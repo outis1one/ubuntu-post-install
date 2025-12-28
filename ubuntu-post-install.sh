@@ -697,113 +697,91 @@ fi
 # Backup System (Optional)
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "BACKUP SYSTEM (Optional)"
+echo "LOCAL BACKUP SYSTEM (Optional)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "This sets up an automated backup system for local drives."
+echo "Set up rsync backup from primary drive(s) to backup drive(s)."
+echo ""
+echo "Why rsync instead of RAID?"
+echo "  • RAID mirrors corruption instantly - rsync gives you time to notice"
+echo "  • RAID requires identical drives - rsync works with any sizes"
+echo "  • RAID is complex to set up/recover - rsync is simple copy"
+echo "  • rsync can run on schedule - RAID is always-on (more wear)"
+echo "  • With rsync, backup drives can be disconnected for safety"
 echo ""
 
 # Check if backup is already configured
 BACKUP_CONFIGURED=false
-if [ -f /usr/local/bin/backup-scripts/rclone-backup.sh ] || [ -f /usr/local/bin/backup-scripts/rsync-backup.sh ]; then
+if [ -f /usr/local/bin/backup-scripts/rsync-backup.sh ]; then
     BACKUP_CONFIGURED=true
-    echo "Backup system is already configured."
-    if [ -f /usr/local/bin/backup-scripts/rclone-backup.sh ]; then
-        echo "  Current: rclone backup script"
-    fi
-    if [ -f /usr/local/bin/backup-scripts/rsync-backup.sh ]; then
-        echo "  Current: rsync backup script"
-    fi
+    echo "Local backup system is already configured."
     echo ""
-    prompt_yn "Reconfigure backup system? (y/n):" "n" SETUP_BACKUP
+    prompt_yn "Reconfigure local backup system? (y/n):" "n" SETUP_BACKUP
 else
-    prompt_yn "Set up backup system? (y/n):" "n" SETUP_BACKUP
+    prompt_yn "Set up local backup system? (y/n):" "n" SETUP_BACKUP
 fi
 
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "BACKUP TOOL SELECTION"
+    echo "DRIVE CONFIGURATION"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Choose your backup tool:"
-    echo ""
-    echo "  [1] rsync  - RECOMMENDED for local drive backups"
-    echo "              • Delta transfers (only changed bytes are copied)"
-    echo "              • Faster incremental backups"
-    echo "              • Built into most Linux systems"
-    echo ""
-    echo "  [2] rclone - Better for cloud storage backups"
-    echo "              • Supports 40+ cloud providers (S3, GDrive, Dropbox...)"
-    echo "              • File-level sync (copies entire changed files)"
-    echo "              • Good for local drives, but rsync is more efficient"
-    echo ""
-    prompt_text "Select backup tool [1=rsync, 2=rclone]:" "1" BACKUP_TOOL_CHOICE
-
-    if [ "$BACKUP_TOOL_CHOICE" = "2" ]; then
-        BACKUP_TOOL="rclone"
-    else
-        BACKUP_TOOL="rsync"
-    fi
-
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "BACKUP MODE SELECTION"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "Choose your backup mode:"
-    echo ""
-    echo "  [1] FULL BACKUP - Mirror entire primary drive to one backup drive"
-    echo "              • Simpler setup (primary → backup1)"
-    echo "              • Requires: backup drive >= primary drive size"
-    echo "              • Example: 4TB primary → 4TB+ backup"
-    echo ""
-    echo "  [2] SPLIT BACKUP - Divide data between two smaller backup drives"
-    echo "              • Useful when: Primary > each backup drive"
-    echo "              • Example: 4TB primary → 2TB backup1 + 2TB backup2"
-    echo "              • You configure which folders go to which backup"
-    echo ""
-    prompt_text "Select backup mode [1=full, 2=split]:" "1" BACKUP_MODE_CHOICE
-
-    if [ "$BACKUP_MODE_CHOICE" = "2" ]; then
-        BACKUP_MODE="split"
-    else
-        BACKUP_MODE="full"
-    fi
-
-    echo ""
-    echo "Selected: $BACKUP_TOOL with $BACKUP_MODE backup mode"
-    echo ""
-    echo "Setting up backup configuration..."
+    echo "Configure your drive mount points in ~/drives/"
+    echo "Default names: primary, backup1, backup2, etc."
+    echo "You can customize these (e.g., 'media', 'documents', 'photos-backup')"
     echo ""
 
-    # Install the selected backup tool if needed
-    if [ "$BACKUP_TOOL" = "rsync" ]; then
-        if ! is_rsync_installed; then
-            apt install -y rsync || echo "Warning: rsync installation failed"
-        fi
-    else
-        if ! is_rclone_installed; then
-            apt install -y rclone || echo "Warning: rclone installation failed"
-        fi
+    # Install rsync if needed
+    if ! is_rsync_installed; then
+        run_cmd apt install -y rsync || echo "Warning: rsync installation failed"
     fi
 
     # Create backup script directory
     mkdir -p /usr/local/bin/backup-scripts
 
-    # Create mount point directories based on mode
+    # Ask for primary drive name
+    echo "PRIMARY DRIVE (source for backups):"
+    prompt_text "  Mount point name [default: primary]:" "primary" PRIMARY_NAME
+    PRIMARY_NAME="${PRIMARY_NAME:-primary}"
+
+    # Ask for number of backup drives
     echo ""
-    echo "Creating mount point directories in $ACTUAL_HOME/drives/..."
-    mkdir -p "$ACTUAL_HOME/drives/primary"
-    mkdir -p "$ACTUAL_HOME/drives/backup1"
-    if [ "$BACKUP_MODE" = "split" ]; then
-        mkdir -p "$ACTUAL_HOME/drives/backup2"
-    fi
+    echo "BACKUP DRIVES (destinations):"
+    prompt_text "  How many backup drives? [1-4, default: 1]:" "1" NUM_BACKUPS
+    NUM_BACKUPS="${NUM_BACKUPS:-1}"
+
+    # Validate number
+    case $NUM_BACKUPS in
+        1|2|3|4) ;;
+        *) NUM_BACKUPS=1 ;;
+    esac
+
+    # Collect backup drive names
+    declare -a BACKUP_NAMES
+    for i in $(seq 1 $NUM_BACKUPS); do
+        prompt_text "  Backup drive $i name [default: backup$i]:" "backup$i" "BACKUP_NAME_$i"
+        eval "BACKUP_NAMES[$i]=\${BACKUP_NAME_$i:-backup$i}"
+    done
+
+    # Create mount point directories
+    echo ""
+    echo "Creating mount point directories..."
+    mkdir -p "$ACTUAL_HOME/drives/$PRIMARY_NAME"
+    for i in $(seq 1 $NUM_BACKUPS); do
+        mkdir -p "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"
+    done
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
+    echo "✓ Created mount points:"
+    echo "  Primary: $ACTUAL_HOME/drives/$PRIMARY_NAME"
+    for i in $(seq 1 $NUM_BACKUPS); do
+        echo "  Backup$i: $ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"
+    done
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "DRIVE SETUP - Mount your drives"
+    echo "DRIVE MOUNTING"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "Available block devices:"
@@ -811,43 +789,41 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
     echo ""
 
-    read -p "Do you want to mount drives now? (y/n): " MOUNT_NOW
+    prompt_yn "Mount drives now? (y/n):" "n" MOUNT_NOW
 
     if [ "$MOUNT_NOW" = "y" ] || [ "$MOUNT_NOW" = "Y" ]; then
         echo ""
         echo "Enter device paths (e.g., /dev/sdb1) or leave blank to skip"
         echo ""
 
-        read -p "Primary drive device (e.g., /dev/sdb1): " PRIMARY_DEV
-        read -p "Backup1 drive device (e.g., /dev/sdc1): " BACKUP1_DEV
-        if [ "$BACKUP_MODE" = "split" ]; then
-            read -p "Backup2 drive device (e.g., /dev/sdd1): " BACKUP2_DEV
-        fi
+        read -p "Primary drive ($PRIMARY_NAME) device: " PRIMARY_DEV
+
+        declare -a BACKUP_DEVS
+        for i in $(seq 1 $NUM_BACKUPS); do
+            read -p "Backup drive ${BACKUP_NAMES[$i]} device: " "BACKUP_DEV_$i"
+            eval "BACKUP_DEVS[$i]=\$BACKUP_DEV_$i"
+        done
 
         # Mount primary
         if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
-            echo "Mounting $PRIMARY_DEV to $ACTUAL_HOME/drives/primary..."
-            mount "$PRIMARY_DEV" "$ACTUAL_HOME/drives/primary" && echo "✓ Primary mounted" || echo "✗ Failed to mount primary"
+            echo "Mounting $PRIMARY_DEV to $ACTUAL_HOME/drives/$PRIMARY_NAME..."
+            mount "$PRIMARY_DEV" "$ACTUAL_HOME/drives/$PRIMARY_NAME" && echo "✓ $PRIMARY_NAME mounted" || echo "✗ Failed to mount $PRIMARY_NAME"
         fi
 
-        # Mount backup1
-        if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
-            echo "Mounting $BACKUP1_DEV to $ACTUAL_HOME/drives/backup1..."
-            mount "$BACKUP1_DEV" "$ACTUAL_HOME/drives/backup1" && echo "✓ Backup1 mounted" || echo "✗ Failed to mount backup1"
-        fi
-
-        # Mount backup2 (only in split mode)
-        if [ "$BACKUP_MODE" = "split" ] && [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
-            echo "Mounting $BACKUP2_DEV to $ACTUAL_HOME/drives/backup2..."
-            mount "$BACKUP2_DEV" "$ACTUAL_HOME/drives/backup2" && echo "✓ Backup2 mounted" || echo "✗ Failed to mount backup2"
-        fi
+        # Mount backups
+        for i in $(seq 1 $NUM_BACKUPS); do
+            if [ -n "${BACKUP_DEVS[$i]}" ] && [ -b "${BACKUP_DEVS[$i]}" ]; then
+                echo "Mounting ${BACKUP_DEVS[$i]} to $ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}..."
+                mount "${BACKUP_DEVS[$i]}" "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}" && echo "✓ ${BACKUP_NAMES[$i]} mounted" || echo "✗ Failed to mount ${BACKUP_NAMES[$i]}"
+            fi
+        done
 
         echo ""
         echo "Current mounts:"
-        df -h | grep "$ACTUAL_HOME/drives"
+        df -h | grep "$ACTUAL_HOME/drives" || echo "  (no drives currently mounted)"
 
         echo ""
-        read -p "Add these mounts to /etc/fstab for automatic mounting at boot? (y/n): " ADD_FSTAB
+        prompt_yn "Add to /etc/fstab for auto-mount at boot? (y/n):" "n" ADD_FSTAB
 
         if [ "$ADD_FSTAB" = "y" ] || [ "$ADD_FSTAB" = "Y" ]; then
             echo ""
@@ -857,318 +833,103 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
             if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
                 PRIMARY_UUID=$(blkid -s UUID -o value "$PRIMARY_DEV")
                 if [ -n "$PRIMARY_UUID" ]; then
-                    echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/primary auto defaults 0 2" >> /etc/fstab
-                    echo "✓ Added primary to fstab"
+                    echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/$PRIMARY_NAME auto defaults,nofail 0 2" >> /etc/fstab
+                    echo "✓ Added $PRIMARY_NAME to fstab"
                 fi
             fi
 
-            if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
-                BACKUP1_UUID=$(blkid -s UUID -o value "$BACKUP1_DEV")
-                if [ -n "$BACKUP1_UUID" ]; then
-                    echo "UUID=$BACKUP1_UUID $ACTUAL_HOME/drives/backup1 auto defaults 0 2" >> /etc/fstab
-                    echo "✓ Added backup1 to fstab"
+            for i in $(seq 1 $NUM_BACKUPS); do
+                if [ -n "${BACKUP_DEVS[$i]}" ] && [ -b "${BACKUP_DEVS[$i]}" ]; then
+                    BACKUP_UUID=$(blkid -s UUID -o value "${BACKUP_DEVS[$i]}")
+                    if [ -n "$BACKUP_UUID" ]; then
+                        echo "UUID=$BACKUP_UUID $ACTUAL_HOME/drives/${BACKUP_NAMES[$i]} auto defaults,nofail 0 2" >> /etc/fstab
+                        echo "✓ Added ${BACKUP_NAMES[$i]} to fstab"
+                    fi
                 fi
-            fi
-
-            if [ "$BACKUP_MODE" = "split" ] && [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
-                BACKUP2_UUID=$(blkid -s UUID -o value "$BACKUP2_DEV")
-                if [ -n "$BACKUP2_UUID" ]; then
-                    echo "UUID=$BACKUP2_UUID $ACTUAL_HOME/drives/backup2 auto defaults 0 2" >> /etc/fstab
-                    echo "✓ Added backup2 to fstab"
-                fi
-            fi
-
-            echo "✓ Backup of original fstab saved with timestamp"
-        fi
-    else
-        echo ""
-        echo "Skipping drive mounting. You can mount manually later."
-        echo "Mount points created at:"
-        echo "  $ACTUAL_HOME/drives/primary"
-        echo "  $ACTUAL_HOME/drives/backup1"
-        if [ "$BACKUP_MODE" = "split" ]; then
-            echo "  $ACTUAL_HOME/drives/backup2"
+            done
         fi
     fi
 
-    # Create backup script based on selected tool and mode
-    SCRIPT_NAME="${BACKUP_TOOL}-backup.sh"
+    # Create rsync backup script
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "CREATING BACKUP SCRIPT"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    if [ "$BACKUP_TOOL" = "rsync" ] && [ "$BACKUP_MODE" = "full" ]; then
-        # RSYNC FULL BACKUP
-        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
-#!/bin/bash
-################################################################################
-# rsync FULL Backup Script - Mirror entire primary to backup drive
-################################################################################
-# Tool: rsync (delta transfers - only changed bytes are copied)
-# Mode: Full backup (entire primary → backup1)
-################################################################################
-
-PRIMARY="$ACTUAL_HOME/drives/primary"
-BACKUP1="$ACTUAL_HOME/drives/backup1"
-LOG="/var/log/rsync-backup.log"
-
-echo "=== rsync FULL Backup Started: \$(date) ===" | tee -a "\$LOG"
-echo "FROM: \$PRIMARY" | tee -a "\$LOG"
-echo "TO:   \$BACKUP1" | tee -a "\$LOG"
-echo "" | tee -a "\$LOG"
-
-if [ ! -d "\$PRIMARY" ]; then
-    echo "ERROR: Primary drive not mounted at \$PRIMARY" | tee -a "\$LOG"
-    exit 1
-fi
-
-if [ ! -d "\$BACKUP1" ]; then
-    echo "ERROR: Backup drive not mounted at \$BACKUP1" | tee -a "\$LOG"
-    exit 1
-fi
-
-# rsync options:
-#   -a = archive mode (preserves permissions, timestamps, etc.)
-#   -v = verbose
-#   -h = human-readable sizes
-#   --delete = remove files from backup that don't exist on primary
-#   --progress = show progress
-#   --stats = show transfer statistics
-
-rsync -avh --delete --progress --stats "\$PRIMARY/" "\$BACKUP1/" 2>&1 | tee -a "\$LOG"
-
-if [ \$? -eq 0 ]; then
-    echo "" | tee -a "\$LOG"
-    echo "✓ Backup completed successfully: \$(date)" | tee -a "\$LOG"
-else
-    echo "" | tee -a "\$LOG"
-    echo "✗ Backup failed: \$(date)" | tee -a "\$LOG"
-fi
-BACKUP_SCRIPT
-
-    elif [ "$BACKUP_TOOL" = "rsync" ] && [ "$BACKUP_MODE" = "split" ]; then
-        # RSYNC SPLIT BACKUP
-        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
-#!/bin/bash
-################################################################################
-# rsync SPLIT Backup Script - Divide data between two backup drives
-################################################################################
-# Tool: rsync (delta transfers - only changed bytes are copied)
-# Mode: Split backup (folders divided between backup1 and backup2)
-#
-# CONFIGURE: Edit BACKUP1_DIRS and BACKUP2_DIRS below
-################################################################################
-
-PRIMARY="$ACTUAL_HOME/drives/primary"
-BACKUP1="$ACTUAL_HOME/drives/backup1"
-BACKUP2="$ACTUAL_HOME/drives/backup2"
-LOG="/var/log/rsync-backup.log"
-
-# ⚠️ CONFIGURE: Which folders go to which backup drive
-# Check folder sizes: du -sh $ACTUAL_HOME/drives/primary/*
-BACKUP1_DIRS=(
-    "documents"
-    "work"
-    "photos"
-)
-
-BACKUP2_DIRS=(
-    "videos"
-    "music"
-    "downloads"
-)
-
-echo "=== rsync SPLIT Backup Started: \$(date) ===" | tee -a "\$LOG"
-echo "PRIMARY: \$PRIMARY" | tee -a "\$LOG"
-echo "" | tee -a "\$LOG"
-
-backup_to_drive() {
-    local dest=\$1
-    local drive_name=\$2
-    shift 2
-    local dirs_array=("\$@")
-
-    if [ ! -d "\$dest" ]; then
-        echo "⚠️  WARNING: \$drive_name (\$dest) not mounted, skipping" | tee -a "\$LOG"
-        return 1
-    fi
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
-    echo "DESTINATION: \$drive_name (\$dest)" | tee -a "\$LOG"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
-
-    for dir in "\${dirs_array[@]}"; do
-        if [ ! -d "\$PRIMARY/\$dir" ]; then
-            echo "  ⚠️  WARNING: \$PRIMARY/\$dir does not exist, skipping" | tee -a "\$LOG"
-            continue
-        fi
-
-        echo "" | tee -a "\$LOG"
-        echo "  Syncing: \$dir → \$dest/\$dir" | tee -a "\$LOG"
-
-        rsync -avh --delete --progress "\$PRIMARY/\$dir/" "\$dest/\$dir/" 2>&1 | tee -a "\$LOG"
-
-        if [ \$? -eq 0 ]; then
-            echo "  ✓ \$dir synced successfully" | tee -a "\$LOG"
-        else
-            echo "  ✗ \$dir sync FAILED" | tee -a "\$LOG"
-        fi
+    # Build backup destinations list
+    BACKUP_DESTS=""
+    for i in $(seq 1 $NUM_BACKUPS); do
+        BACKUP_DESTS="$BACKUP_DESTS \"$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}\""
     done
-}
 
-backup_to_drive "\$BACKUP1" "Backup Drive 1" "\${BACKUP1_DIRS[@]}"
-backup_to_drive "\$BACKUP2" "Backup Drive 2" "\${BACKUP2_DIRS[@]}"
+    cat > /usr/local/bin/backup-scripts/rsync-backup.sh << BACKUP_SCRIPT
+#!/bin/bash
+################################################################################
+# rsync Local Backup Script
+# Backs up primary drive to all backup drives
+################################################################################
+
+PRIMARY="$ACTUAL_HOME/drives/$PRIMARY_NAME"
+BACKUP_DRIVES=($BACKUP_DESTS)
+LOG="/var/log/rsync-backup.log"
+
+echo "=== rsync Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "Source: \$PRIMARY" | tee -a "\$LOG"
+echo "" | tee -a "\$LOG"
+
+if [ ! -d "\$PRIMARY" ] || [ -z "\$(ls -A \$PRIMARY 2>/dev/null)" ]; then
+    echo "ERROR: Primary drive not mounted or empty at \$PRIMARY" | tee -a "\$LOG"
+    exit 1
+fi
+
+for BACKUP in "\${BACKUP_DRIVES[@]}"; do
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
+    echo "Backing up to: \$BACKUP" | tee -a "\$LOG"
+
+    if [ ! -d "\$BACKUP" ]; then
+        echo "⚠️  WARNING: \$BACKUP not mounted, skipping" | tee -a "\$LOG"
+        continue
+    fi
+
+    # rsync options:
+    #   -a = archive mode (preserves permissions, timestamps, etc.)
+    #   -v = verbose
+    #   -h = human-readable sizes
+    #   --delete = remove files from backup that don't exist on primary
+    #   --progress = show progress
+
+    rsync -avh --delete --progress "\$PRIMARY/" "\$BACKUP/" 2>&1 | tee -a "\$LOG"
+
+    if [ \$? -eq 0 ]; then
+        echo "✓ Backup to \$BACKUP completed" | tee -a "\$LOG"
+    else
+        echo "✗ Backup to \$BACKUP FAILED" | tee -a "\$LOG"
+    fi
+done
 
 echo "" | tee -a "\$LOG"
 echo "=== Backup Completed: \$(date) ===" | tee -a "\$LOG"
 BACKUP_SCRIPT
 
-    elif [ "$BACKUP_TOOL" = "rclone" ] && [ "$BACKUP_MODE" = "full" ]; then
-        # RCLONE FULL BACKUP
-        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
-#!/bin/bash
-################################################################################
-# rclone FULL Backup Script - Mirror entire primary to backup drive
-################################################################################
-# Tool: rclone (file-level sync, great for cloud storage)
-# Mode: Full backup (entire primary → backup1)
-################################################################################
+    chmod +x /usr/local/bin/backup-scripts/rsync-backup.sh
 
-PRIMARY="$ACTUAL_HOME/drives/primary"
-BACKUP1="$ACTUAL_HOME/drives/backup1"
-LOG="/var/log/rclone-backup.log"
-
-echo "=== rclone FULL Backup Started: \$(date) ===" | tee -a "\$LOG"
-echo "FROM: \$PRIMARY" | tee -a "\$LOG"
-echo "TO:   \$BACKUP1" | tee -a "\$LOG"
-echo "" | tee -a "\$LOG"
-
-if [ ! -d "\$PRIMARY" ]; then
-    echo "ERROR: Primary drive not mounted at \$PRIMARY" | tee -a "\$LOG"
-    exit 1
-fi
-
-if [ ! -d "\$BACKUP1" ]; then
-    echo "ERROR: Backup drive not mounted at \$BACKUP1" | tee -a "\$LOG"
-    exit 1
-fi
-
-# rclone sync: one-way sync from source to destination
-rclone sync "\$PRIMARY" "\$BACKUP1" \\
-    --checksum \\
-    --verbose \\
-    --progress \\
-    --stats=30s \\
-    --log-file="\$LOG"
-
-if [ \$? -eq 0 ]; then
-    echo "" | tee -a "\$LOG"
-    echo "✓ Backup completed successfully: \$(date)" | tee -a "\$LOG"
-else
-    echo "" | tee -a "\$LOG"
-    echo "✗ Backup failed: \$(date)" | tee -a "\$LOG"
-fi
-BACKUP_SCRIPT
-
-    else
-        # RCLONE SPLIT BACKUP (default)
-        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
-#!/bin/bash
-################################################################################
-# rclone SPLIT Backup Script - Divide data between two backup drives
-################################################################################
-# Tool: rclone (file-level sync, great for cloud storage)
-# Mode: Split backup (folders divided between backup1 and backup2)
-#
-# CONFIGURE: Edit BACKUP1_DIRS and BACKUP2_DIRS below
-################################################################################
-
-PRIMARY="$ACTUAL_HOME/drives/primary"
-BACKUP1="$ACTUAL_HOME/drives/backup1"
-BACKUP2="$ACTUAL_HOME/drives/backup2"
-LOG="/var/log/rclone-backup.log"
-
-# ⚠️ CONFIGURE: Which folders go to which backup drive
-# Check folder sizes: du -sh $ACTUAL_HOME/drives/primary/*
-BACKUP1_DIRS=(
-    "documents"
-    "work"
-    "photos"
-)
-
-BACKUP2_DIRS=(
-    "videos"
-    "music"
-    "downloads"
-)
-
-echo "=== rclone SPLIT Backup Started: \$(date) ===" | tee -a "\$LOG"
-echo "PRIMARY: \$PRIMARY" | tee -a "\$LOG"
-echo "" | tee -a "\$LOG"
-
-backup_to_drive() {
-    local dest=\$1
-    local drive_name=\$2
-    shift 2
-    local dirs_array=("\$@")
-
-    if [ ! -d "\$dest" ]; then
-        echo "⚠️  WARNING: \$drive_name (\$dest) not mounted, skipping" | tee -a "\$LOG"
-        return 1
-    fi
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
-    echo "DESTINATION: \$drive_name (\$dest)" | tee -a "\$LOG"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
-
-    for dir in "\${dirs_array[@]}"; do
-        if [ ! -d "\$PRIMARY/\$dir" ]; then
-            echo "  ⚠️  WARNING: \$PRIMARY/\$dir does not exist, skipping" | tee -a "\$LOG"
-            continue
-        fi
-
-        echo "" | tee -a "\$LOG"
-        echo "  Syncing: \$dir → \$dest/\$dir" | tee -a "\$LOG"
-
-        rclone sync "\$PRIMARY/\$dir" "\$dest/\$dir" \\
-            --checksum \\
-            --verbose \\
-            --progress \\
-            --stats=30s \\
-            --log-file="\$LOG"
-
-        if [ \$? -eq 0 ]; then
-            echo "  ✓ \$dir synced successfully" | tee -a "\$LOG"
-        else
-            echo "  ✗ \$dir sync FAILED" | tee -a "\$LOG"
-        fi
-    done
-}
-
-backup_to_drive "\$BACKUP1" "Backup Drive 1" "\${BACKUP1_DIRS[@]}"
-backup_to_drive "\$BACKUP2" "Backup Drive 2" "\${BACKUP2_DIRS[@]}"
-
-echo "" | tee -a "\$LOG"
-echo "=== Backup Completed: \$(date) ===" | tee -a "\$LOG"
-BACKUP_SCRIPT
-    fi
-
-    chmod +x /usr/local/bin/backup-scripts/$SCRIPT_NAME
-
-    # Create systemd service for automatic backups
-    cat > /etc/systemd/system/${BACKUP_TOOL}-backup.service << SERVICE
+    # Create systemd service
+    cat > /etc/systemd/system/rsync-backup.service << SERVICE
 [Unit]
-Description=${BACKUP_TOOL} Backup Service
+Description=rsync Local Backup Service
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/backup-scripts/${SCRIPT_NAME}
+ExecStart=/usr/local/bin/backup-scripts/rsync-backup.sh
 User=root
 SERVICE
 
     # Create systemd timer for daily backups at 2 AM
-    cat > /etc/systemd/system/${BACKUP_TOOL}-backup.timer << TIMER
+    cat > /etc/systemd/system/rsync-backup.timer << TIMER
 [Unit]
-Description=Daily ${BACKUP_TOOL} Backup Timer
-Requires=${BACKUP_TOOL}-backup.service
+Description=Daily rsync Backup Timer
+Requires=rsync-backup.service
 
 [Timer]
 OnCalendar=*-*-* 02:00:00
@@ -1179,19 +940,245 @@ WantedBy=timers.target
 TIMER
 
     echo ""
-    echo "✓ Backup script created: /usr/local/bin/backup-scripts/$SCRIPT_NAME"
+    echo "✓ Backup script created: /usr/local/bin/backup-scripts/rsync-backup.sh"
     echo "✓ Systemd service/timer created (disabled by default)"
     echo ""
-    echo "Configuration: $BACKUP_TOOL + $BACKUP_MODE mode"
-    if [ "$BACKUP_MODE" = "split" ]; then
+    echo "Quick start:"
+    echo "  Test backup:    sudo /usr/local/bin/backup-scripts/rsync-backup.sh"
+    echo "  Enable daily:   sudo systemctl enable --now rsync-backup.timer"
+    echo "  View log:       tail -f /var/log/rsync-backup.log"
+else
+    echo "Skipping local backup setup."
+fi
+
+# Cloud Backup with rclone (Optional)
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "CLOUD BACKUP (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Set up encrypted cloud backup using rclone."
+echo "Supports: Google Drive, OneDrive, Dropbox, and 40+ other providers."
+echo ""
+echo "Your files are encrypted BEFORE upload - the cloud provider cannot read them."
+echo ""
+
+prompt_yn "Set up encrypted cloud backup? (y/n):" "n" SETUP_CLOUD_BACKUP
+
+if [ "$SETUP_CLOUD_BACKUP" = "y" ] || [ "$SETUP_CLOUD_BACKUP" = "Y" ]; then
+    echo ""
+
+    # Install rclone if needed
+    if ! is_rclone_installed; then
+        echo "Installing rclone..."
+        run_cmd apt install -y rclone || echo "Warning: rclone installation failed"
+    fi
+
+    if is_rclone_installed; then
         echo ""
-        echo "⚠️  IMPORTANT: Edit the backup script to configure which folders"
-        echo "   go to which backup drive before running!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "CHOOSE CLOUD PROVIDER"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
-        echo "   sudo nano /usr/local/bin/backup-scripts/$SCRIPT_NAME"
+        echo "  [1] Google Drive (15GB free)"
+        echo "  [2] Microsoft OneDrive (5GB free, 1TB with Microsoft 365)"
+        echo "  [3] Other (manual rclone config)"
+        echo ""
+        prompt_text "Select provider [1/2/3]:" "1" CLOUD_PROVIDER
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "RCLONE CONFIGURATION"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        case $CLOUD_PROVIDER in
+            1)
+                echo "Setting up Google Drive..."
+                echo ""
+                echo "Step 1: Run 'rclone config' to create a Google Drive remote"
+                echo "Step 2: When prompted:"
+                echo "   - Choose 'n' for new remote"
+                echo "   - Name it 'gdrive'"
+                echo "   - Choose 'drive' (Google Drive)"
+                echo "   - Leave client_id and client_secret blank"
+                echo "   - Choose scope '1' (full access)"
+                echo "   - Leave root_folder_id blank"
+                echo "   - Leave service_account_file blank"
+                echo "   - Choose 'n' for advanced config"
+                echo "   - Choose 'y' for auto config (opens browser)"
+                echo "   - Choose 'n' for team drive"
+                echo "   - Confirm with 'y'"
+                echo ""
+                CLOUD_REMOTE="gdrive"
+                ;;
+            2)
+                echo "Setting up Microsoft OneDrive..."
+                echo ""
+                echo "Step 1: Run 'rclone config' to create a OneDrive remote"
+                echo "Step 2: When prompted:"
+                echo "   - Choose 'n' for new remote"
+                echo "   - Name it 'onedrive'"
+                echo "   - Choose 'onedrive' (Microsoft OneDrive)"
+                echo "   - Leave client_id and client_secret blank"
+                echo "   - Choose region (usually 'global')"
+                echo "   - Choose 'n' for advanced config"
+                echo "   - Choose 'y' for auto config (opens browser)"
+                echo "   - Choose 'onedrive' for account type"
+                echo "   - Choose your drive from the list (usually option 0)"
+                echo "   - Confirm with 'y'"
+                echo ""
+                CLOUD_REMOTE="onedrive"
+                ;;
+            *)
+                echo "Manual configuration selected."
+                echo "Run 'rclone config' to set up your cloud provider."
+                echo ""
+                prompt_text "Enter the remote name you will create:" "cloud" CLOUD_REMOTE
+                ;;
+        esac
+
+        if [ "$UNATTENDED" != true ]; then
+            echo "Press Enter to launch rclone config..."
+            read
+            sudo -u "$ACTUAL_USER" rclone config
+        else
+            echo "Skipping interactive rclone config (unattended mode)"
+            echo "Run 'rclone config' manually to complete setup"
+        fi
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "ENCRYPTION SETUP"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Now we'll create an encrypted wrapper around your cloud storage."
+        echo "This encrypts file names AND contents before upload."
+        echo ""
+        echo "⚠️  IMPORTANT: You will set a password. Without this password and"
+        echo "   the rclone config file, your files CANNOT be recovered!"
+        echo ""
+
+        if [ "$UNATTENDED" != true ]; then
+            echo "In rclone config:"
+            echo "   - Choose 'n' for new remote"
+            echo "   - Name it '${CLOUD_REMOTE}-crypt'"
+            echo "   - Choose 'crypt' (Encrypt/Decrypt)"
+            echo "   - Remote: '${CLOUD_REMOTE}:backup' (folder on cloud storage)"
+            echo "   - Choose 'standard' for filename encryption"
+            echo "   - Choose 'true' for directory name encryption"
+            echo "   - Choose 'y' to enter your own password"
+            echo "   - Enter a STRONG password (you'll need this to decrypt!)"
+            echo "   - Choose 'y' for salt password (or 'n' to skip)"
+            echo "   - Confirm with 'y'"
+            echo ""
+            echo "Press Enter to continue rclone config..."
+            read
+            sudo -u "$ACTUAL_USER" rclone config
+        fi
+
+        # Backup the rclone config to local drives
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "BACKUP YOUR RCLONE CONFIG"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Your rclone config contains your encryption keys."
+        echo "WITHOUT IT, YOUR ENCRYPTED CLOUD FILES CANNOT BE DECRYPTED!"
+        echo ""
+        echo "The config file is at: $ACTUAL_HOME/.config/rclone/rclone.conf"
+        echo ""
+
+        # Copy config to any mounted backup drives
+        if [ -d "$ACTUAL_HOME/drives" ]; then
+            for drive_dir in "$ACTUAL_HOME/drives"/*/; do
+                if [ -d "$drive_dir" ] && mountpoint -q "$drive_dir" 2>/dev/null; then
+                    mkdir -p "${drive_dir}.rclone-config-backup"
+                    if [ -f "$ACTUAL_HOME/.config/rclone/rclone.conf" ]; then
+                        cp "$ACTUAL_HOME/.config/rclone/rclone.conf" "${drive_dir}.rclone-config-backup/rclone.conf.backup"
+                        echo "✓ Config backed up to: ${drive_dir}.rclone-config-backup/"
+                    fi
+                fi
+            done
+        fi
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "SECURE OFF-SITE BACKUP OF CONFIG"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "For disaster recovery, store a copy of rclone.conf OFF-SITE:"
+        echo ""
+        echo "Recommended secure methods:"
+        echo "  • Signal (end-to-end encrypted, send to yourself or trusted contact)"
+        echo "  • Box.com (better privacy policy than Dropbox)"
+        echo "  • Password manager (1Password, Bitwarden, etc.)"
+        echo "  • Encrypted USB drive stored at another location"
+        echo ""
+        echo "⚠️  Dropbox: Works but has broader data access policies."
+        echo "    Consider encrypting the config file before uploading."
+        echo ""
+        echo "To use on another computer:"
+        echo "  1. Install rclone"
+        echo "  2. Copy rclone.conf to ~/.config/rclone/"
+        echo "  3. Run: rclone ls ${CLOUD_REMOTE}-crypt:"
+        echo ""
+
+        # Create cloud backup script
+        mkdir -p /usr/local/bin/backup-scripts
+
+        SOURCE_PATH="${PRIMARY_NAME:-primary}"
+
+        cat > /usr/local/bin/backup-scripts/cloud-backup.sh << CLOUD_SCRIPT
+#!/bin/bash
+################################################################################
+# rclone Encrypted Cloud Backup Script
+################################################################################
+
+SOURCE="$ACTUAL_HOME/drives/$SOURCE_PATH"
+REMOTE="${CLOUD_REMOTE:-gdrive}-crypt"
+LOG="/var/log/cloud-backup.log"
+
+echo "=== Cloud Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "Source: \$SOURCE" | tee -a "\$LOG"
+echo "Destination: \$REMOTE:" | tee -a "\$LOG"
+echo "" | tee -a "\$LOG"
+
+if [ ! -d "\$SOURCE" ] || [ -z "\$(ls -A \$SOURCE 2>/dev/null)" ]; then
+    echo "ERROR: Source not mounted or empty at \$SOURCE" | tee -a "\$LOG"
+    exit 1
+fi
+
+# Sync to encrypted cloud storage
+rclone sync "\$SOURCE" "\$REMOTE:" \\
+    --progress \\
+    --stats=30s \\
+    --log-file="\$LOG" \\
+    --log-level INFO
+
+if [ \$? -eq 0 ]; then
+    echo "" | tee -a "\$LOG"
+    echo "✓ Cloud backup completed: \$(date)" | tee -a "\$LOG"
+else
+    echo "" | tee -a "\$LOG"
+    echo "✗ Cloud backup FAILED: \$(date)" | tee -a "\$LOG"
+fi
+CLOUD_SCRIPT
+
+        chmod +x /usr/local/bin/backup-scripts/cloud-backup.sh
+        chown "$ACTUAL_USER:$ACTUAL_USER" /usr/local/bin/backup-scripts/cloud-backup.sh
+
+        echo ""
+        echo "✓ Cloud backup script created: /usr/local/bin/backup-scripts/cloud-backup.sh"
+        echo ""
+        echo "Quick start:"
+        echo "  Test backup:  sudo /usr/local/bin/backup-scripts/cloud-backup.sh"
+        echo "  View log:     tail -f /var/log/cloud-backup.log"
+    else
+        echo "rclone installation failed. Skipping cloud backup setup."
     fi
 else
-    echo "Skipping backup system setup."
+    echo "Skipping cloud backup setup."
 fi
 
 # UFW Firewall Configuration (Optional)

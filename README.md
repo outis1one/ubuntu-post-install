@@ -8,8 +8,8 @@ Automated setup script for Ubuntu 24.04 Desktop that installs additional tools, 
 - **Dry-run mode** - Preview what would be installed without making changes
 - **Unattended mode** - Run with defaults for automated/scripted installs
 - **Logging** - All output logged to `/var/log/post-install.log`
-- **Backup options** - Choose rsync (faster, local) or rclone (cloud support)
-- **Backup modes** - Full backup (one drive) or split backup (two drives)
+- **Local backup** - rsync to 1-4 drives with customizable names
+- **Cloud backup** - Encrypted backup to Google Drive, OneDrive, or 40+ providers
 
 ## What This Script Does
 
@@ -33,6 +33,7 @@ Automated setup script for Ubuntu 24.04 Desktop that installs additional tools, 
   - Protects against SSH brute-force attacks
   - Bans IPs after 5 failed attempts for 1 hour
   - Only offered when SSH password authentication remains enabled
+  - **Note:** fail2ban provides no benefit with key-only SSH because SSH keys cannot be brute-forced (they're 4096-bit cryptographic keys, not passwords)
 - **UFW Firewall**
   - Simple firewall management
   - Automatically allows SSH (port 22)
@@ -61,24 +62,43 @@ Automated setup script for Ubuntu 24.04 Desktop that installs additional tools, 
   - Detects if already installed
 
 ### Backup System (Optional)
-Choose your backup tool and mode:
 
-**Backup Tools:**
-- **rsync** (recommended for local drives)
-  - Delta transfers - only changed bytes are copied
-  - Faster incremental backups
-  - Built into most Linux systems
-- **rclone** (better for cloud storage)
-  - Supports 40+ cloud providers (S3, Google Drive, Dropbox...)
-  - File-level sync
+**Local Backup (rsync):**
+- Syncs your primary drive to 1-4 backup drives
+- Delta transfers - only changed bytes are copied
+- Customizable drive names (default: primary, backup1, backup2, etc.)
+- Systemd timer for scheduled daily backups at 2 AM
 
-**Backup Modes:**
-- **Full** - Mirror entire primary to one backup drive (simpler)
-- **Split** - Divide data between two smaller backup drives (budget-friendly)
+**Why rsync instead of RAID?**
+- RAID mirrors corruption instantly - rsync gives you time to notice problems
+- RAID requires identical drives - rsync works with any sizes
+- RAID is complex to set up/recover - rsync is simple copy
+- rsync can run on schedule - RAID is always-on (more wear)
+- With rsync, backup drives can be disconnected for safety
+
+**Cloud Backup (rclone, optional):**
+- Encrypted cloud backup to Google Drive, OneDrive, or 40+ providers
+- Files are encrypted BEFORE upload - cloud provider cannot read them
+- Guided setup for Google Drive and OneDrive with encryption
+- rclone.conf automatically backed up to all local backup drives
+
+**Drive Mount Points (`~/drives/`):**
+The script creates and manages mount points for your drives:
+```
+~/drives/
+├── primary/    # Your main data drive
+├── backup1/    # First backup drive
+└── backup2/    # Second backup drive (split mode only)
+```
+
+**Interactive Drive Mounting:**
+During backup setup, the script:
+1. Shows available block devices (`lsblk`)
+2. Asks for device paths (e.g., `/dev/sdb1`, `/dev/sdc1`)
+3. Mounts drives to `~/drives/` directories
+4. Optionally adds entries to `/etc/fstab` for auto-mount at boot
 
 **Features:**
-- Mount point management at `~/drives/`
-- Interactive drive mounting with automatic fstab configuration
 - Systemd timer for scheduled daily backups at 2 AM
 - Detects existing configuration and offers to reconfigure
 
@@ -149,9 +169,10 @@ The script shows current system status and asks:
   - If yes: Set password for Samba user
 - **NetBird**: Install NetBird mesh VPN? (y/n)
 - **RustDesk**: Install RustDesk remote desktop? (y/n)
-- **Backup System**: Set up backup system? (y/n)
-  - If yes: Choose tool (rsync/rclone), mode (full/split)
-  - Mount drives now? Device paths, fstab configuration
+- **Local Backup**: Set up local backup with rsync? (y/n)
+  - If yes: Configure drive names, mount drives, fstab configuration
+- **Cloud Backup**: Set up encrypted cloud backup? (y/n)
+  - If yes: Choose provider (Google Drive, OneDrive, other), set up encryption
 - **UFW Firewall**: Enable and configure UFW? (y/n)
 
 ### 5. Post-Installation Steps
@@ -162,11 +183,9 @@ The script shows current system status and asks:
 logout
 ```
 
-**If you enabled backup system (split mode):**
-```bash
-# Configure backup script to set which folders go to which drive
-sudo nano /usr/local/bin/backup-scripts/rsync-backup.sh  # or rclone-backup.sh
-```
+**If you enabled cloud backup:**
+- Run `rclone config` if you need to reconfigure
+- Keep your `~/.config/rclone/rclone.conf` backed up securely off-site
 
 ## SSH Configuration
 
@@ -211,92 +230,84 @@ Use it to:
 
 *This section applies if you chose to set up the backup system during installation.*
 
-### rsync vs rclone
+### Local Backup (rsync)
 
-| Feature | rsync | rclone |
-|---------|-------|--------|
-| **Best for** | Local drives | Cloud storage |
-| **Transfer method** | Delta (byte-level) | File-level |
-| **Speed** | Faster for incremental | Slower for local |
-| **Cloud support** | SSH only | 40+ providers |
+The local backup system uses rsync to sync your primary drive to one or more backup drives.
 
-**Recommendation:** Use rsync for local drive backups, rclone for cloud backups.
-
-### Full vs Split Backup Mode
-
-**Full Backup:**
-- Mirrors entire primary → backup1
-- Requires: backup drive ≥ primary drive
-- Example: 4TB primary → 4TB+ backup
-
-**Split Backup:**
-- Divides folders between backup1 and backup2
-- Useful when: Primary > each backup drive
-- Example: 4TB primary → 2TB backup1 + 2TB backup2
-
-```
-# Split backup example:
-primary/work/    (500G)  → backup1/work/    ┐
-primary/photos/  (800G)  → backup1/photos/  ├─ 1.3TB on backup1
-                                             ┘
-primary/videos/  (1.2T)  → backup2/videos/  ┐
-primary/music/   (500G)  → backup2/music/   ├─ 1.7TB on backup2
-                                             ┘
-```
-
-### Step-by-Step Backup Setup
-
-Replace `{tool}` with your chosen tool (rsync or rclone).
-
-#### 1. Check Your Folder Sizes (for split mode)
-
+**Run Backup:**
 ```bash
-du -sh ~/drives/primary/*
+sudo /usr/local/bin/backup-scripts/local-backup.sh
 ```
 
-#### 2. Edit the Backup Script (split mode only)
-
+**View Log:**
 ```bash
-sudo nano /usr/local/bin/backup-scripts/{tool}-backup.sh
+tail -f /var/log/rsync-backup.log
 ```
 
-Configure which folders go to which backup drive:
-
+**Enable Automatic Daily Backups:**
 ```bash
-# Folders to backup to BACKUP1 only
-BACKUP1_DIRS=(
-    "work"
-    "photos"
-)
-
-# Folders to backup to BACKUP2 only
-BACKUP2_DIRS=(
-    "videos"
-    "music"
-)
-```
-
-#### 3. Run First Backup
-
-```bash
-sudo /usr/local/bin/backup-scripts/{tool}-backup.sh
-```
-
-Monitor progress:
-```bash
-tail -f /var/log/{tool}-backup.log
-```
-
-#### 4. Enable Automatic Backups (Optional)
-
-```bash
-sudo systemctl enable {tool}-backup.timer
-sudo systemctl start {tool}-backup.timer
+sudo systemctl enable rsync-backup.timer
+sudo systemctl start rsync-backup.timer
 
 # Check status
-sudo systemctl status {tool}-backup.timer
-sudo systemctl list-timers
+sudo systemctl list-timers | grep rsync
 ```
+
+### Cloud Backup (rclone)
+
+If you set up cloud backup, your files are encrypted locally before being uploaded.
+
+**Run Cloud Backup:**
+```bash
+sudo /usr/local/bin/backup-scripts/cloud-backup.sh
+```
+
+**View Log:**
+```bash
+tail -f /var/log/cloud-backup.log
+```
+
+### Protecting Your rclone Configuration
+
+Your `~/.config/rclone/rclone.conf` file contains your encryption keys and cloud credentials. **Without this file, your encrypted cloud files cannot be decrypted.**
+
+**The script automatically:**
+- Backs up rclone.conf to all local backup drives
+- Reminds you to store a copy off-site
+
+**Recommended off-site backup methods for rclone.conf:**
+- **Signal** - End-to-end encrypted; send to yourself or a trusted contact
+- **Box.com** - Better privacy policy than some alternatives
+- **Password manager** - 1Password, Bitwarden, etc.
+- **Encrypted USB drive** - Store at another physical location
+
+**Note on Dropbox:** Works but has broader data access policies. Consider alternatives.
+
+### Restoring Files on Another Computer
+
+If you need to decrypt your cloud-backed files on a new machine:
+
+1. **Install rclone:**
+   ```bash
+   sudo apt install rclone
+   ```
+
+2. **Copy your rclone.conf to the new machine:**
+   ```bash
+   mkdir -p ~/.config/rclone
+   # Copy your backed-up rclone.conf to ~/.config/rclone/rclone.conf
+   ```
+
+3. **Download and decrypt files:**
+   ```bash
+   # List your encrypted remote
+   rclone ls cloud-crypt:
+
+   # Download and decrypt to local folder
+   rclone copy cloud-crypt: /path/to/restore/
+   ```
+
+The "cloud-crypt" remote automatically decrypts files during download using the keys stored in rclone.conf.
 
 ### Manual Drive Mounting
 
@@ -653,21 +664,22 @@ sudo ufw status numbered
 sudo ufw delete 3
 ```
 
-## Backup Mode Comparison
+## Backup Strategy Summary
 
-### Full Backup
-✓ Simpler setup - no folder configuration needed
-✓ Single backup drive to manage
-✓ Easy restore - just copy everything back
-⚠️ Requires backup drive ≥ primary size
+### Local Backup (rsync)
+✓ Simple setup - just specify your drives
+✓ Delta transfers - only changed bytes copied (fast incremental backups)
+✓ Supports 1-4 backup drives with custom names
+✓ Time to notice corruption before it propagates (unlike RAID)
+✓ Backup drives can be disconnected for safety
+✓ Easy restore - just rsync back
 
-### Split Backup
-✓ Budget-friendly - use two smaller drives
-✓ No RAID complexity
-✓ Flexible - rebalance folders anytime
-⚠️ Manual folder configuration required
-⚠️ Need BOTH backup drives to fully restore
-⚠️ Failed backup = some folders without redundancy
+### Cloud Backup (rclone)
+✓ Files encrypted locally before upload (cloud provider can't read them)
+✓ Guided setup for Google Drive and OneDrive
+✓ 40+ cloud providers supported
+✓ Config automatically backed up to local drives
+⚠️ Requires rclone.conf for decryption - keep it safe!
 
 ## Files Created by This Script
 
@@ -685,15 +697,18 @@ sudo ufw delete 3
 # If Samba is installed
 /etc/samba/smb.conf.backup-TIMESTAMP            # Samba config backup
 
-# If backup system is set up (rsync or rclone)
-/usr/local/bin/backup-scripts/{tool}-backup.sh  # Backup script
-/etc/systemd/system/{tool}-backup.service       # Systemd service
-/etc/systemd/system/{tool}-backup.timer         # Systemd timer
-/var/log/{tool}-backup.log                      # Backup log
+# If local backup is set up
+/usr/local/bin/backup-scripts/local-backup.sh   # Local rsync backup script
+/etc/systemd/system/rsync-backup.service        # Systemd service
+/etc/systemd/system/rsync-backup.timer          # Systemd timer (daily at 2 AM)
+/var/log/rsync-backup.log                       # Backup log
 /etc/fstab.backup-TIMESTAMP                     # fstab backup (if modified)
-~/drives/primary/                               # Primary mount point
-~/drives/backup1/                               # Backup1 mount point
-~/drives/backup2/                               # Backup2 mount point (split mode only)
+~/drives/{your-drive-names}/                    # Mount points (customizable names)
+
+# If cloud backup is set up
+/usr/local/bin/backup-scripts/cloud-backup.sh   # Cloud rclone backup script
+~/.config/rclone/rclone.conf                    # rclone config (KEEP SAFE - has encryption keys!)
+~/drives/*/rclone-config-backup/rclone.conf     # Config backed up to each local drive
 ```
 
 ## Security Notes
@@ -705,6 +720,7 @@ sudo ufw delete 3
 - **Samba password** (if installed): Stored separately from system password; change with `sudo smbpasswd username`
 - **Samba shares** (if installed): Only accessible to configured users; ensure strong passwords
 - **Network security** (if Samba installed): Samba shares are accessible to anyone on your local network who has credentials
+- **rclone.conf** (if cloud backup enabled): Contains encryption keys - without it, cloud files cannot be decrypted. Back up securely off-site!
 - **Backup drives** (if backup enabled): Consider encrypting sensitive data
 
 ## Support & Feedback
@@ -722,6 +738,14 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.2**: Backup system overhaul
+  - Local backups now use rsync exclusively (simpler, better for local drives)
+  - Support for 1-4 backup drives with customizable names
+  - Cloud backup added as separate option using rclone with encryption
+  - Guided setup for Google Drive and OneDrive cloud backups
+  - rclone.conf automatically backed up to all local drives
+  - Added guidance for secure off-site config backup (Signal, Box.com, password managers)
+  - Documentation: why rsync instead of RAID, why fail2ban with key-only SSH is unnecessary
 - **v2.1**: QoL improvements
   - Added `--dry-run` flag to preview installations without changes
   - Added `--unattended` flag for automated/scripted installs
