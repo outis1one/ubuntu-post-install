@@ -1,10 +1,16 @@
 # Ubuntu 24.04 Desktop Post-Installation Script
 
-Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, configures SSH, sets up Docker, configures remote access, and optionally sets up Samba file sharing and a split-backup system using rclone.
+Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, configures SSH, and optionally sets up Docker, Samba file sharing, remote access tools (NetBird, RustDesk), and an automated backup system.
+
+**Key Features:**
+- **Rerunnable** - Detects existing installations and offers to reinstall/reconfigure
+- **Modular** - Every component is optional with y/n prompts
+- **Backup options** - Choose rsync (faster, local) or rclone (cloud support)
+- **Backup modes** - Full backup (one drive) or split backup (two drives)
 
 ## What This Script Does
 
-### Core Utilities Installed
+### Core Utilities Installed (Always)
 - **net-tools** - Network utilities (ifconfig, netstat)
 - **ncdu** - Disk usage analyzer with ncurses interface
 - **git** - Version control system
@@ -13,7 +19,6 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **htop** - Interactive process viewer
 - **tree** - Directory structure visualizer
 - **zip/unzip** - Archive utilities
-- **rclone** - Sync tool for split backup strategy
 
 ### SSH Configuration
 - **OpenSSH Server** - Enables remote SSH access
@@ -21,28 +26,48 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **Key Import** - Optionally imports public keys from GitHub and/or Launchpad
 - **Security** - Automatically disables password authentication if keys are imported
 
-### Docker Installation
+### Docker Installation (Optional)
 - **Docker Engine** - Latest version from official Docker repository (not snap)
 - **Docker Compose** - Installed as a plugin (modern method)
 - **User Configuration** - Adds your user to docker group (run docker without sudo)
+- Detects if already installed and offers to reinstall
 
 ### Samba File Sharing (Optional)
 - **Samba Server** - SMB/CIFS file server for network file sharing
 - **Primary Drive Share** - Entire primary drive shared as "Primary"
 - **User Configuration** - Creates Samba user matching your system username
 - **Cross-Platform Access** - Works with Windows, Mac, and Linux
+- Detects if already installed and offers to reconfigure
 
-### Remote Access Tools
+### Remote Access Tools (Optional)
 - **NetBird** - Mesh VPN for secure device connections
   - Supports both NetBird SSH and traditional SSH
   - Enables remote access across networks
+  - Detects if already installed
 - **RustDesk** - Open-source remote desktop software
+  - Detects if already installed
 
-### Backup System - Split Backup Strategy (Optional)
-- **Automated rclone backup script** using split-backup approach
-- **Mount point management** at `~/drives/primary`, `~/drives/backup1`, `~/drives/backup2`
-- **Interactive drive mounting** with automatic fstab configuration
-- **Systemd timer** for scheduled daily backups
+### Backup System (Optional)
+Choose your backup tool and mode:
+
+**Backup Tools:**
+- **rsync** (recommended for local drives)
+  - Delta transfers - only changed bytes are copied
+  - Faster incremental backups
+  - Built into most Linux systems
+- **rclone** (better for cloud storage)
+  - Supports 40+ cloud providers (S3, Google Drive, Dropbox...)
+  - File-level sync
+
+**Backup Modes:**
+- **Full** - Mirror entire primary to one backup drive (simpler)
+- **Split** - Divide data between two smaller backup drives (budget-friendly)
+
+**Features:**
+- Mount point management at `~/drives/`
+- Interactive drive mounting with automatic fstab configuration
+- Systemd timer for scheduled daily backups at 2 AM
+- Detects existing configuration and offers to reconfigure
 
 ## Prerequisites
 
@@ -78,13 +103,17 @@ sudo ./post-install.sh
 
 ### 4. Follow Interactive Prompts
 
-The script will ask you:
+The script shows current system status and asks:
 - **SSH Key Generation**: Generate new 4096-bit RSA key? (y/n)
 - **Import SSH Keys**: GitHub username, Launchpad username (or leave blank)
+- **Docker**: Install Docker? (y/n) - or reinstall if detected
 - **Samba File Sharing**: Install and configure Samba? (y/n)
   - If yes: Set password for Samba user
-- **Rclone Backup System**: Set up split backup system? (y/n)
-  - If yes: Mount drives now? Device paths, fstab configuration
+- **NetBird**: Install NetBird mesh VPN? (y/n)
+- **RustDesk**: Install RustDesk remote desktop? (y/n)
+- **Backup System**: Set up backup system? (y/n)
+  - If yes: Choose tool (rsync/rclone), mode (full/split)
+  - Mount drives now? Device paths, fstab configuration
 
 ### 5. Post-Installation Steps
 
@@ -94,10 +123,10 @@ The script will ask you:
 logout
 ```
 
-**If you enabled rclone backup:**
+**If you enabled backup system (split mode):**
 ```bash
-# Configure rclone backup (see Backup Configuration section)
-sudo nano /usr/local/bin/backup-scripts/rclone-backup.sh
+# Configure backup script to set which folders go to which drive
+sudo nano /usr/local/bin/backup-scripts/rsync-backup.sh  # or rclone-backup.sh
 ```
 
 ## SSH Configuration
@@ -141,18 +170,33 @@ Use it to:
 
 ## Backup Configuration
 
-*This section applies if you chose to set up the rclone split backup system during installation.*
+*This section applies if you chose to set up the backup system during installation.*
 
-### Understanding Split Backup Strategy
+### rsync vs rclone
 
-**The Problem:**
-- Your primary drive: 4TB
-- Your backup drives: 2TB each
-- Can't fit full primary on one backup drive
+| Feature | rsync | rclone |
+|---------|-------|--------|
+| **Best for** | Local drives | Cloud storage |
+| **Transfer method** | Delta (byte-level) | File-level |
+| **Speed** | Faster for incremental | Slower for local |
+| **Cloud support** | SSH only | 40+ providers |
 
-**The Solution:**
-Divide your data between backup1 and backup2:
+**Recommendation:** Use rsync for local drive backups, rclone for cloud backups.
+
+### Full vs Split Backup Mode
+
+**Full Backup:**
+- Mirrors entire primary → backup1
+- Requires: backup drive ≥ primary drive
+- Example: 4TB primary → 4TB+ backup
+
+**Split Backup:**
+- Divides folders between backup1 and backup2
+- Useful when: Primary > each backup drive
+- Example: 4TB primary → 2TB backup1 + 2TB backup2
+
 ```
+# Split backup example:
 primary/work/    (500G)  → backup1/work/    ┐
 primary/photos/  (800G)  → backup1/photos/  ├─ 1.3TB on backup1
                                              ┘
@@ -163,86 +207,56 @@ primary/music/   (500G)  → backup2/music/   ├─ 1.7TB on backup2
 
 ### Step-by-Step Backup Setup
 
-#### 1. Check Your Folder Sizes
+Replace `{tool}` with your chosen tool (rsync or rclone).
+
+#### 1. Check Your Folder Sizes (for split mode)
 
 ```bash
 du -sh ~/drives/primary/*
 ```
 
-Example output:
-```
-500G  primary/work
-800G  primary/photos
-1.2T  primary/videos
-500G  primary/music
-```
-
-#### 2. Edit the Backup Script
+#### 2. Edit the Backup Script (split mode only)
 
 ```bash
-sudo nano /usr/local/bin/backup-scripts/rclone-backup.sh
+sudo nano /usr/local/bin/backup-scripts/{tool}-backup.sh
 ```
 
-Find and edit these sections:
+Configure which folders go to which backup drive:
 
 ```bash
 # Folders to backup to BACKUP1 only
 BACKUP1_DIRS=(
-    "work"        # 500G
-    "photos"      # 800G
+    "work"
+    "photos"
 )
-# Total: ~1.3TB
 
 # Folders to backup to BACKUP2 only
 BACKUP2_DIRS=(
-    "videos"      # 1.2T
-    "music"       # 500G
+    "videos"
+    "music"
 )
-# Total: ~1.7TB
 ```
 
-**Balance the data** so each backup drive has enough space.
-
-#### 3. Test with Dry-Run (CRITICAL!)
+#### 3. Run First Backup
 
 ```bash
-# Test backup1 sync (shows what WOULD happen)
-rclone sync ~/drives/primary/work ~/drives/backup1/work --checksum --dry-run -v
-
-# Test backup2 sync
-rclone sync ~/drives/primary/videos ~/drives/backup2/videos --checksum --dry-run -v
-```
-
-Review the output carefully!
-
-#### 4. Run First Backup
-
-```bash
-sudo /usr/local/bin/backup-scripts/rclone-backup.sh
+sudo /usr/local/bin/backup-scripts/{tool}-backup.sh
 ```
 
 Monitor progress:
 ```bash
-tail -f /var/log/rclone-backup.log
+tail -f /var/log/{tool}-backup.log
 ```
 
-#### 5. Enable Automatic Backups (Optional)
+#### 4. Enable Automatic Backups (Optional)
 
-After successful manual backup:
 ```bash
-sudo systemctl enable rclone-backup.timer
-sudo systemctl start rclone-backup.timer
-```
+sudo systemctl enable {tool}-backup.timer
+sudo systemctl start {tool}-backup.timer
 
-Check status:
-```bash
-sudo systemctl status rclone-backup.timer
+# Check status
+sudo systemctl status {tool}-backup.timer
 sudo systemctl list-timers
-```
-
-Change schedule (default: 2 AM daily):
-```bash
-sudo systemctl edit rclone-backup.timer
 ```
 
 ### Manual Drive Mounting
@@ -275,69 +289,50 @@ UUID=zzzz-zzzz /home/username/drives/backup2 auto defaults 0 2
 
 ## Drive Failure Recovery
 
-### If PRIMARY Drive Fails ⚠️ CRITICAL
-
-You need **BOTH** backup drives to restore (data is split between them):
+### If PRIMARY Drive Fails
 
 ```bash
 # 1. Get new drive (same size or larger)
-# 2. Format it
+# 2. Format and mount it
 sudo mkfs.ext4 /dev/sdX1
-
-# 3. Mount as primary
 sudo mount /dev/sdX1 ~/drives/primary
 
-# 4. Restore from BOTH backups
-rclone sync ~/drives/backup1/ ~/drives/primary/ --checksum
-rclone sync ~/drives/backup2/ ~/drives/primary/ --checksum
+# 3. Restore from backup(s)
+# Full mode: restore from backup1
+rsync -avh ~/drives/backup1/ ~/drives/primary/  # or rclone sync
 
-# 5. Update /etc/fstab with new UUID
+# Split mode: restore from BOTH backups
+rsync -avh ~/drives/backup1/ ~/drives/primary/
+rsync -avh ~/drives/backup2/ ~/drives/primary/
+
+# 4. Update /etc/fstab with new UUID
 sudo blkid /dev/sdX1
 sudo nano /etc/fstab
 ```
 
 ### If BACKUP Drive Fails
 
-Example: backup1 fails (contained work/ and photos/ backups)
+Your primary still has all data - it's safe. Just replace the backup drive and re-run the backup script:
 
-**Status:**
-- ✓ Primary still has work/ and photos/ (original data is safe)
-- ✓ backup2 still works (videos/ and music/ still backed up)
-- ⚠️ work/ and photos/ have NO backup until backup1 is replaced
-
-**Recovery:**
 ```bash
-# 1. Replace the drive
-# 2. Format it
 sudo mkfs.ext4 /dev/sdX1
-
-# 3. Mount it
 sudo mount /dev/sdX1 ~/drives/backup1
-
-# 4. Update /etc/fstab if needed
-sudo nano /etc/fstab
-
-# 5. Run backup script - syncs assigned folders back
-sudo /usr/local/bin/backup-scripts/rclone-backup.sh
+sudo /usr/local/bin/backup-scripts/{tool}-backup.sh
 ```
 
-**⚠️ Replace failed backup drives quickly!** While a backup is down, those folders have no redundancy.
+**⚠️ Replace failed backup drives quickly!** While down, those folders have no redundancy.
 
 ## Verification Commands
 
 ### Check Backups Match Primary
 
 ```bash
-# Verify backup1 folders
-rclone check ~/drives/primary/work ~/drives/backup1/work
-rclone check ~/drives/primary/photos ~/drives/backup1/photos
+# Using rsync (dry-run shows differences)
+rsync -avhn --delete ~/drives/primary/ ~/drives/backup1/
 
-# Verify backup2 folders
-rclone check ~/drives/primary/videos ~/drives/backup2/videos
-rclone check ~/drives/primary/music ~/drives/backup2/music
+# Using rclone
+rclone check ~/drives/primary ~/drives/backup1
 ```
-
-If perfect: "0 differences found"
 
 ### Check Space Usage
 
@@ -345,12 +340,9 @@ If perfect: "0 differences found"
 # See what's on each drive
 du -sh ~/drives/primary/*
 du -sh ~/drives/backup1/*
-du -sh ~/drives/backup2/*
 
 # Check free space
-df -h ~/drives/primary
-df -h ~/drives/backup1
-df -h ~/drives/backup2
+df -h ~/drives/
 ```
 
 ## NetBird Setup
@@ -576,20 +568,21 @@ sudo ufw allow samba
 sudo systemctl restart smbd nmbd
 ```
 
-## Split Backup Advantages & Disadvantages
+## Backup Mode Comparison
 
-### ✓ Advantages
-- **Budget-friendly**: 4TB primary = 2TB backup1 + 2TB backup2 (saves money)
-- **Simpler than RAID**: No complex RAID setup or rebuild process
-- **Easy recovery**: Mount points stay the same, just swap drives
-- **No downtime**: Replace drives one at a time
-- **Flexible**: Easily rebalance folders between drives
+### Full Backup
+✓ Simpler setup - no folder configuration needed
+✓ Single backup drive to manage
+✓ Easy restore - just copy everything back
+⚠️ Requires backup drive ≥ primary size
 
-### ⚠️ Disadvantages
-- **Split redundancy**: Each folder backed up to ONE drive only (not both)
-- **Two-drive restore**: Need BOTH backups to fully restore primary
-- **Urgent replacement**: Failed backup leaves some folders without redundancy
-- **Manual balancing**: You must divide folders between drives yourself
+### Split Backup
+✓ Budget-friendly - use two smaller drives
+✓ No RAID complexity
+✓ Flexible - rebalance folders anytime
+⚠️ Manual folder configuration required
+⚠️ Need BOTH backup drives to fully restore
+⚠️ Failed backup = some folders without redundancy
 
 ## Files Created by This Script
 
@@ -603,15 +596,15 @@ sudo systemctl restart smbd nmbd
 # If Samba is installed
 /etc/samba/smb.conf.backup-TIMESTAMP            # Samba config backup
 
-# If rclone backup system is set up
-/usr/local/bin/backup-scripts/rclone-backup.sh  # Backup script
-/etc/systemd/system/rclone-backup.service       # Systemd service
-/etc/systemd/system/rclone-backup.timer         # Systemd timer
-/var/log/rclone-backup.log                      # Backup log
+# If backup system is set up (rsync or rclone)
+/usr/local/bin/backup-scripts/{tool}-backup.sh  # Backup script
+/etc/systemd/system/{tool}-backup.service       # Systemd service
+/etc/systemd/system/{tool}-backup.timer         # Systemd timer
+/var/log/{tool}-backup.log                      # Backup log
 /etc/fstab.backup-TIMESTAMP                     # fstab backup (if modified)
 ~/drives/primary/                               # Primary mount point
 ~/drives/backup1/                               # Backup1 mount point
-~/drives/backup2/                               # Backup2 mount point
+~/drives/backup2/                               # Backup2 mount point (split mode only)
 ```
 
 ## Security Notes
@@ -640,5 +633,12 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
-- Initial version: Ubuntu 24.04 Desktop post-installation automation
-- Features: SSH (with key generation and import), Docker, Samba file sharing, NetBird, RustDesk, split-backup with rclone
+- **v2.0**: Major update
+  - Script is now rerunnable - detects existing installations
+  - All components optional with y/n prompts (Docker, Samba, NetBird, RustDesk)
+  - Backup system: choice of rsync or rclone
+  - Backup modes: full (one drive) or split (two drives)
+  - Shows current system status at start
+- **v1.0**: Initial version
+  - SSH (with key generation and import), Docker, Samba file sharing
+  - NetBird, RustDesk, split-backup with rclone
