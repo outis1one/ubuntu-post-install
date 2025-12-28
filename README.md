@@ -15,7 +15,6 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **ncdu** - Disk usage analyzer with ncurses interface
 - **git** - Version control system
 - **curl & wget** - Download tools
-- **vim** - Text editor (instructions use nano)
 - **htop** - Interactive process viewer
 - **tree** - Directory structure visualizer
 - **zip/unzip** - Archive utilities

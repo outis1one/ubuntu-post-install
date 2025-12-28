@@ -101,7 +101,6 @@ echo "  - ncdu: Disk usage analyzer with ncurses interface"
 echo "  - git: Version control system"
 echo "  - curl: Command-line tool for transferring data with URLs"
 echo "  - wget: Network downloader"
-echo "  - vim: Advanced text editor"
 echo "  - htop: Interactive process viewer"
 echo "  - tree: Display directory structure in tree format"
 echo "  - zip/unzip: Archive compression utilities"
@@ -114,7 +113,6 @@ apt install -y \
     git \
     curl \
     wget \
-    vim \
     htop \
     tree \
     zip \
@@ -1009,7 +1007,7 @@ echo ""
 echo "=== Installation Complete! ==="
 echo ""
 echo "Installed Software:"
-echo "  ✓ net-tools, ncdu, git, curl, wget, vim, htop, tree, zip/unzip"
+echo "  ✓ net-tools, ncdu, git, curl, wget, htop, tree, zip/unzip"
 echo "  ✓ OpenSSH Server - SSH remote access"
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     echo "  ✓ Docker Engine + Docker Compose"
