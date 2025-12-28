@@ -2,12 +2,13 @@
 
 # Ubuntu 24.04 Post-Installation Script
 # Run with: sudo bash post-install.sh
+# This script is rerunnable - it detects existing installations
 
 echo "=== Ubuntu 24.04 Post-Installation Script ==="
 echo ""
 
 # Check if running as root
-if [ "$EUID" -ne 0 ]; then 
+if [ "$EUID" -ne 0 ]; then
     echo "Please run as root (use sudo)"
     exit 1
 fi
@@ -17,6 +18,75 @@ ACTUAL_USER="${SUDO_USER:-$USER}"
 ACTUAL_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
 
 echo "Note: Script will continue even if individual packages fail to install"
+echo ""
+
+# ============================================================================
+# SOFTWARE DETECTION FUNCTIONS
+# ============================================================================
+
+is_docker_installed() {
+    command -v docker &> /dev/null && systemctl is-active --quiet docker 2>/dev/null
+}
+
+is_samba_installed() {
+    command -v smbd &> /dev/null && systemctl is-active --quiet smbd 2>/dev/null
+}
+
+is_netbird_installed() {
+    command -v netbird &> /dev/null
+}
+
+is_rustdesk_installed() {
+    command -v rustdesk &> /dev/null || dpkg -l rustdesk &> /dev/null
+}
+
+is_rclone_installed() {
+    command -v rclone &> /dev/null
+}
+
+is_rsync_installed() {
+    command -v rsync &> /dev/null
+}
+
+# ============================================================================
+# SHOW CURRENT INSTALLATION STATUS
+# ============================================================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "CURRENT SYSTEM STATUS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+if is_docker_installed; then
+    echo "  ✓ Docker: Installed ($(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ','))"
+else
+    echo "  ○ Docker: Not installed"
+fi
+if is_samba_installed; then
+    echo "  ✓ Samba: Installed and running"
+else
+    echo "  ○ Samba: Not installed"
+fi
+if is_netbird_installed; then
+    echo "  ✓ NetBird: Installed"
+else
+    echo "  ○ NetBird: Not installed"
+fi
+if is_rustdesk_installed; then
+    echo "  ✓ RustDesk: Installed"
+else
+    echo "  ○ RustDesk: Not installed"
+fi
+if is_rclone_installed; then
+    echo "  ✓ rclone: Installed"
+else
+    echo "  ○ rclone: Not installed"
+fi
+if is_rsync_installed; then
+    echo "  ✓ rsync: Installed"
+else
+    echo "  ○ rsync: Not installed"
+fi
+echo ""
+echo "This script can reinstall/reconfigure any component."
 echo ""
 
 # Update package list
@@ -187,61 +257,76 @@ else
 fi
 
 
-# Install Docker prerequisites
+# Docker Installation
 echo ""
-echo "Installing Docker prerequisites..."
-echo "  - ca-certificates: SSL/TLS certificates for secure connections"
-echo "  - gnupg: GNU Privacy Guard for package verification"
-echo "  - lsb-release: Provides Ubuntu version information"
-echo ""
-
-apt install -y \
-    ca-certificates \
-    gnupg \
-    lsb-release || echo "Warning: Some prerequisites failed to install, continuing..."
-
-# Install Docker
-echo ""
-echo "Installing Docker..."
-echo "  - Docker Engine: Container runtime platform"
-echo "  - Docker Compose: Multi-container application orchestration"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "DOCKER INSTALLATION"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Remove old Docker packages if they exist
-apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-
-# Add Docker's official GPG key
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-
-# Add Docker repository
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# Update package list with Docker repo
-apt update
-
-# Install Docker Engine, CLI, containerd, and Docker Compose plugin
-apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || echo "Warning: Docker installation failed, continuing..."
-
-# Start and enable Docker service
-systemctl start docker || echo "Warning: Failed to start Docker"
-systemctl enable docker || echo "Warning: Failed to enable Docker"
-
-# Add current user to docker group (if not root)
-if [ -n "$SUDO_USER" ]; then
-    usermod -aG docker "$SUDO_USER"
-    echo "User $SUDO_USER added to docker group"
+INSTALL_DOCKER="y"
+if is_docker_installed; then
+    echo "Docker is already installed: $(docker --version 2>/dev/null)"
+    read -p "Reinstall Docker? (y/n): " INSTALL_DOCKER
 fi
 
-# Verify Docker installation
-echo ""
-echo "Verifying Docker installation..."
-docker --version || echo "Warning: Docker verification failed"
-docker compose version || echo "Warning: Docker Compose verification failed"
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    echo ""
+    echo "Installing Docker prerequisites..."
+    echo "  - ca-certificates: SSL/TLS certificates for secure connections"
+    echo "  - gnupg: GNU Privacy Guard for package verification"
+    echo "  - lsb-release: Provides Ubuntu version information"
+    echo ""
+
+    apt install -y \
+        ca-certificates \
+        gnupg \
+        lsb-release || echo "Warning: Some prerequisites failed to install, continuing..."
+
+    echo ""
+    echo "Installing Docker..."
+    echo "  - Docker Engine: Container runtime platform"
+    echo "  - Docker Compose: Multi-container application orchestration"
+    echo ""
+
+    # Remove old Docker packages if they exist
+    apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+
+    # Add Docker's official GPG key
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    # Add Docker repository
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    # Update package list with Docker repo
+    apt update
+
+    # Install Docker Engine, CLI, containerd, and Docker Compose plugin
+    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || echo "Warning: Docker installation failed, continuing..."
+
+    # Start and enable Docker service
+    systemctl start docker || echo "Warning: Failed to start Docker"
+    systemctl enable docker || echo "Warning: Failed to enable Docker"
+
+    # Add current user to docker group (if not root)
+    if [ -n "$SUDO_USER" ]; then
+        usermod -aG docker "$SUDO_USER"
+        echo "User $SUDO_USER added to docker group"
+    fi
+
+    # Verify Docker installation
+    echo ""
+    echo "Verifying Docker installation..."
+    docker --version || echo "Warning: Docker verification failed"
+    docker compose version || echo "Warning: Docker Compose verification failed"
+else
+    echo "Skipping Docker installation."
+fi
 
 # Samba File Sharing (Optional)
 echo ""
@@ -252,7 +337,17 @@ echo ""
 echo "Samba allows you to share folders over the network to Windows, Mac, and Linux."
 echo "The script will share your primary drive at ~/drives/primary"
 echo ""
-read -p "Install and configure Samba file sharing? (y/n): " INSTALL_SAMBA
+
+if is_samba_installed; then
+    echo "Samba is already installed and running."
+    if grep -q "\[Primary\]" /etc/samba/smb.conf 2>/dev/null; then
+        echo "  Share 'Primary' is configured at: $ACTUAL_HOME/drives/primary"
+    fi
+    echo ""
+    read -p "Reconfigure Samba? (y/n): " INSTALL_SAMBA
+else
+    read -p "Install and configure Samba file sharing? (y/n): " INSTALL_SAMBA
+fi
 
 if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
     echo ""
@@ -317,73 +412,193 @@ else
     echo "Skipping Samba installation."
 fi
 
-# Install NetBird
+# NetBird Installation
 echo ""
-echo "Installing NetBird..."
-echo "  - NetBird: Secure mesh VPN for connecting devices"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "NETBIRD MESH VPN (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-
-curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
-
-echo ""
-echo "NetBird installed. Setup instructions:"
-echo "  1. Create account at https://app.netbird.io (or self-host)"
-echo "  2. Run 'netbird up' and authenticate via browser"
-echo ""
-echo "For NetBird SSH functionality:"
-echo "  • Enable SSH in NetBird dashboard settings"
-echo "  • Use 'netbird ssh <peer-name>' to connect to peers"
-echo "  • NetBird manages SSH keys automatically when using 'netbird ssh'"
-echo "  • Traditional SSH also works using peer IPs from 'netbird status'"
-echo "  • Configure ACL rules in dashboard for SSH access (port 22)"
+echo "NetBird is a secure mesh VPN for connecting devices across networks."
 echo ""
 
-# Install RustDesk
-echo ""
-echo "Installing RustDesk..."
-echo "  - RustDesk: Open-source remote desktop software"
-echo ""
-
-# Download latest RustDesk .deb package
-RUSTDESK_VERSION=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/${RUSTDESK_VERSION}/rustdesk-${RUSTDESK_VERSION}-x86_64.deb"
-
-wget -O /tmp/rustdesk.deb "$RUSTDESK_URL" || echo "Warning: RustDesk download failed, continuing..."
-
-if [ -f /tmp/rustdesk.deb ]; then
-    apt install -y /tmp/rustdesk.deb || echo "Warning: RustDesk installation failed, continuing..."
-    rm /tmp/rustdesk.deb
+INSTALL_NETBIRD="y"
+if is_netbird_installed; then
+    echo "NetBird is already installed."
+    netbird status 2>/dev/null || true
+    echo ""
+    read -p "Reinstall NetBird? (y/n): " INSTALL_NETBIRD
+else
+    read -p "Install NetBird? (y/n): " INSTALL_NETBIRD
 fi
 
-# Rclone Split Backup System (Optional)
+if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
+    echo ""
+    echo "Installing NetBird..."
+    echo "  - NetBird: Secure mesh VPN for connecting devices"
+    echo ""
+
+    curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
+
+    echo ""
+    echo "NetBird installed. Setup instructions:"
+    echo "  1. Create account at https://app.netbird.io (or self-host)"
+    echo "  2. Run 'netbird up' and authenticate via browser"
+    echo ""
+    echo "For NetBird SSH functionality:"
+    echo "  • Enable SSH in NetBird dashboard settings"
+    echo "  • Use 'netbird ssh <peer-name>' to connect to peers"
+    echo "  • NetBird manages SSH keys automatically when using 'netbird ssh'"
+    echo "  • Traditional SSH also works using peer IPs from 'netbird status'"
+    echo "  • Configure ACL rules in dashboard for SSH access (port 22)"
+    echo ""
+else
+    echo "Skipping NetBird installation."
+fi
+
+# RustDesk Installation
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "RCLONE SPLIT BACKUP SYSTEM (Optional)"
+echo "RUSTDESK REMOTE DESKTOP (Optional)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "This sets up a split backup system using rclone:"
-echo "  - Creates mount points for primary + 2 backup drives"
-echo "  - Installs backup script that splits data across backup drives"
-echo "  - Optionally configures automatic daily backups"
+echo "RustDesk is an open-source remote desktop software."
 echo ""
-echo "Useful when: Primary drive (e.g., 4TB) > individual backup drives (e.g., 2TB each)"
+
+INSTALL_RUSTDESK="y"
+if is_rustdesk_installed; then
+    echo "RustDesk is already installed."
+    echo ""
+    read -p "Reinstall RustDesk? (y/n): " INSTALL_RUSTDESK
+else
+    read -p "Install RustDesk? (y/n): " INSTALL_RUSTDESK
+fi
+
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    echo ""
+    echo "Installing RustDesk..."
+    echo "  - RustDesk: Open-source remote desktop software"
+    echo ""
+
+    # Download latest RustDesk .deb package
+    RUSTDESK_VERSION=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+    RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/${RUSTDESK_VERSION}/rustdesk-${RUSTDESK_VERSION}-x86_64.deb"
+
+    wget -O /tmp/rustdesk.deb "$RUSTDESK_URL" || echo "Warning: RustDesk download failed, continuing..."
+
+    if [ -f /tmp/rustdesk.deb ]; then
+        apt install -y /tmp/rustdesk.deb || echo "Warning: RustDesk installation failed, continuing..."
+        rm /tmp/rustdesk.deb
+        echo "✓ RustDesk installed"
+    fi
+else
+    echo "Skipping RustDesk installation."
+fi
+
+# Backup System (Optional)
 echo ""
-read -p "Set up rclone split backup system? (y/n): " SETUP_BACKUP
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "BACKUP SYSTEM (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "This sets up an automated backup system for local drives."
+echo ""
+
+# Check if backup is already configured
+BACKUP_CONFIGURED=false
+if [ -f /usr/local/bin/backup-scripts/rclone-backup.sh ] || [ -f /usr/local/bin/backup-scripts/rsync-backup.sh ]; then
+    BACKUP_CONFIGURED=true
+    echo "Backup system is already configured."
+    if [ -f /usr/local/bin/backup-scripts/rclone-backup.sh ]; then
+        echo "  Current: rclone backup script"
+    fi
+    if [ -f /usr/local/bin/backup-scripts/rsync-backup.sh ]; then
+        echo "  Current: rsync backup script"
+    fi
+    echo ""
+    read -p "Reconfigure backup system? (y/n): " SETUP_BACKUP
+else
+    read -p "Set up backup system? (y/n): " SETUP_BACKUP
+fi
 
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     echo ""
-    echo "Setting up rclone backup configuration..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "BACKUP TOOL SELECTION"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
+    echo "Choose your backup tool:"
+    echo ""
+    echo "  [1] rsync  - RECOMMENDED for local drive backups"
+    echo "              • Delta transfers (only changed bytes are copied)"
+    echo "              • Faster incremental backups"
+    echo "              • Built into most Linux systems"
+    echo ""
+    echo "  [2] rclone - Better for cloud storage backups"
+    echo "              • Supports 40+ cloud providers (S3, GDrive, Dropbox...)"
+    echo "              • File-level sync (copies entire changed files)"
+    echo "              • Good for local drives, but rsync is more efficient"
+    echo ""
+    read -p "Select backup tool [1=rsync, 2=rclone]: " BACKUP_TOOL_CHOICE
+
+    if [ "$BACKUP_TOOL_CHOICE" = "2" ]; then
+        BACKUP_TOOL="rclone"
+    else
+        BACKUP_TOOL="rsync"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "BACKUP MODE SELECTION"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Choose your backup mode:"
+    echo ""
+    echo "  [1] FULL BACKUP - Mirror entire primary drive to one backup drive"
+    echo "              • Simpler setup (primary → backup1)"
+    echo "              • Requires: backup drive >= primary drive size"
+    echo "              • Example: 4TB primary → 4TB+ backup"
+    echo ""
+    echo "  [2] SPLIT BACKUP - Divide data between two smaller backup drives"
+    echo "              • Useful when: Primary > each backup drive"
+    echo "              • Example: 4TB primary → 2TB backup1 + 2TB backup2"
+    echo "              • You configure which folders go to which backup"
+    echo ""
+    read -p "Select backup mode [1=full, 2=split]: " BACKUP_MODE_CHOICE
+
+    if [ "$BACKUP_MODE_CHOICE" = "2" ]; then
+        BACKUP_MODE="split"
+    else
+        BACKUP_MODE="full"
+    fi
+
+    echo ""
+    echo "Selected: $BACKUP_TOOL with $BACKUP_MODE backup mode"
+    echo ""
+    echo "Setting up backup configuration..."
+    echo ""
+
+    # Install the selected backup tool if needed
+    if [ "$BACKUP_TOOL" = "rsync" ]; then
+        if ! is_rsync_installed; then
+            apt install -y rsync || echo "Warning: rsync installation failed"
+        fi
+    else
+        if ! is_rclone_installed; then
+            apt install -y rclone || echo "Warning: rclone installation failed"
+        fi
+    fi
 
     # Create backup script directory
     mkdir -p /usr/local/bin/backup-scripts
 
-    # Create mount point directories
+    # Create mount point directories based on mode
     echo ""
     echo "Creating mount point directories in $ACTUAL_HOME/drives/..."
     mkdir -p "$ACTUAL_HOME/drives/primary"
     mkdir -p "$ACTUAL_HOME/drives/backup1"
-    mkdir -p "$ACTUAL_HOME/drives/backup2"
+    if [ "$BACKUP_MODE" = "split" ]; then
+        mkdir -p "$ACTUAL_HOME/drives/backup2"
+    fi
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
 
     echo ""
@@ -405,7 +620,9 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
 
         read -p "Primary drive device (e.g., /dev/sdb1): " PRIMARY_DEV
         read -p "Backup1 drive device (e.g., /dev/sdc1): " BACKUP1_DEV
-        read -p "Backup2 drive device (e.g., /dev/sdd1): " BACKUP2_DEV
+        if [ "$BACKUP_MODE" = "split" ]; then
+            read -p "Backup2 drive device (e.g., /dev/sdd1): " BACKUP2_DEV
+        fi
 
         # Mount primary
         if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
@@ -419,8 +636,8 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
             mount "$BACKUP1_DEV" "$ACTUAL_HOME/drives/backup1" && echo "✓ Backup1 mounted" || echo "✗ Failed to mount backup1"
         fi
 
-        # Mount backup2
-        if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
+        # Mount backup2 (only in split mode)
+        if [ "$BACKUP_MODE" = "split" ] && [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
             echo "Mounting $BACKUP2_DEV to $ACTUAL_HOME/drives/backup2..."
             mount "$BACKUP2_DEV" "$ACTUAL_HOME/drives/backup2" && echo "✓ Backup2 mounted" || echo "✗ Failed to mount backup2"
         fi
@@ -453,7 +670,7 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
                 fi
             fi
 
-            if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
+            if [ "$BACKUP_MODE" = "split" ] && [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
                 BACKUP2_UUID=$(blkid -s UUID -o value "$BACKUP2_DEV")
                 if [ -n "$BACKUP2_UUID" ]; then
                     echo "UUID=$BACKUP2_UUID $ACTUAL_HOME/drives/backup2 auto defaults 0 2" >> /etc/fstab
@@ -469,195 +686,312 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
         echo "Mount points created at:"
         echo "  $ACTUAL_HOME/drives/primary"
         echo "  $ACTUAL_HOME/drives/backup1"
-        echo "  $ACTUAL_HOME/drives/backup2"
+        if [ "$BACKUP_MODE" = "split" ]; then
+            echo "  $ACTUAL_HOME/drives/backup2"
+        fi
     fi
 
-    # Create example backup script with correct paths
-    cat > /usr/local/bin/backup-scripts/rclone-backup.sh << BACKUP_SCRIPT
+    # Create backup script based on selected tool and mode
+    SCRIPT_NAME="${BACKUP_TOOL}-backup.sh"
+
+    if [ "$BACKUP_TOOL" = "rsync" ] && [ "$BACKUP_MODE" = "full" ]; then
+        # RSYNC FULL BACKUP
+        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
 #!/bin/bash
-
 ################################################################################
-# Rclone SPLIT Backup Script - Divide data between multiple backup drives
+# rsync FULL Backup Script - Mirror entire primary to backup drive
 ################################################################################
-#
-# RCLONE TERMINOLOGY:
-#   SOURCE (PRIMARY)      = Where your data currently lives
-#   DESTINATION (BACKUP)  = Where you want exact copies stored
-#
-# SPLIT BACKUP STRATEGY:
-#   This script splits your primary data between backup1 and backup2
-#   Perfect for when: Primary is 4TB, Backup1 is 2TB, Backup2 is 2TB
-#
-# Example:
-#   primary/work/         → backup1/work/        (backup1 only)
-#   primary/photos/       → backup1/photos/      (backup1 only)
-#   primary/videos/       → backup2/videos/      (backup2 only)
-#   primary/music/        → backup2/music/       (backup2 only)
-#
+# Tool: rsync (delta transfers - only changed bytes are copied)
+# Mode: Full backup (entire primary → backup1)
 ################################################################################
 
-# ┌────────────────────────────────────────────────────────────────────┐
-# │ CONFIGURE THESE PATHS                                              │
-# └────────────────────────────────────────────────────────────────────┘
-
-# SOURCE: Primary drive (where your data lives)
 PRIMARY="$ACTUAL_HOME/drives/primary"
+BACKUP1="$ACTUAL_HOME/drives/backup1"
+LOG="/var/log/rsync-backup.log"
 
-# DESTINATIONS: Backup drives (where copies will be stored)
+echo "=== rsync FULL Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "FROM: \$PRIMARY" | tee -a "\$LOG"
+echo "TO:   \$BACKUP1" | tee -a "\$LOG"
+echo "" | tee -a "\$LOG"
+
+if [ ! -d "\$PRIMARY" ]; then
+    echo "ERROR: Primary drive not mounted at \$PRIMARY" | tee -a "\$LOG"
+    exit 1
+fi
+
+if [ ! -d "\$BACKUP1" ]; then
+    echo "ERROR: Backup drive not mounted at \$BACKUP1" | tee -a "\$LOG"
+    exit 1
+fi
+
+# rsync options:
+#   -a = archive mode (preserves permissions, timestamps, etc.)
+#   -v = verbose
+#   -h = human-readable sizes
+#   --delete = remove files from backup that don't exist on primary
+#   --progress = show progress
+#   --stats = show transfer statistics
+
+rsync -avh --delete --progress --stats "\$PRIMARY/" "\$BACKUP1/" 2>&1 | tee -a "\$LOG"
+
+if [ \$? -eq 0 ]; then
+    echo "" | tee -a "\$LOG"
+    echo "✓ Backup completed successfully: \$(date)" | tee -a "\$LOG"
+else
+    echo "" | tee -a "\$LOG"
+    echo "✗ Backup failed: \$(date)" | tee -a "\$LOG"
+fi
+BACKUP_SCRIPT
+
+    elif [ "$BACKUP_TOOL" = "rsync" ] && [ "$BACKUP_MODE" = "split" ]; then
+        # RSYNC SPLIT BACKUP
+        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
+#!/bin/bash
+################################################################################
+# rsync SPLIT Backup Script - Divide data between two backup drives
+################################################################################
+# Tool: rsync (delta transfers - only changed bytes are copied)
+# Mode: Split backup (folders divided between backup1 and backup2)
+#
+# CONFIGURE: Edit BACKUP1_DIRS and BACKUP2_DIRS below
+################################################################################
+
+PRIMARY="$ACTUAL_HOME/drives/primary"
 BACKUP1="$ACTUAL_HOME/drives/backup1"
 BACKUP2="$ACTUAL_HOME/drives/backup2"
+LOG="/var/log/rsync-backup.log"
 
-# ┌────────────────────────────────────────────────────────────────────┐
-# │ ⚠️  CRITICAL: CONFIGURE WHICH FOLDERS GO TO WHICH BACKUP DRIVE! ⚠️ │
-# └────────────────────────────────────────────────────────────────────┘
-#
-# List folder names that exist in PRIMARY and assign them to backup drives.
-# Balance the data so each backup drive has roughly equal capacity used.
-#
-# Example setup (adjust to match YOUR actual folders):
-
-# Folders to backup to BACKUP1 only
+# ⚠️ CONFIGURE: Which folders go to which backup drive
+# Check folder sizes: du -sh $ACTUAL_HOME/drives/primary/*
 BACKUP1_DIRS=(
     "documents"
     "work"
     "photos"
 )
 
-# Folders to backup to BACKUP2 only
 BACKUP2_DIRS=(
     "videos"
     "music"
     "downloads"
 )
 
-# ┌────────────────────────────────────────────────────────────────────┐
-# │ HOW TO BALANCE YOUR DATA:                                          │
-# └────────────────────────────────────────────────────────────────────┘
-#
-# 1. Check size of each folder on PRIMARY:
-#    du -sh $ACTUAL_HOME/drives/primary/*
-#
-# 2. Divide folders between BACKUP1_DIRS and BACKUP2_DIRS so the total
-#    size in each list fits on the respective backup drive
-#
-# Example output from du -sh:
-#   500G  primary/work
-#   800G  primary/photos
-#   1.2T  primary/videos
-#   500G  primary/music
-#
-# Split strategy (for 2TB backup drives):
-#   BACKUP1_DIRS: work (500G) + photos (800G) = 1.3TB → fits on 2TB drive
-#   BACKUP2_DIRS: videos (1.2T) + music (500G) = 1.7TB → fits on 2TB drive
-#
-
-################################################################################
-# Script logic below - you shouldn't need to edit anything below this line
-################################################################################
-
-# Log file
-LOG="/var/log/rclone-backup.log"
-
-echo "=== Rclone SPLIT Backup Started: \$(date) ===" | tee -a "\$LOG"
-echo "SOURCE (Primary): \$PRIMARY" | tee -a "\$LOG"
-echo "Strategy: Split data between backup drives" | tee -a "\$LOG"
+echo "=== rsync SPLIT Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "PRIMARY: \$PRIMARY" | tee -a "\$LOG"
 echo "" | tee -a "\$LOG"
 
-# Function to backup specific directories to a destination
 backup_to_drive() {
     local dest=\$1
     local drive_name=\$2
     shift 2
     local dirs_array=("\$@")
-    
+
     if [ ! -d "\$dest" ]; then
         echo "⚠️  WARNING: \$drive_name (\$dest) not mounted, skipping" | tee -a "\$LOG"
         return 1
     fi
-    
-    if [ \${#dirs_array[@]} -eq 0 ]; then
-        echo "⚠️  WARNING: No directories assigned to \$drive_name, skipping" | tee -a "\$LOG"
-        return 1
-    fi
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
     echo "DESTINATION: \$drive_name (\$dest)" | tee -a "\$LOG"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
-    
+
     for dir in "\${dirs_array[@]}"; do
         if [ ! -d "\$PRIMARY/\$dir" ]; then
             echo "  ⚠️  WARNING: \$PRIMARY/\$dir does not exist, skipping" | tee -a "\$LOG"
             continue
         fi
-        
+
         echo "" | tee -a "\$LOG"
-        echo "  Syncing: \$dir" | tee -a "\$LOG"
-        echo "    FROM: \$PRIMARY/\$dir" | tee -a "\$LOG"
-        echo "    TO:   \$dest/\$dir" | tee -a "\$LOG"
-        
-        # Use rclone sync for exact mirroring
-        # SOURCE -> DESTINATION (one-way)
-        # --checksum: verify with checksums (slower but accurate)
-        # --verbose: show what's being copied
-        # --progress: show progress
-        # --delete-during: delete files from dest that don't exist in source
-        
+        echo "  Syncing: \$dir → \$dest/\$dir" | tee -a "\$LOG"
+
+        rsync -avh --delete --progress "\$PRIMARY/\$dir/" "\$dest/\$dir/" 2>&1 | tee -a "\$LOG"
+
+        if [ \$? -eq 0 ]; then
+            echo "  ✓ \$dir synced successfully" | tee -a "\$LOG"
+        else
+            echo "  ✗ \$dir sync FAILED" | tee -a "\$LOG"
+        fi
+    done
+}
+
+backup_to_drive "\$BACKUP1" "Backup Drive 1" "\${BACKUP1_DIRS[@]}"
+backup_to_drive "\$BACKUP2" "Backup Drive 2" "\${BACKUP2_DIRS[@]}"
+
+echo "" | tee -a "\$LOG"
+echo "=== Backup Completed: \$(date) ===" | tee -a "\$LOG"
+BACKUP_SCRIPT
+
+    elif [ "$BACKUP_TOOL" = "rclone" ] && [ "$BACKUP_MODE" = "full" ]; then
+        # RCLONE FULL BACKUP
+        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
+#!/bin/bash
+################################################################################
+# rclone FULL Backup Script - Mirror entire primary to backup drive
+################################################################################
+# Tool: rclone (file-level sync, great for cloud storage)
+# Mode: Full backup (entire primary → backup1)
+################################################################################
+
+PRIMARY="$ACTUAL_HOME/drives/primary"
+BACKUP1="$ACTUAL_HOME/drives/backup1"
+LOG="/var/log/rclone-backup.log"
+
+echo "=== rclone FULL Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "FROM: \$PRIMARY" | tee -a "\$LOG"
+echo "TO:   \$BACKUP1" | tee -a "\$LOG"
+echo "" | tee -a "\$LOG"
+
+if [ ! -d "\$PRIMARY" ]; then
+    echo "ERROR: Primary drive not mounted at \$PRIMARY" | tee -a "\$LOG"
+    exit 1
+fi
+
+if [ ! -d "\$BACKUP1" ]; then
+    echo "ERROR: Backup drive not mounted at \$BACKUP1" | tee -a "\$LOG"
+    exit 1
+fi
+
+# rclone sync: one-way sync from source to destination
+rclone sync "\$PRIMARY" "\$BACKUP1" \\
+    --checksum \\
+    --verbose \\
+    --progress \\
+    --stats=30s \\
+    --log-file="\$LOG"
+
+if [ \$? -eq 0 ]; then
+    echo "" | tee -a "\$LOG"
+    echo "✓ Backup completed successfully: \$(date)" | tee -a "\$LOG"
+else
+    echo "" | tee -a "\$LOG"
+    echo "✗ Backup failed: \$(date)" | tee -a "\$LOG"
+fi
+BACKUP_SCRIPT
+
+    else
+        # RCLONE SPLIT BACKUP (default)
+        cat > /usr/local/bin/backup-scripts/$SCRIPT_NAME << BACKUP_SCRIPT
+#!/bin/bash
+################################################################################
+# rclone SPLIT Backup Script - Divide data between two backup drives
+################################################################################
+# Tool: rclone (file-level sync, great for cloud storage)
+# Mode: Split backup (folders divided between backup1 and backup2)
+#
+# CONFIGURE: Edit BACKUP1_DIRS and BACKUP2_DIRS below
+################################################################################
+
+PRIMARY="$ACTUAL_HOME/drives/primary"
+BACKUP1="$ACTUAL_HOME/drives/backup1"
+BACKUP2="$ACTUAL_HOME/drives/backup2"
+LOG="/var/log/rclone-backup.log"
+
+# ⚠️ CONFIGURE: Which folders go to which backup drive
+# Check folder sizes: du -sh $ACTUAL_HOME/drives/primary/*
+BACKUP1_DIRS=(
+    "documents"
+    "work"
+    "photos"
+)
+
+BACKUP2_DIRS=(
+    "videos"
+    "music"
+    "downloads"
+)
+
+echo "=== rclone SPLIT Backup Started: \$(date) ===" | tee -a "\$LOG"
+echo "PRIMARY: \$PRIMARY" | tee -a "\$LOG"
+echo "" | tee -a "\$LOG"
+
+backup_to_drive() {
+    local dest=\$1
+    local drive_name=\$2
+    shift 2
+    local dirs_array=("\$@")
+
+    if [ ! -d "\$dest" ]; then
+        echo "⚠️  WARNING: \$drive_name (\$dest) not mounted, skipping" | tee -a "\$LOG"
+        return 1
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
+    echo "DESTINATION: \$drive_name (\$dest)" | tee -a "\$LOG"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "\$LOG"
+
+    for dir in "\${dirs_array[@]}"; do
+        if [ ! -d "\$PRIMARY/\$dir" ]; then
+            echo "  ⚠️  WARNING: \$PRIMARY/\$dir does not exist, skipping" | tee -a "\$LOG"
+            continue
+        fi
+
+        echo "" | tee -a "\$LOG"
+        echo "  Syncing: \$dir → \$dest/\$dir" | tee -a "\$LOG"
+
         rclone sync "\$PRIMARY/\$dir" "\$dest/\$dir" \\
             --checksum \\
             --verbose \\
             --progress \\
-            --log-file="\$LOG" \\
-            --stats=30s
-            
+            --stats=30s \\
+            --log-file="\$LOG"
+
         if [ \$? -eq 0 ]; then
-            echo "  ✓ \$dir synced successfully to \$drive_name" | tee -a "\$LOG"
+            echo "  ✓ \$dir synced successfully" | tee -a "\$LOG"
         else
-            echo "  ✗ \$dir sync to \$drive_name FAILED" | tee -a "\$LOG"
+            echo "  ✗ \$dir sync FAILED" | tee -a "\$LOG"
         fi
     done
-    echo "" | tee -a "\$LOG"
 }
 
-# Sync to backup drives with their assigned directories
 backup_to_drive "\$BACKUP1" "Backup Drive 1" "\${BACKUP1_DIRS[@]}"
 backup_to_drive "\$BACKUP2" "Backup Drive 2" "\${BACKUP2_DIRS[@]}"
 
+echo "" | tee -a "\$LOG"
 echo "=== Backup Completed: \$(date) ===" | tee -a "\$LOG"
 BACKUP_SCRIPT
+    fi
 
-    chmod +x /usr/local/bin/backup-scripts/rclone-backup.sh
+    chmod +x /usr/local/bin/backup-scripts/$SCRIPT_NAME
 
-    # Create systemd service for automatic backups (optional)
-    cat > /etc/systemd/system/rclone-backup.service << 'SERVICE'
+    # Create systemd service for automatic backups
+    cat > /etc/systemd/system/${BACKUP_TOOL}-backup.service << SERVICE
 [Unit]
-Description=Rclone Backup Service
+Description=${BACKUP_TOOL} Backup Service
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/backup-scripts/rclone-backup.sh
+ExecStart=/usr/local/bin/backup-scripts/${SCRIPT_NAME}
 User=root
 SERVICE
 
-    # Create systemd timer for daily backups at 2 AM (optional)
-    cat > /etc/systemd/system/rclone-backup.timer << 'TIMER'
+    # Create systemd timer for daily backups at 2 AM
+    cat > /etc/systemd/system/${BACKUP_TOOL}-backup.timer << TIMER
 [Unit]
-Description=Daily Rclone Backup Timer
-Requires=rclone-backup.service
+Description=Daily ${BACKUP_TOOL} Backup Timer
+Requires=${BACKUP_TOOL}-backup.service
 
 [Timer]
-OnCalendar=daily
-OnCalendar=02:00
+OnCalendar=*-*-* 02:00:00
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 TIMER
 
-    echo "✓ Rclone backup script created at /usr/local/bin/backup-scripts/rclone-backup.sh"
+    echo ""
+    echo "✓ Backup script created: /usr/local/bin/backup-scripts/$SCRIPT_NAME"
     echo "✓ Systemd service/timer created (disabled by default)"
+    echo ""
+    echo "Configuration: $BACKUP_TOOL + $BACKUP_MODE mode"
+    if [ "$BACKUP_MODE" = "split" ]; then
+        echo ""
+        echo "⚠️  IMPORTANT: Edit the backup script to configure which folders"
+        echo "   go to which backup drive before running!"
+        echo ""
+        echo "   sudo nano /usr/local/bin/backup-scripts/$SCRIPT_NAME"
+    fi
 else
-    echo "Skipping rclone backup system setup."
+    echo "Skipping backup system setup."
 fi
 
 # Full system upgrade
@@ -675,16 +1009,22 @@ echo ""
 echo "=== Installation Complete! ==="
 echo ""
 echo "Installed Software:"
-echo "  ✓ net-tools, ncdu, git, curl, wget, vim, htop, tree, zip/unzip, rclone"
+echo "  ✓ net-tools, ncdu, git, curl, wget, vim, htop, tree, zip/unzip"
 echo "  ✓ OpenSSH Server - SSH remote access"
-echo "  ✓ Docker Engine + Docker Compose"
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    echo "  ✓ Docker Engine + Docker Compose"
+fi
 if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
     echo "  ✓ Samba - File sharing (Primary drive shared)"
 fi
-echo "  ✓ NetBird - Mesh VPN"
-echo "  ✓ RustDesk - Remote desktop"
+if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
+    echo "  ✓ NetBird - Mesh VPN"
+fi
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    echo "  ✓ RustDesk - Remote desktop"
+fi
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
-    echo "  ✓ Rclone split backup system configured"
+    echo "  ✓ Backup system configured: $BACKUP_TOOL ($BACKUP_MODE mode)"
 fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -739,215 +1079,32 @@ echo "    ✓ None (password auth only - if no keys imported)"
 echo ""
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "RCLONE BACKUP SETUP - Exact Drive Mirroring"
+echo "BACKUP SYSTEM - $BACKUP_TOOL ($BACKUP_MODE mode)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  Mount points created at:"
+echo "  Mount points:"
 echo "    $ACTUAL_HOME/drives/primary"
 echo "    $ACTUAL_HOME/drives/backup1"
+if [ "$BACKUP_MODE" = "split" ]; then
 echo "    $ACTUAL_HOME/drives/backup2"
+fi
 echo ""
-if [ "$MOUNT_NOW" = "y" ] || [ "$MOUNT_NOW" = "Y" ]; then
-echo "  ✓ Drives have been mounted (if you provided valid device paths)"
+echo "  Backup script: /usr/local/bin/backup-scripts/${BACKUP_TOOL}-backup.sh"
+echo "  Log file: /var/log/${BACKUP_TOOL}-backup.log"
 echo ""
-else
-echo "  → Drives NOT mounted yet. To mount manually:"
-echo "     See available drives: lsblk -f"
-echo "     Mount: sudo mount /dev/sdX1 $ACTUAL_HOME/drives/primary"
-echo "     Make permanent: Add to /etc/fstab (see instructions below)"
+if [ "$BACKUP_MODE" = "split" ]; then
+echo "  ⚠️  CONFIGURE BEFORE RUNNING:"
+echo "     Edit the script to set which folders go to which backup drive."
+echo "     sudo nano /usr/local/bin/backup-scripts/${BACKUP_TOOL}-backup.sh"
 echo ""
 fi
-echo "  ⚠️  CRITICAL: CONFIGURE BEFORE RUNNING ⚠️"
-echo "  The backup script uses SPLIT BACKUP strategy"
-echo "  You decide which folders go to which backup drive"
+echo "  Quick start:"
+echo "    1. Test (dry-run):  sudo ${BACKUP_TOOL}-backup.sh --dry-run  # (edit script first)"
+echo "    2. Run manually:    sudo /usr/local/bin/backup-scripts/${BACKUP_TOOL}-backup.sh"
+echo "    3. Enable auto:     sudo systemctl enable ${BACKUP_TOOL}-backup.timer"
+echo "                        sudo systemctl start ${BACKUP_TOOL}-backup.timer"
 echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 1: CONFIGURE THE SPLIT BACKUP SCRIPT                  │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Edit the backup script:"
-echo "    sudo nano /usr/local/bin/backup-scripts/rclone-backup.sh"
-echo ""
-echo "  ╔═══════════════════════════════════════════════════════════════╗"
-echo "  ║ SPLIT BACKUP EXPLAINED:                                       ║"
-echo "  ║                                                               ║"
-echo "  ║ Your PRIMARY drive is bigger than either backup drive        ║"
-echo "  ║ Example: Primary=4TB, Backup1=2TB, Backup2=2TB               ║"
-echo "  ║                                                               ║"
-echo "  ║ Solution: DIVIDE your folders between the two backups        ║"
-echo "  ║   • Some folders → backup1 only                              ║"
-echo "  ║   • Other folders → backup2 only                             ║"
-echo "  ║                                                               ║"
-echo "  ║ Each folder is backed up to ONE drive, NOT both              ║"
-echo "  ╚═══════════════════════════════════════════════════════════════╝"
-echo ""
-echo "  Step 1a: Check how much space your folders use"
-echo "    du -sh $ACTUAL_HOME/drives/primary/*"
-echo ""
-echo "  Example output:"
-echo "    500G  primary/work"
-echo "    800G  primary/photos"
-echo "    1.2T  primary/videos"
-echo "    500G  primary/music"
-echo ""
-echo "  Step 1b: Divide folders so each backup drive has enough space"
-echo ""
-echo "  In the script, find these two lists:"
-echo ""
-echo "    # Folders to backup to BACKUP1 only (example: 1.3TB total)"
-echo "    BACKUP1_DIRS=("
-echo "      \"work\"        # 500G"
-echo "      \"photos\"      # 800G"
-echo "    )"
-echo ""
-echo "    # Folders to backup to BACKUP2 only (example: 1.7TB total)"
-echo "    BACKUP2_DIRS=("
-echo "      \"videos\"      # 1.2T"
-echo "      \"music\"       # 500G"
-echo "    )"
-echo ""
-echo "  ⚠️  What this means:"
-echo "    primary/work/    → backup1/work/    (backup1 ONLY)"
-echo "    primary/photos/  → backup1/photos/  (backup1 ONLY)"
-echo "    primary/videos/  → backup2/videos/  (backup2 ONLY)"
-echo "    primary/music/   → backup2/music/   (backup2 ONLY)"
-echo ""
-echo "  ✓ Benefit: Your 4TB primary fits across two 2TB backups"
-echo "  ⚠️ Risk: If backup1 fails, you lose work/ and photos/ backups"
-echo "          (but original data on primary is still safe!)"
-echo ""
-echo "  Save with: Ctrl+O, then Enter, then Ctrl+X to exit"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 2: TEST WITH DRY-RUN (DO THIS FIRST!)                 │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Test what would sync to BACKUP1 (without actually copying):"
-echo ""
-echo "    rclone sync $ACTUAL_HOME/drives/primary/work \\"
-echo "                 $ACTUAL_HOME/drives/backup1/work \\"
-echo "                 --checksum --dry-run -v"
-echo ""
-echo "  Test what would sync to BACKUP2:"
-echo ""
-echo "    rclone sync $ACTUAL_HOME/drives/primary/videos \\"
-echo "                 $ACTUAL_HOME/drives/backup2/videos \\"
-echo "                 --checksum --dry-run -v"
-echo ""
-echo "  The dry-run shows:"
-echo "    • Files that would copy FROM primary TO backup"
-echo "    • Files that would be DELETED from backup (not on primary)"
-echo "    • Total data that would transfer"
-echo ""
-echo "  ⚠️  Read carefully! Make sure the right folders go to the right drives!"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 3: RUN FIRST BACKUP MANUALLY                           │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Only after dry-run looks correct:"
-echo "    sudo /usr/local/bin/backup-scripts/rclone-backup.sh"
-echo ""
-echo "  The script will sync:"
-echo "    FROM: $ACTUAL_HOME/drives/primary/[BACKUP1_DIRS]"
-echo "    TO:   $ACTUAL_HOME/drives/backup1/[same folders]"
-echo ""
-echo "    FROM: $ACTUAL_HOME/drives/primary/[BACKUP2_DIRS]"
-echo "    TO:   $ACTUAL_HOME/drives/backup2/[same folders]"
-echo ""
-echo "  Each folder goes to its assigned backup drive only!"
-echo ""
-echo "  Monitor live progress:"
-echo "    tail -f /var/log/rclone-backup.log"
-echo ""
-echo "  The log shows which folders sync to which backup drives"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 4: ENABLE AUTOMATIC DAILY BACKUPS (Optional)          │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Only enable after successful manual backup:"
-echo "    sudo systemctl enable rclone-backup.timer"
-echo "    sudo systemctl start rclone-backup.timer"
-echo ""
-echo "  This will automatically run the split backup daily at 2 AM"
-echo "  (Each folder syncs to its assigned backup drive)"
-echo ""
-echo "     Check status:"
-echo "       sudo systemctl status rclone-backup.timer"
-echo "       sudo systemctl list-timers"
-echo ""
-echo "     Change schedule (default: 2 AM daily):"
-echo "       sudo systemctl edit rclone-backup.timer"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 5: MANUAL MOUNT INSTRUCTIONS (if you skipped earlier) │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Find drive UUIDs:"
-echo "    sudo blkid"
-echo ""
-echo "  Edit /etc/fstab for permanent mounts:"
-echo "    sudo nano /etc/fstab"
-echo ""
-echo "  Add lines like (replace UUID with actual values from blkid):"
-echo "    UUID=xxxx-xxxx $ACTUAL_HOME/drives/primary auto defaults 0 2"
-echo "    UUID=yyyy-yyyy $ACTUAL_HOME/drives/backup1 auto defaults 0 2"
-echo "    UUID=zzzz-zzzz $ACTUAL_HOME/drives/backup2 auto defaults 0 2"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 6: DRIVE FAILURE & RECOVERY (Split Backup Strategy)  │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  If SOURCE (primary) drive fails - CRITICAL SITUATION:"
-echo "    ⚠️  With split backup, you need BOTH backup drives to restore!"
-echo ""
-echo "    1. Get a new drive (same size or larger than primary)"
-echo "    2. Format it: sudo mkfs.ext4 /dev/sdX1"
-echo "    3. Mount as primary: sudo mount /dev/sdX1 $ACTUAL_HOME/drives/primary"
-echo "    4. Restore from BOTH backups:"
-echo "       rclone sync $ACTUAL_HOME/drives/backup1/ $ACTUAL_HOME/drives/primary/ --checksum"
-echo "       rclone sync $ACTUAL_HOME/drives/backup2/ $ACTUAL_HOME/drives/primary/ --checksum"
-echo "    5. Update /etc/fstab with new UUID"
-echo ""
-echo "  If DESTINATION (backup1 or backup2) drive fails:"
-echo "    ⚠️  You lose backup of those specific folders until drive is replaced!"
-echo ""
-echo "    Example: backup1 fails (had work/ and photos/ backups)"
-echo "    • Your PRIMARY still has work/ and photos/ (original data is safe)"
-echo "    • backup2 still works (videos/ and music/ are still backed up)"
-echo "    • But work/ and photos/ have NO backup until you fix backup1"
-echo ""
-echo "    Recovery:"
-echo "    1. Replace the failed drive"
-echo "    2. Format: sudo mkfs.ext4 /dev/sdX1"
-echo "    3. Mount: sudo mount /dev/sdX1 $ACTUAL_HOME/drives/backup1"
-echo "    4. Update /etc/fstab if needed"
-echo "    5. Run backup script - rclone will sync the assigned folders back"
-echo ""
-echo "  ⚠️  IMPORTANT: Replace failed backup drives quickly!"
-echo "      While a backup drive is down, those folders have no redundancy."
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ STEP 7: VERIFY BACKUPS - Check Sync Status                 │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │ VERIFY BACKUPS - Check if PRIMARY and BACKUP match         │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Compare SOURCE (primary) vs DESTINATION (backup):"
-echo "    rclone check $ACTUAL_HOME/drives/primary/documents \\"
-echo "                  $ACTUAL_HOME/drives/backup1/documents"
-echo ""
-echo "  This shows any differences between the two locations."
-echo "  If they match perfectly, you'll see: \"0 differences found\""
-echo ""
-echo "  One-way check (files that exist on primary but not backup):"
-echo "    rclone check $ACTUAL_HOME/drives/primary/documents \\"
-echo "                  $ACTUAL_HOME/drives/backup1/documents \\"
-echo "                  --checksum --one-way"
-echo ""
+echo "  Monitor: tail -f /var/log/${BACKUP_TOOL}-backup.log"
 fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -968,12 +1125,18 @@ if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
         echo ""
     fi
 fi
-echo "  Docker: Log out and back in for group membership to take effect"
-echo ""
-echo "  NetBird:"
-echo "    1. Run 'netbird up' (opens browser for authentication)"
-echo "    2. View connected peers: netbird status"
-echo "    3. Configure ACLs in dashboard: https://app.netbird.io"
-echo ""
-echo "  RustDesk: Launch from applications menu or run 'rustdesk'"
-echo ""
+if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+    echo "  Docker: Log out and back in for group membership to take effect"
+    echo ""
+fi
+if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
+    echo "  NetBird:"
+    echo "    1. Run 'netbird up' (opens browser for authentication)"
+    echo "    2. View connected peers: netbird status"
+    echo "    3. Configure ACLs in dashboard: https://app.netbird.io"
+    echo ""
+fi
+if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
+    echo "  RustDesk: Launch from applications menu or run 'rustdesk'"
+    echo ""
+fi
