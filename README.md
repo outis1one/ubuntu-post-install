@@ -1,6 +1,6 @@
 # Ubuntu 24.04 Desktop Post-Installation Script
 
-Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, configures SSH, sets up Docker, configures remote access, and creates a split-backup system using rclone.
+Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, configures SSH, sets up Docker, configures remote access, and optionally sets up Samba file sharing and a split-backup system using rclone.
 
 ## What This Script Does
 
@@ -26,7 +26,7 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **Docker Compose** - Installed as a plugin (modern method)
 - **User Configuration** - Adds your user to docker group (run docker without sudo)
 
-### Samba File Sharing
+### Samba File Sharing (Optional)
 - **Samba Server** - SMB/CIFS file server for network file sharing
 - **Primary Drive Share** - Entire primary drive shared as "Primary"
 - **User Configuration** - Creates Samba user matching your system username
@@ -38,11 +38,11 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
   - Enables remote access across networks
 - **RustDesk** - Open-source remote desktop software
 
-### Backup System - Split Backup Strategy
+### Backup System - Split Backup Strategy (Optional)
 - **Automated rclone backup script** using split-backup approach
 - **Mount point management** at `~/drives/primary`, `~/drives/backup1`, `~/drives/backup2`
 - **Interactive drive mounting** with automatic fstab configuration
-- **Systemd timer** for scheduled daily backups (optional)
+- **Systemd timer** for scheduled daily backups
 
 ## Prerequisites
 
@@ -81,10 +81,10 @@ sudo ./post-install.sh
 The script will ask you:
 - **SSH Key Generation**: Generate new 4096-bit RSA key? (y/n)
 - **Import SSH Keys**: GitHub username, Launchpad username (or leave blank)
-- **Mount Drives**: Mount backup drives now? (y/n)
-- **Drive Selection**: Device paths for primary, backup1, backup2 (e.g., /dev/sdb1)
-- **fstab Configuration**: Add mounts to /etc/fstab for auto-mount? (y/n)
-- **Samba Password**: Set password for Samba user (suggested: use same as system password)
+- **Samba File Sharing**: Install and configure Samba? (y/n)
+  - If yes: Set password for Samba user
+- **Rclone Backup System**: Set up split backup system? (y/n)
+  - If yes: Mount drives now? Device paths, fstab configuration
 
 ### 5. Post-Installation Steps
 
@@ -94,7 +94,7 @@ The script will ask you:
 logout
 ```
 
-**Recommended:**
+**If you enabled rclone backup:**
 ```bash
 # Configure rclone backup (see Backup Configuration section)
 sudo nano /usr/local/bin/backup-scripts/rclone-backup.sh
@@ -140,6 +140,8 @@ Use it to:
 - Connect from this computer to other servers
 
 ## Backup Configuration
+
+*This section applies if you chose to set up the rclone split backup system during installation.*
 
 ### Understanding Split Backup Strategy
 
@@ -369,7 +371,7 @@ netbird ssh peer-name
 
 ## Samba File Sharing
 
-The script automatically shares your **entire primary drive** via Samba.
+If you chose to install Samba, it shares your **entire primary drive** via SMB/CIFS.
 
 ### Share Details
 
@@ -592,19 +594,24 @@ sudo systemctl restart smbd nmbd
 ## Files Created by This Script
 
 ```
+# Always created
+/etc/ssh/sshd_config.backup                     # SSH config backup (if modified)
+~/.ssh/id_rsa                                   # Private SSH key (if generated)
+~/.ssh/id_rsa.pub                               # Public SSH key (if generated)
+~/.ssh/authorized_keys                          # Imported SSH keys (if any)
+
+# If Samba is installed
+/etc/samba/smb.conf.backup-TIMESTAMP            # Samba config backup
+
+# If rclone backup system is set up
 /usr/local/bin/backup-scripts/rclone-backup.sh  # Backup script
 /etc/systemd/system/rclone-backup.service       # Systemd service
 /etc/systemd/system/rclone-backup.timer         # Systemd timer
 /var/log/rclone-backup.log                      # Backup log
 /etc/fstab.backup-TIMESTAMP                     # fstab backup (if modified)
-/etc/ssh/sshd_config.backup                     # SSH config backup (if modified)
-/etc/samba/smb.conf.backup-TIMESTAMP            # Samba config backup
-~/drives/primary/                               # Primary mount point (shared via Samba)
+~/drives/primary/                               # Primary mount point
 ~/drives/backup1/                               # Backup1 mount point
 ~/drives/backup2/                               # Backup2 mount point
-~/.ssh/id_rsa                                   # Private SSH key (if generated)
-~/.ssh/id_rsa.pub                               # Public SSH key (if generated)
-~/.ssh/authorized_keys                          # Imported SSH keys (if any)
 ```
 
 ## Security Notes
@@ -613,10 +620,10 @@ sudo systemctl restart smbd nmbd
 - **Public SSH key** (`~/.ssh/id_rsa.pub`): Safe to share
 - **Password authentication**: Disabled if keys imported (more secure)
 - **Docker group**: Equivalent to root access - only add trusted users
-- **Samba password**: Stored separately from system password; change with `sudo smbpasswd username`
-- **Samba shares**: Only accessible to configured users; ensure strong passwords
-- **Network security**: Samba shares are accessible to anyone on your local network who has credentials
-- **Backup drives**: Consider encrypting sensitive data
+- **Samba password** (if installed): Stored separately from system password; change with `sudo smbpasswd username`
+- **Samba shares** (if installed): Only accessible to configured users; ensure strong passwords
+- **Network security** (if Samba installed): Samba shares are accessible to anyone on your local network who has credentials
+- **Backup drives** (if backup enabled): Consider encrypting sensitive data
 
 ## Support & Feedback
 
