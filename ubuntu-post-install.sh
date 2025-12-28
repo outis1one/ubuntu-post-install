@@ -4,8 +4,78 @@
 # Run with: sudo bash post-install.sh
 # This script is rerunnable - it detects existing installations
 
+# ============================================================================
+# COMMAND-LINE ARGUMENT PARSING
+# ============================================================================
+
+DRY_RUN=false
+UNATTENDED=false
+LOG_FILE="/var/log/post-install.log"
+
+show_help() {
+    echo "Ubuntu 24.04 Post-Installation Script"
+    echo ""
+    echo "Usage: sudo ./post-install.sh [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --dry-run      Preview what would be installed without making changes"
+    echo "  --unattended   Run with default options (no prompts)"
+    echo "                 Defaults: skip key generation, no SSH imports,"
+    echo "                 install Docker, skip Samba/NetBird/RustDesk/Backup"
+    echo "  --help         Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  sudo ./post-install.sh                # Interactive mode"
+    echo "  sudo ./post-install.sh --dry-run      # Preview installations"
+    echo "  sudo ./post-install.sh --unattended   # Automated install"
+    echo ""
+    exit 0
+}
+
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            DRY_RUN=true
+            ;;
+        --unattended)
+            UNATTENDED=true
+            ;;
+        --help|-h)
+            show_help
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+# Create log file and tee all output
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "=== Post-Install Log Started: $(date) ===" >> "$LOG_FILE"
+
 echo "=== Ubuntu 24.04 Post-Installation Script ==="
 echo ""
+
+if [ "$DRY_RUN" = true ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DRY RUN MODE - No changes will be made"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+fi
+
+if [ "$UNATTENDED" = true ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "UNATTENDED MODE - Using default options"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+fi
 
 # Check if running as root
 if [ "$EUID" -ne 0 ]; then
@@ -18,6 +88,7 @@ ACTUAL_USER="${SUDO_USER:-$USER}"
 ACTUAL_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
 
 echo "Note: Script will continue even if individual packages fail to install"
+echo "Log file: $LOG_FILE"
 echo ""
 
 # ============================================================================
@@ -46,6 +117,59 @@ is_rclone_installed() {
 
 is_rsync_installed() {
     command -v rsync &> /dev/null
+}
+
+is_ufw_installed() {
+    command -v ufw &> /dev/null
+}
+
+# ============================================================================
+# DRY-RUN AND UNATTENDED HELPER FUNCTIONS
+# ============================================================================
+
+# Run a command, but skip it in dry-run mode
+run_cmd() {
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would execute: $*"
+        return 0
+    else
+        "$@"
+    fi
+}
+
+# Prompt for yes/no, with unattended default
+# Usage: prompt_yn "Question?" "default" VARNAME
+# default can be "y" or "n"
+prompt_yn() {
+    local question="$1"
+    local default="$2"
+    local varname="$3"
+
+    if [ "$UNATTENDED" = true ]; then
+        eval "$varname='$default'"
+        echo "$question [auto: $default]"
+        return
+    fi
+
+    read -p "$question " response
+    eval "$varname='$response'"
+}
+
+# Prompt for text input, with unattended default
+# Usage: prompt_text "Question?" "default" VARNAME
+prompt_text() {
+    local question="$1"
+    local default="$2"
+    local varname="$3"
+
+    if [ "$UNATTENDED" = true ]; then
+        eval "$varname='$default'"
+        echo "$question [auto: $default]"
+        return
+    fi
+
+    read -p "$question " response
+    eval "$varname='$response'"
 }
 
 # ============================================================================
@@ -85,13 +209,22 @@ if is_rsync_installed; then
 else
     echo "  ○ rsync: Not installed"
 fi
+if is_ufw_installed; then
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        echo "  ✓ UFW Firewall: Enabled"
+    else
+        echo "  ○ UFW Firewall: Installed but disabled"
+    fi
+else
+    echo "  ○ UFW Firewall: Not installed"
+fi
 echo ""
 echo "This script can reinstall/reconfigure any component."
 echo ""
 
 # Update package list
 echo "Updating package lists..."
-apt update
+run_cmd apt update
 
 # Install basic utilities
 echo ""
@@ -107,7 +240,7 @@ echo "  - zip/unzip: Archive compression utilities"
 echo "  - rclone: Rsync for cloud storage and local drives (backup tool)"
 echo ""
 
-apt install -y \
+run_cmd apt install -y \
     net-tools \
     ncdu \
     git \
@@ -137,7 +270,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "SSH KEY GENERATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-read -p "Generate a new SSH key for this computer? (y/n): " GENERATE_KEY
+prompt_yn "Generate a new SSH key for this computer? (y/n):" "n" GENERATE_KEY
 
 if [ "$GENERATE_KEY" = "y" ] || [ "$GENERATE_KEY" = "Y" ]; then
     echo ""
@@ -195,8 +328,8 @@ fi
 
 # Import SSH keys from GitHub/Launchpad
 echo ""
-read -p "Import SSH keys from GitHub? (enter username or leave blank to skip): " GITHUB_USER
-read -p "Import SSH keys from Launchpad? (enter username or leave blank to skip): " LAUNCHPAD_USER
+prompt_text "Import SSH keys from GitHub? (enter username or leave blank to skip):" "" GITHUB_USER
+prompt_text "Import SSH keys from Launchpad? (enter username or leave blank to skip):" "" LAUNCHPAD_USER
 
 KEYS_IMPORTED=false
 
@@ -252,8 +385,49 @@ if [ "$KEYS_IMPORTED" = true ]; then
 else
     echo ""
     echo "No SSH keys imported. Password authentication remains enabled."
+
+    # Offer fail2ban since password auth is still enabled
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "FAIL2BAN (Recommended with password SSH)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Since password authentication is enabled, fail2ban is recommended"
+    echo "to protect against brute-force SSH attacks."
+    echo ""
+
+    prompt_yn "Install and enable fail2ban? (y/n):" "y" INSTALL_FAIL2BAN
+
+    if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+        echo ""
+        echo "Installing fail2ban..."
+        run_cmd apt install -y fail2ban
+
+        if [ "$DRY_RUN" != true ]; then
+            # Create local config to protect SSH
+            cat > /etc/fail2ban/jail.local << 'FAIL2BAN_CONFIG'
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+FAIL2BAN_CONFIG
+
+            run_cmd systemctl enable fail2ban
+            run_cmd systemctl restart fail2ban
+            echo "✓ fail2ban installed and configured"
+            echo "  - 5 failed attempts = 1 hour ban"
+            echo "  - View banned IPs: sudo fail2ban-client status sshd"
+        fi
+    else
+        echo "Skipping fail2ban installation."
+    fi
 fi
 
+INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-n}"
 
 # Docker Installation
 echo ""
@@ -262,10 +436,11 @@ echo "DOCKER INSTALLATION"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-INSTALL_DOCKER="y"
 if is_docker_installed; then
     echo "Docker is already installed: $(docker --version 2>/dev/null)"
-    read -p "Reinstall Docker? (y/n): " INSTALL_DOCKER
+    prompt_yn "Reinstall Docker? (y/n):" "n" INSTALL_DOCKER
+else
+    prompt_yn "Install Docker? (y/n):" "y" INSTALL_DOCKER
 fi
 
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
@@ -276,7 +451,7 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     echo "  - lsb-release: Provides Ubuntu version information"
     echo ""
 
-    apt install -y \
+    run_cmd apt install -y \
         ca-certificates \
         gnupg \
         lsb-release || echo "Warning: Some prerequisites failed to install, continuing..."
@@ -287,41 +462,49 @@ if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     echo "  - Docker Compose: Multi-container application orchestration"
     echo ""
 
-    # Remove old Docker packages if they exist
-    apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would remove old Docker packages"
+        echo "[DRY-RUN] Would add Docker GPG key and repository"
+        echo "[DRY-RUN] Would install docker-ce, docker-ce-cli, containerd.io, plugins"
+        echo "[DRY-RUN] Would start and enable Docker service"
+        echo "[DRY-RUN] Would add $SUDO_USER to docker group"
+    else
+        # Remove old Docker packages if they exist
+        apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
 
-    # Add Docker's official GPG key
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
+        # Add Docker's official GPG key
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
 
-    # Add Docker repository
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-      tee /etc/apt/sources.list.d/docker.list > /dev/null
+        # Add Docker repository
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+          tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    # Update package list with Docker repo
-    apt update
+        # Update package list with Docker repo
+        apt update
 
-    # Install Docker Engine, CLI, containerd, and Docker Compose plugin
-    apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || echo "Warning: Docker installation failed, continuing..."
+        # Install Docker Engine, CLI, containerd, and Docker Compose plugin
+        apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || echo "Warning: Docker installation failed, continuing..."
 
-    # Start and enable Docker service
-    systemctl start docker || echo "Warning: Failed to start Docker"
-    systemctl enable docker || echo "Warning: Failed to enable Docker"
+        # Start and enable Docker service
+        systemctl start docker || echo "Warning: Failed to start Docker"
+        systemctl enable docker || echo "Warning: Failed to enable Docker"
 
-    # Add current user to docker group (if not root)
-    if [ -n "$SUDO_USER" ]; then
-        usermod -aG docker "$SUDO_USER"
-        echo "User $SUDO_USER added to docker group"
+        # Add current user to docker group (if not root)
+        if [ -n "$SUDO_USER" ]; then
+            usermod -aG docker "$SUDO_USER"
+            echo "User $SUDO_USER added to docker group"
+        fi
+
+        # Verify Docker installation
+        echo ""
+        echo "Verifying Docker installation..."
+        docker --version || echo "Warning: Docker verification failed"
+        docker compose version || echo "Warning: Docker Compose verification failed"
     fi
-
-    # Verify Docker installation
-    echo ""
-    echo "Verifying Docker installation..."
-    docker --version || echo "Warning: Docker verification failed"
-    docker compose version || echo "Warning: Docker Compose verification failed"
 else
     echo "Skipping Docker installation."
 fi
@@ -342,9 +525,9 @@ if is_samba_installed; then
         echo "  Share 'Primary' is configured at: $ACTUAL_HOME/drives/primary"
     fi
     echo ""
-    read -p "Reconfigure Samba? (y/n): " INSTALL_SAMBA
+    prompt_yn "Reconfigure Samba? (y/n):" "n" INSTALL_SAMBA
 else
-    read -p "Install and configure Samba file sharing? (y/n): " INSTALL_SAMBA
+    prompt_yn "Install and configure Samba file sharing? (y/n):" "n" INSTALL_SAMBA
 fi
 
 if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
@@ -353,19 +536,25 @@ if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
     echo "  - Samba: SMB/CIFS file server for network file sharing"
     echo ""
 
-    apt install -y samba || echo "Warning: Samba installation failed, continuing..."
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would install samba"
+        echo "[DRY-RUN] Would configure [Primary] share at $ACTUAL_HOME/drives/primary"
+        echo "[DRY-RUN] Would prompt for Samba password"
+        echo "[DRY-RUN] Would enable and start smbd/nmbd services"
+    else
+        run_cmd apt install -y samba || echo "Warning: Samba installation failed, continuing..."
 
-    # Configure Samba share for primary drive
-    if command -v smbd &> /dev/null; then
-        echo ""
-        echo "Configuring Samba share for primary drive..."
+        # Configure Samba share for primary drive
+        if command -v smbd &> /dev/null; then
+            echo ""
+            echo "Configuring Samba share for primary drive..."
 
-        # Backup existing config
-        cp /etc/samba/smb.conf /etc/samba/smb.conf.backup-$(date +%Y%m%d-%H%M%S)
+            # Backup existing config
+            cp /etc/samba/smb.conf /etc/samba/smb.conf.backup-$(date +%Y%m%d-%H%M%S)
 
-        # Add Primary share configuration
-        if ! grep -q "\[Primary\]" /etc/samba/smb.conf; then
-            cat >> /etc/samba/smb.conf << SAMBA_CONFIG
+            # Add Primary share configuration
+            if ! grep -q "\[Primary\]" /etc/samba/smb.conf; then
+                cat >> /etc/samba/smb.conf << SAMBA_CONFIG
 
 # Primary drive share - added by post-install script
 [Primary]
@@ -378,33 +567,39 @@ if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
    create mask = 0775
    directory mask = 0775
 SAMBA_CONFIG
-            echo "✓ Added [Primary] share to Samba configuration"
+                echo "✓ Added [Primary] share to Samba configuration"
+            else
+                echo "Samba [Primary] share already configured, skipping..."
+            fi
+
+            # Add Samba user (skip in unattended mode - user must set password manually)
+            if [ "$UNATTENDED" != true ]; then
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "SAMBA PASSWORD SETUP"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                echo "Set a password for Samba file sharing access."
+                echo "Tip: Using the same password as your system login is convenient."
+                echo ""
+                smbpasswd -a "$ACTUAL_USER"
+            else
+                echo "Skipping Samba password setup (unattended mode)"
+                echo "Set password later with: sudo smbpasswd -a $ACTUAL_USER"
+            fi
+
+            # Enable and restart Samba services
+            systemctl enable smbd nmbd || echo "Warning: Failed to enable Samba services"
+            systemctl restart smbd nmbd || echo "Warning: Failed to restart Samba services"
+
+            echo ""
+            echo "✓ Samba configured successfully"
+            echo "  Share name: Primary"
+            echo "  Path: $ACTUAL_HOME/drives/primary"
+            echo "  Access: \\\\$(hostname)\\Primary (Windows) or smb://$(hostname)/Primary (Mac/Linux)"
         else
-            echo "Samba [Primary] share already configured, skipping..."
+            echo "✗ Samba installation failed, skipping configuration"
         fi
-
-        # Add Samba user
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "SAMBA PASSWORD SETUP"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo ""
-        echo "Set a password for Samba file sharing access."
-        echo "Tip: Using the same password as your system login is convenient."
-        echo ""
-        smbpasswd -a "$ACTUAL_USER"
-
-        # Enable and restart Samba services
-        systemctl enable smbd nmbd || echo "Warning: Failed to enable Samba services"
-        systemctl restart smbd nmbd || echo "Warning: Failed to restart Samba services"
-
-        echo ""
-        echo "✓ Samba configured successfully"
-        echo "  Share name: Primary"
-        echo "  Path: $ACTUAL_HOME/drives/primary"
-        echo "  Access: \\\\$(hostname)\\Primary (Windows) or smb://$(hostname)/Primary (Mac/Linux)"
-    else
-        echo "✗ Samba installation failed, skipping configuration"
     fi
 else
     echo "Skipping Samba installation."
@@ -419,14 +614,13 @@ echo ""
 echo "NetBird is a secure mesh VPN for connecting devices across networks."
 echo ""
 
-INSTALL_NETBIRD="y"
 if is_netbird_installed; then
     echo "NetBird is already installed."
     netbird status 2>/dev/null || true
     echo ""
-    read -p "Reinstall NetBird? (y/n): " INSTALL_NETBIRD
+    prompt_yn "Reinstall NetBird? (y/n):" "n" INSTALL_NETBIRD
 else
-    read -p "Install NetBird? (y/n): " INSTALL_NETBIRD
+    prompt_yn "Install NetBird? (y/n):" "n" INSTALL_NETBIRD
 fi
 
 if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
@@ -435,20 +629,24 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
     echo "  - NetBird: Secure mesh VPN for connecting devices"
     echo ""
 
-    curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would download and run NetBird install script"
+    else
+        curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
 
-    echo ""
-    echo "NetBird installed. Setup instructions:"
-    echo "  1. Create account at https://app.netbird.io (or self-host)"
-    echo "  2. Run 'netbird up' and authenticate via browser"
-    echo ""
-    echo "For NetBird SSH functionality:"
-    echo "  • Enable SSH in NetBird dashboard settings"
-    echo "  • Use 'netbird ssh <peer-name>' to connect to peers"
-    echo "  • NetBird manages SSH keys automatically when using 'netbird ssh'"
-    echo "  • Traditional SSH also works using peer IPs from 'netbird status'"
-    echo "  • Configure ACL rules in dashboard for SSH access (port 22)"
-    echo ""
+        echo ""
+        echo "NetBird installed. Setup instructions:"
+        echo "  1. Create account at https://app.netbird.io (or self-host)"
+        echo "  2. Run 'netbird up' and authenticate via browser"
+        echo ""
+        echo "For NetBird SSH functionality:"
+        echo "  • Enable SSH in NetBird dashboard settings"
+        echo "  • Use 'netbird ssh <peer-name>' to connect to peers"
+        echo "  • NetBird manages SSH keys automatically when using 'netbird ssh'"
+        echo "  • Traditional SSH also works using peer IPs from 'netbird status'"
+        echo "  • Configure ACL rules in dashboard for SSH access (port 22)"
+        echo ""
+    fi
 else
     echo "Skipping NetBird installation."
 fi
@@ -462,13 +660,12 @@ echo ""
 echo "RustDesk is an open-source remote desktop software."
 echo ""
 
-INSTALL_RUSTDESK="y"
 if is_rustdesk_installed; then
     echo "RustDesk is already installed."
     echo ""
-    read -p "Reinstall RustDesk? (y/n): " INSTALL_RUSTDESK
+    prompt_yn "Reinstall RustDesk? (y/n):" "n" INSTALL_RUSTDESK
 else
-    read -p "Install RustDesk? (y/n): " INSTALL_RUSTDESK
+    prompt_yn "Install RustDesk? (y/n):" "n" INSTALL_RUSTDESK
 fi
 
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
@@ -477,16 +674,21 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     echo "  - RustDesk: Open-source remote desktop software"
     echo ""
 
-    # Download latest RustDesk .deb package
-    RUSTDESK_VERSION=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
-    RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/${RUSTDESK_VERSION}/rustdesk-${RUSTDESK_VERSION}-x86_64.deb"
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would download latest RustDesk from GitHub"
+        echo "[DRY-RUN] Would install rustdesk .deb package"
+    else
+        # Download latest RustDesk .deb package
+        RUSTDESK_VERSION=$(curl -s https://api.github.com/repos/rustdesk/rustdesk/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+        RUSTDESK_URL="https://github.com/rustdesk/rustdesk/releases/download/${RUSTDESK_VERSION}/rustdesk-${RUSTDESK_VERSION}-x86_64.deb"
 
-    wget -O /tmp/rustdesk.deb "$RUSTDESK_URL" || echo "Warning: RustDesk download failed, continuing..."
+        wget -O /tmp/rustdesk.deb "$RUSTDESK_URL" || echo "Warning: RustDesk download failed, continuing..."
 
-    if [ -f /tmp/rustdesk.deb ]; then
-        apt install -y /tmp/rustdesk.deb || echo "Warning: RustDesk installation failed, continuing..."
-        rm /tmp/rustdesk.deb
-        echo "✓ RustDesk installed"
+        if [ -f /tmp/rustdesk.deb ]; then
+            apt install -y /tmp/rustdesk.deb || echo "Warning: RustDesk installation failed, continuing..."
+            rm /tmp/rustdesk.deb
+            echo "✓ RustDesk installed"
+        fi
     fi
 else
     echo "Skipping RustDesk installation."
@@ -513,9 +715,9 @@ if [ -f /usr/local/bin/backup-scripts/rclone-backup.sh ] || [ -f /usr/local/bin/
         echo "  Current: rsync backup script"
     fi
     echo ""
-    read -p "Reconfigure backup system? (y/n): " SETUP_BACKUP
+    prompt_yn "Reconfigure backup system? (y/n):" "n" SETUP_BACKUP
 else
-    read -p "Set up backup system? (y/n): " SETUP_BACKUP
+    prompt_yn "Set up backup system? (y/n):" "n" SETUP_BACKUP
 fi
 
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
@@ -536,7 +738,7 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     echo "              • File-level sync (copies entire changed files)"
     echo "              • Good for local drives, but rsync is more efficient"
     echo ""
-    read -p "Select backup tool [1=rsync, 2=rclone]: " BACKUP_TOOL_CHOICE
+    prompt_text "Select backup tool [1=rsync, 2=rclone]:" "1" BACKUP_TOOL_CHOICE
 
     if [ "$BACKUP_TOOL_CHOICE" = "2" ]; then
         BACKUP_TOOL="rclone"
@@ -561,7 +763,7 @@ if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     echo "              • Example: 4TB primary → 2TB backup1 + 2TB backup2"
     echo "              • You configure which folders go to which backup"
     echo ""
-    read -p "Select backup mode [1=full, 2=split]: " BACKUP_MODE_CHOICE
+    prompt_text "Select backup mode [1=full, 2=split]:" "1" BACKUP_MODE_CHOICE
 
     if [ "$BACKUP_MODE_CHOICE" = "2" ]; then
         BACKUP_MODE="split"
@@ -992,16 +1194,88 @@ else
     echo "Skipping backup system setup."
 fi
 
+# UFW Firewall Configuration (Optional)
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "UFW FIREWALL (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "UFW (Uncomplicated Firewall) provides a simple interface for managing"
+echo "iptables firewall rules."
+echo ""
+
+UFW_ACTIVE=false
+if is_ufw_installed && ufw status 2>/dev/null | grep -q "Status: active"; then
+    UFW_ACTIVE=true
+    echo "UFW is already enabled."
+    ufw status 2>/dev/null | head -20
+    echo ""
+    prompt_yn "Reconfigure UFW? (y/n):" "n" CONFIGURE_UFW
+else
+    if is_ufw_installed; then
+        echo "UFW is installed but not enabled."
+    else
+        echo "UFW is not installed."
+    fi
+    echo ""
+    prompt_yn "Enable and configure UFW firewall? (y/n):" "y" CONFIGURE_UFW
+fi
+
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    echo ""
+    echo "Configuring UFW firewall..."
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would install ufw if needed"
+        echo "[DRY-RUN] Would allow SSH (port 22)"
+        if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
+            echo "[DRY-RUN] Would allow Samba"
+        fi
+        echo "[DRY-RUN] Would enable UFW"
+    else
+        # Install UFW if not present
+        if ! is_ufw_installed; then
+            apt install -y ufw || echo "Warning: UFW installation failed"
+        fi
+
+        if is_ufw_installed; then
+            # Always allow SSH first (before enabling!)
+            ufw allow ssh
+            echo "✓ Allowed SSH (port 22)"
+
+            # Allow Samba if installed
+            if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ] || is_samba_installed; then
+                ufw allow samba
+                echo "✓ Allowed Samba"
+            fi
+
+            # Enable UFW (with --force to avoid prompt)
+            ufw --force enable
+            echo "✓ UFW firewall enabled"
+
+            echo ""
+            echo "Current UFW status:"
+            ufw status
+        else
+            echo "✗ UFW installation failed, skipping configuration"
+        fi
+    fi
+else
+    echo "Skipping UFW configuration."
+fi
+
+CONFIGURE_UFW="${CONFIGURE_UFW:-n}"
+
 # Full system upgrade
 echo ""
 echo "Performing full system upgrade..."
-apt upgrade -y
+run_cmd apt upgrade -y
 
 # Clean up
 echo ""
 echo "Cleaning up..."
-apt autoremove -y
-apt autoclean
+run_cmd apt autoremove -y
+run_cmd apt autoclean
 
 echo ""
 echo "=== Installation Complete! ==="
@@ -1009,6 +1283,9 @@ echo ""
 echo "Installed Software:"
 echo "  ✓ net-tools, ncdu, git, curl, wget, htop, tree, zip/unzip"
 echo "  ✓ OpenSSH Server - SSH remote access"
+if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+    echo "  ✓ fail2ban - SSH brute-force protection"
+fi
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     echo "  ✓ Docker Engine + Docker Compose"
 fi
@@ -1023,6 +1300,9 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
 fi
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
     echo "  ✓ Backup system configured: $BACKUP_TOOL ($BACKUP_MODE mode)"
+fi
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    echo "  ✓ UFW Firewall - enabled"
 fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1136,5 +1416,20 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
 fi
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     echo "  RustDesk: Launch from applications menu or run 'rustdesk'"
+    echo ""
+fi
+if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+    echo "  fail2ban:"
+    echo "    • Check status: sudo fail2ban-client status sshd"
+    echo "    • View banned IPs: sudo fail2ban-client status sshd"
+    echo "    • Unban IP: sudo fail2ban-client set sshd unbanip <IP>"
+    echo ""
+fi
+if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
+    echo "  UFW Firewall:"
+    echo "    • Check status: sudo ufw status"
+    echo "    • Allow port: sudo ufw allow <port>"
+    echo "    • Deny port: sudo ufw deny <port>"
+    echo "    • Disable: sudo ufw disable"
     echo ""
 fi

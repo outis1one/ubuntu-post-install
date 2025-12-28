@@ -5,6 +5,9 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 **Key Features:**
 - **Rerunnable** - Detects existing installations and offers to reinstall/reconfigure
 - **Modular** - Every component is optional with y/n prompts
+- **Dry-run mode** - Preview what would be installed without making changes
+- **Unattended mode** - Run with defaults for automated/scripted installs
+- **Logging** - All output logged to `/var/log/post-install.log`
 - **Backup options** - Choose rsync (faster, local) or rclone (cloud support)
 - **Backup modes** - Full backup (one drive) or split backup (two drives)
 
@@ -24,6 +27,17 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **SSH Key Generation** - Creates 4096-bit RSA key pair for this computer
 - **Key Import** - Optionally imports public keys from GitHub and/or Launchpad
 - **Security** - Automatically disables password authentication if keys are imported
+
+### Security Features (Optional)
+- **fail2ban** (when password SSH enabled)
+  - Protects against SSH brute-force attacks
+  - Bans IPs after 5 failed attempts for 1 hour
+  - Only offered when SSH password authentication remains enabled
+- **UFW Firewall**
+  - Simple firewall management
+  - Automatically allows SSH (port 22)
+  - Automatically allows Samba if installed
+  - Easy to add/remove port rules
 
 ### Docker Installation (Optional)
 - **Docker Engine** - Latest version from official Docker repository (not snap)
@@ -100,11 +114,36 @@ chmod +x post-install.sh
 sudo ./post-install.sh
 ```
 
-### 4. Follow Interactive Prompts
+### 4. Command-Line Options
+
+```bash
+# Interactive mode (default)
+sudo ./post-install.sh
+
+# Preview what would be installed (no changes made)
+sudo ./post-install.sh --dry-run
+
+# Automated install with defaults (no prompts)
+sudo ./post-install.sh --unattended
+
+# Show help
+sudo ./post-install.sh --help
+```
+
+**Unattended mode defaults:**
+- Skip SSH key generation
+- No SSH key imports (password auth stays enabled)
+- Install Docker
+- Install fail2ban (since password auth is enabled)
+- Enable UFW firewall
+- Skip Samba, NetBird, RustDesk, Backup system
+
+### 5. Follow Interactive Prompts
 
 The script shows current system status and asks:
 - **SSH Key Generation**: Generate new 4096-bit RSA key? (y/n)
 - **Import SSH Keys**: GitHub username, Launchpad username (or leave blank)
+- **fail2ban**: Install fail2ban? (only if password SSH remains enabled)
 - **Docker**: Install Docker? (y/n) - or reinstall if detected
 - **Samba File Sharing**: Install and configure Samba? (y/n)
   - If yes: Set password for Samba user
@@ -113,6 +152,7 @@ The script shows current system status and asks:
 - **Backup System**: Set up backup system? (y/n)
   - If yes: Choose tool (rsync/rclone), mode (full/split)
   - Mount drives now? Device paths, fstab configuration
+- **UFW Firewall**: Enable and configure UFW? (y/n)
 
 ### 5. Post-Installation Steps
 
@@ -494,6 +534,16 @@ sudo smbpasswd your_username
 
 ## Troubleshooting
 
+### View Installation Log
+
+```bash
+# Check what was installed and any errors
+cat /var/log/post-install.log
+
+# View last 50 lines
+tail -50 /var/log/post-install.log
+```
+
 ### Docker Permission Denied
 
 ```bash
@@ -567,6 +617,42 @@ sudo ufw allow samba
 sudo systemctl restart smbd nmbd
 ```
 
+### fail2ban Issues
+
+```bash
+# Check if fail2ban is running
+sudo systemctl status fail2ban
+
+# View SSH jail status
+sudo fail2ban-client status sshd
+
+# Unban an IP address
+sudo fail2ban-client set sshd unbanip 192.168.1.100
+
+# Check fail2ban logs
+sudo tail -50 /var/log/fail2ban.log
+```
+
+### UFW Firewall Issues
+
+```bash
+# Check UFW status
+sudo ufw status verbose
+
+# If locked out, disable UFW temporarily
+sudo ufw disable
+
+# Re-enable with SSH allowed first
+sudo ufw allow ssh
+sudo ufw enable
+
+# List all rules with numbers
+sudo ufw status numbered
+
+# Delete a specific rule
+sudo ufw delete 3
+```
+
 ## Backup Mode Comparison
 
 ### Full Backup
@@ -587,10 +673,14 @@ sudo systemctl restart smbd nmbd
 
 ```
 # Always created
+/var/log/post-install.log                       # Installation log
 /etc/ssh/sshd_config.backup                     # SSH config backup (if modified)
 ~/.ssh/id_rsa                                   # Private SSH key (if generated)
 ~/.ssh/id_rsa.pub                               # Public SSH key (if generated)
 ~/.ssh/authorized_keys                          # Imported SSH keys (if any)
+
+# If fail2ban is installed
+/etc/fail2ban/jail.local                        # fail2ban SSH jail configuration
 
 # If Samba is installed
 /etc/samba/smb.conf.backup-TIMESTAMP            # Samba config backup
@@ -632,6 +722,13 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.1**: QoL improvements
+  - Added `--dry-run` flag to preview installations without changes
+  - Added `--unattended` flag for automated/scripted installs
+  - Added logging to `/var/log/post-install.log`
+  - Added fail2ban (offered when SSH password auth is enabled)
+  - Added UFW firewall configuration
+  - All prompts support unattended mode with sensible defaults
 - **v2.0**: Major update
   - Script is now rerunnable - detects existing installations
   - All components optional with y/n prompts (Docker, Samba, NetBird, RustDesk)
