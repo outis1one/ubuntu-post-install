@@ -1,6 +1,6 @@
 # Ubuntu 24.04 Desktop Post-Installation Script
 
-Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, configures SSH, and optionally sets up Docker, Samba file sharing, remote access tools (NetBird, RustDesk), and an automated backup system.
+Automated setup script for Ubuntu 24.04 Desktop that installs additional tools, configures SSH, and optionally sets up Docker, Samba file sharing, remote access tools (NetBird, RustDesk), and an automated backup system.
 
 **Key Features:**
 - **Rerunnable** - Detects existing installations and offers to reinstall/reconfigure
