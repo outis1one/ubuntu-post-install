@@ -281,8 +281,6 @@ Your `~/.config/rclone/rclone.conf` file contains your encryption keys and cloud
 - **Password manager** - 1Password, Bitwarden, etc.
 - **Encrypted USB drive** - Store at another physical location
 
-**Note on Dropbox:** Works but has broader data access policies. Consider alternatives.
-
 ### Restoring Files on Another Computer
 
 If you need to decrypt your cloud-backed files on a new machine:
