@@ -56,12 +56,12 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 ### 1. Download the Script
 
 ```bash
-# Download (replace URL with actual location)
-wget https://your-domain.com/post-install.sh
+# Clone the repository
+git clone https://github.com/outis1one/post-ubuntu-install.git
+cd post-ubuntu-install
 
-# Or create manually
-nano post-install.sh
-# Paste the script content and save (Ctrl+O, Enter, Ctrl+X)
+# Or download the script directly
+wget https://raw.githubusercontent.com/outis1one/post-ubuntu-install/main/ubuntu-post-install.sh -O post-install.sh
 ```
 
 ### 2. Make Executable

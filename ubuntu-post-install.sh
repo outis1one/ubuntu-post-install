@@ -243,6 +243,66 @@ echo "Verifying Docker installation..."
 docker --version || echo "Warning: Docker verification failed"
 docker compose version || echo "Warning: Docker Compose verification failed"
 
+# Install and Configure Samba
+echo ""
+echo "Installing Samba file sharing..."
+echo "  - Samba: SMB/CIFS file server for network file sharing"
+echo ""
+
+apt install -y samba || echo "Warning: Samba installation failed, continuing..."
+
+# Configure Samba share for primary drive
+if command -v smbd &> /dev/null; then
+    echo ""
+    echo "Configuring Samba share for primary drive..."
+
+    # Backup existing config
+    cp /etc/samba/smb.conf /etc/samba/smb.conf.backup-$(date +%Y%m%d-%H%M%S)
+
+    # Add Primary share configuration
+    if ! grep -q "\[Primary\]" /etc/samba/smb.conf; then
+        cat >> /etc/samba/smb.conf << SAMBA_CONFIG
+
+# Primary drive share - added by post-install script
+[Primary]
+   comment = Primary Drive
+   path = $ACTUAL_HOME/drives/primary
+   browseable = yes
+   read only = no
+   writable = yes
+   valid users = $ACTUAL_USER
+   create mask = 0775
+   directory mask = 0775
+SAMBA_CONFIG
+        echo "✓ Added [Primary] share to Samba configuration"
+    else
+        echo "Samba [Primary] share already configured, skipping..."
+    fi
+
+    # Add Samba user
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "SAMBA PASSWORD SETUP"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Set a password for Samba file sharing access."
+    echo "Tip: Using the same password as your system login is convenient."
+    echo ""
+    smbpasswd -a "$ACTUAL_USER"
+
+    # Enable and restart Samba services
+    systemctl enable smbd nmbd || echo "Warning: Failed to enable Samba services"
+    systemctl restart smbd nmbd || echo "Warning: Failed to restart Samba services"
+
+    echo ""
+    echo "✓ Samba configured successfully"
+    echo "  Share name: Primary"
+    echo "  Path: $ACTUAL_HOME/drives/primary"
+    echo "  Access: \\\\$(hostname)\\Primary (Windows) or smb://$(hostname)/Primary (Mac/Linux)"
+else
+    echo "✗ Samba installation failed, skipping configuration"
+fi
+
 # Install NetBird
 echo ""
 echo "Installing NetBird..."
