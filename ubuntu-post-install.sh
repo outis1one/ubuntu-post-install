@@ -243,6 +243,80 @@ echo "Verifying Docker installation..."
 docker --version || echo "Warning: Docker verification failed"
 docker compose version || echo "Warning: Docker Compose verification failed"
 
+# Samba File Sharing (Optional)
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "SAMBA FILE SHARING (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Samba allows you to share folders over the network to Windows, Mac, and Linux."
+echo "The script will share your primary drive at ~/drives/primary"
+echo ""
+read -p "Install and configure Samba file sharing? (y/n): " INSTALL_SAMBA
+
+if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
+    echo ""
+    echo "Installing Samba file sharing..."
+    echo "  - Samba: SMB/CIFS file server for network file sharing"
+    echo ""
+
+    apt install -y samba || echo "Warning: Samba installation failed, continuing..."
+
+    # Configure Samba share for primary drive
+    if command -v smbd &> /dev/null; then
+        echo ""
+        echo "Configuring Samba share for primary drive..."
+
+        # Backup existing config
+        cp /etc/samba/smb.conf /etc/samba/smb.conf.backup-$(date +%Y%m%d-%H%M%S)
+
+        # Add Primary share configuration
+        if ! grep -q "\[Primary\]" /etc/samba/smb.conf; then
+            cat >> /etc/samba/smb.conf << SAMBA_CONFIG
+
+# Primary drive share - added by post-install script
+[Primary]
+   comment = Primary Drive
+   path = $ACTUAL_HOME/drives/primary
+   browseable = yes
+   read only = no
+   writable = yes
+   valid users = $ACTUAL_USER
+   create mask = 0775
+   directory mask = 0775
+SAMBA_CONFIG
+            echo "✓ Added [Primary] share to Samba configuration"
+        else
+            echo "Samba [Primary] share already configured, skipping..."
+        fi
+
+        # Add Samba user
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "SAMBA PASSWORD SETUP"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Set a password for Samba file sharing access."
+        echo "Tip: Using the same password as your system login is convenient."
+        echo ""
+        smbpasswd -a "$ACTUAL_USER"
+
+        # Enable and restart Samba services
+        systemctl enable smbd nmbd || echo "Warning: Failed to enable Samba services"
+        systemctl restart smbd nmbd || echo "Warning: Failed to restart Samba services"
+
+        echo ""
+        echo "✓ Samba configured successfully"
+        echo "  Share name: Primary"
+        echo "  Path: $ACTUAL_HOME/drives/primary"
+        echo "  Access: \\\\$(hostname)\\Primary (Windows) or smb://$(hostname)/Primary (Mac/Linux)"
+    else
+        echo "✗ Samba installation failed, skipping configuration"
+    fi
+else
+    echo "Skipping Samba installation."
+fi
+
 # Install NetBird
 echo ""
 echo "Installing NetBird..."
@@ -281,110 +355,125 @@ if [ -f /tmp/rustdesk.deb ]; then
     rm /tmp/rustdesk.deb
 fi
 
-# Create rclone backup script and instructions
-echo ""
-echo "Setting up rclone backup configuration..."
-echo ""
-
-# Create backup script directory
-mkdir -p /usr/local/bin/backup-scripts
-
-# Create mount point directories
-echo ""
-echo "Creating mount point directories in $ACTUAL_HOME/drives/..."
-mkdir -p "$ACTUAL_HOME/drives/primary"
-mkdir -p "$ACTUAL_HOME/drives/backup1"
-mkdir -p "$ACTUAL_HOME/drives/backup2"
-chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
-
+# Rclone Split Backup System (Optional)
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "DRIVE SETUP - Mount your drives"
+echo "RCLONE SPLIT BACKUP SYSTEM (Optional)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "Available block devices:"
+echo "This sets up a split backup system using rclone:"
+echo "  - Creates mount points for primary + 2 backup drives"
+echo "  - Installs backup script that splits data across backup drives"
+echo "  - Optionally configures automatic daily backups"
 echo ""
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+echo "Useful when: Primary drive (e.g., 4TB) > individual backup drives (e.g., 2TB each)"
 echo ""
+read -p "Set up rclone split backup system? (y/n): " SETUP_BACKUP
 
-read -p "Do you want to mount drives now? (y/n): " MOUNT_NOW
+if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
+    echo ""
+    echo "Setting up rclone backup configuration..."
+    echo ""
 
-if [ "$MOUNT_NOW" = "y" ] || [ "$MOUNT_NOW" = "Y" ]; then
+    # Create backup script directory
+    mkdir -p /usr/local/bin/backup-scripts
+
+    # Create mount point directories
     echo ""
-    echo "Enter device paths (e.g., /dev/sdb1) or leave blank to skip"
+    echo "Creating mount point directories in $ACTUAL_HOME/drives/..."
+    mkdir -p "$ACTUAL_HOME/drives/primary"
+    mkdir -p "$ACTUAL_HOME/drives/backup1"
+    mkdir -p "$ACTUAL_HOME/drives/backup2"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
     echo ""
-    
-    read -p "Primary drive device (e.g., /dev/sdb1): " PRIMARY_DEV
-    read -p "Backup1 drive device (e.g., /dev/sdc1): " BACKUP1_DEV
-    read -p "Backup2 drive device (e.g., /dev/sdd1): " BACKUP2_DEV
-    
-    # Mount primary
-    if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
-        echo "Mounting $PRIMARY_DEV to $ACTUAL_HOME/drives/primary..."
-        mount "$PRIMARY_DEV" "$ACTUAL_HOME/drives/primary" && echo "✓ Primary mounted" || echo "✗ Failed to mount primary"
-    fi
-    
-    # Mount backup1
-    if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
-        echo "Mounting $BACKUP1_DEV to $ACTUAL_HOME/drives/backup1..."
-        mount "$BACKUP1_DEV" "$ACTUAL_HOME/drives/backup1" && echo "✓ Backup1 mounted" || echo "✗ Failed to mount backup1"
-    fi
-    
-    # Mount backup2
-    if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
-        echo "Mounting $BACKUP2_DEV to $ACTUAL_HOME/drives/backup2..."
-        mount "$BACKUP2_DEV" "$ACTUAL_HOME/drives/backup2" && echo "✓ Backup2 mounted" || echo "✗ Failed to mount backup2"
-    fi
-    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DRIVE SETUP - Mount your drives"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Current mounts:"
-    df -h | grep "$ACTUAL_HOME/drives"
-    
+    echo "Available block devices:"
     echo ""
-    read -p "Add these mounts to /etc/fstab for automatic mounting at boot? (y/n): " ADD_FSTAB
-    
-    if [ "$ADD_FSTAB" = "y" ] || [ "$ADD_FSTAB" = "Y" ]; then
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+    echo ""
+
+    read -p "Do you want to mount drives now? (y/n): " MOUNT_NOW
+
+    if [ "$MOUNT_NOW" = "y" ] || [ "$MOUNT_NOW" = "Y" ]; then
         echo ""
-        echo "Adding entries to /etc/fstab..."
-        cp /etc/fstab /etc/fstab.backup-$(date +%Y%m%d-%H%M%S)
-        
-        if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
-            PRIMARY_UUID=$(blkid -s UUID -o value "$PRIMARY_DEV")
-            if [ -n "$PRIMARY_UUID" ]; then
-                echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/primary auto defaults 0 2" >> /etc/fstab
-                echo "✓ Added primary to fstab"
-            fi
-        fi
-        
-        if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
-            BACKUP1_UUID=$(blkid -s UUID -o value "$BACKUP1_DEV")
-            if [ -n "$BACKUP1_UUID" ]; then
-                echo "UUID=$BACKUP1_UUID $ACTUAL_HOME/drives/backup1 auto defaults 0 2" >> /etc/fstab
-                echo "✓ Added backup1 to fstab"
-            fi
-        fi
-        
-        if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
-            BACKUP2_UUID=$(blkid -s UUID -o value "$BACKUP2_DEV")
-            if [ -n "$BACKUP2_UUID" ]; then
-                echo "UUID=$BACKUP2_UUID $ACTUAL_HOME/drives/backup2 auto defaults 0 2" >> /etc/fstab
-                echo "✓ Added backup2 to fstab"
-            fi
-        fi
-        
-        echo "✓ Backup of original fstab saved with timestamp"
-    fi
-else
-    echo ""
-    echo "Skipping drive mounting. You can mount manually later."
-    echo "Mount points created at:"
-    echo "  $ACTUAL_HOME/drives/primary"
-    echo "  $ACTUAL_HOME/drives/backup1"
-    echo "  $ACTUAL_HOME/drives/backup2"
-fi
+        echo "Enter device paths (e.g., /dev/sdb1) or leave blank to skip"
+        echo ""
 
-# Create example backup script with correct paths
-cat > /usr/local/bin/backup-scripts/rclone-backup.sh << BACKUP_SCRIPT
+        read -p "Primary drive device (e.g., /dev/sdb1): " PRIMARY_DEV
+        read -p "Backup1 drive device (e.g., /dev/sdc1): " BACKUP1_DEV
+        read -p "Backup2 drive device (e.g., /dev/sdd1): " BACKUP2_DEV
+
+        # Mount primary
+        if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
+            echo "Mounting $PRIMARY_DEV to $ACTUAL_HOME/drives/primary..."
+            mount "$PRIMARY_DEV" "$ACTUAL_HOME/drives/primary" && echo "✓ Primary mounted" || echo "✗ Failed to mount primary"
+        fi
+
+        # Mount backup1
+        if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
+            echo "Mounting $BACKUP1_DEV to $ACTUAL_HOME/drives/backup1..."
+            mount "$BACKUP1_DEV" "$ACTUAL_HOME/drives/backup1" && echo "✓ Backup1 mounted" || echo "✗ Failed to mount backup1"
+        fi
+
+        # Mount backup2
+        if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
+            echo "Mounting $BACKUP2_DEV to $ACTUAL_HOME/drives/backup2..."
+            mount "$BACKUP2_DEV" "$ACTUAL_HOME/drives/backup2" && echo "✓ Backup2 mounted" || echo "✗ Failed to mount backup2"
+        fi
+
+        echo ""
+        echo "Current mounts:"
+        df -h | grep "$ACTUAL_HOME/drives"
+
+        echo ""
+        read -p "Add these mounts to /etc/fstab for automatic mounting at boot? (y/n): " ADD_FSTAB
+
+        if [ "$ADD_FSTAB" = "y" ] || [ "$ADD_FSTAB" = "Y" ]; then
+            echo ""
+            echo "Adding entries to /etc/fstab..."
+            cp /etc/fstab /etc/fstab.backup-$(date +%Y%m%d-%H%M%S)
+
+            if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
+                PRIMARY_UUID=$(blkid -s UUID -o value "$PRIMARY_DEV")
+                if [ -n "$PRIMARY_UUID" ]; then
+                    echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/primary auto defaults 0 2" >> /etc/fstab
+                    echo "✓ Added primary to fstab"
+                fi
+            fi
+
+            if [ -n "$BACKUP1_DEV" ] && [ -b "$BACKUP1_DEV" ]; then
+                BACKUP1_UUID=$(blkid -s UUID -o value "$BACKUP1_DEV")
+                if [ -n "$BACKUP1_UUID" ]; then
+                    echo "UUID=$BACKUP1_UUID $ACTUAL_HOME/drives/backup1 auto defaults 0 2" >> /etc/fstab
+                    echo "✓ Added backup1 to fstab"
+                fi
+            fi
+
+            if [ -n "$BACKUP2_DEV" ] && [ -b "$BACKUP2_DEV" ]; then
+                BACKUP2_UUID=$(blkid -s UUID -o value "$BACKUP2_DEV")
+                if [ -n "$BACKUP2_UUID" ]; then
+                    echo "UUID=$BACKUP2_UUID $ACTUAL_HOME/drives/backup2 auto defaults 0 2" >> /etc/fstab
+                    echo "✓ Added backup2 to fstab"
+                fi
+            fi
+
+            echo "✓ Backup of original fstab saved with timestamp"
+        fi
+    else
+        echo ""
+        echo "Skipping drive mounting. You can mount manually later."
+        echo "Mount points created at:"
+        echo "  $ACTUAL_HOME/drives/primary"
+        echo "  $ACTUAL_HOME/drives/backup1"
+        echo "  $ACTUAL_HOME/drives/backup2"
+    fi
+
+    # Create example backup script with correct paths
+    cat > /usr/local/bin/backup-scripts/rclone-backup.sh << BACKUP_SCRIPT
 #!/bin/bash
 
 ################################################################################
@@ -536,10 +625,10 @@ backup_to_drive "\$BACKUP2" "Backup Drive 2" "\${BACKUP2_DIRS[@]}"
 echo "=== Backup Completed: \$(date) ===" | tee -a "\$LOG"
 BACKUP_SCRIPT
 
-chmod +x /usr/local/bin/backup-scripts/rclone-backup.sh
+    chmod +x /usr/local/bin/backup-scripts/rclone-backup.sh
 
-# Create systemd service for automatic backups (optional)
-cat > /etc/systemd/system/rclone-backup.service << 'SERVICE'
+    # Create systemd service for automatic backups (optional)
+    cat > /etc/systemd/system/rclone-backup.service << 'SERVICE'
 [Unit]
 Description=Rclone Backup Service
 After=network.target
@@ -550,8 +639,8 @@ ExecStart=/usr/local/bin/backup-scripts/rclone-backup.sh
 User=root
 SERVICE
 
-# Create systemd timer for daily backups at 2 AM (optional)
-cat > /etc/systemd/system/rclone-backup.timer << 'TIMER'
+    # Create systemd timer for daily backups at 2 AM (optional)
+    cat > /etc/systemd/system/rclone-backup.timer << 'TIMER'
 [Unit]
 Description=Daily Rclone Backup Timer
 Requires=rclone-backup.service
@@ -565,9 +654,11 @@ Persistent=true
 WantedBy=timers.target
 TIMER
 
-echo "✓ Rclone backup script created at /usr/local/bin/backup-scripts/rclone-backup.sh"
-echo "✓ Systemd service/timer created (disabled by default)"
-
+    echo "✓ Rclone backup script created at /usr/local/bin/backup-scripts/rclone-backup.sh"
+    echo "✓ Systemd service/timer created (disabled by default)"
+else
+    echo "Skipping rclone backup system setup."
+fi
 
 # Full system upgrade
 echo ""
@@ -584,13 +675,17 @@ echo ""
 echo "=== Installation Complete! ==="
 echo ""
 echo "Installed Software:"
-echo "  ✓ net-tools, ncdu, git, curl, wget, vim, htop, tree, zip/unzip"
-echo "  ✓ rclone - Backup/sync tool"
+echo "  ✓ net-tools, ncdu, git, curl, wget, vim, htop, tree, zip/unzip, rclone"
 echo "  ✓ OpenSSH Server - SSH remote access"
-echo "  ✓ Samba - File sharing (Primary drive shared)"
 echo "  ✓ Docker Engine + Docker Compose"
+if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
+    echo "  ✓ Samba - File sharing (Primary drive shared)"
+fi
 echo "  ✓ NetBird - Mesh VPN"
 echo "  ✓ RustDesk - Remote desktop"
+if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
+    echo "  ✓ Rclone split backup system configured"
+fi
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "SSH AUTHENTICATION SETUP"
@@ -642,6 +737,7 @@ echo "    ✓ Just GitHub or just Launchpad"
 echo "    ✓ Just NetBird SSH"
 echo "    ✓ None (password auth only - if no keys imported)"
 echo ""
+if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "RCLONE BACKUP SETUP - Exact Drive Mirroring"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -852,21 +948,25 @@ echo "    rclone check $ACTUAL_HOME/drives/primary/documents \\"
 echo "                  $ACTUAL_HOME/drives/backup1/documents \\"
 echo "                  --checksum --one-way"
 echo ""
+fi
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "OTHER IMPORTANT NOTES"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  Samba File Sharing:"
-if command -v smbd &> /dev/null && grep -q "\[Primary\]" /etc/samba/smb.conf 2>/dev/null; then
-echo "    ✓ Share 'Primary' is accessible at:"
-echo "      Windows: \\\\$(hostname)\\Primary"
-echo "      Mac/Linux: smb://$(hostname)/Primary"
-echo "    • Username: $ACTUAL_USER"
-echo "    • Use the Samba password you just set"
-echo ""
-else
-echo "    Not configured (Samba installation may have failed)"
-echo ""
+if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ]; then
+    echo "  Samba File Sharing:"
+    if command -v smbd &> /dev/null && grep -q "\[Primary\]" /etc/samba/smb.conf 2>/dev/null; then
+        echo "    ✓ Share 'Primary' is accessible at:"
+        echo "      Windows: \\\\$(hostname)\\Primary"
+        echo "      Mac/Linux: smb://$(hostname)/Primary"
+        echo "    • Username: $ACTUAL_USER"
+        echo "    • Use the Samba password you just set"
+        echo ""
+    else
+        echo "    ✗ Installation may have failed - check 'systemctl status smbd'"
+        echo ""
+    fi
 fi
 echo "  Docker: Log out and back in for group membership to take effect"
 echo ""
