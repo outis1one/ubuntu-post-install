@@ -21,7 +21,7 @@ show_help() {
     echo "  --dry-run      Preview what would be installed without making changes"
     echo "  --unattended   Run with default options (no prompts)"
     echo "                 Defaults: skip key generation, no SSH imports,"
-    echo "                 install Docker, skip Samba/NetBird/RustDesk/Backup"
+    echo "                 install Docker, skip VPNs/Remote Desktop/Backup"
     echo "  --help         Show this help message"
     echo ""
     echo "Examples:"
@@ -123,6 +123,23 @@ is_ufw_installed() {
     command -v ufw &> /dev/null
 }
 
+is_wireguard_installed() {
+    command -v wg &> /dev/null
+}
+
+is_tailscale_installed() {
+    command -v tailscale &> /dev/null
+}
+
+is_teamviewer_installed() {
+    command -v teamviewer &> /dev/null || dpkg -l teamviewer &> /dev/null 2>&1
+}
+
+is_meshcentral_installed() {
+    # MeshCentral agent is typically installed as meshagent
+    command -v meshagent &> /dev/null || [ -f /usr/local/mesh_services/meshagent/meshagent ]
+}
+
 # ============================================================================
 # DRY-RUN AND UNATTENDED HELPER FUNCTIONS
 # ============================================================================
@@ -198,6 +215,26 @@ if is_rustdesk_installed; then
     echo "  ✓ RustDesk: Installed"
 else
     echo "  ○ RustDesk: Not installed"
+fi
+if is_teamviewer_installed; then
+    echo "  ✓ TeamViewer: Installed"
+else
+    echo "  ○ TeamViewer: Not installed"
+fi
+if is_meshcentral_installed; then
+    echo "  ✓ MeshCentral Agent: Installed"
+else
+    echo "  ○ MeshCentral Agent: Not installed"
+fi
+if is_wireguard_installed; then
+    echo "  ✓ WireGuard: Installed"
+else
+    echo "  ○ WireGuard: Not installed"
+fi
+if is_tailscale_installed; then
+    echo "  ✓ Tailscale: Installed"
+else
+    echo "  ○ Tailscale: Not installed"
 fi
 if is_rclone_installed; then
     echo "  ✓ rclone: Installed"
@@ -651,6 +688,120 @@ else
     echo "Skipping NetBird installation."
 fi
 
+# WireGuard Installation
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "WIREGUARD VPN (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "WireGuard is a fast, modern VPN protocol."
+echo "  • Lightweight and high-performance"
+echo "  • Simple configuration via config files"
+echo "  • Built into Linux kernel"
+echo ""
+
+if is_wireguard_installed; then
+    echo "WireGuard is already installed."
+    echo ""
+    prompt_yn "Reinstall WireGuard? (y/n):" "n" INSTALL_WIREGUARD
+else
+    prompt_yn "Install WireGuard? (y/n):" "n" INSTALL_WIREGUARD
+fi
+
+if [ "$INSTALL_WIREGUARD" = "y" ] || [ "$INSTALL_WIREGUARD" = "Y" ]; then
+    echo ""
+    echo "Installing WireGuard..."
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would install wireguard wireguard-tools"
+    else
+        apt install -y wireguard wireguard-tools || echo "Warning: WireGuard installation failed, continuing..."
+
+        echo ""
+        echo "WireGuard installed. Setup instructions:"
+        echo ""
+        echo "Generate keys:"
+        echo "  wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey"
+        echo ""
+        echo "Create config at /etc/wireguard/wg0.conf:"
+        echo "  [Interface]"
+        echo "  PrivateKey = <your-private-key>"
+        echo "  Address = 10.0.0.1/24"
+        echo "  ListenPort = 51820"
+        echo ""
+        echo "  [Peer]"
+        echo "  PublicKey = <peer-public-key>"
+        echo "  AllowedIPs = 10.0.0.2/32"
+        echo "  Endpoint = peer.example.com:51820"
+        echo ""
+        echo "Start WireGuard:"
+        echo "  sudo wg-quick up wg0"
+        echo "  sudo systemctl enable wg-quick@wg0  # Start on boot"
+        echo ""
+    fi
+else
+    echo "Skipping WireGuard installation."
+fi
+
+# Tailscale Installation
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "TAILSCALE VPN (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Tailscale is a zero-config mesh VPN built on WireGuard."
+echo "  • Easy setup - just sign in"
+echo "  • Built on WireGuard for performance"
+echo "  • Automatic NAT traversal"
+echo "  • Built-in SSH (Tailscale SSH)"
+echo ""
+
+if is_tailscale_installed; then
+    echo "Tailscale is already installed."
+    tailscale status 2>/dev/null || true
+    echo ""
+    prompt_yn "Reinstall Tailscale? (y/n):" "n" INSTALL_TAILSCALE
+else
+    prompt_yn "Install Tailscale? (y/n):" "n" INSTALL_TAILSCALE
+fi
+
+if [ "$INSTALL_TAILSCALE" = "y" ] || [ "$INSTALL_TAILSCALE" = "Y" ]; then
+    echo ""
+    echo "Installing Tailscale..."
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would add Tailscale apt repository"
+        echo "[DRY-RUN] Would install tailscale"
+    else
+        # Add Tailscale's package signing key and repository
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list
+
+        apt update
+        apt install -y tailscale || echo "Warning: Tailscale installation failed, continuing..."
+
+        echo ""
+        echo "Tailscale installed. Setup instructions:"
+        echo ""
+        echo "Connect to Tailscale network:"
+        echo "  sudo tailscale up"
+        echo ""
+        echo "This opens a browser to authenticate. After that:"
+        echo "  tailscale status     # View connected devices"
+        echo "  tailscale ip         # Show your Tailscale IP"
+        echo ""
+        echo "Tailscale SSH (optional - enable in admin console):"
+        echo "  • Enable 'SSH' in Tailscale admin console for this machine"
+        echo "  • Connect with: ssh user@device-name (uses Tailscale identity)"
+        echo "  • No SSH keys needed - Tailscale handles authentication"
+        echo ""
+    fi
+else
+    echo "Skipping Tailscale installation."
+fi
+
 # RustDesk Installation
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -692,6 +843,124 @@ if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     fi
 else
     echo "Skipping RustDesk installation."
+fi
+
+# TeamViewer Installation
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "TEAMVIEWER REMOTE DESKTOP (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "TeamViewer is commercial remote desktop software with a free tier."
+echo "  • Cross-platform (Windows, Mac, Linux, mobile)"
+echo "  • Easy to use - no port forwarding needed"
+echo "  • Requires TeamViewer account for unattended access"
+echo ""
+
+if is_teamviewer_installed; then
+    echo "TeamViewer is already installed."
+    echo ""
+    prompt_yn "Reinstall TeamViewer? (y/n):" "n" INSTALL_TEAMVIEWER
+else
+    prompt_yn "Install TeamViewer? (y/n):" "n" INSTALL_TEAMVIEWER
+fi
+
+if [ "$INSTALL_TEAMVIEWER" = "y" ] || [ "$INSTALL_TEAMVIEWER" = "Y" ]; then
+    echo ""
+    echo "Installing TeamViewer..."
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would download TeamViewer .deb package"
+        echo "[DRY-RUN] Would install teamviewer"
+    else
+        # Download TeamViewer .deb package
+        wget -O /tmp/teamviewer.deb "https://download.teamviewer.com/download/linux/teamviewer_amd64.deb" || echo "Warning: TeamViewer download failed, continuing..."
+
+        if [ -f /tmp/teamviewer.deb ]; then
+            apt install -y /tmp/teamviewer.deb || echo "Warning: TeamViewer installation failed, continuing..."
+            rm /tmp/teamviewer.deb
+
+            echo ""
+            echo "TeamViewer installed. Setup instructions:"
+            echo ""
+            echo "Start TeamViewer:"
+            echo "  teamviewer"
+            echo ""
+            echo "For unattended access:"
+            echo "  1. Open TeamViewer"
+            echo "  2. Go to Extras → Options → Security"
+            echo "  3. Set a personal password for unattended access"
+            echo "  4. Note your TeamViewer ID (shown in main window)"
+            echo ""
+            echo "✓ TeamViewer installed"
+        fi
+    fi
+else
+    echo "Skipping TeamViewer installation."
+fi
+
+# MeshCentral Installation
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "MESHCENTRAL AGENT (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "MeshCentral is an open-source remote management solution."
+echo "  • Self-hosted or use public servers"
+echo "  • Web-based remote desktop (no client software needed)"
+echo "  • Terminal, file transfer, and remote desktop"
+echo "  • Requires a MeshCentral server to connect to"
+echo ""
+
+if is_meshcentral_installed; then
+    echo "MeshCentral Agent is already installed."
+    echo ""
+    prompt_yn "Reinstall MeshCentral Agent? (y/n):" "n" INSTALL_MESHCENTRAL
+else
+    prompt_yn "Install MeshCentral Agent? (y/n):" "n" INSTALL_MESHCENTRAL
+fi
+
+if [ "$INSTALL_MESHCENTRAL" = "y" ] || [ "$INSTALL_MESHCENTRAL" = "Y" ]; then
+    echo ""
+    echo "MeshCentral requires a server URL to connect to."
+    echo ""
+    echo "If you have a MeshCentral server, the agent install is typically done by:"
+    echo "  1. Log into your MeshCentral web interface"
+    echo "  2. Go to 'My Devices' → 'Add Agent'"
+    echo "  3. Download and run the Linux agent installer"
+    echo ""
+    echo "Example (replace with your server's URL):"
+    echo "  wget -O meshagent https://your-meshcentral-server/meshagents?id=XXXXX"
+    echo "  chmod +x meshagent"
+    echo "  sudo ./meshagent -install"
+    echo ""
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would prompt for MeshCentral server URL"
+        echo "[DRY-RUN] Would download and install meshagent"
+    else
+        prompt_text "Enter MeshCentral agent URL (or leave blank to skip):" "" MESHCENTRAL_URL
+
+        if [ -n "$MESHCENTRAL_URL" ]; then
+            wget -O /tmp/meshagent "$MESHCENTRAL_URL" || echo "Warning: MeshCentral agent download failed"
+
+            if [ -f /tmp/meshagent ]; then
+                chmod +x /tmp/meshagent
+                /tmp/meshagent -install || echo "Warning: MeshCentral agent installation failed"
+                rm /tmp/meshagent
+                echo ""
+                echo "✓ MeshCentral Agent installed"
+                echo "  Check your MeshCentral server - this device should appear shortly."
+            fi
+        else
+            echo ""
+            echo "No URL provided. Skipping MeshCentral agent installation."
+            echo "You can install later by downloading the agent from your MeshCentral server."
+        fi
+    fi
+else
+    echo "Skipping MeshCentral installation."
 fi
 
 # Backup System (Optional)
@@ -1282,11 +1551,26 @@ fi
 if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
     echo "  ✓ NetBird - Mesh VPN"
 fi
+if [ "$INSTALL_WIREGUARD" = "y" ] || [ "$INSTALL_WIREGUARD" = "Y" ]; then
+    echo "  ✓ WireGuard - VPN"
+fi
+if [ "$INSTALL_TAILSCALE" = "y" ] || [ "$INSTALL_TAILSCALE" = "Y" ]; then
+    echo "  ✓ Tailscale - Mesh VPN"
+fi
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     echo "  ✓ RustDesk - Remote desktop"
 fi
+if [ "$INSTALL_TEAMVIEWER" = "y" ] || [ "$INSTALL_TEAMVIEWER" = "Y" ]; then
+    echo "  ✓ TeamViewer - Remote desktop"
+fi
+if [ "$INSTALL_MESHCENTRAL" = "y" ] || [ "$INSTALL_MESHCENTRAL" = "Y" ]; then
+    echo "  ✓ MeshCentral Agent - Remote management"
+fi
 if [ "$SETUP_BACKUP" = "y" ] || [ "$SETUP_BACKUP" = "Y" ]; then
-    echo "  ✓ Backup system configured: $BACKUP_TOOL ($BACKUP_MODE mode)"
+    echo "  ✓ Local backup configured (rsync)"
+fi
+if [ "$SETUP_CLOUD_BACKUP" = "y" ] || [ "$SETUP_CLOUD_BACKUP" = "Y" ]; then
+    echo "  ✓ Cloud backup configured (rclone)"
 fi
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
     echo "  ✓ UFW Firewall - enabled"
