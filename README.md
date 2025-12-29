@@ -53,13 +53,30 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **Cross-Platform Access** - Works with Windows, Mac, and Linux
 - Detects if already installed and offers to reconfigure
 
-### Remote Access Tools (Optional)
+### VPN Tools (Optional)
 - **NetBird** - Mesh VPN for secure device connections
-  - Supports both NetBird SSH and traditional SSH
-  - Enables remote access across networks
+  - Zero-config mesh VPN with built-in SSH
+  - Manages SSH keys automatically (no manual key setup)
   - Detects if already installed
+- **WireGuard** - Fast, modern VPN protocol
+  - Lightweight and high-performance
+  - Built into Linux kernel
+  - Manual configuration via config files
+- **Tailscale** - Zero-config mesh VPN built on WireGuard
+  - Easy setup - just sign in
+  - Built-in SSH (Tailscale SSH) - no keys needed
+  - Automatic NAT traversal
+
+### Remote Desktop Tools (Optional)
 - **RustDesk** - Open-source remote desktop software
-  - Detects if already installed
+  - Self-hosted or use public servers
+  - Cross-platform
+- **TeamViewer** - Commercial remote desktop (free tier available)
+  - Cross-platform (Windows, Mac, Linux, mobile)
+  - No port forwarding needed
+- **MeshCentral Agent** - Open-source remote management
+  - Requires a MeshCentral server (self-hosted or public)
+  - Web-based remote desktop, terminal, and file transfer
 
 ### Backup System (Optional)
 
@@ -168,7 +185,12 @@ The script shows current system status and asks:
 - **Samba File Sharing**: Install and configure Samba? (y/n)
   - If yes: Set password for Samba user
 - **NetBird**: Install NetBird mesh VPN? (y/n)
+- **WireGuard**: Install WireGuard VPN? (y/n)
+- **Tailscale**: Install Tailscale VPN? (y/n)
 - **RustDesk**: Install RustDesk remote desktop? (y/n)
+- **TeamViewer**: Install TeamViewer remote desktop? (y/n)
+- **MeshCentral**: Install MeshCentral agent? (y/n)
+  - If yes: Provide MeshCentral server agent URL
 - **Local Backup**: Set up local backup with rsync? (y/n)
   - If yes: Configure drive names, mount drives, fstab configuration
 - **Cloud Backup**: Set up encrypted cloud backup? (y/n)
@@ -395,7 +417,9 @@ du -sh ~/drives/backup1/*
 df -h ~/drives/
 ```
 
-## NetBird Setup
+## VPN Setup
+
+### NetBird
 
 ```bash
 # 1. Connect to NetBird (opens browser for auth)
@@ -410,6 +434,73 @@ netbird ssh peer-name
 # 4. Configure ACLs and settings
 # Visit: https://app.netbird.io
 ```
+
+**NetBird SSH:** NetBird manages its own SSH keys automatically. Enable SSH in the NetBird dashboard, then use `netbird ssh <peer-name>` to connect. No manual key configuration needed.
+
+### WireGuard
+
+```bash
+# Generate keys
+wg genkey | sudo tee /etc/wireguard/privatekey | wg pubkey | sudo tee /etc/wireguard/publickey
+
+# Create config
+sudo nano /etc/wireguard/wg0.conf
+
+# Start VPN
+sudo wg-quick up wg0
+
+# Enable on boot
+sudo systemctl enable wg-quick@wg0
+
+# Check status
+sudo wg show
+```
+
+### Tailscale
+
+```bash
+# Connect (opens browser for auth)
+sudo tailscale up
+
+# View connected devices
+tailscale status
+
+# Get your Tailscale IP
+tailscale ip
+
+# Tailscale SSH (enable in admin console first)
+ssh user@device-name
+```
+
+**Tailscale SSH:** Enable in the Tailscale admin console. Uses Tailscale identity - no traditional SSH keys required.
+
+## Remote Desktop Setup
+
+### RustDesk
+
+After installation, launch RustDesk from the application menu. Note your ID and set a password for remote access.
+
+### TeamViewer
+
+```bash
+# Launch TeamViewer
+teamviewer
+
+# For unattended access:
+# 1. Open TeamViewer
+# 2. Go to Extras → Options → Security
+# 3. Set personal password
+# 4. Note your TeamViewer ID
+```
+
+### MeshCentral
+
+MeshCentral agent connects to your MeshCentral server automatically after installation. Check your server's web interface - the device should appear in "My Devices".
+
+To manually install/reinstall:
+1. Log into your MeshCentral web interface
+2. Go to "My Devices" → "Add Agent"
+3. Download and run the Linux agent installer
 
 ## Samba File Sharing
 
@@ -738,6 +829,12 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.3**: Additional VPN and remote desktop options
+  - Added WireGuard VPN installation
+  - Added Tailscale VPN installation (with Tailscale SSH info)
+  - Added TeamViewer remote desktop installation
+  - Added MeshCentral agent installation
+  - Updated NetBird documentation to clarify SSH key management
 - **v2.2**: Backup system overhaul
   - Local backups now use rsync exclusively (simpler, better for local drives)
   - Support for 1-4 backup drives with customizable names
