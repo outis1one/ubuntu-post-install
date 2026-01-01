@@ -1982,6 +1982,10 @@ FRIGATE_CONFIG
             mkdir -p "$CADDY_DIR"
             cd "$CADDY_DIR"
 
+            # Ask for domain
+            echo ""
+            prompt_text "Your domain (e.g., example.com) [leave blank for local only]:" "" CADDY_DOMAIN
+
             cat > docker-compose.yml << 'CADDY_COMPOSE'
 name: caddy
 
@@ -1991,6 +1995,7 @@ services:
     container_name: caddy
     hostname: caddy
     restart: unless-stopped
+    env_file: .env
     ports:
       - "80:80"
       - "443:443"
@@ -2007,33 +2012,129 @@ networks:
     external: true
 CADDY_COMPOSE
 
+            # Create .env file
+            cat > .env << CADDY_ENV
+MY_DOMAIN=${CADDY_DOMAIN:-localhost}
+TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+CADDY_ENV
+
             # Create Docker network for Caddy
             docker network create caddy_net 2>/dev/null || true
 
-            # Create example Caddyfile
+            # Create comprehensive Caddyfile with all services
             cat > Caddyfile << 'CADDY_FILE'
 # Caddy reverse proxy configuration
-# Replace example.com with your domain
+# Edit MY_DOMAIN in .env file, then uncomment services below
+#
+# To use: containers must be on 'caddy_net' network
+# Add to each container's docker-compose.yml:
+#   networks:
+#     default:
+#       name: caddy_net
+#       external: true
 
-# Example: Reverse proxy to Immich
-# immich.example.com {
+# ============================================================================
+# GLOBAL OPTIONS
+# ============================================================================
+{
+    # Uncomment for local-only (no domain/SSL):
+    # auto_https off
+}
+
+# ============================================================================
+# MEDIA SERVERS
+# ============================================================================
+
+# Immich (photo backup)
+# immich.{$MY_DOMAIN} {
 #     reverse_proxy immich_server:2283
 # }
 
-# Example: Reverse proxy to Jellyfin
-# jellyfin.example.com {
+# Jellyfin (media server)
+# jellyfin.{$MY_DOMAIN} {
 #     reverse_proxy jellyfin:8096
 # }
 
-# Example: Simple file server
-# files.example.com {
-#     root * /srv
-#     file_server browse
+# Emby (media server)
+# emby.{$MY_DOMAIN} {
+#     reverse_proxy emby:8096
 # }
 
-# Localhost catch-all (for testing)
+# Audiobookshelf
+# audiobooks.{$MY_DOMAIN} {
+#     reverse_proxy audiobookshelf:80
+# }
+
+# Lyrion Music Server
+# music.{$MY_DOMAIN} {
+#     reverse_proxy lms:9000
+# }
+
+# ============================================================================
+# HOME AUTOMATION & MONITORING
+# ============================================================================
+
+# Frigate NVR
+# frigate.{$MY_DOMAIN} {
+#     reverse_proxy frigate:5000
+# }
+
+# Uptime Kuma
+# status.{$MY_DOMAIN} {
+#     reverse_proxy uptime-kuma:3001
+# }
+
+# Magic Mirror
+# mirror.{$MY_DOMAIN} {
+#     reverse_proxy magicmirror:8080
+# }
+
+# Traccar GPS
+# gps.{$MY_DOMAIN} {
+#     reverse_proxy traccar:8082
+# }
+
+# FindMyDevice
+# fmd.{$MY_DOMAIN} {
+#     reverse_proxy fmd:8080
+# }
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+# Filebrowser
+# files.{$MY_DOMAIN} {
+#     reverse_proxy filebrowser:80
+# }
+
+# Mealie (recipes)
+# recipes.{$MY_DOMAIN} {
+#     reverse_proxy mealie:9000
+# }
+
+# ntfy (notifications)
+# ntfy.{$MY_DOMAIN} {
+#     reverse_proxy ntfy:80
+# }
+
+# Portainer
+# docker.{$MY_DOMAIN} {
+#     reverse_proxy portainer:9000
+# }
+
+# Kopia backup UI
+# backup.{$MY_DOMAIN} {
+#     reverse_proxy kopia:51515
+# }
+
+# ============================================================================
+# TESTING / CATCH-ALL
+# ============================================================================
+
+# Local testing (always responds)
 :80 {
-    respond "Caddy is running! Edit Caddyfile to add your sites."
+    respond "Caddy is running! Edit Caddyfile to enable your services."
 }
 CADDY_FILE
 
@@ -2043,8 +2144,17 @@ CADDY_FILE
             echo ""
             echo "✓ Caddy configured at $CADDY_DIR"
             echo "  Start with: cd $CADDY_DIR && docker compose up -d"
-            echo "  Edit Caddyfile to add your reverse proxy rules"
-            echo "  Created 'caddy_net' Docker network for container routing"
+            echo ""
+            echo "  Configuration:"
+            echo "    Domain:     ${CADDY_DOMAIN:-localhost} (edit .env to change)"
+            echo "    Caddyfile:  $CADDY_DIR/Caddyfile (uncomment services)"
+            echo "    Network:    caddy_net (add to other containers)"
+            echo ""
+            echo "  To add a container to Caddy network, add to its docker-compose.yml:"
+            echo "    networks:"
+            echo "      default:"
+            echo "        name: caddy_net"
+            echo "        external: true"
             echo ""
         fi
     fi
@@ -2407,6 +2517,226 @@ PORTAINER_COMPOSE
             echo "  Start with: cd $PORTAINER_DIR && docker compose up -d"
             echo "  Access at:  https://localhost:9443"
             echo "  Create admin account on first visit"
+            echo ""
+        fi
+    fi
+
+    # ---- FINDMYDEVICE (FMD) ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FINDMYDEVICE - Self-hosted device tracking                      │"
+    echo "│ Track and locate Android devices. Alternative to Google Find.  │"
+    echo "│ Port: 8084                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install FindMyDevice server? (y/n):" "n" INSTALL_FMD
+
+    if [ "$INSTALL_FMD" = "y" ] || [ "$INSTALL_FMD" = "Y" ]; then
+        echo "Installing FindMyDevice..."
+        FMD_DIR="$DOCKER_DIR/fmd"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $FMD_DIR"
+        else
+            mkdir -p "$FMD_DIR"
+            cd "$FMD_DIR"
+
+            # Generate random admin password
+            FMD_ADMIN_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+            cat > docker-compose.yml << FMD_COMPOSE
+name: fmd
+
+services:
+  fmd:
+    image: nulide/findmydevice
+    container_name: fmd
+    hostname: fmd
+    restart: unless-stopped
+    environment:
+      - FMD_ADMIN_PASSWORD=\${FMD_ADMIN_PASSWORD}
+    volumes:
+      - ./data:/fmd/data
+    ports:
+      - "8084:8080"
+FMD_COMPOSE
+
+            cat > .env << FMD_ENV
+FMD_ADMIN_PASSWORD=$FMD_ADMIN_PASS
+FMD_ENV
+
+            mkdir -p data
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FMD_DIR"
+
+            echo ""
+            echo "✓ FindMyDevice configured at $FMD_DIR"
+            echo "  Start with: cd $FMD_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8084"
+            echo "  Admin password: $FMD_ADMIN_PASS (saved in .env)"
+            echo ""
+            echo "  Mobile app: Install 'FindMyDevice' from F-Droid"
+            echo "  Configure app to point to: http://YOUR-SERVER-IP:8084"
+            echo ""
+        fi
+    fi
+
+    # ---- FRIGATE-NOTIFY ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FRIGATE-NOTIFY - Push notifications for Frigate events         │"
+    echo "│ Get alerts when Frigate detects people, cars, etc.             │"
+    echo "│ Sends to: ntfy, Pushover, Discord, Gotify, and more.           │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Frigate-Notify? (y/n):" "n" INSTALL_FRIGATE_NOTIFY
+
+    if [ "$INSTALL_FRIGATE_NOTIFY" = "y" ] || [ "$INSTALL_FRIGATE_NOTIFY" = "Y" ]; then
+        echo "Installing Frigate-Notify..."
+        FN_DIR="$DOCKER_DIR/frigate-notify"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $FN_DIR"
+        else
+            mkdir -p "$FN_DIR"
+            cd "$FN_DIR"
+
+            # Check if Frigate and ntfy are being installed
+            FRIGATE_URL="http://frigate:5000"
+            NTFY_URL=""
+            NTFY_TOPIC=""
+
+            echo ""
+            echo "Frigate-Notify needs to connect to Frigate and a notification service."
+            echo ""
+
+            # Ask for Frigate URL
+            if [ -d "$DOCKER_DIR/frigate" ]; then
+                echo "  Frigate detected at $DOCKER_DIR/frigate"
+                prompt_text "Frigate URL [default: http://frigate:5000]:" "http://frigate:5000" FRIGATE_URL
+            else
+                prompt_text "Frigate URL (e.g., http://192.168.1.100:5000):" "" FRIGATE_URL
+            fi
+
+            # Ask for ntfy configuration
+            echo ""
+            echo "Notification service (ntfy recommended - free, self-hosted):"
+            if [ -d "$DOCKER_DIR/ntfy" ]; then
+                echo "  ntfy detected at $DOCKER_DIR/ntfy"
+                prompt_text "ntfy server URL [default: http://ntfy:80]:" "http://ntfy:80" NTFY_URL
+            else
+                prompt_text "ntfy server URL (e.g., https://ntfy.sh or http://localhost:8090):" "https://ntfy.sh" NTFY_URL
+            fi
+
+            prompt_text "ntfy topic name [default: frigate-alerts]:" "frigate-alerts" NTFY_TOPIC
+
+            cat > docker-compose.yml << 'FN_COMPOSE'
+name: frigate-notify
+
+services:
+  frigate-notify:
+    image: ghcr.io/0x2142/frigate-notify:latest
+    container_name: frigate-notify
+    hostname: frigate-notify
+    restart: unless-stopped
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+FN_COMPOSE
+
+            # Create config file
+            cat > config.yml << FN_CONFIG
+# Frigate-Notify Configuration
+# Documentation: https://frigate-notify.0x2142.com
+
+frigate:
+  server: $FRIGATE_URL
+  # WebAPI mode (recommended) - polls Frigate API
+  webapi:
+    enabled: true
+    interval: 30
+  # Uncomment for MQTT mode instead:
+  # mqtt:
+  #   enabled: true
+  #   server: mqtt://mosquitto:1883
+
+alerts:
+  # General settings
+  general:
+    # Send test notification on startup
+    send_startup_message: true
+
+  # Zones to monitor (empty = all zones)
+  zones:
+    # - front_yard
+    # - driveway
+
+  # Labels to alert on
+  labels:
+    - person
+    - car
+    # - dog
+    # - cat
+    # - package
+
+  # Quiet hours (no notifications)
+  # quiet:
+  #   start: "22:00"
+  #   end: "07:00"
+
+notifiers:
+  # ntfy (recommended - free, simple)
+  - name: ntfy
+    enabled: true
+    provider: ntfy
+    config:
+      server: $NTFY_URL
+      topic: $NTFY_TOPIC
+      # Uncomment for auth:
+      # token: your-ntfy-token
+
+  # Uncomment for additional notifiers:
+  # - name: discord
+  #   enabled: false
+  #   provider: discord
+  #   config:
+  #     webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK
+
+  # - name: pushover
+  #   enabled: false
+  #   provider: pushover
+  #   config:
+  #     token: your-app-token
+  #     userkey: your-user-key
+
+  # - name: gotify
+  #   enabled: false
+  #   provider: gotify
+  #   config:
+  #     server: http://gotify:80
+  #     token: your-gotify-token
+FN_CONFIG
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FN_DIR"
+
+            echo ""
+            echo "✓ Frigate-Notify configured at $FN_DIR"
+            echo "  Start with: cd $FN_DIR && docker compose up -d"
+            echo ""
+            echo "  Configuration:"
+            echo "    Frigate:  $FRIGATE_URL"
+            echo "    ntfy:     $NTFY_URL"
+            echo "    Topic:    $NTFY_TOPIC"
+            echo ""
+            echo "  Edit config.yml to customize:"
+            echo "    - Which labels trigger alerts (person, car, dog...)"
+            echo "    - Quiet hours for no notifications"
+            echo "    - Additional notification services"
+            echo ""
+            if [[ "$NTFY_URL" == *"ntfy.sh"* ]]; then
+                echo "  ⚠️  Using public ntfy.sh - anyone can subscribe to your topic!"
+                echo "      Consider self-hosting ntfy for privacy."
+                echo ""
+            fi
+            echo "  Subscribe to alerts:"
+            echo "    Mobile: Install ntfy app → Add topic '$NTFY_TOPIC'"
+            echo "    Web:    ${NTFY_URL}/${NTFY_TOPIC}"
             echo ""
         fi
     fi

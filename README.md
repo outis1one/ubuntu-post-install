@@ -100,6 +100,8 @@ Install containerized applications to `~/docker/{appname}/`:
 - **wg-easy** - WireGuard VPN with web UI
 - **Traccar** - GPS tracking server
 - **Portainer** - Docker management UI
+- **FindMyDevice** - Self-hosted Android device tracking
+- **Frigate-Notify** - Push notifications for Frigate AI events
 
 ### Container Backup & Restore (Kopia)
 Backup all Docker container data (configs, databases, app data) to your backup drives for disaster recovery. Includes restore functionality to recover containers after OS drive failure.
@@ -575,6 +577,7 @@ docker compose up -d
 | wg-easy | 51821 | http://localhost:51821 |
 | Traccar | 8082 | http://localhost:8082 |
 | Portainer | 9443 | https://localhost:9443 |
+| FindMyDevice | 8084 | http://localhost:8084 |
 
 ### Container Backup & Restore (Kopia)
 
@@ -599,6 +602,39 @@ Backup all Docker container data to your backup drives for disaster recovery.
 - All application state and settings
 
 **Kopia Repository Location:** Your backup drive(s) in `~/drives/backupX/container-backups/`
+
+### Frigate + ntfy Notifications
+
+If you installed Frigate, ntfy, and Frigate-Notify, they work together:
+
+1. **Frigate** detects objects (person, car, etc.) on your cameras
+2. **Frigate-Notify** monitors Frigate for events
+3. **ntfy** sends push notifications to your phone
+
+**Subscribe to alerts:**
+```bash
+# On your phone: Install ntfy app, add topic "frigate-alerts"
+# Or visit: http://localhost:8090/frigate-alerts
+```
+
+**Customize alerts:** Edit `~/docker/frigate-notify/config.yml`
+- Change which objects trigger alerts (person, car, dog, package)
+- Set quiet hours for no notifications
+- Add multiple notification services (Discord, Pushover, etc.)
+
+### Caddy Reverse Proxy Network
+
+To route traffic through Caddy, containers must be on the `caddy_net` network:
+
+```yaml
+# Add to any container's docker-compose.yml:
+networks:
+  default:
+    name: caddy_net
+    external: true
+```
+
+Then uncomment the service in `~/docker/caddy/Caddyfile`.
 
 ### Private Repository (linux-to-sync)
 
@@ -944,6 +980,13 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.6**: FindMyDevice, Frigate-Notify, and Caddy improvements
+  - Added FindMyDevice server (self-hosted Android tracking)
+  - Added Frigate-Notify (push alerts for Frigate AI detections)
+  - Interactive setup: frigate → frigate-notify → ntfy integration
+  - Caddy now asks for domain and creates comprehensive Caddyfile
+  - Caddyfile template includes all services (uncomment to enable)
+  - Added caddy_net Docker network instructions
 - **v2.5**: Additional Docker apps and container backup
   - Added Jellyfin (free media server with hardware acceleration)
   - Added Frigate NVR (AI-powered object detection)
