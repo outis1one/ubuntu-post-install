@@ -78,6 +78,20 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
   - Requires a MeshCentral server (self-hosted or public)
   - Web-based remote desktop, terminal, and file transfer
 
+### Self-Hosted Docker Applications (Optional)
+Install containerized applications to `~/docker/{appname}/`:
+
+- **Immich** - Self-hosted photo & video backup (like Google Photos)
+- **Audiobookshelf** - Audiobook & podcast server with progress sync
+- **Emby** - Media server for movies, TV, and music
+- **A.R.M.** - Automatic Ripping Machine for DVDs/Blu-rays/CDs
+- **Filebrowser** - Web-based file manager
+- **Magic Mirror** - Smart mirror dashboard (up to 3 instances)
+- **Lyrion Music Server** - Music streaming to Squeezebox/Chromecast
+- **Mealie** - Recipe manager & meal planner
+- **Minecraft Server** - Fabric server with configurable RAM limit
+- **linux-to-sync** - Private repository setup
+
 ### Backup System (Optional)
 
 **Local Backup (rsync):**
@@ -191,6 +205,10 @@ The script shows current system status and asks:
 - **TeamViewer**: Install TeamViewer remote desktop? (y/n)
 - **MeshCentral**: Install MeshCentral agent? (y/n)
   - If yes: Provide MeshCentral server agent URL
+- **Docker Apps**: Install self-hosted applications? (each individually)
+  - Immich, Audiobookshelf, Emby, A.R.M., Filebrowser
+  - Magic Mirror (1-3 instances), Lyrion, Mealie, Minecraft
+  - linux-to-sync (private repo)
 - **Local Backup**: Set up local backup with rsync? (y/n)
   - If yes: Configure drive names, mount drives, fstab configuration
 - **Cloud Backup**: Set up encrypted cloud backup? (y/n)
@@ -501,6 +519,59 @@ To manually install/reinstall:
 1. Log into your MeshCentral web interface
 2. Go to "My Devices" → "Add Agent"
 3. Download and run the Linux agent installer
+
+## Docker Applications
+
+Self-hosted applications are installed to `~/docker/{appname}/` with docker-compose.
+
+### Managing Docker Apps
+
+```bash
+# Start an application
+cd ~/docker/{appname}
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop an application
+docker compose down
+
+# Update an application
+docker compose pull
+docker compose up -d
+```
+
+### Application Ports
+
+| Application | Port | URL |
+|-------------|------|-----|
+| Immich | 2283 | http://localhost:2283 |
+| Audiobookshelf | 13378 | http://localhost:13378 |
+| Emby | 8096 | http://localhost:8096 |
+| A.R.M. | 8080 | http://localhost:8080 |
+| Filebrowser | 8085 | http://localhost:8085 |
+| Magic Mirror | 8081-8083 | http://localhost:808X |
+| Lyrion (LMS) | 9000 | http://localhost:9000 |
+| Mealie | 9925 | http://localhost:9925 |
+| Minecraft | 25565 | localhost:25565 |
+
+### Private Repository (linux-to-sync)
+
+To clone a private GitHub repository, you need authentication:
+
+**Option 1: SSH Key (Recommended)**
+```bash
+# Your SSH key must be added to GitHub
+cat ~/.ssh/id_rsa.pub
+# Add at: https://github.com/settings/keys
+```
+
+**Option 2: Personal Access Token**
+```bash
+# Create token at: https://github.com/settings/tokens/new
+# Select 'repo' scope
+```
 
 ## Samba File Sharing
 
@@ -829,6 +900,18 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.4**: Self-hosted Docker applications
+  - Added Immich (photo/video backup)
+  - Added Audiobookshelf (audiobook server)
+  - Added Emby (media server)
+  - Added A.R.M. (automatic ripping machine)
+  - Added Filebrowser (web file manager)
+  - Added Magic Mirror (up to 3 instances)
+  - Added Lyrion Music Server (LMS)
+  - Added Mealie (recipe manager)
+  - Added Minecraft Server (Fabric, RAM-limited)
+  - Added linux-to-sync private repo setup
+  - All apps use docker-compose in ~/docker/{appname}/
 - **v2.3**: Additional VPN and remote desktop options
   - Added WireGuard VPN installation
   - Added Tailscale VPN installation (with Tailscale SSH info)
