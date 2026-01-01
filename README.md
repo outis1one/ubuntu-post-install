@@ -7,6 +7,7 @@ Automated setup script for Ubuntu 24.04 Desktop that installs essential tools, c
 - **Modular** - Every component is optional with y/n prompts
 - **Dry-run mode** - Preview what would be installed without making changes
 - **Unattended mode** - Run with defaults for automated/scripted installs
+- **Disaster recovery** - One-click restore from Kopia backup after system failure
 - **Logging** - All output logged to `/var/log/post-install.log`
 - **Local backup** - rsync to 1-4 drives with customizable names
 - **Cloud backup** - Encrypted backup to Google Drive, OneDrive, or 40+ providers
@@ -191,6 +192,9 @@ sudo ./post-install.sh --dry-run
 # Automated install with defaults (no prompts)
 sudo ./post-install.sh --unattended
 
+# Disaster recovery - restore from Kopia backup
+sudo ./post-install.sh --restore
+
 # Show help
 sudo ./post-install.sh --help
 ```
@@ -201,7 +205,59 @@ sudo ./post-install.sh --help
 - Install Docker
 - Install fail2ban (since password auth is enabled)
 - Enable UFW firewall
-- Skip Samba, NetBird, RustDesk, Backup system
+
+## Disaster Recovery
+
+If your OS drive fails, you can restore everything from a Kopia backup.
+
+### One-Click Recovery
+
+```bash
+# 1. Install fresh Ubuntu 24.04
+# 2. Connect your backup drive
+# 3. Download and run the script
+
+wget https://raw.githubusercontent.com/outis1one/post-ubuntu-install/main/ubuntu-post-install.sh
+chmod +x ubuntu-post-install.sh
+sudo ./ubuntu-post-install.sh --restore
+```
+
+### What the Recovery Does
+
+1. **Finds your backup drive** - Shows available drives, auto-detects Kopia repo
+2. **Installs Docker** - If not already installed
+3. **Lists snapshots** - Shows all available backups, lets you choose
+4. **Restores services** - Detects which apps were backed up, restores them all
+5. **Starts containers** - Optionally starts all services immediately
+
+### What Gets Restored
+
+Everything in `~/docker/` that Kopia backed up:
+- **App configs** - All settings, users, preferences
+- **Databases** - Immich, Mealie, Traccar, etc.
+- **Media metadata** - Emby/Jellyfin watch history, thumbnails
+- **Minecraft worlds** - Saves, mods, permissions
+- **Frigate** - Camera configs, detection settings
+- **All other container data**
+
+### Recovery Requirements
+
+- Fresh Ubuntu 24.04 installation
+- Backup drive with Kopia repository
+- Kopia password (stored in `~/docker/kopia/.env` on backup, or remembered)
+
+### Interactive Mode
+
+When you run the script without `--restore`, you'll be asked:
+```
+INSTALLATION MODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [N] Normal install - Fresh install or modify existing
+  [R] Disaster recovery - Restore from Kopia backup
+
+Select mode (N/R) [N]:
+```
 
 ### 5. Follow Interactive Prompts
 
@@ -980,6 +1036,14 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.7**: Disaster recovery mode
+  - **One-click restore** from Kopia backup after system failure
+  - New `--restore` flag for disaster recovery mode
+  - Interactive mode selector at script start: Normal install or Disaster recovery
+  - Auto-detects Kopia repository on backup drives
+  - Auto-detects and restores all backed-up Docker services
+  - Installs Docker if needed, starts all containers after restore
+  - Recovery flow: Mount drive → Find repo → Enter password → Select snapshot → Restore → Start
 - **v2.6**: FindMyDevice, Frigate-Notify, and resilient install
   - Added FindMyDevice server (self-hosted Android tracking)
   - Added Frigate-Notify (push alerts for Frigate AI detections)

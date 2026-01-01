@@ -22,15 +22,19 @@ show_help() {
     echo "  --unattended   Run with default options (no prompts)"
     echo "                 Defaults: skip key generation, no SSH imports,"
     echo "                 install Docker, skip VPNs/Remote Desktop/Backup"
+    echo "  --restore      Disaster recovery mode - restore from backup"
     echo "  --help         Show this help message"
     echo ""
     echo "Examples:"
     echo "  sudo ./post-install.sh                # Interactive mode"
     echo "  sudo ./post-install.sh --dry-run      # Preview installations"
     echo "  sudo ./post-install.sh --unattended   # Automated install"
+    echo "  sudo ./post-install.sh --restore      # Disaster recovery"
     echo ""
     exit 0
 }
+
+RESTORE_MODE=false
 
 for arg in "$@"; do
     case $arg in
@@ -39,6 +43,9 @@ for arg in "$@"; do
             ;;
         --unattended)
             UNATTENDED=true
+            ;;
+        --restore)
+            RESTORE_MODE=true
             ;;
         --help|-h)
             show_help
@@ -86,10 +93,303 @@ fi
 # Get the actual user (not root)
 ACTUAL_USER="${SUDO_USER:-$USER}"
 ACTUAL_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
+DOCKER_DIR="$ACTUAL_HOME/docker"
 
 echo "Note: Script will continue even if individual packages fail to install"
 echo "Log file: $LOG_FILE"
 echo ""
+
+# ============================================================================
+# INSTALLATION MODE SELECTOR
+# ============================================================================
+
+INSTALL_MODE="normal"
+
+# Disaster recovery function
+run_disaster_recovery() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DISASTER RECOVERY MODE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will restore your Docker apps and data from a Kopia backup."
+    echo ""
+    echo "Requirements:"
+    echo "  • Backup drive connected (with kopia-repo folder)"
+    echo "  • Kopia password (saved in .env or you remember it)"
+    echo ""
+
+    # Step 1: Find/mount backup drive
+    echo "Step 1: Locate backup drive"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Available block devices:"
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null || lsblk
+    echo ""
+
+    # Check if drives are already mounted
+    if [ -d "$ACTUAL_HOME/drives" ]; then
+        echo "Existing mount points in ~/drives/:"
+        ls -la "$ACTUAL_HOME/drives/" 2>/dev/null || echo "  (none)"
+        echo ""
+    fi
+
+    read -p "Enter path to backup drive or Kopia repo (e.g., /dev/sdb1 or ~/drives/backup1): " BACKUP_PATH
+
+    # If it's a device, mount it
+    if [[ "$BACKUP_PATH" == /dev/* ]]; then
+        MOUNT_POINT="$ACTUAL_HOME/drives/restore-backup"
+        mkdir -p "$MOUNT_POINT" 2>/dev/null
+        echo "Mounting $BACKUP_PATH to $MOUNT_POINT..."
+        mount "$BACKUP_PATH" "$MOUNT_POINT" || { echo "Failed to mount. Check device path."; return 1; }
+        BACKUP_PATH="$MOUNT_POINT"
+    fi
+
+    # Expand ~ to home directory
+    BACKUP_PATH="${BACKUP_PATH/#\~/$ACTUAL_HOME}"
+
+    # Look for kopia-repo
+    KOPIA_REPO=""
+    if [ -d "$BACKUP_PATH/kopia-repo" ]; then
+        KOPIA_REPO="$BACKUP_PATH/kopia-repo"
+    elif [ -d "$BACKUP_PATH/kopia.repository" ] || [ -f "$BACKUP_PATH/kopia.repository.f" ]; then
+        KOPIA_REPO="$BACKUP_PATH"
+    else
+        echo ""
+        echo "Looking for Kopia repository..."
+        FOUND_REPO=$(find "$BACKUP_PATH" -maxdepth 3 -name "kopia.repository*" -type f 2>/dev/null | head -1)
+        if [ -n "$FOUND_REPO" ]; then
+            KOPIA_REPO=$(dirname "$FOUND_REPO")
+        fi
+    fi
+
+    if [ -z "$KOPIA_REPO" ] || [ ! -d "$KOPIA_REPO" ]; then
+        echo "❌ Could not find Kopia repository at $BACKUP_PATH"
+        echo "   Look for a folder containing 'kopia.repository' files"
+        return 1
+    fi
+
+    echo "✓ Found Kopia repository at: $KOPIA_REPO"
+    echo ""
+
+    # Step 2: Get Kopia password
+    echo "Step 2: Kopia password"
+    echo "━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Try to find password in backed-up .env
+    if [ -f "$BACKUP_PATH/kopia/.env" ]; then
+        KOPIA_PASS=$(grep "KOPIA_PASSWORD" "$BACKUP_PATH/kopia/.env" 2>/dev/null | cut -d= -f2)
+        if [ -n "$KOPIA_PASS" ]; then
+            echo "Found password in backup. Use this? (y/n)"
+            read -p "> " USE_FOUND_PASS
+            [ "$USE_FOUND_PASS" != "y" ] && KOPIA_PASS=""
+        fi
+    fi
+
+    if [ -z "$KOPIA_PASS" ]; then
+        read -s -p "Enter Kopia repository password: " KOPIA_PASS
+        echo ""
+    fi
+
+    # Step 3: Install Docker if needed
+    echo ""
+    echo "Step 3: Ensure Docker is installed"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ! command -v docker &> /dev/null; then
+        echo "Installing Docker..."
+        apt-get update
+        apt-get install -y ca-certificates curl gnupg
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        usermod -aG docker "$ACTUAL_USER"
+        echo "✓ Docker installed"
+    else
+        echo "✓ Docker already installed"
+    fi
+    echo ""
+
+    # Step 4: List snapshots and let user choose
+    echo "Step 4: Select snapshot to restore"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Connecting to repository and listing snapshots..."
+    echo ""
+
+    # Use docker to run kopia
+    SNAPSHOT_LIST=$(docker run --rm \
+        -v "$KOPIA_REPO:/repository" \
+        -e KOPIA_PASSWORD="$KOPIA_PASS" \
+        kopia/kopia:latest \
+        snapshot list --all 2>&1)
+
+    if echo "$SNAPSHOT_LIST" | grep -q "invalid password"; then
+        echo "❌ Invalid password"
+        return 1
+    fi
+
+    echo "$SNAPSHOT_LIST"
+    echo ""
+    read -p "Enter snapshot ID to restore (or 'latest' for most recent): " SNAPSHOT_ID
+
+    if [ "$SNAPSHOT_ID" = "latest" ]; then
+        SNAPSHOT_ID=$(echo "$SNAPSHOT_LIST" | grep -oE "^[a-f0-9]+" | tail -1)
+        echo "Using latest snapshot: $SNAPSHOT_ID"
+    fi
+
+    # Step 5: Restore to temp location
+    echo ""
+    echo "Step 5: Restoring from backup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    RESTORE_TEMP="$ACTUAL_HOME/docker-restore-temp"
+    mkdir -p "$RESTORE_TEMP"
+
+    echo "Restoring to $RESTORE_TEMP..."
+    docker run --rm \
+        -v "$KOPIA_REPO:/repository" \
+        -v "$RESTORE_TEMP:/restore" \
+        -e KOPIA_PASSWORD="$KOPIA_PASS" \
+        kopia/kopia:latest \
+        restore "$SNAPSHOT_ID" /restore
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Restore failed"
+        return 1
+    fi
+    echo "✓ Snapshot restored to temp location"
+    echo ""
+
+    # Step 6: Detect and install services
+    echo "Step 6: Installing services from backup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    mkdir -p "$DOCKER_DIR"
+
+    # Find all docker-compose.yml files in restored backup
+    SERVICES_FOUND=()
+    for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
+        SERVICE_DIR=$(dirname "$compose_file")
+        SERVICE_NAME=$(basename "$SERVICE_DIR")
+        SERVICES_FOUND+=("$SERVICE_NAME")
+    done
+
+    if [ ${#SERVICES_FOUND[@]} -eq 0 ]; then
+        echo "No Docker services found in backup"
+        # Check if backup is the docker folder itself
+        if [ -f "$RESTORE_TEMP/docker-compose.yml" ]; then
+            echo "Found docker-compose.yml at root - checking structure..."
+        fi
+    else
+        echo "Found ${#SERVICES_FOUND[@]} services in backup:"
+        for svc in "${SERVICES_FOUND[@]}"; do
+            echo "  • $svc"
+        done
+        echo ""
+
+        read -p "Restore all services? (y/n): " RESTORE_ALL
+
+        if [ "$RESTORE_ALL" = "y" ] || [ "$RESTORE_ALL" = "Y" ]; then
+            for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
+                SERVICE_DIR=$(dirname "$compose_file")
+                SERVICE_NAME=$(basename "$SERVICE_DIR")
+                TARGET_DIR="$DOCKER_DIR/$SERVICE_NAME"
+
+                echo "Restoring $SERVICE_NAME..."
+
+                # Copy entire service directory
+                cp -r "$SERVICE_DIR" "$TARGET_DIR" 2>/dev/null || true
+
+                # Fix ownership
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TARGET_DIR" 2>/dev/null || true
+
+                echo "  ✓ $SERVICE_NAME restored to $TARGET_DIR"
+            done
+        fi
+    fi
+
+    # Step 7: Start services
+    echo ""
+    echo "Step 7: Starting services"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    read -p "Start all restored services now? (y/n): " START_ALL
+
+    if [ "$START_ALL" = "y" ] || [ "$START_ALL" = "Y" ]; then
+        for dir in "$DOCKER_DIR"/*/; do
+            if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
+                SERVICE_NAME=$(basename "$dir")
+                echo "Starting $SERVICE_NAME..."
+                (cd "$dir" && docker compose up -d 2>/dev/null) || echo "  ⚠ Failed to start $SERVICE_NAME"
+            fi
+        done
+    fi
+
+    # Cleanup
+    echo ""
+    read -p "Remove temporary restore files? (y/n): " CLEANUP
+    if [ "$CLEANUP" = "y" ]; then
+        rm -rf "$RESTORE_TEMP"
+        echo "✓ Cleaned up temp files"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DISASTER RECOVERY COMPLETE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Services restored to: $DOCKER_DIR"
+    echo ""
+    echo "To check running containers:"
+    echo "  docker ps"
+    echo ""
+    echo "To view logs:"
+    echo "  docker compose logs -f"
+    echo ""
+    echo "⚠️  Some services may need manual configuration:"
+    echo "  • Frigate: Edit config/config.yml with camera URLs"
+    echo "  • Caddy: Update Caddyfile with your domain"
+    echo "  • ddclient: Edit config/ddclient.conf with DNS credentials"
+    echo ""
+
+    return 0
+}
+
+# Check for restore mode flag
+if [ "$RESTORE_MODE" = true ]; then
+    run_disaster_recovery
+    exit $?
+fi
+
+# Interactive mode selector (if not unattended)
+if [ "$UNATTENDED" != true ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "INSTALLATION MODE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "  [N] Normal install - Fresh install or modify existing"
+    echo "  [R] Disaster recovery - Restore from Kopia backup"
+    echo ""
+    read -p "Select mode (N/R) [N]: " MODE_SELECT
+
+    case "${MODE_SELECT^^}" in
+        R)
+            run_disaster_recovery
+            exit $?
+            ;;
+        *)
+            INSTALL_MODE="normal"
+            ;;
+    esac
+    echo ""
+fi
 
 # ============================================================================
 # SOFTWARE DETECTION FUNCTIONS
@@ -2853,49 +3153,6 @@ RESTORE_SCRIPT
             echo ""
             echo "  ⚠️  SAVE YOUR KOPIA PASSWORD! Without it, backups cannot be restored."
             echo ""
-        fi
-    fi
-
-    # ============================================================================
-    # IMPORT/RESTORE CONTAINERS
-    # ============================================================================
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "IMPORT CONTAINERS FROM BACKUP"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "If you have a previous Kopia backup, you can import/restore your"
-    echo "Docker containers from a backup drive."
-    echo ""
-    prompt_yn "Import containers from a Kopia backup? (y/n):" "n" IMPORT_CONTAINERS
-
-    if [ "$IMPORT_CONTAINERS" = "y" ] || [ "$IMPORT_CONTAINERS" = "Y" ]; then
-        if [ "$DRY_RUN" = true ]; then
-            echo "[DRY-RUN] Would prompt for backup location and restore containers"
-        else
-            echo ""
-            prompt_text "Path to Kopia repository [e.g., /home/user/drives/backup1/kopia-repo]:" "" IMPORT_REPO
-
-            if [ -d "$IMPORT_REPO" ]; then
-                echo ""
-                echo "Repository found. To restore:"
-                echo ""
-                echo "1. Start Kopia with this repository:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia repository connect filesystem --path=/repository"
-                echo ""
-                echo "2. List available snapshots:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository kopia/kopia snapshot list"
-                echo ""
-                echo "3. Restore a snapshot:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia restore <snapshot-id> /restore"
-                echo ""
-                echo "4. Start your containers:"
-                echo "   for dir in ~/docker/*/; do (cd \"\$dir\" && docker compose up -d); done"
-                echo ""
-            else
-                echo "Repository not found at $IMPORT_REPO"
-                echo "Make sure your backup drive is mounted and try again."
-            fi
         fi
     fi
 
