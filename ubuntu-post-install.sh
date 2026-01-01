@@ -992,6 +992,826 @@ else
     echo "Skipping MeshCentral installation."
 fi
 
+# ============================================================================
+# SELF-HOSTED DOCKER APPLICATIONS (Optional)
+# ============================================================================
+# These applications run in Docker containers using docker-compose
+# Each app is installed to ~/docker/{appname}/
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "SELF-HOSTED DOCKER APPLICATIONS (Optional)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Install self-hosted applications using Docker Compose."
+echo "Each app will be installed to ~/docker/{appname}/"
+echo ""
+echo "Note: Docker must be installed for these applications."
+echo ""
+
+if ! is_docker_installed && [ "$INSTALL_DOCKER" != "y" ] && [ "$INSTALL_DOCKER" != "Y" ]; then
+    echo "Docker is not installed. Skipping self-hosted applications."
+    echo "Install Docker first, then rerun this script."
+else
+    # Create docker apps directory
+    DOCKER_DIR="$ACTUAL_HOME/docker"
+    if [ "$DRY_RUN" != true ]; then
+        mkdir -p "$DOCKER_DIR"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+    fi
+
+    # ---- IMMICH ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ IMMICH - Self-hosted photo & video backup                       │"
+    echo "│ Like Google Photos but private. Mobile app auto-uploads.        │"
+    echo "│ Port: 2283                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Immich? (y/n):" "n" INSTALL_IMMICH
+
+    if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
+        echo "Installing Immich..."
+        IMMICH_DIR="$DOCKER_DIR/immich"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $IMMICH_DIR"
+            echo "[DRY-RUN] Would create docker-compose.yml and .env"
+        else
+            mkdir -p "$IMMICH_DIR"
+            cd "$IMMICH_DIR"
+
+            # Create docker-compose.yml
+            cat > docker-compose.yml << 'IMMICH_COMPOSE'
+name: immich
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    volumes:
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    ports:
+      - 2283:2283
+    depends_on:
+      - redis
+      - database
+    restart: always
+    healthcheck:
+      disable: false
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    volumes:
+      - model-cache:/cache
+    env_file:
+      - .env
+    restart: always
+    healthcheck:
+      disable: false
+
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:8-bookworm
+    healthcheck:
+      test: valkey-cli ping || exit 1
+    restart: always
+
+  database:
+    container_name: immich_postgres
+    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1; Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ''public'' AND c.relkind = ''r''')"; echo "googlechecksum: $$Chksum"; exit 0
+      interval: 5m
+      start_interval: 30s
+      start_period: 5m
+    command: ["postgres", "-c", "shared_preload_libraries=vectors.so", "-c", 'search_path="$$user", public, vectors', "-c", "logging_collector=on", "-c", "max_wal_size=2GB", "-c", "shared_buffers=512MB", "-c", "wal_compression=on"]
+    restart: always
+
+volumes:
+  model-cache:
+IMMICH_COMPOSE
+
+            # Generate random password
+            DB_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+
+            # Create .env file
+            cat > .env << IMMICH_ENV
+# Immich Configuration
+UPLOAD_LOCATION=./library
+DB_DATA_LOCATION=./postgres
+
+IMMICH_VERSION=release
+
+DB_PASSWORD=$DB_PASS
+DB_USERNAME=postgres
+DB_DATABASE_NAME=immich
+
+TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+IMMICH_ENV
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR"
+
+            echo ""
+            echo "✓ Immich configured at $IMMICH_DIR"
+            echo "  Start with: cd $IMMICH_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:2283"
+            echo ""
+        fi
+    fi
+
+    # ---- AUDIOBOOKSHELF ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ AUDIOBOOKSHELF - Audiobook & podcast server                     │"
+    echo "│ Stream audiobooks with progress sync across devices.            │"
+    echo "│ Port: 13378                                                     │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Audiobookshelf? (y/n):" "n" INSTALL_AUDIOBOOKSHELF
+
+    if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
+        echo "Installing Audiobookshelf..."
+        ABS_DIR="$DOCKER_DIR/audiobookshelf"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $ABS_DIR"
+        else
+            mkdir -p "$ABS_DIR"
+            cd "$ABS_DIR"
+
+            prompt_text "Path to audiobooks folder [default: $ACTUAL_HOME/drives/primary/audiobooks]:" "$ACTUAL_HOME/drives/primary/audiobooks" AUDIOBOOKS_PATH
+
+            cat > docker-compose.yml << ABS_COMPOSE
+name: audiobookshelf
+
+services:
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: audiobookshelf
+    hostname: audiobookshelf
+    restart: unless-stopped
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/config
+      - ./metadata:/metadata
+      - ${AUDIOBOOKS_PATH}:/audiobooks
+      - ${PODCASTS_PATH:-./podcasts}:/podcasts
+    ports:
+      - "13378:80"
+ABS_COMPOSE
+
+            cat > .env << ABS_ENV
+AUDIOBOOKS_PATH=$AUDIOBOOKS_PATH
+PODCASTS_PATH=./podcasts
+ABS_ENV
+
+            mkdir -p config metadata podcasts
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ABS_DIR"
+
+            echo ""
+            echo "✓ Audiobookshelf configured at $ABS_DIR"
+            echo "  Start with: cd $ABS_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:13378"
+            echo ""
+        fi
+    fi
+
+    # ---- EMBY ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ EMBY - Media server for movies, TV, music                       │"
+    echo "│ Stream your media library to any device.                        │"
+    echo "│ Port: 8096 (web), 8920 (https)                                  │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Emby? (y/n):" "n" INSTALL_EMBY
+
+    if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
+        echo "Installing Emby..."
+        EMBY_DIR="$DOCKER_DIR/emby"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $EMBY_DIR"
+        else
+            mkdir -p "$EMBY_DIR"
+            cd "$EMBY_DIR"
+
+            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+
+            cat > docker-compose.yml << EMBY_COMPOSE
+name: emby
+
+services:
+  emby:
+    image: emby/embyserver:latest
+    container_name: emby
+    hostname: emby
+    restart: unless-stopped
+    environment:
+      - UID=$(id -u "$ACTUAL_USER")
+      - GID=$(id -g "$ACTUAL_USER")
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/config
+      - ${MEDIA_PATH}:/media
+    ports:
+      - "8096:8096"
+      - "8920:8920"
+    # Uncomment for hardware transcoding (Intel/AMD)
+    # devices:
+    #   - /dev/dri:/dev/dri
+EMBY_COMPOSE
+
+            cat > .env << EMBY_ENV
+MEDIA_PATH=$MEDIA_PATH
+EMBY_ENV
+
+            mkdir -p config
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EMBY_DIR"
+
+            echo ""
+            echo "✓ Emby configured at $EMBY_DIR"
+            echo "  Start with: cd $EMBY_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8096"
+            echo ""
+        fi
+    fi
+
+    # ---- A.R.M. (Automatic Ripping Machine) ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ A.R.M. - Automatic Ripping Machine                              │"
+    echo "│ Automatically rip DVDs, Blu-rays, and CDs.                      │"
+    echo "│ Port: 8080                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install A.R.M.? (y/n):" "n" INSTALL_ARM
+
+    if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
+        echo "Installing A.R.M...."
+        ARM_DIR="$DOCKER_DIR/arm"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $ARM_DIR"
+        else
+            mkdir -p "$ARM_DIR"
+            cd "$ARM_DIR"
+
+            prompt_text "Path for ripped media output [default: $ACTUAL_HOME/drives/primary/ripped]:" "$ACTUAL_HOME/drives/primary/ripped" ARM_OUTPUT
+
+            # Detect optical drives
+            echo ""
+            echo "Detecting optical drives..."
+            OPTICAL_DRIVES=$(ls /dev/sr* 2>/dev/null || echo "")
+            if [ -n "$OPTICAL_DRIVES" ]; then
+                echo "Found: $OPTICAL_DRIVES"
+            else
+                echo "No optical drives detected. You can add them later."
+                OPTICAL_DRIVES="/dev/sr0"
+            fi
+
+            cat > docker-compose.yml << ARM_COMPOSE
+name: arm
+
+services:
+  automatic-ripping-machine:
+    image: automaticrippingmachine/automatic-ripping-machine:latest
+    container_name: arm
+    hostname: arm
+    restart: unless-stopped
+    environment:
+      - ARM_UID=$(id -u "$ACTUAL_USER")
+      - ARM_GID=$(id -g "$ACTUAL_USER")
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/etc/arm/config
+      - ./logs:/home/arm/logs
+      - ${ARM_OUTPUT}/movies:/home/arm/media/completed
+      - ${ARM_OUTPUT}/music:/home/arm/music
+    ports:
+      - "8080:8080"
+    devices:
+      - /dev/sr0:/dev/sr0
+      # Add more drives as needed:
+      # - /dev/sr1:/dev/sr1
+    privileged: true
+ARM_COMPOSE
+
+            cat > .env << ARM_ENV
+ARM_OUTPUT=$ARM_OUTPUT
+ARM_ENV
+
+            mkdir -p config logs
+            mkdir -p "$ARM_OUTPUT/movies" "$ARM_OUTPUT/music"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ARM_DIR"
+
+            echo ""
+            echo "✓ A.R.M. configured at $ARM_DIR"
+            echo "  Start with: cd $ARM_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8080"
+            echo "  Note: Edit docker-compose.yml to add more optical drives"
+            echo ""
+        fi
+    fi
+
+    # ---- FILEBROWSER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FILEBROWSER - Web-based file manager                            │"
+    echo "│ Browse, upload, download files via web interface.               │"
+    echo "│ Port: 8085                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Filebrowser? (y/n):" "n" INSTALL_FILEBROWSER
+
+    if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
+        echo "Installing Filebrowser..."
+        FB_DIR="$DOCKER_DIR/filebrowser"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $FB_DIR"
+        else
+            mkdir -p "$FB_DIR"
+            cd "$FB_DIR"
+
+            prompt_text "Path to browse [default: $ACTUAL_HOME/drives/primary]:" "$ACTUAL_HOME/drives/primary" FB_PATH
+
+            cat > docker-compose.yml << FB_COMPOSE
+name: filebrowser
+
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:s6
+    container_name: filebrowser
+    hostname: filebrowser
+    restart: unless-stopped
+    environment:
+      - PUID=$(id -u "$ACTUAL_USER")
+      - PGID=$(id -g "$ACTUAL_USER")
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ${FB_PATH}:/srv
+      - ./database/filebrowser.db:/database/filebrowser.db
+      - ./config/settings.json:/config/settings.json
+    ports:
+      - "8085:80"
+FB_COMPOSE
+
+            cat > .env << FB_ENV
+FB_PATH=$FB_PATH
+FB_ENV
+
+            mkdir -p database config
+            touch database/filebrowser.db
+            cat > config/settings.json << 'FB_SETTINGS'
+{
+  "port": 80,
+  "baseURL": "",
+  "address": "",
+  "log": "stdout",
+  "database": "/database/filebrowser.db",
+  "root": "/srv"
+}
+FB_SETTINGS
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
+
+            echo ""
+            echo "✓ Filebrowser configured at $FB_DIR"
+            echo "  Start with: cd $FB_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8085"
+            echo "  Default login: admin / admin (change immediately!)"
+            echo ""
+        fi
+    fi
+
+    # ---- MAGIC MIRROR ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ MAGIC MIRROR - Smart mirror / dashboard display                 │"
+    echo "│ Modular smart mirror platform. Run up to 3 instances.           │"
+    echo "│ Ports: 8081, 8082, 8083                                         │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Magic Mirror? (y/n):" "n" INSTALL_MAGICMIRROR
+
+    if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
+        echo ""
+        prompt_text "How many Magic Mirror instances? [1-3, default: 1]:" "1" MM_COUNT
+        MM_COUNT=${MM_COUNT:-1}
+        if [ "$MM_COUNT" -gt 3 ]; then MM_COUNT=3; fi
+        if [ "$MM_COUNT" -lt 1 ]; then MM_COUNT=1; fi
+
+        echo "Installing $MM_COUNT Magic Mirror instance(s)..."
+
+        for i in $(seq 1 $MM_COUNT); do
+            MM_PORT=$((8080 + i))
+            MM_DIR="$DOCKER_DIR/magicmirror-$MM_PORT"
+
+            if [ "$DRY_RUN" = true ]; then
+                echo "[DRY-RUN] Would create $MM_DIR (port $MM_PORT)"
+            else
+                mkdir -p "$MM_DIR"
+                cd "$MM_DIR"
+
+                cat > docker-compose.yml << MM_COMPOSE
+name: mm-$MM_PORT
+
+services:
+  magicmirror:
+    image: karsten13/magicmirror:latest
+    container_name: magicmirror-$MM_PORT
+    hostname: magicmirror-$MM_PORT
+    restart: unless-stopped
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/opt/magic_mirror/config
+      - ./modules:/opt/magic_mirror/modules
+      - ./css:/opt/magic_mirror/css
+    ports:
+      - "$MM_PORT:8080"
+MM_COMPOSE
+
+                mkdir -p config modules css
+
+                # Create basic config.js
+                cat > config/config.js << 'MM_CONFIG'
+let config = {
+    address: "0.0.0.0",
+    port: 8080,
+    ipWhitelist: [],
+    language: "en",
+    timeFormat: 12,
+    units: "imperial",
+    modules: [
+        {
+            module: "alert",
+        },
+        {
+            module: "clock",
+            position: "top_left"
+        },
+        {
+            module: "calendar",
+            header: "Calendar",
+            position: "top_left",
+            config: {
+                calendars: [
+                    {
+                        symbol: "calendar-check",
+                        url: "webcal://www.calendarlabs.com/ical-calendar/ics/76/US_Holidays.ics"
+                    }
+                ]
+            }
+        },
+        {
+            module: "weather",
+            position: "top_right",
+            config: {
+                weatherProvider: "openmeteo",
+                type: "current",
+                lat: 40.7128,
+                lon: -74.0060
+            }
+        },
+        {
+            module: "weather",
+            position: "top_right",
+            header: "Weather Forecast",
+            config: {
+                weatherProvider: "openmeteo",
+                type: "forecast",
+                lat: 40.7128,
+                lon: -74.0060
+            }
+        },
+        {
+            module: "newsfeed",
+            position: "bottom_bar",
+            config: {
+                feeds: [
+                    {
+                        title: "BBC",
+                        url: "https://feeds.bbci.co.uk/news/rss.xml"
+                    }
+                ],
+                showSourceTitle: true,
+                showPublishDate: true,
+                broadcastNewsFeeds: true,
+                broadcastNewsUpdates: true
+            }
+        },
+    ]
+};
+
+/*************** DO NOT EDIT THE LINE BELOW ***************/
+if (typeof module !== "undefined") {module.exports = config;}
+MM_CONFIG
+
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MM_DIR"
+
+                echo "  ✓ Magic Mirror #$i configured at $MM_DIR (port $MM_PORT)"
+            fi
+        done
+
+        if [ "$DRY_RUN" != true ]; then
+            echo ""
+            echo "  Start with: cd ~/docker/magicmirror-808X && docker compose up -d"
+            echo "  Access at:  http://localhost:808X"
+            echo "  Edit config: ~/docker/magicmirror-808X/config/config.js"
+            echo ""
+        fi
+    fi
+
+    # ---- LYRION MUSIC SERVER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ LYRION MUSIC SERVER (LMS) - Music streaming server              │"
+    echo "│ Stream music to Squeezebox devices, apps, and Chromecast.       │"
+    echo "│ Port: 9000 (web), 9090 (CLI), 3483 (players)                    │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Lyrion Music Server? (y/n):" "n" INSTALL_LMS
+
+    if [ "$INSTALL_LMS" = "y" ] || [ "$INSTALL_LMS" = "Y" ]; then
+        echo "Installing Lyrion Music Server..."
+        LMS_DIR="$DOCKER_DIR/lyrion"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $LMS_DIR"
+        else
+            mkdir -p "$LMS_DIR"
+            cd "$LMS_DIR"
+
+            prompt_text "Path to music folder [default: $ACTUAL_HOME/drives/primary/music]:" "$ACTUAL_HOME/drives/primary/music" MUSIC_PATH
+
+            cat > docker-compose.yml << LMS_COMPOSE
+name: lyrion
+
+services:
+  lyrion:
+    image: lmscommunity/lyrionmusicserver:stable
+    container_name: lyrion
+    hostname: lyrion
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HTTP_PORT=9000
+      - PUID=$(id -u "$ACTUAL_USER")
+      - PGID=$(id -g "$ACTUAL_USER")
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/config:rw
+      - ${MUSIC_PATH}:/music:ro
+      - ./playlists:/playlists:rw
+      - /etc/localtime:/etc/localtime:ro
+LMS_COMPOSE
+
+            cat > .env << LMS_ENV
+MUSIC_PATH=$MUSIC_PATH
+LMS_ENV
+
+            mkdir -p config playlists
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$LMS_DIR"
+
+            echo ""
+            echo "✓ Lyrion Music Server configured at $LMS_DIR"
+            echo "  Start with: cd $LMS_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:9000"
+            echo "  Note: Uses host networking for Chromecast support"
+            echo ""
+        fi
+    fi
+
+    # ---- MEALIE ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ MEALIE - Recipe manager & meal planner                          │"
+    echo "│ Save recipes, plan meals, generate shopping lists.              │"
+    echo "│ Port: 9925                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Mealie? (y/n):" "n" INSTALL_MEALIE
+
+    if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
+        echo "Installing Mealie..."
+        MEALIE_DIR="$DOCKER_DIR/mealie"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $MEALIE_DIR"
+        else
+            mkdir -p "$MEALIE_DIR"
+            cd "$MEALIE_DIR"
+
+            cat > docker-compose.yml << MEALIE_COMPOSE
+name: mealie
+
+services:
+  mealie:
+    image: ghcr.io/mealie-recipes/mealie:latest
+    container_name: mealie
+    hostname: mealie
+    restart: unless-stopped
+    environment:
+      - PUID=$(id -u "$ACTUAL_USER")
+      - PGID=$(id -g "$ACTUAL_USER")
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+      - ALLOW_SIGNUP=true
+      - MAX_WORKERS=1
+      - WEB_CONCURRENCY=1
+      - BASE_URL=http://localhost:9925
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "9925:9000"
+MEALIE_COMPOSE
+
+            mkdir -p data
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MEALIE_DIR"
+
+            echo ""
+            echo "✓ Mealie configured at $MEALIE_DIR"
+            echo "  Start with: cd $MEALIE_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:9925"
+            echo "  Default:    changeme@email.com / MyPassword"
+            echo ""
+        fi
+    fi
+
+    # ---- MINECRAFT SERVER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ MINECRAFT SERVER - Game server with RAM limit                   │"
+    echo "│ Fabric server with configurable memory allocation.              │"
+    echo "│ Port: 25565                                                     │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Minecraft Server? (y/n):" "n" INSTALL_MINECRAFT
+
+    if [ "$INSTALL_MINECRAFT" = "y" ] || [ "$INSTALL_MINECRAFT" = "Y" ]; then
+        echo "Installing Minecraft Server..."
+        MC_DIR="$DOCKER_DIR/minecraft"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $MC_DIR"
+        else
+            mkdir -p "$MC_DIR"
+            cd "$MC_DIR"
+
+            echo ""
+            prompt_text "Maximum RAM for Minecraft (e.g., 2G, 4G) [default: 2G]:" "2G" MC_RAM
+            MC_RAM=${MC_RAM:-2G}
+
+            cat > docker-compose.yml << MC_COMPOSE
+name: minecraft
+
+services:
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: minecraft
+    hostname: minecraft
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    environment:
+      - EULA=TRUE
+      - TYPE=FABRIC
+      - VERSION=LATEST
+      - MEMORY=${MC_RAM}
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+      - OPS=
+      - MOTD=A Minecraft Server
+      - DIFFICULTY=normal
+      - MODE=survival
+    volumes:
+      - ./data:/data
+    ports:
+      - "25565:25565"
+    deploy:
+      resources:
+        limits:
+          memory: ${MC_RAM}
+MC_COMPOSE
+
+            cat > .env << MC_ENV
+MC_RAM=$MC_RAM
+MC_ENV
+
+            mkdir -p data
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR"
+
+            echo ""
+            echo "✓ Minecraft Server configured at $MC_DIR"
+            echo "  Start with: cd $MC_DIR && docker compose up -d"
+            echo "  Connect:    localhost:25565"
+            echo "  RAM limit:  $MC_RAM"
+            echo "  Console:    docker attach minecraft (Ctrl+P, Ctrl+Q to detach)"
+            echo ""
+        fi
+    fi
+
+    # ---- LINUX-TO-SYNC (Private Repo) ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ LINUX-TO-SYNC - Private sync repository                         │"
+    echo "│ Clone and set up your private linux-to-sync repository.         │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    echo ""
+    echo "Note: This requires access to github.com/outis1one/linux-to-sync"
+    echo ""
+    echo "To grant access, you need ONE of these:"
+    echo "  1. SSH key already added to your GitHub account"
+    echo "  2. GitHub Personal Access Token (PAT)"
+    echo "  3. GitHub CLI (gh) authenticated"
+    echo ""
+    prompt_yn "Set up linux-to-sync? (y/n):" "n" INSTALL_LINUXTOSYNC
+
+    if [ "$INSTALL_LINUXTOSYNC" = "y" ] || [ "$INSTALL_LINUXTOSYNC" = "Y" ]; then
+        SYNC_DIR="$DOCKER_DIR/linux-to-sync"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would clone linux-to-sync to $SYNC_DIR"
+        else
+            echo ""
+            echo "Choose authentication method:"
+            echo "  [1] SSH (if you have SSH key added to GitHub)"
+            echo "  [2] HTTPS with token (requires Personal Access Token)"
+            echo ""
+            prompt_text "Enter 1 or 2 [default: 1]:" "1" AUTH_METHOD
+
+            if [ "$AUTH_METHOD" = "2" ]; then
+                echo ""
+                echo "Create a Personal Access Token at:"
+                echo "  https://github.com/settings/tokens/new"
+                echo "  - Select 'repo' scope for full repository access"
+                echo ""
+                prompt_text "Enter your GitHub Personal Access Token:" "" GH_TOKEN
+
+                if [ -n "$GH_TOKEN" ]; then
+                    git clone "https://$GH_TOKEN@github.com/outis1one/linux-to-sync.git" "$SYNC_DIR" 2>/dev/null
+                    if [ $? -eq 0 ]; then
+                        # Remove token from remote URL for security
+                        cd "$SYNC_DIR"
+                        git remote set-url origin "https://github.com/outis1one/linux-to-sync.git"
+                        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$SYNC_DIR"
+                        echo ""
+                        echo "✓ linux-to-sync cloned to $SYNC_DIR"
+                        echo "  Note: You'll need to enter token again for push/pull"
+                        echo "  Or set up: git config credential.helper store"
+                    else
+                        echo "✗ Clone failed. Check your token and try again."
+                    fi
+                else
+                    echo "No token provided. Skipping."
+                fi
+            else
+                echo ""
+                echo "Attempting SSH clone..."
+                echo "(Make sure your SSH key is added to GitHub)"
+                echo ""
+                git clone git@github.com:outis1one/linux-to-sync.git "$SYNC_DIR" 2>/dev/null
+                if [ $? -eq 0 ]; then
+                    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$SYNC_DIR"
+                    echo ""
+                    echo "✓ linux-to-sync cloned to $SYNC_DIR"
+                else
+                    echo ""
+                    echo "✗ SSH clone failed."
+                    echo ""
+                    echo "To add your SSH key to GitHub:"
+                    echo "  1. Copy your public key: cat ~/.ssh/id_rsa.pub"
+                    echo "  2. Go to: https://github.com/settings/keys"
+                    echo "  3. Click 'New SSH key' and paste your key"
+                    echo ""
+                    echo "Then retry this script or manually clone:"
+                    echo "  git clone git@github.com:outis1one/linux-to-sync.git ~/docker/linux-to-sync"
+                fi
+            fi
+        fi
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Docker applications configured in: $DOCKER_DIR"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "To start an application:"
+    echo "  cd ~/docker/{appname}"
+    echo "  docker compose up -d"
+    echo ""
+    echo "To view logs:"
+    echo "  docker compose logs -f"
+    echo ""
+    echo "To stop:"
+    echo "  docker compose down"
+    echo ""
+fi
+
 # Backup System (Optional)
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
