@@ -1876,10 +1876,12 @@ JELLYFIN_ENV
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FRIGATE_DIR"
         else
-            mkdir -p "$FRIGATE_DIR"
-            cd "$FRIGATE_DIR"
+            # STEP 1: Create directory and install docker-compose
+            mkdir -p "$FRIGATE_DIR" 2>/dev/null || true
+            cd "$FRIGATE_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
-            prompt_text "Path for recordings [default: $ACTUAL_HOME/drives/primary/frigate]:" "$ACTUAL_HOME/drives/primary/frigate" FRIGATE_PATH
+            # Default path
+            FRIGATE_PATH="$ACTUAL_HOME/drives/primary/frigate"
 
             cat > docker-compose.yml << FRIGATE_COMPOSE
 name: frigate
@@ -1909,28 +1911,35 @@ services:
       - "8555:8555/tcp"
       - "8555:8555/udp"
 FRIGATE_COMPOSE
+            echo "✓ Installed docker-compose.yml"
+
+            # STEP 2: Try to configure (uses defaults if fails)
+            prompt_text "Path for recordings [$FRIGATE_PATH]:" "$FRIGATE_PATH" FRIGATE_PATH 2>/dev/null || FRIGATE_PATH="$ACTUAL_HOME/drives/primary/frigate"
 
             cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_PATH
 FRIGATE_ENV
 
-            mkdir -p config
-            mkdir -p "$FRIGATE_PATH"
+            mkdir -p config 2>/dev/null || true
+            mkdir -p "$FRIGATE_PATH" 2>/dev/null || echo "  ⚠ Could not create $FRIGATE_PATH - create manually"
 
-            # Create basic config.yml
+            # Create template config
             cat > config/config.yml << 'FRIGATE_CONFIG'
+# Frigate Configuration
+# Docs: https://docs.frigate.video
+#
+# ⚠️  YOU MUST EDIT THIS FILE to add your cameras!
+
 mqtt:
   enabled: false
 
 cameras:
-  # Example camera - edit with your camera details
+  # EXAMPLE - Replace with your camera:
   # front_door:
   #   ffmpeg:
   #     inputs:
-  #       - path: rtsp://user:pass@camera-ip:554/stream
-  #         roles:
-  #           - detect
-  #           - record
+  #       - path: rtsp://user:pass@192.168.1.100:554/stream
+  #         roles: [detect, record]
   #   detect:
   #     width: 1280
   #     height: 720
@@ -1952,13 +1961,15 @@ snapshots:
     default: 7
 FRIGATE_CONFIG
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Frigate configured at $FRIGATE_DIR"
-            echo "  Start with: cd $FRIGATE_DIR && docker compose up -d"
-            echo "  Access at:  http://localhost:5000"
-            echo "  IMPORTANT: Edit config/config.yml to add your cameras!"
+            echo "✓ Frigate installed at $FRIGATE_DIR"
+            echo "  Start: cd $FRIGATE_DIR && docker compose up -d"
+            echo "  Access: http://localhost:5000"
+            echo ""
+            echo "  ⚠️  REQUIRED: Edit config/config.yml to add your cameras!"
+            echo "  Docs: https://docs.frigate.video"
             echo ""
         fi
     fi
@@ -1979,12 +1990,9 @@ FRIGATE_CONFIG
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $CADDY_DIR"
         else
-            mkdir -p "$CADDY_DIR"
-            cd "$CADDY_DIR"
-
-            # Ask for domain
-            echo ""
-            prompt_text "Your domain (e.g., example.com) [leave blank for local only]:" "" CADDY_DOMAIN
+            # STEP 1: Create directory and install docker-compose
+            mkdir -p "$CADDY_DIR" 2>/dev/null || true
+            cd "$CADDY_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'CADDY_COMPOSE'
 name: caddy
@@ -2011,14 +2019,18 @@ networks:
     name: caddy_net
     external: true
 CADDY_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
-            # Create .env file
+            # STEP 2: Try configuration (uses defaults if fails)
+            CADDY_DOMAIN=""
+            prompt_text "Your domain (e.g., example.com) [blank for local]:" "" CADDY_DOMAIN 2>/dev/null || CADDY_DOMAIN=""
+
             cat > .env << CADDY_ENV
 MY_DOMAIN=${CADDY_DOMAIN:-localhost}
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 CADDY_ENV
 
-            # Create Docker network for Caddy
+            # Create Docker network for Caddy (ignore if exists)
             docker network create caddy_net 2>/dev/null || true
 
             # Create comprehensive Caddyfile with all services
@@ -2138,23 +2150,17 @@ CADDY_ENV
 }
 CADDY_FILE
 
-            mkdir -p config data site
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR"
+            mkdir -p config data site 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Caddy configured at $CADDY_DIR"
-            echo "  Start with: cd $CADDY_DIR && docker compose up -d"
+            echo "✓ Caddy installed at $CADDY_DIR"
+            echo "  Start: cd $CADDY_DIR && docker compose up -d"
+            echo "  Domain: ${CADDY_DOMAIN:-localhost} (edit .env)"
+            echo "  Config: $CADDY_DIR/Caddyfile (uncomment services)"
             echo ""
-            echo "  Configuration:"
-            echo "    Domain:     ${CADDY_DOMAIN:-localhost} (edit .env to change)"
-            echo "    Caddyfile:  $CADDY_DIR/Caddyfile (uncomment services)"
-            echo "    Network:    caddy_net (add to other containers)"
-            echo ""
-            echo "  To add a container to Caddy network, add to its docker-compose.yml:"
-            echo "    networks:"
-            echo "      default:"
-            echo "        name: caddy_net"
-            echo "        external: true"
+            echo "  ⚠️  Containers must be on 'caddy_net' network"
+            echo "  Docs: https://caddyserver.com/docs/"
             echo ""
         fi
     fi
@@ -2175,8 +2181,9 @@ CADDY_FILE
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $DDCLIENT_DIR"
         else
-            mkdir -p "$DDCLIENT_DIR"
-            cd "$DDCLIENT_DIR"
+            # STEP 1: Install docker-compose
+            mkdir -p "$DDCLIENT_DIR" 2>/dev/null || true
+            cd "$DDCLIENT_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'DDCLIENT_COMPOSE'
 name: ddclient
@@ -2194,24 +2201,26 @@ services:
     volumes:
       - ./config:/config
 DDCLIENT_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
             cat > .env << DDCLIENT_ENV
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 DDCLIENT_ENV
 
-            mkdir -p config
+            mkdir -p config 2>/dev/null || true
 
-            # Create example ddclient.conf
+            # Create template config
             cat > config/ddclient.conf << 'DDCLIENT_CONF'
 # ddclient configuration
-# Uncomment and edit the section for your DNS provider
+# ⚠️  YOU MUST EDIT THIS FILE!
+# Uncomment and edit for your DNS provider
 
 daemon=300
 syslog=yes
 pid=/var/run/ddclient/ddclient.pid
 ssl=yes
 
-# Example: Cloudflare
+# Cloudflare example:
 # use=web, web=cloudflare
 # protocol=cloudflare
 # zone=example.com
@@ -2219,19 +2228,21 @@ ssl=yes
 # password=your-api-token
 # example.com
 
-# Example: DuckDNS
+# DuckDNS example:
 # use=web
 # protocol=duckdns
 # password=your-duckdns-token
 # yourdomain.duckdns.org
 DDCLIENT_CONF
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DDCLIENT_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DDCLIENT_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ ddclient configured at $DDCLIENT_DIR"
-            echo "  IMPORTANT: Edit config/ddclient.conf with your DNS provider settings!"
-            echo "  Start with: cd $DDCLIENT_DIR && docker compose up -d"
+            echo "✓ ddclient installed at $DDCLIENT_DIR"
+            echo "  Start: cd $DDCLIENT_DIR && docker compose up -d"
+            echo ""
+            echo "  ⚠️  REQUIRED: Edit config/ddclient.conf first!"
+            echo "  Docs: https://ddclient.net/"
             echo ""
         fi
     fi
@@ -2595,37 +2606,9 @@ FMD_ENV
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FN_DIR"
         else
-            mkdir -p "$FN_DIR"
-            cd "$FN_DIR"
-
-            # Check if Frigate and ntfy are being installed
-            FRIGATE_URL="http://frigate:5000"
-            NTFY_URL=""
-            NTFY_TOPIC=""
-
-            echo ""
-            echo "Frigate-Notify needs to connect to Frigate and a notification service."
-            echo ""
-
-            # Ask for Frigate URL
-            if [ -d "$DOCKER_DIR/frigate" ]; then
-                echo "  Frigate detected at $DOCKER_DIR/frigate"
-                prompt_text "Frigate URL [default: http://frigate:5000]:" "http://frigate:5000" FRIGATE_URL
-            else
-                prompt_text "Frigate URL (e.g., http://192.168.1.100:5000):" "" FRIGATE_URL
-            fi
-
-            # Ask for ntfy configuration
-            echo ""
-            echo "Notification service (ntfy recommended - free, self-hosted):"
-            if [ -d "$DOCKER_DIR/ntfy" ]; then
-                echo "  ntfy detected at $DOCKER_DIR/ntfy"
-                prompt_text "ntfy server URL [default: http://ntfy:80]:" "http://ntfy:80" NTFY_URL
-            else
-                prompt_text "ntfy server URL (e.g., https://ntfy.sh or http://localhost:8090):" "https://ntfy.sh" NTFY_URL
-            fi
-
-            prompt_text "ntfy topic name [default: frigate-alerts]:" "frigate-alerts" NTFY_TOPIC
+            # STEP 1: Create directory and docker-compose (always succeeds)
+            mkdir -p "$FN_DIR" 2>/dev/null || true
+            cd "$FN_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'FN_COMPOSE'
 name: frigate-notify
@@ -2639,104 +2622,68 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
 FN_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
-            # Create config file
+            # STEP 2: Try configuration (uses defaults if prompts fail)
+            echo ""
+            echo "Attempting auto-configuration..."
+
+            # Set smart defaults based on what's installed
+            FRIGATE_URL="http://frigate:5000"
+            NTFY_URL="https://ntfy.sh"
+            NTFY_TOPIC="frigate-alerts"
+
+            [ -d "$DOCKER_DIR/frigate" ] && echo "  ✓ Frigate detected" || echo "  ⚠ Frigate not found (using default URL)"
+            [ -d "$DOCKER_DIR/ntfy" ] && { NTFY_URL="http://ntfy:80"; echo "  ✓ ntfy detected"; } || echo "  ⚠ ntfy not found (using ntfy.sh)"
+
+            # Try prompts, use defaults if they fail
+            echo ""
+            prompt_text "Frigate URL [$FRIGATE_URL]:" "$FRIGATE_URL" FRIGATE_URL 2>/dev/null || FRIGATE_URL="http://frigate:5000"
+            prompt_text "ntfy server [$NTFY_URL]:" "$NTFY_URL" NTFY_URL 2>/dev/null || NTFY_URL="https://ntfy.sh"
+            prompt_text "ntfy topic [frigate-alerts]:" "frigate-alerts" NTFY_TOPIC 2>/dev/null || NTFY_TOPIC="frigate-alerts"
+
+            # Create config (template with user values or defaults)
             cat > config.yml << FN_CONFIG
 # Frigate-Notify Configuration
-# Documentation: https://frigate-notify.0x2142.com
+# Docs: https://frigate-notify.0x2142.com
+#
+# ⚠️  YOU MAY NEED TO EDIT THIS FILE!
+# If notifications don't work, check:
+#   - Frigate server URL is correct
+#   - ntfy server is reachable
+#   - Containers are on same Docker network
 
 frigate:
   server: $FRIGATE_URL
-  # WebAPI mode (recommended) - polls Frigate API
   webapi:
     enabled: true
     interval: 30
-  # Uncomment for MQTT mode instead:
-  # mqtt:
-  #   enabled: true
-  #   server: mqtt://mosquitto:1883
 
 alerts:
-  # General settings
   general:
-    # Send test notification on startup
     send_startup_message: true
-
-  # Zones to monitor (empty = all zones)
-  zones:
-    # - front_yard
-    # - driveway
-
-  # Labels to alert on
   labels:
     - person
     - car
     # - dog
-    # - cat
     # - package
 
-  # Quiet hours (no notifications)
-  # quiet:
-  #   start: "22:00"
-  #   end: "07:00"
-
 notifiers:
-  # ntfy (recommended - free, simple)
   - name: ntfy
     enabled: true
     provider: ntfy
     config:
       server: $NTFY_URL
       topic: $NTFY_TOPIC
-      # Uncomment for auth:
-      # token: your-ntfy-token
-
-  # Uncomment for additional notifiers:
-  # - name: discord
-  #   enabled: false
-  #   provider: discord
-  #   config:
-  #     webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK
-
-  # - name: pushover
-  #   enabled: false
-  #   provider: pushover
-  #   config:
-  #     token: your-app-token
-  #     userkey: your-user-key
-
-  # - name: gotify
-  #   enabled: false
-  #   provider: gotify
-  #   config:
-  #     server: http://gotify:80
-  #     token: your-gotify-token
 FN_CONFIG
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FN_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FN_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Frigate-Notify configured at $FN_DIR"
-            echo "  Start with: cd $FN_DIR && docker compose up -d"
-            echo ""
-            echo "  Configuration:"
-            echo "    Frigate:  $FRIGATE_URL"
-            echo "    ntfy:     $NTFY_URL"
-            echo "    Topic:    $NTFY_TOPIC"
-            echo ""
-            echo "  Edit config.yml to customize:"
-            echo "    - Which labels trigger alerts (person, car, dog...)"
-            echo "    - Quiet hours for no notifications"
-            echo "    - Additional notification services"
-            echo ""
-            if [[ "$NTFY_URL" == *"ntfy.sh"* ]]; then
-                echo "  ⚠️  Using public ntfy.sh - anyone can subscribe to your topic!"
-                echo "      Consider self-hosting ntfy for privacy."
-                echo ""
-            fi
-            echo "  Subscribe to alerts:"
-            echo "    Mobile: Install ntfy app → Add topic '$NTFY_TOPIC'"
-            echo "    Web:    ${NTFY_URL}/${NTFY_TOPIC}"
+            echo "✓ Frigate-Notify installed at $FN_DIR"
+            echo "  Start: cd $FN_DIR && docker compose up -d"
+            echo "  Config: $FN_DIR/config.yml (edit if needed)"
+            echo "  Docs: https://frigate-notify.0x2142.com"
             echo ""
         fi
     fi

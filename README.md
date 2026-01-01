@@ -980,13 +980,14 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
-- **v2.6**: FindMyDevice, Frigate-Notify, and Caddy improvements
+- **v2.6**: FindMyDevice, Frigate-Notify, and resilient install
   - Added FindMyDevice server (self-hosted Android tracking)
   - Added Frigate-Notify (push alerts for Frigate AI detections)
-  - Interactive setup: frigate → frigate-notify → ntfy integration
   - Caddy now asks for domain and creates comprehensive Caddyfile
-  - Caddyfile template includes all services (uncomment to enable)
-  - Added caddy_net Docker network instructions
+  - **Resilient install pattern**: Install first, configure with defaults, continue on errors
+  - All Docker apps now use "install → try config → use defaults if fail" approach
+  - Config templates include clear "EDIT THIS FILE" warnings
+  - Script won't stop if configuration prompts fail - uses sensible defaults
 - **v2.5**: Additional Docker apps and container backup
   - Added Jellyfin (free media server with hardware acceleration)
   - Added Frigate NVR (AI-powered object detection)
