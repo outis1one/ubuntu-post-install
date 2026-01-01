@@ -22,15 +22,19 @@ show_help() {
     echo "  --unattended   Run with default options (no prompts)"
     echo "                 Defaults: skip key generation, no SSH imports,"
     echo "                 install Docker, skip VPNs/Remote Desktop/Backup"
+    echo "  --restore      Disaster recovery mode - restore from backup"
     echo "  --help         Show this help message"
     echo ""
     echo "Examples:"
     echo "  sudo ./post-install.sh                # Interactive mode"
     echo "  sudo ./post-install.sh --dry-run      # Preview installations"
     echo "  sudo ./post-install.sh --unattended   # Automated install"
+    echo "  sudo ./post-install.sh --restore      # Disaster recovery"
     echo ""
     exit 0
 }
+
+RESTORE_MODE=false
 
 for arg in "$@"; do
     case $arg in
@@ -39,6 +43,9 @@ for arg in "$@"; do
             ;;
         --unattended)
             UNATTENDED=true
+            ;;
+        --restore)
+            RESTORE_MODE=true
             ;;
         --help|-h)
             show_help
@@ -86,10 +93,303 @@ fi
 # Get the actual user (not root)
 ACTUAL_USER="${SUDO_USER:-$USER}"
 ACTUAL_HOME=$(getent passwd "$ACTUAL_USER" | cut -d: -f6)
+DOCKER_DIR="$ACTUAL_HOME/docker"
 
 echo "Note: Script will continue even if individual packages fail to install"
 echo "Log file: $LOG_FILE"
 echo ""
+
+# ============================================================================
+# INSTALLATION MODE SELECTOR
+# ============================================================================
+
+INSTALL_MODE="normal"
+
+# Disaster recovery function
+run_disaster_recovery() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DISASTER RECOVERY MODE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will restore your Docker apps and data from a Kopia backup."
+    echo ""
+    echo "Requirements:"
+    echo "  • Backup drive connected (with kopia-repo folder)"
+    echo "  • Kopia password (saved in .env or you remember it)"
+    echo ""
+
+    # Step 1: Find/mount backup drive
+    echo "Step 1: Locate backup drive"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Available block devices:"
+    lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null || lsblk
+    echo ""
+
+    # Check if drives are already mounted
+    if [ -d "$ACTUAL_HOME/drives" ]; then
+        echo "Existing mount points in ~/drives/:"
+        ls -la "$ACTUAL_HOME/drives/" 2>/dev/null || echo "  (none)"
+        echo ""
+    fi
+
+    read -p "Enter path to backup drive or Kopia repo (e.g., /dev/sdb1 or ~/drives/backup1): " BACKUP_PATH
+
+    # If it's a device, mount it
+    if [[ "$BACKUP_PATH" == /dev/* ]]; then
+        MOUNT_POINT="$ACTUAL_HOME/drives/restore-backup"
+        mkdir -p "$MOUNT_POINT" 2>/dev/null
+        echo "Mounting $BACKUP_PATH to $MOUNT_POINT..."
+        mount "$BACKUP_PATH" "$MOUNT_POINT" || { echo "Failed to mount. Check device path."; return 1; }
+        BACKUP_PATH="$MOUNT_POINT"
+    fi
+
+    # Expand ~ to home directory
+    BACKUP_PATH="${BACKUP_PATH/#\~/$ACTUAL_HOME}"
+
+    # Look for kopia-repo
+    KOPIA_REPO=""
+    if [ -d "$BACKUP_PATH/kopia-repo" ]; then
+        KOPIA_REPO="$BACKUP_PATH/kopia-repo"
+    elif [ -d "$BACKUP_PATH/kopia.repository" ] || [ -f "$BACKUP_PATH/kopia.repository.f" ]; then
+        KOPIA_REPO="$BACKUP_PATH"
+    else
+        echo ""
+        echo "Looking for Kopia repository..."
+        FOUND_REPO=$(find "$BACKUP_PATH" -maxdepth 3 -name "kopia.repository*" -type f 2>/dev/null | head -1)
+        if [ -n "$FOUND_REPO" ]; then
+            KOPIA_REPO=$(dirname "$FOUND_REPO")
+        fi
+    fi
+
+    if [ -z "$KOPIA_REPO" ] || [ ! -d "$KOPIA_REPO" ]; then
+        echo "❌ Could not find Kopia repository at $BACKUP_PATH"
+        echo "   Look for a folder containing 'kopia.repository' files"
+        return 1
+    fi
+
+    echo "✓ Found Kopia repository at: $KOPIA_REPO"
+    echo ""
+
+    # Step 2: Get Kopia password
+    echo "Step 2: Kopia password"
+    echo "━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Try to find password in backed-up .env
+    if [ -f "$BACKUP_PATH/kopia/.env" ]; then
+        KOPIA_PASS=$(grep "KOPIA_PASSWORD" "$BACKUP_PATH/kopia/.env" 2>/dev/null | cut -d= -f2)
+        if [ -n "$KOPIA_PASS" ]; then
+            echo "Found password in backup. Use this? (y/n)"
+            read -p "> " USE_FOUND_PASS
+            [ "$USE_FOUND_PASS" != "y" ] && KOPIA_PASS=""
+        fi
+    fi
+
+    if [ -z "$KOPIA_PASS" ]; then
+        read -s -p "Enter Kopia repository password: " KOPIA_PASS
+        echo ""
+    fi
+
+    # Step 3: Install Docker if needed
+    echo ""
+    echo "Step 3: Ensure Docker is installed"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ! command -v docker &> /dev/null; then
+        echo "Installing Docker..."
+        apt-get update
+        apt-get install -y ca-certificates curl gnupg
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update
+        apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        usermod -aG docker "$ACTUAL_USER"
+        echo "✓ Docker installed"
+    else
+        echo "✓ Docker already installed"
+    fi
+    echo ""
+
+    # Step 4: List snapshots and let user choose
+    echo "Step 4: Select snapshot to restore"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Connecting to repository and listing snapshots..."
+    echo ""
+
+    # Use docker to run kopia
+    SNAPSHOT_LIST=$(docker run --rm \
+        -v "$KOPIA_REPO:/repository" \
+        -e KOPIA_PASSWORD="$KOPIA_PASS" \
+        kopia/kopia:latest \
+        snapshot list --all 2>&1)
+
+    if echo "$SNAPSHOT_LIST" | grep -q "invalid password"; then
+        echo "❌ Invalid password"
+        return 1
+    fi
+
+    echo "$SNAPSHOT_LIST"
+    echo ""
+    read -p "Enter snapshot ID to restore (or 'latest' for most recent): " SNAPSHOT_ID
+
+    if [ "$SNAPSHOT_ID" = "latest" ]; then
+        SNAPSHOT_ID=$(echo "$SNAPSHOT_LIST" | grep -oE "^[a-f0-9]+" | tail -1)
+        echo "Using latest snapshot: $SNAPSHOT_ID"
+    fi
+
+    # Step 5: Restore to temp location
+    echo ""
+    echo "Step 5: Restoring from backup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    RESTORE_TEMP="$ACTUAL_HOME/docker-restore-temp"
+    mkdir -p "$RESTORE_TEMP"
+
+    echo "Restoring to $RESTORE_TEMP..."
+    docker run --rm \
+        -v "$KOPIA_REPO:/repository" \
+        -v "$RESTORE_TEMP:/restore" \
+        -e KOPIA_PASSWORD="$KOPIA_PASS" \
+        kopia/kopia:latest \
+        restore "$SNAPSHOT_ID" /restore
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Restore failed"
+        return 1
+    fi
+    echo "✓ Snapshot restored to temp location"
+    echo ""
+
+    # Step 6: Detect and install services
+    echo "Step 6: Installing services from backup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    mkdir -p "$DOCKER_DIR"
+
+    # Find all docker-compose.yml files in restored backup
+    SERVICES_FOUND=()
+    for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
+        SERVICE_DIR=$(dirname "$compose_file")
+        SERVICE_NAME=$(basename "$SERVICE_DIR")
+        SERVICES_FOUND+=("$SERVICE_NAME")
+    done
+
+    if [ ${#SERVICES_FOUND[@]} -eq 0 ]; then
+        echo "No Docker services found in backup"
+        # Check if backup is the docker folder itself
+        if [ -f "$RESTORE_TEMP/docker-compose.yml" ]; then
+            echo "Found docker-compose.yml at root - checking structure..."
+        fi
+    else
+        echo "Found ${#SERVICES_FOUND[@]} services in backup:"
+        for svc in "${SERVICES_FOUND[@]}"; do
+            echo "  • $svc"
+        done
+        echo ""
+
+        read -p "Restore all services? (y/n): " RESTORE_ALL
+
+        if [ "$RESTORE_ALL" = "y" ] || [ "$RESTORE_ALL" = "Y" ]; then
+            for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
+                SERVICE_DIR=$(dirname "$compose_file")
+                SERVICE_NAME=$(basename "$SERVICE_DIR")
+                TARGET_DIR="$DOCKER_DIR/$SERVICE_NAME"
+
+                echo "Restoring $SERVICE_NAME..."
+
+                # Copy entire service directory
+                cp -r "$SERVICE_DIR" "$TARGET_DIR" 2>/dev/null || true
+
+                # Fix ownership
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TARGET_DIR" 2>/dev/null || true
+
+                echo "  ✓ $SERVICE_NAME restored to $TARGET_DIR"
+            done
+        fi
+    fi
+
+    # Step 7: Start services
+    echo ""
+    echo "Step 7: Starting services"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    read -p "Start all restored services now? (y/n): " START_ALL
+
+    if [ "$START_ALL" = "y" ] || [ "$START_ALL" = "Y" ]; then
+        for dir in "$DOCKER_DIR"/*/; do
+            if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
+                SERVICE_NAME=$(basename "$dir")
+                echo "Starting $SERVICE_NAME..."
+                (cd "$dir" && docker compose up -d 2>/dev/null) || echo "  ⚠ Failed to start $SERVICE_NAME"
+            fi
+        done
+    fi
+
+    # Cleanup
+    echo ""
+    read -p "Remove temporary restore files? (y/n): " CLEANUP
+    if [ "$CLEANUP" = "y" ]; then
+        rm -rf "$RESTORE_TEMP"
+        echo "✓ Cleaned up temp files"
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DISASTER RECOVERY COMPLETE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Services restored to: $DOCKER_DIR"
+    echo ""
+    echo "To check running containers:"
+    echo "  docker ps"
+    echo ""
+    echo "To view logs:"
+    echo "  docker compose logs -f"
+    echo ""
+    echo "⚠️  Some services may need manual configuration:"
+    echo "  • Frigate: Edit config/config.yml with camera URLs"
+    echo "  • Caddy: Update Caddyfile with your domain"
+    echo "  • ddclient: Edit config/ddclient.conf with DNS credentials"
+    echo ""
+
+    return 0
+}
+
+# Check for restore mode flag
+if [ "$RESTORE_MODE" = true ]; then
+    run_disaster_recovery
+    exit $?
+fi
+
+# Interactive mode selector (if not unattended)
+if [ "$UNATTENDED" != true ]; then
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "INSTALLATION MODE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "  [N] Normal install - Fresh install or modify existing"
+    echo "  [R] Disaster recovery - Restore from Kopia backup"
+    echo ""
+    read -p "Select mode (N/R) [N]: " MODE_SELECT
+
+    case "${MODE_SELECT^^}" in
+        R)
+            run_disaster_recovery
+            exit $?
+            ;;
+        *)
+            INSTALL_MODE="normal"
+            ;;
+    esac
+    echo ""
+fi
 
 # ============================================================================
 # SOFTWARE DETECTION FUNCTIONS
@@ -1876,10 +2176,12 @@ JELLYFIN_ENV
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FRIGATE_DIR"
         else
-            mkdir -p "$FRIGATE_DIR"
-            cd "$FRIGATE_DIR"
+            # STEP 1: Create directory and install docker-compose
+            mkdir -p "$FRIGATE_DIR" 2>/dev/null || true
+            cd "$FRIGATE_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
-            prompt_text "Path for recordings [default: $ACTUAL_HOME/drives/primary/frigate]:" "$ACTUAL_HOME/drives/primary/frigate" FRIGATE_PATH
+            # Default path
+            FRIGATE_PATH="$ACTUAL_HOME/drives/primary/frigate"
 
             cat > docker-compose.yml << FRIGATE_COMPOSE
 name: frigate
@@ -1909,28 +2211,35 @@ services:
       - "8555:8555/tcp"
       - "8555:8555/udp"
 FRIGATE_COMPOSE
+            echo "✓ Installed docker-compose.yml"
+
+            # STEP 2: Try to configure (uses defaults if fails)
+            prompt_text "Path for recordings [$FRIGATE_PATH]:" "$FRIGATE_PATH" FRIGATE_PATH 2>/dev/null || FRIGATE_PATH="$ACTUAL_HOME/drives/primary/frigate"
 
             cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_PATH
 FRIGATE_ENV
 
-            mkdir -p config
-            mkdir -p "$FRIGATE_PATH"
+            mkdir -p config 2>/dev/null || true
+            mkdir -p "$FRIGATE_PATH" 2>/dev/null || echo "  ⚠ Could not create $FRIGATE_PATH - create manually"
 
-            # Create basic config.yml
+            # Create template config
             cat > config/config.yml << 'FRIGATE_CONFIG'
+# Frigate Configuration
+# Docs: https://docs.frigate.video
+#
+# ⚠️  YOU MUST EDIT THIS FILE to add your cameras!
+
 mqtt:
   enabled: false
 
 cameras:
-  # Example camera - edit with your camera details
+  # EXAMPLE - Replace with your camera:
   # front_door:
   #   ffmpeg:
   #     inputs:
-  #       - path: rtsp://user:pass@camera-ip:554/stream
-  #         roles:
-  #           - detect
-  #           - record
+  #       - path: rtsp://user:pass@192.168.1.100:554/stream
+  #         roles: [detect, record]
   #   detect:
   #     width: 1280
   #     height: 720
@@ -1952,13 +2261,15 @@ snapshots:
     default: 7
 FRIGATE_CONFIG
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Frigate configured at $FRIGATE_DIR"
-            echo "  Start with: cd $FRIGATE_DIR && docker compose up -d"
-            echo "  Access at:  http://localhost:5000"
-            echo "  IMPORTANT: Edit config/config.yml to add your cameras!"
+            echo "✓ Frigate installed at $FRIGATE_DIR"
+            echo "  Start: cd $FRIGATE_DIR && docker compose up -d"
+            echo "  Access: http://localhost:5000"
+            echo ""
+            echo "  ⚠️  REQUIRED: Edit config/config.yml to add your cameras!"
+            echo "  Docs: https://docs.frigate.video"
             echo ""
         fi
     fi
@@ -1979,12 +2290,9 @@ FRIGATE_CONFIG
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $CADDY_DIR"
         else
-            mkdir -p "$CADDY_DIR"
-            cd "$CADDY_DIR"
-
-            # Ask for domain
-            echo ""
-            prompt_text "Your domain (e.g., example.com) [leave blank for local only]:" "" CADDY_DOMAIN
+            # STEP 1: Create directory and install docker-compose
+            mkdir -p "$CADDY_DIR" 2>/dev/null || true
+            cd "$CADDY_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'CADDY_COMPOSE'
 name: caddy
@@ -2011,14 +2319,18 @@ networks:
     name: caddy_net
     external: true
 CADDY_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
-            # Create .env file
+            # STEP 2: Try configuration (uses defaults if fails)
+            CADDY_DOMAIN=""
+            prompt_text "Your domain (e.g., example.com) [blank for local]:" "" CADDY_DOMAIN 2>/dev/null || CADDY_DOMAIN=""
+
             cat > .env << CADDY_ENV
 MY_DOMAIN=${CADDY_DOMAIN:-localhost}
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 CADDY_ENV
 
-            # Create Docker network for Caddy
+            # Create Docker network for Caddy (ignore if exists)
             docker network create caddy_net 2>/dev/null || true
 
             # Create comprehensive Caddyfile with all services
@@ -2138,23 +2450,17 @@ CADDY_ENV
 }
 CADDY_FILE
 
-            mkdir -p config data site
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR"
+            mkdir -p config data site 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Caddy configured at $CADDY_DIR"
-            echo "  Start with: cd $CADDY_DIR && docker compose up -d"
+            echo "✓ Caddy installed at $CADDY_DIR"
+            echo "  Start: cd $CADDY_DIR && docker compose up -d"
+            echo "  Domain: ${CADDY_DOMAIN:-localhost} (edit .env)"
+            echo "  Config: $CADDY_DIR/Caddyfile (uncomment services)"
             echo ""
-            echo "  Configuration:"
-            echo "    Domain:     ${CADDY_DOMAIN:-localhost} (edit .env to change)"
-            echo "    Caddyfile:  $CADDY_DIR/Caddyfile (uncomment services)"
-            echo "    Network:    caddy_net (add to other containers)"
-            echo ""
-            echo "  To add a container to Caddy network, add to its docker-compose.yml:"
-            echo "    networks:"
-            echo "      default:"
-            echo "        name: caddy_net"
-            echo "        external: true"
+            echo "  ⚠️  Containers must be on 'caddy_net' network"
+            echo "  Docs: https://caddyserver.com/docs/"
             echo ""
         fi
     fi
@@ -2175,8 +2481,9 @@ CADDY_FILE
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $DDCLIENT_DIR"
         else
-            mkdir -p "$DDCLIENT_DIR"
-            cd "$DDCLIENT_DIR"
+            # STEP 1: Install docker-compose
+            mkdir -p "$DDCLIENT_DIR" 2>/dev/null || true
+            cd "$DDCLIENT_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'DDCLIENT_COMPOSE'
 name: ddclient
@@ -2194,24 +2501,26 @@ services:
     volumes:
       - ./config:/config
 DDCLIENT_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
             cat > .env << DDCLIENT_ENV
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 DDCLIENT_ENV
 
-            mkdir -p config
+            mkdir -p config 2>/dev/null || true
 
-            # Create example ddclient.conf
+            # Create template config
             cat > config/ddclient.conf << 'DDCLIENT_CONF'
 # ddclient configuration
-# Uncomment and edit the section for your DNS provider
+# ⚠️  YOU MUST EDIT THIS FILE!
+# Uncomment and edit for your DNS provider
 
 daemon=300
 syslog=yes
 pid=/var/run/ddclient/ddclient.pid
 ssl=yes
 
-# Example: Cloudflare
+# Cloudflare example:
 # use=web, web=cloudflare
 # protocol=cloudflare
 # zone=example.com
@@ -2219,19 +2528,21 @@ ssl=yes
 # password=your-api-token
 # example.com
 
-# Example: DuckDNS
+# DuckDNS example:
 # use=web
 # protocol=duckdns
 # password=your-duckdns-token
 # yourdomain.duckdns.org
 DDCLIENT_CONF
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DDCLIENT_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DDCLIENT_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ ddclient configured at $DDCLIENT_DIR"
-            echo "  IMPORTANT: Edit config/ddclient.conf with your DNS provider settings!"
-            echo "  Start with: cd $DDCLIENT_DIR && docker compose up -d"
+            echo "✓ ddclient installed at $DDCLIENT_DIR"
+            echo "  Start: cd $DDCLIENT_DIR && docker compose up -d"
+            echo ""
+            echo "  ⚠️  REQUIRED: Edit config/ddclient.conf first!"
+            echo "  Docs: https://ddclient.net/"
             echo ""
         fi
     fi
@@ -2595,37 +2906,9 @@ FMD_ENV
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FN_DIR"
         else
-            mkdir -p "$FN_DIR"
-            cd "$FN_DIR"
-
-            # Check if Frigate and ntfy are being installed
-            FRIGATE_URL="http://frigate:5000"
-            NTFY_URL=""
-            NTFY_TOPIC=""
-
-            echo ""
-            echo "Frigate-Notify needs to connect to Frigate and a notification service."
-            echo ""
-
-            # Ask for Frigate URL
-            if [ -d "$DOCKER_DIR/frigate" ]; then
-                echo "  Frigate detected at $DOCKER_DIR/frigate"
-                prompt_text "Frigate URL [default: http://frigate:5000]:" "http://frigate:5000" FRIGATE_URL
-            else
-                prompt_text "Frigate URL (e.g., http://192.168.1.100:5000):" "" FRIGATE_URL
-            fi
-
-            # Ask for ntfy configuration
-            echo ""
-            echo "Notification service (ntfy recommended - free, self-hosted):"
-            if [ -d "$DOCKER_DIR/ntfy" ]; then
-                echo "  ntfy detected at $DOCKER_DIR/ntfy"
-                prompt_text "ntfy server URL [default: http://ntfy:80]:" "http://ntfy:80" NTFY_URL
-            else
-                prompt_text "ntfy server URL (e.g., https://ntfy.sh or http://localhost:8090):" "https://ntfy.sh" NTFY_URL
-            fi
-
-            prompt_text "ntfy topic name [default: frigate-alerts]:" "frigate-alerts" NTFY_TOPIC
+            # STEP 1: Create directory and docker-compose (always succeeds)
+            mkdir -p "$FN_DIR" 2>/dev/null || true
+            cd "$FN_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'FN_COMPOSE'
 name: frigate-notify
@@ -2639,104 +2922,68 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
 FN_COMPOSE
+            echo "✓ Installed docker-compose.yml"
 
-            # Create config file
+            # STEP 2: Try configuration (uses defaults if prompts fail)
+            echo ""
+            echo "Attempting auto-configuration..."
+
+            # Set smart defaults based on what's installed
+            FRIGATE_URL="http://frigate:5000"
+            NTFY_URL="https://ntfy.sh"
+            NTFY_TOPIC="frigate-alerts"
+
+            [ -d "$DOCKER_DIR/frigate" ] && echo "  ✓ Frigate detected" || echo "  ⚠ Frigate not found (using default URL)"
+            [ -d "$DOCKER_DIR/ntfy" ] && { NTFY_URL="http://ntfy:80"; echo "  ✓ ntfy detected"; } || echo "  ⚠ ntfy not found (using ntfy.sh)"
+
+            # Try prompts, use defaults if they fail
+            echo ""
+            prompt_text "Frigate URL [$FRIGATE_URL]:" "$FRIGATE_URL" FRIGATE_URL 2>/dev/null || FRIGATE_URL="http://frigate:5000"
+            prompt_text "ntfy server [$NTFY_URL]:" "$NTFY_URL" NTFY_URL 2>/dev/null || NTFY_URL="https://ntfy.sh"
+            prompt_text "ntfy topic [frigate-alerts]:" "frigate-alerts" NTFY_TOPIC 2>/dev/null || NTFY_TOPIC="frigate-alerts"
+
+            # Create config (template with user values or defaults)
             cat > config.yml << FN_CONFIG
 # Frigate-Notify Configuration
-# Documentation: https://frigate-notify.0x2142.com
+# Docs: https://frigate-notify.0x2142.com
+#
+# ⚠️  YOU MAY NEED TO EDIT THIS FILE!
+# If notifications don't work, check:
+#   - Frigate server URL is correct
+#   - ntfy server is reachable
+#   - Containers are on same Docker network
 
 frigate:
   server: $FRIGATE_URL
-  # WebAPI mode (recommended) - polls Frigate API
   webapi:
     enabled: true
     interval: 30
-  # Uncomment for MQTT mode instead:
-  # mqtt:
-  #   enabled: true
-  #   server: mqtt://mosquitto:1883
 
 alerts:
-  # General settings
   general:
-    # Send test notification on startup
     send_startup_message: true
-
-  # Zones to monitor (empty = all zones)
-  zones:
-    # - front_yard
-    # - driveway
-
-  # Labels to alert on
   labels:
     - person
     - car
     # - dog
-    # - cat
     # - package
 
-  # Quiet hours (no notifications)
-  # quiet:
-  #   start: "22:00"
-  #   end: "07:00"
-
 notifiers:
-  # ntfy (recommended - free, simple)
   - name: ntfy
     enabled: true
     provider: ntfy
     config:
       server: $NTFY_URL
       topic: $NTFY_TOPIC
-      # Uncomment for auth:
-      # token: your-ntfy-token
-
-  # Uncomment for additional notifiers:
-  # - name: discord
-  #   enabled: false
-  #   provider: discord
-  #   config:
-  #     webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK
-
-  # - name: pushover
-  #   enabled: false
-  #   provider: pushover
-  #   config:
-  #     token: your-app-token
-  #     userkey: your-user-key
-
-  # - name: gotify
-  #   enabled: false
-  #   provider: gotify
-  #   config:
-  #     server: http://gotify:80
-  #     token: your-gotify-token
 FN_CONFIG
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FN_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FN_DIR" 2>/dev/null || true
 
             echo ""
-            echo "✓ Frigate-Notify configured at $FN_DIR"
-            echo "  Start with: cd $FN_DIR && docker compose up -d"
-            echo ""
-            echo "  Configuration:"
-            echo "    Frigate:  $FRIGATE_URL"
-            echo "    ntfy:     $NTFY_URL"
-            echo "    Topic:    $NTFY_TOPIC"
-            echo ""
-            echo "  Edit config.yml to customize:"
-            echo "    - Which labels trigger alerts (person, car, dog...)"
-            echo "    - Quiet hours for no notifications"
-            echo "    - Additional notification services"
-            echo ""
-            if [[ "$NTFY_URL" == *"ntfy.sh"* ]]; then
-                echo "  ⚠️  Using public ntfy.sh - anyone can subscribe to your topic!"
-                echo "      Consider self-hosting ntfy for privacy."
-                echo ""
-            fi
-            echo "  Subscribe to alerts:"
-            echo "    Mobile: Install ntfy app → Add topic '$NTFY_TOPIC'"
-            echo "    Web:    ${NTFY_URL}/${NTFY_TOPIC}"
+            echo "✓ Frigate-Notify installed at $FN_DIR"
+            echo "  Start: cd $FN_DIR && docker compose up -d"
+            echo "  Config: $FN_DIR/config.yml (edit if needed)"
+            echo "  Docs: https://frigate-notify.0x2142.com"
             echo ""
         fi
     fi
@@ -2906,49 +3153,6 @@ RESTORE_SCRIPT
             echo ""
             echo "  ⚠️  SAVE YOUR KOPIA PASSWORD! Without it, backups cannot be restored."
             echo ""
-        fi
-    fi
-
-    # ============================================================================
-    # IMPORT/RESTORE CONTAINERS
-    # ============================================================================
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "IMPORT CONTAINERS FROM BACKUP"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "If you have a previous Kopia backup, you can import/restore your"
-    echo "Docker containers from a backup drive."
-    echo ""
-    prompt_yn "Import containers from a Kopia backup? (y/n):" "n" IMPORT_CONTAINERS
-
-    if [ "$IMPORT_CONTAINERS" = "y" ] || [ "$IMPORT_CONTAINERS" = "Y" ]; then
-        if [ "$DRY_RUN" = true ]; then
-            echo "[DRY-RUN] Would prompt for backup location and restore containers"
-        else
-            echo ""
-            prompt_text "Path to Kopia repository [e.g., /home/user/drives/backup1/kopia-repo]:" "" IMPORT_REPO
-
-            if [ -d "$IMPORT_REPO" ]; then
-                echo ""
-                echo "Repository found. To restore:"
-                echo ""
-                echo "1. Start Kopia with this repository:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia repository connect filesystem --path=/repository"
-                echo ""
-                echo "2. List available snapshots:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository kopia/kopia snapshot list"
-                echo ""
-                echo "3. Restore a snapshot:"
-                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia restore <snapshot-id> /restore"
-                echo ""
-                echo "4. Start your containers:"
-                echo "   for dir in ~/docker/*/; do (cd \"\$dir\" && docker compose up -d); done"
-                echo ""
-            else
-                echo "Repository not found at $IMPORT_REPO"
-                echo "Make sure your backup drive is mounted and try again."
-            fi
         fi
     fi
 
