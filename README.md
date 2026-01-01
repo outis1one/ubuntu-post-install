@@ -91,6 +91,18 @@ Install containerized applications to `~/docker/{appname}/`:
 - **Mealie** - Recipe manager & meal planner
 - **Minecraft Server** - Fabric server with configurable RAM limit
 - **linux-to-sync** - Private repository setup
+- **Jellyfin** - Free media server (alternative to Emby)
+- **Frigate** - NVR with AI object detection
+- **Caddy** - Reverse proxy with automatic HTTPS
+- **ddclient** - Dynamic DNS updater
+- **ntfy** - Self-hosted push notifications
+- **Uptime Kuma** - Service uptime monitoring
+- **wg-easy** - WireGuard VPN with web UI
+- **Traccar** - GPS tracking server
+- **Portainer** - Docker management UI
+
+### Container Backup & Restore (Kopia)
+Backup all Docker container data (configs, databases, app data) to your backup drives for disaster recovery. Includes restore functionality to recover containers after OS drive failure.
 
 ### Backup System (Optional)
 
@@ -549,12 +561,44 @@ docker compose up -d
 | Immich | 2283 | http://localhost:2283 |
 | Audiobookshelf | 13378 | http://localhost:13378 |
 | Emby | 8096 | http://localhost:8096 |
+| Jellyfin | 8097 | http://localhost:8097 |
 | A.R.M. | 8080 | http://localhost:8080 |
 | Filebrowser | 8085 | http://localhost:8085 |
 | Magic Mirror | 8081-8083 | http://localhost:808X |
 | Lyrion (LMS) | 9000 | http://localhost:9000 |
 | Mealie | 9925 | http://localhost:9925 |
 | Minecraft | 25565 | localhost:25565 |
+| Frigate | 5000 | http://localhost:5000 |
+| Caddy | 80, 443 | http://localhost |
+| ntfy | 8090 | http://localhost:8090 |
+| Uptime Kuma | 3001 | http://localhost:3001 |
+| wg-easy | 51821 | http://localhost:51821 |
+| Traccar | 8082 | http://localhost:8082 |
+| Portainer | 9443 | https://localhost:9443 |
+
+### Container Backup & Restore (Kopia)
+
+Backup all Docker container data to your backup drives for disaster recovery.
+
+**Run Container Backup:**
+```bash
+~/docker/kopia/backup-containers.sh
+```
+
+**Restore Containers (after OS drive failure):**
+```bash
+~/docker/kopia/restore-containers.sh
+```
+
+**What Gets Backed Up:**
+- All container configs and databases
+- Immich facial recognition data and memories
+- Emby/Jellyfin metadata and watch history
+- Minecraft worlds, mods, and permissions
+- Mealie recipes, Audiobookshelf progress
+- All application state and settings
+
+**Kopia Repository Location:** Your backup drive(s) in `~/drives/backupX/container-backups/`
 
 ### Private Repository (linux-to-sync)
 
@@ -900,6 +944,18 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.5**: Additional Docker apps and container backup
+  - Added Jellyfin (free media server with hardware acceleration)
+  - Added Frigate NVR (AI-powered object detection)
+  - Added Caddy (reverse proxy with automatic HTTPS)
+  - Added ddclient (dynamic DNS updater)
+  - Added ntfy (self-hosted push notifications)
+  - Added Uptime Kuma (service monitoring)
+  - Added wg-easy (WireGuard with web UI)
+  - Added Traccar (GPS tracking server)
+  - Added Portainer (Docker management UI)
+  - Added Kopia backup for all Docker containers
+  - Added container import/restore for disaster recovery
 - **v2.4**: Self-hosted Docker applications
   - Added Immich (photo/video backup)
   - Added Audiobookshelf (audiobook server)

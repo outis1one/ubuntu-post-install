@@ -1795,6 +1795,833 @@ MC_ENV
         fi
     fi
 
+    # ---- JELLYFIN (Alternative to Emby) ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ JELLYFIN - Free media server (alternative to Emby)              │"
+    echo "│ Stream movies, TV, music. No premium features locked.           │"
+    echo "│ Port: 8096                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Jellyfin? (y/n):" "n" INSTALL_JELLYFIN
+
+    if [ "$INSTALL_JELLYFIN" = "y" ] || [ "$INSTALL_JELLYFIN" = "Y" ]; then
+        echo "Installing Jellyfin..."
+        JELLYFIN_DIR="$DOCKER_DIR/jellyfin"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $JELLYFIN_DIR"
+        else
+            mkdir -p "$JELLYFIN_DIR"
+            cd "$JELLYFIN_DIR"
+
+            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+
+            # Get render group ID for hardware acceleration
+            RENDER_GID=$(getent group render | cut -d: -f3 2>/dev/null || echo "989")
+
+            cat > docker-compose.yml << JELLYFIN_COMPOSE
+name: jellyfin
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    hostname: jellyfin
+    restart: unless-stopped
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "$RENDER_GID"
+    volumes:
+      - ./config:/config
+      - ./cache:/cache
+      - \${MEDIA_PATH}:/media:ro
+    ports:
+      - "8096:8096"
+      - "1900:1900/udp"
+      - "7359:7359/udp"
+JELLYFIN_COMPOSE
+
+            cat > .env << JELLYFIN_ENV
+MEDIA_PATH=$MEDIA_PATH
+JELLYFIN_ENV
+
+            mkdir -p config cache
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$JELLYFIN_DIR"
+
+            echo ""
+            echo "✓ Jellyfin configured at $JELLYFIN_DIR"
+            echo "  Start with: cd $JELLYFIN_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8096"
+            echo "  Note: Hardware acceleration enabled (Intel GPU)"
+            echo ""
+        fi
+    fi
+
+    # ---- FRIGATE NVR ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FRIGATE - AI-powered NVR for security cameras                   │"
+    echo "│ Object detection, recordings, 24/7 monitoring.                  │"
+    echo "│ Port: 5000 (web), 8554 (RTSP), 8555 (WebRTC)                    │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Frigate? (y/n):" "n" INSTALL_FRIGATE
+
+    if [ "$INSTALL_FRIGATE" = "y" ] || [ "$INSTALL_FRIGATE" = "Y" ]; then
+        echo "Installing Frigate..."
+        FRIGATE_DIR="$DOCKER_DIR/frigate"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $FRIGATE_DIR"
+        else
+            mkdir -p "$FRIGATE_DIR"
+            cd "$FRIGATE_DIR"
+
+            prompt_text "Path for recordings [default: $ACTUAL_HOME/drives/primary/frigate]:" "$ACTUAL_HOME/drives/primary/frigate" FRIGATE_PATH
+
+            cat > docker-compose.yml << FRIGATE_COMPOSE
+name: frigate
+
+services:
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: frigate
+    hostname: frigate
+    restart: unless-stopped
+    privileged: true
+    shm_size: "256mb"
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    volumes:
+      - ./config:/config
+      - \${FRIGATE_MEDIA}:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "5000:5000"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+FRIGATE_COMPOSE
+
+            cat > .env << FRIGATE_ENV
+FRIGATE_MEDIA=$FRIGATE_PATH
+FRIGATE_ENV
+
+            mkdir -p config
+            mkdir -p "$FRIGATE_PATH"
+
+            # Create basic config.yml
+            cat > config/config.yml << 'FRIGATE_CONFIG'
+mqtt:
+  enabled: false
+
+cameras:
+  # Example camera - edit with your camera details
+  # front_door:
+  #   ffmpeg:
+  #     inputs:
+  #       - path: rtsp://user:pass@camera-ip:554/stream
+  #         roles:
+  #           - detect
+  #           - record
+  #   detect:
+  #     width: 1280
+  #     height: 720
+  #     fps: 5
+
+detectors:
+  default:
+    type: cpu
+
+record:
+  enabled: true
+  retain:
+    days: 7
+    mode: motion
+
+snapshots:
+  enabled: true
+  retain:
+    default: 7
+FRIGATE_CONFIG
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
+
+            echo ""
+            echo "✓ Frigate configured at $FRIGATE_DIR"
+            echo "  Start with: cd $FRIGATE_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:5000"
+            echo "  IMPORTANT: Edit config/config.yml to add your cameras!"
+            echo ""
+        fi
+    fi
+
+    # ---- CADDY REVERSE PROXY ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ CADDY - Automatic HTTPS reverse proxy                           │"
+    echo "│ Route domains to containers with automatic SSL certificates.    │"
+    echo "│ Ports: 80, 443                                                  │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY
+
+    if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+        echo "Installing Caddy..."
+        CADDY_DIR="$DOCKER_DIR/caddy"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $CADDY_DIR"
+        else
+            mkdir -p "$CADDY_DIR"
+            cd "$CADDY_DIR"
+
+            cat > docker-compose.yml << 'CADDY_COMPOSE'
+name: caddy
+
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    hostname: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config:/config
+      - ./data:/data
+      - ./site:/srv
+
+networks:
+  default:
+    name: caddy_net
+    external: true
+CADDY_COMPOSE
+
+            # Create Docker network for Caddy
+            docker network create caddy_net 2>/dev/null || true
+
+            # Create example Caddyfile
+            cat > Caddyfile << 'CADDY_FILE'
+# Caddy reverse proxy configuration
+# Replace example.com with your domain
+
+# Example: Reverse proxy to Immich
+# immich.example.com {
+#     reverse_proxy immich_server:2283
+# }
+
+# Example: Reverse proxy to Jellyfin
+# jellyfin.example.com {
+#     reverse_proxy jellyfin:8096
+# }
+
+# Example: Simple file server
+# files.example.com {
+#     root * /srv
+#     file_server browse
+# }
+
+# Localhost catch-all (for testing)
+:80 {
+    respond "Caddy is running! Edit Caddyfile to add your sites."
+}
+CADDY_FILE
+
+            mkdir -p config data site
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR"
+
+            echo ""
+            echo "✓ Caddy configured at $CADDY_DIR"
+            echo "  Start with: cd $CADDY_DIR && docker compose up -d"
+            echo "  Edit Caddyfile to add your reverse proxy rules"
+            echo "  Created 'caddy_net' Docker network for container routing"
+            echo ""
+        fi
+    fi
+
+    # ---- DDCLIENT DYNAMIC DNS ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ DDCLIENT - Dynamic DNS updater                                  │"
+    echo "│ Keep your domain pointing to your home IP.                      │"
+    echo "│ Supports: Cloudflare, DuckDNS, No-IP, and more.                 │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install ddclient? (y/n):" "n" INSTALL_DDCLIENT
+
+    if [ "$INSTALL_DDCLIENT" = "y" ] || [ "$INSTALL_DDCLIENT" = "Y" ]; then
+        echo "Installing ddclient..."
+        DDCLIENT_DIR="$DOCKER_DIR/ddclient"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $DDCLIENT_DIR"
+        else
+            mkdir -p "$DDCLIENT_DIR"
+            cd "$DDCLIENT_DIR"
+
+            cat > docker-compose.yml << 'DDCLIENT_COMPOSE'
+name: ddclient
+
+services:
+  ddclient:
+    image: lscr.io/linuxserver/ddclient:latest
+    container_name: ddclient
+    hostname: ddclient
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+    volumes:
+      - ./config:/config
+DDCLIENT_COMPOSE
+
+            cat > .env << DDCLIENT_ENV
+TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+DDCLIENT_ENV
+
+            mkdir -p config
+
+            # Create example ddclient.conf
+            cat > config/ddclient.conf << 'DDCLIENT_CONF'
+# ddclient configuration
+# Uncomment and edit the section for your DNS provider
+
+daemon=300
+syslog=yes
+pid=/var/run/ddclient/ddclient.pid
+ssl=yes
+
+# Example: Cloudflare
+# use=web, web=cloudflare
+# protocol=cloudflare
+# zone=example.com
+# login=token
+# password=your-api-token
+# example.com
+
+# Example: DuckDNS
+# use=web
+# protocol=duckdns
+# password=your-duckdns-token
+# yourdomain.duckdns.org
+DDCLIENT_CONF
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DDCLIENT_DIR"
+
+            echo ""
+            echo "✓ ddclient configured at $DDCLIENT_DIR"
+            echo "  IMPORTANT: Edit config/ddclient.conf with your DNS provider settings!"
+            echo "  Start with: cd $DDCLIENT_DIR && docker compose up -d"
+            echo ""
+        fi
+    fi
+
+    # ---- NTFY NOTIFICATIONS ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ NTFY - Push notifications server                                │"
+    echo "│ Send notifications from scripts to your phone.                  │"
+    echo "│ Port: 8090                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install ntfy? (y/n):" "n" INSTALL_NTFY
+
+    if [ "$INSTALL_NTFY" = "y" ] || [ "$INSTALL_NTFY" = "Y" ]; then
+        echo "Installing ntfy..."
+        NTFY_DIR="$DOCKER_DIR/ntfy"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $NTFY_DIR"
+        else
+            mkdir -p "$NTFY_DIR"
+            cd "$NTFY_DIR"
+
+            cat > docker-compose.yml << 'NTFY_COMPOSE'
+name: ntfy
+
+services:
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    hostname: ntfy
+    restart: unless-stopped
+    command: serve
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ./cache:/var/cache/ntfy
+      - ./config:/etc/ntfy
+    ports:
+      - "8090:80"
+NTFY_COMPOSE
+
+            cat > .env << NTFY_ENV
+TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+NTFY_ENV
+
+            mkdir -p cache config
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$NTFY_DIR"
+
+            echo ""
+            echo "✓ ntfy configured at $NTFY_DIR"
+            echo "  Start with: cd $NTFY_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8090"
+            echo ""
+            echo "  Send notification: curl -d \"Hello!\" localhost:8090/mytopic"
+            echo "  Subscribe on phone: ntfy app → Add subscription → localhost:8090/mytopic"
+            echo ""
+        fi
+    fi
+
+    # ---- UPTIME KUMA ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ UPTIME KUMA - Service monitoring dashboard                      │"
+    echo "│ Monitor websites, servers, Docker containers.                   │"
+    echo "│ Port: 3001                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Uptime Kuma? (y/n):" "n" INSTALL_UPTIMEKUMA
+
+    if [ "$INSTALL_UPTIMEKUMA" = "y" ] || [ "$INSTALL_UPTIMEKUMA" = "Y" ]; then
+        echo "Installing Uptime Kuma..."
+        UPTIME_DIR="$DOCKER_DIR/uptime-kuma"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $UPTIME_DIR"
+        else
+            mkdir -p "$UPTIME_DIR"
+            cd "$UPTIME_DIR"
+
+            cat > docker-compose.yml << 'UPTIME_COMPOSE'
+name: uptime-kuma
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    hostname: uptime-kuma
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "3001:3001"
+UPTIME_COMPOSE
+
+            mkdir -p data
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPTIME_DIR"
+
+            echo ""
+            echo "✓ Uptime Kuma configured at $UPTIME_DIR"
+            echo "  Start with: cd $UPTIME_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:3001"
+            echo ""
+        fi
+    fi
+
+    # ---- WG-EASY (WireGuard with Web UI) ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ WG-EASY - WireGuard VPN with web management                     │"
+    echo "│ Easy WireGuard setup with QR codes for clients.                 │"
+    echo "│ Port: 51821 (web), 51820 (VPN)                                  │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install wg-easy? (y/n):" "n" INSTALL_WGEASY
+
+    if [ "$INSTALL_WGEASY" = "y" ] || [ "$INSTALL_WGEASY" = "Y" ]; then
+        echo "Installing wg-easy..."
+        WGEASY_DIR="$DOCKER_DIR/wg-easy"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $WGEASY_DIR"
+        else
+            mkdir -p "$WGEASY_DIR"
+            cd "$WGEASY_DIR"
+
+            # Get public IP or hostname
+            PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "your-public-ip")
+            WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+            prompt_text "Public IP or hostname for VPN [default: $PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
+
+            cat > docker-compose.yml << WGEASY_COMPOSE
+name: wg-easy
+
+services:
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy:latest
+    container_name: wg-easy
+    hostname: wg-easy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - WG_HOST=\${WG_HOST}
+      - PASSWORD=\${WG_PASSWORD}
+      - WG_DEFAULT_DNS=1.1.1.1
+    volumes:
+      - ./config:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
+WGEASY_COMPOSE
+
+            cat > .env << WGEASY_ENV
+WG_HOST=$WG_HOST
+WG_PASSWORD=$WG_PASSWORD
+WGEASY_ENV
+
+            mkdir -p config
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
+
+            echo ""
+            echo "✓ wg-easy configured at $WGEASY_DIR"
+            echo "  Start with: cd $WGEASY_DIR && docker compose up -d"
+            echo "  Web UI:     http://localhost:51821"
+            echo "  Password:   $WG_PASSWORD (saved in .env)"
+            echo "  VPN Port:   51820/udp (forward this in your router)"
+            echo ""
+        fi
+    fi
+
+    # ---- TRACCAR GPS TRACKING ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ TRACCAR - GPS tracking server                                   │"
+    echo "│ Track phones, vehicles, assets with OwnTracks/Traccar apps.     │"
+    echo "│ Port: 8082 (web), 5055 (OsmAnd), 5000+ (devices)                │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Traccar? (y/n):" "n" INSTALL_TRACCAR
+
+    if [ "$INSTALL_TRACCAR" = "y" ] || [ "$INSTALL_TRACCAR" = "Y" ]; then
+        echo "Installing Traccar..."
+        TRACCAR_DIR="$DOCKER_DIR/traccar"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $TRACCAR_DIR"
+        else
+            mkdir -p "$TRACCAR_DIR"
+            cd "$TRACCAR_DIR"
+
+            cat > docker-compose.yml << 'TRACCAR_COMPOSE'
+name: traccar
+
+services:
+  traccar:
+    image: traccar/traccar:latest
+    container_name: traccar
+    hostname: traccar
+    restart: unless-stopped
+    volumes:
+      - ./logs:/opt/traccar/logs:rw
+      - ./data:/opt/traccar/data:rw
+      - ./config/traccar.xml:/opt/traccar/conf/traccar.xml:ro
+    ports:
+      - "8082:8082"
+      - "5000-5150:5000-5150"
+      - "5000-5150:5000-5150/udp"
+TRACCAR_COMPOSE
+
+            mkdir -p logs data config
+
+            # Create basic traccar.xml config
+            cat > config/traccar.xml << 'TRACCAR_XML'
+<?xml version='1.0' encoding='UTF-8'?>
+
+<!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
+
+<properties>
+    <entry key='config.default'>./conf/default.xml</entry>
+    <entry key='database.driver'>org.h2.Driver</entry>
+    <entry key='database.url'>jdbc:h2:/opt/traccar/data/database</entry>
+    <entry key='database.user'>sa</entry>
+    <entry key='database.password'></entry>
+</properties>
+TRACCAR_XML
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
+
+            echo ""
+            echo "✓ Traccar configured at $TRACCAR_DIR"
+            echo "  Start with: cd $TRACCAR_DIR && docker compose up -d"
+            echo "  Access at:  http://localhost:8082"
+            echo "  Default:    admin@admin.com / admin (change immediately!)"
+            echo ""
+        fi
+    fi
+
+    # ---- PORTAINER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ PORTAINER - Docker management web UI                            │"
+    echo "│ Manage containers, images, volumes via browser.                 │"
+    echo "│ Port: 9443 (https), 9000 (http)                                 │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Portainer? (y/n):" "n" INSTALL_PORTAINER
+
+    if [ "$INSTALL_PORTAINER" = "y" ] || [ "$INSTALL_PORTAINER" = "Y" ]; then
+        echo "Installing Portainer..."
+        PORTAINER_DIR="$DOCKER_DIR/portainer"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $PORTAINER_DIR"
+        else
+            mkdir -p "$PORTAINER_DIR"
+            cd "$PORTAINER_DIR"
+
+            cat > docker-compose.yml << 'PORTAINER_COMPOSE'
+name: portainer
+
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    hostname: portainer
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+PORTAINER_COMPOSE
+
+            mkdir -p data
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PORTAINER_DIR"
+
+            echo ""
+            echo "✓ Portainer configured at $PORTAINER_DIR"
+            echo "  Start with: cd $PORTAINER_DIR && docker compose up -d"
+            echo "  Access at:  https://localhost:9443"
+            echo "  Create admin account on first visit"
+            echo ""
+        fi
+    fi
+
+    # ============================================================================
+    # KOPIA BACKUP FOR DOCKER CONTAINERS
+    # ============================================================================
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DOCKER CONTAINER BACKUP (Kopia)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Backup all Docker containers (configs, databases, app data) to your"
+    echo "backup drives. Essential for disaster recovery - if your OS drive"
+    echo "fails, you can restore everything including:"
+    echo "  • Immich memories, facial recognition data"
+    echo "  • Emby/Jellyfin metadata, watch history"
+    echo "  • Minecraft worlds, mods, permissions"
+    echo "  • All app configs, users, and databases"
+    echo ""
+    prompt_yn "Set up Kopia container backup? (y/n):" "n" INSTALL_KOPIA
+
+    if [ "$INSTALL_KOPIA" = "y" ] || [ "$INSTALL_KOPIA" = "Y" ]; then
+        echo "Installing Kopia backup..."
+        KOPIA_DIR="$DOCKER_DIR/kopia"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $KOPIA_DIR"
+        else
+            mkdir -p "$KOPIA_DIR"
+            cd "$KOPIA_DIR"
+
+            KOPIA_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+
+            echo ""
+            echo "Select backup destination(s):"
+            echo "  Backups will be stored in ~/drives/{backup-drive}/kopia-repo/"
+            echo ""
+
+            # List available backup drives
+            echo "Available mount points in ~/drives/:"
+            ls -1 "$ACTUAL_HOME/drives/" 2>/dev/null | grep -v "^primary$" || echo "  (none found - set up drives first)"
+            echo ""
+
+            prompt_text "Backup drive name [default: backup1]:" "backup1" KOPIA_BACKUP_DRIVE
+
+            KOPIA_REPO="$ACTUAL_HOME/drives/$KOPIA_BACKUP_DRIVE/kopia-repo"
+
+            cat > docker-compose.yml << KOPIA_COMPOSE
+name: kopia
+
+services:
+  kopia:
+    image: kopia/kopia:latest
+    container_name: kopia
+    hostname: kopia
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+      - KOPIA_PASSWORD=\${KOPIA_PASSWORD}
+    command: >
+      server start
+      --tls-generate-cert
+      --disable-csrf-token-checks
+      --address=0.0.0.0:51515
+      --server-username=admin
+      --server-password=\${KOPIA_PASSWORD}
+    volumes:
+      - ./config:/app/config
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - $DOCKER_DIR:/data/docker:ro
+      - $KOPIA_REPO:/repository
+      - ./tmp:/tmp:shared
+    ports:
+      - "51515:51515"
+KOPIA_COMPOSE
+
+            cat > .env << KOPIA_ENV
+KOPIA_PASSWORD=$KOPIA_PASSWORD
+KOPIA_ENV
+
+            mkdir -p config cache logs tmp
+            mkdir -p "$KOPIA_REPO"
+
+            # Create backup script
+            cat > backup-containers.sh << 'BACKUP_SCRIPT'
+#!/bin/bash
+# Backup all Docker containers using Kopia
+
+DOCKER_DIR="$HOME/docker"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+echo "=== Docker Container Backup: $TIMESTAMP ==="
+echo ""
+
+# Stop containers before backup for consistency (optional)
+read -p "Stop containers during backup for consistency? (y/n): " STOP_CONTAINERS
+
+if [ "$STOP_CONTAINERS" = "y" ]; then
+    echo "Stopping containers..."
+    for dir in "$DOCKER_DIR"/*/; do
+        if [ -f "$dir/docker-compose.yml" ]; then
+            echo "  Stopping $(basename $dir)..."
+            (cd "$dir" && docker compose stop) 2>/dev/null
+        fi
+    done
+fi
+
+echo ""
+echo "Running Kopia backup..."
+docker exec kopia kopia snapshot create /data/docker --description "Container backup $TIMESTAMP"
+
+if [ "$STOP_CONTAINERS" = "y" ]; then
+    echo ""
+    echo "Restarting containers..."
+    for dir in "$DOCKER_DIR"/*/; do
+        if [ -f "$dir/docker-compose.yml" ]; then
+            echo "  Starting $(basename $dir)..."
+            (cd "$dir" && docker compose start) 2>/dev/null
+        fi
+    done
+fi
+
+echo ""
+echo "=== Backup Complete ==="
+docker exec kopia kopia snapshot list /data/docker --max-results 5
+BACKUP_SCRIPT
+
+            # Create restore script
+            cat > restore-containers.sh << 'RESTORE_SCRIPT'
+#!/bin/bash
+# Restore Docker containers from Kopia backup
+
+echo "=== Docker Container Restore ==="
+echo ""
+echo "Available snapshots:"
+docker exec kopia kopia snapshot list /data/docker
+
+echo ""
+echo "To restore a specific snapshot:"
+echo "  docker exec kopia kopia restore <snapshot-id> /tmp/restore"
+echo "  Then copy files from ~/docker/kopia/tmp/restore/ to ~/docker/"
+echo ""
+echo "To mount snapshots for browsing:"
+echo "  docker exec kopia kopia mount all /tmp/mnt &"
+echo "  Then browse: ~/docker/kopia/tmp/mnt/"
+RESTORE_SCRIPT
+
+            chmod +x backup-containers.sh restore-containers.sh
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$KOPIA_DIR"
+
+            echo ""
+            echo "✓ Kopia backup configured at $KOPIA_DIR"
+            echo "  Start Kopia:    cd $KOPIA_DIR && docker compose up -d"
+            echo "  Web UI:         https://localhost:51515"
+            echo "  Username:       admin"
+            echo "  Password:       $KOPIA_PASSWORD (saved in .env)"
+            echo ""
+            echo "  Repository at:  $KOPIA_REPO"
+            echo ""
+            echo "  Backup now:     cd $KOPIA_DIR && ./backup-containers.sh"
+            echo "  Restore:        cd $KOPIA_DIR && ./restore-containers.sh"
+            echo ""
+            echo "  ⚠️  SAVE YOUR KOPIA PASSWORD! Without it, backups cannot be restored."
+            echo ""
+        fi
+    fi
+
+    # ============================================================================
+    # IMPORT/RESTORE CONTAINERS
+    # ============================================================================
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "IMPORT CONTAINERS FROM BACKUP"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "If you have a previous Kopia backup, you can import/restore your"
+    echo "Docker containers from a backup drive."
+    echo ""
+    prompt_yn "Import containers from a Kopia backup? (y/n):" "n" IMPORT_CONTAINERS
+
+    if [ "$IMPORT_CONTAINERS" = "y" ] || [ "$IMPORT_CONTAINERS" = "Y" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would prompt for backup location and restore containers"
+        else
+            echo ""
+            prompt_text "Path to Kopia repository [e.g., /home/user/drives/backup1/kopia-repo]:" "" IMPORT_REPO
+
+            if [ -d "$IMPORT_REPO" ]; then
+                echo ""
+                echo "Repository found. To restore:"
+                echo ""
+                echo "1. Start Kopia with this repository:"
+                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia repository connect filesystem --path=/repository"
+                echo ""
+                echo "2. List available snapshots:"
+                echo "   docker run -it --rm -v $IMPORT_REPO:/repository kopia/kopia snapshot list"
+                echo ""
+                echo "3. Restore a snapshot:"
+                echo "   docker run -it --rm -v $IMPORT_REPO:/repository -v $DOCKER_DIR:/restore kopia/kopia restore <snapshot-id> /restore"
+                echo ""
+                echo "4. Start your containers:"
+                echo "   for dir in ~/docker/*/; do (cd \"\$dir\" && docker compose up -d); done"
+                echo ""
+            else
+                echo "Repository not found at $IMPORT_REPO"
+                echo "Make sure your backup drive is mounted and try again."
+            fi
+        fi
+    fi
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "Docker applications configured in: $DOCKER_DIR"
