@@ -112,15 +112,41 @@ run_disaster_recovery() {
     echo "DISASTER RECOVERY MODE"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "This will restore your Docker apps and data from a Kopia backup."
+    echo "This will restore your system and Docker apps from a Kopia backup."
     echo ""
     echo "Requirements:"
     echo "  • Backup drive connected (with kopia-repo folder)"
     echo "  • Kopia password (saved in .env or you remember it)"
     echo ""
 
-    # Step 1: Find/mount backup drive
-    echo "Step 1: Locate backup drive"
+    # Step 1: Install core utilities
+    echo "Step 1: Installing core utilities"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Installing essential packages..."
+    apt-get update
+    apt-get install -y \
+        net-tools \
+        openssh-server \
+        git \
+        curl \
+        wget \
+        htop \
+        ncdu \
+        tree \
+        zip \
+        unzip \
+        whiptail \
+        2>/dev/null || echo "  ⚠ Some packages may have failed"
+
+    # Start SSH
+    systemctl enable ssh 2>/dev/null || true
+    systemctl start ssh 2>/dev/null || true
+    echo "✓ Core utilities installed"
+    echo ""
+
+    # Step 2: Find/mount backup drive
+    echo "Step 2: Locate backup drive"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "Available block devices:"
@@ -172,8 +198,8 @@ run_disaster_recovery() {
     echo "✓ Found Kopia repository at: $KOPIA_REPO"
     echo ""
 
-    # Step 2: Get Kopia password
-    echo "Step 2: Kopia password"
+    # Step 3: Get Kopia password
+    echo "Step 3: Kopia password"
     echo "━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
@@ -192,9 +218,9 @@ run_disaster_recovery() {
         echo ""
     fi
 
-    # Step 3: Install Docker if needed
+    # Step 4: Install Docker if needed
     echo ""
-    echo "Step 3: Ensure Docker is installed"
+    echo "Step 4: Ensure Docker is installed"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if ! command -v docker &> /dev/null; then
         echo "Installing Docker..."
@@ -213,8 +239,8 @@ run_disaster_recovery() {
     fi
     echo ""
 
-    # Step 4: List snapshots and let user choose
-    echo "Step 4: Select snapshot to restore"
+    # Step 5: List snapshots and let user choose
+    echo "Step 5: Select snapshot to restore"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "Connecting to repository and listing snapshots..."
@@ -241,9 +267,9 @@ run_disaster_recovery() {
         echo "Using latest snapshot: $SNAPSHOT_ID"
     fi
 
-    # Step 5: Restore to temp location
+    # Step 6: Restore to temp location
     echo ""
-    echo "Step 5: Restoring from backup"
+    echo "Step 6: Restoring from backup"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
@@ -265,43 +291,91 @@ run_disaster_recovery() {
     echo "✓ Snapshot restored to temp location"
     echo ""
 
-    # Step 6: Detect and install services
-    echo "Step 6: Installing services from backup"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    # Step 7: Detect and select services to restore
+    echo "Step 7: Select services to restore"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
     mkdir -p "$DOCKER_DIR"
 
     # Find all docker-compose.yml files in restored backup
+    declare -A SERVICE_DIRS
     SERVICES_FOUND=()
     for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
         SERVICE_DIR=$(dirname "$compose_file")
         SERVICE_NAME=$(basename "$SERVICE_DIR")
         SERVICES_FOUND+=("$SERVICE_NAME")
+        SERVICE_DIRS["$SERVICE_NAME"]="$SERVICE_DIR"
     done
 
     if [ ${#SERVICES_FOUND[@]} -eq 0 ]; then
         echo "No Docker services found in backup"
-        # Check if backup is the docker folder itself
-        if [ -f "$RESTORE_TEMP/docker-compose.yml" ]; then
-            echo "Found docker-compose.yml at root - checking structure..."
-        fi
     else
-        echo "Found ${#SERVICES_FOUND[@]} services in backup:"
-        for svc in "${SERVICES_FOUND[@]}"; do
-            echo "  • $svc"
-        done
+        echo "Found ${#SERVICES_FOUND[@]} services in backup."
         echo ""
 
-        read -p "Restore all services? (y/n): " RESTORE_ALL
+        # Check if whiptail is available for nice UI
+        if command -v whiptail &> /dev/null; then
+            # Build whiptail checklist arguments
+            CHECKLIST_ARGS=()
+            for svc in "${SERVICES_FOUND[@]}"; do
+                CHECKLIST_ARGS+=("$svc" "" "ON")
+            done
 
-        if [ "$RESTORE_ALL" = "y" ] || [ "$RESTORE_ALL" = "Y" ]; then
-            for compose_file in $(find "$RESTORE_TEMP" -name "docker-compose.yml" -o -name "compose.yml" 2>/dev/null); do
-                SERVICE_DIR=$(dirname "$compose_file")
-                SERVICE_NAME=$(basename "$SERVICE_DIR")
-                TARGET_DIR="$DOCKER_DIR/$SERVICE_NAME"
+            # Show checklist - returns selected items
+            SELECTED=$(whiptail --title "Select Services to Restore" \
+                --checklist "Use SPACE to select/deselect, ENTER to confirm:" \
+                20 60 12 \
+                "${CHECKLIST_ARGS[@]}" \
+                3>&1 1>&2 2>&3)
 
-                echo "Restoring $SERVICE_NAME..."
+            # Parse selected services (whiptail returns quoted strings)
+            SELECTED_SERVICES=()
+            for item in $SELECTED; do
+                # Remove quotes
+                svc=$(echo "$item" | tr -d '"')
+                SELECTED_SERVICES+=("$svc")
+            done
+        else
+            # Fallback: text-based selection
+            echo "Select services to restore:"
+            echo "  [A] All services"
+            echo "  [N] None (skip restore)"
+            echo "  [S] Select individually"
+            echo ""
+            read -p "Choice (A/N/S) [A]: " RESTORE_CHOICE
+
+            case "${RESTORE_CHOICE^^}" in
+                N)
+                    SELECTED_SERVICES=()
+                    ;;
+                S)
+                    SELECTED_SERVICES=()
+                    for svc in "${SERVICES_FOUND[@]}"; do
+                        read -p "  Restore $svc? (y/n) [y]: " RESTORE_SVC
+                        if [ "$RESTORE_SVC" != "n" ] && [ "$RESTORE_SVC" != "N" ]; then
+                            SELECTED_SERVICES+=("$svc")
+                        fi
+                    done
+                    ;;
+                *)
+                    SELECTED_SERVICES=("${SERVICES_FOUND[@]}")
+                    ;;
+            esac
+        fi
+
+        # Restore selected services
+        echo ""
+        if [ ${#SELECTED_SERVICES[@]} -eq 0 ]; then
+            echo "No services selected for restore."
+        else
+            echo "Restoring ${#SELECTED_SERVICES[@]} services..."
+            echo ""
+            for svc in "${SELECTED_SERVICES[@]}"; do
+                SERVICE_DIR="${SERVICE_DIRS[$svc]}"
+                TARGET_DIR="$DOCKER_DIR/$svc"
+
+                echo "  Restoring $svc..."
 
                 # Copy entire service directory
                 cp -r "$SERVICE_DIR" "$TARGET_DIR" 2>/dev/null || true
@@ -309,27 +383,62 @@ run_disaster_recovery() {
                 # Fix ownership
                 chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TARGET_DIR" 2>/dev/null || true
 
-                echo "  ✓ $SERVICE_NAME restored to $TARGET_DIR"
+                echo "    ✓ $svc restored to $TARGET_DIR"
             done
         fi
     fi
 
-    # Step 7: Start services
+    # Step 8: Start services
     echo ""
-    echo "Step 7: Starting services"
+    echo "Step 8: Starting services"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    read -p "Start all restored services now? (y/n): " START_ALL
+    # Count restored services
+    RESTORED_COUNT=0
+    for dir in "$DOCKER_DIR"/*/; do
+        if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
+            ((RESTORED_COUNT++))
+        fi
+    done
 
-    if [ "$START_ALL" = "y" ] || [ "$START_ALL" = "Y" ]; then
-        for dir in "$DOCKER_DIR"/*/; do
-            if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
-                SERVICE_NAME=$(basename "$dir")
-                echo "Starting $SERVICE_NAME..."
-                (cd "$dir" && docker compose up -d 2>/dev/null) || echo "  ⚠ Failed to start $SERVICE_NAME"
-            fi
-        done
+    if [ $RESTORED_COUNT -eq 0 ]; then
+        echo "No services to start."
+    else
+        echo "Start restored services?"
+        echo "  [A] All services"
+        echo "  [S] Select which to start"
+        echo "  [N] None (start manually later)"
+        echo ""
+        read -p "Choice (A/S/N) [A]: " START_CHOICE
+
+        case "${START_CHOICE^^}" in
+            N)
+                echo "Services not started. Start manually with:"
+                echo "  cd ~/docker/{service} && docker compose up -d"
+                ;;
+            S)
+                for dir in "$DOCKER_DIR"/*/; do
+                    if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
+                        SERVICE_NAME=$(basename "$dir")
+                        read -p "  Start $SERVICE_NAME? (y/n) [y]: " START_SVC
+                        if [ "$START_SVC" != "n" ] && [ "$START_SVC" != "N" ]; then
+                            echo "    Starting $SERVICE_NAME..."
+                            (cd "$dir" && docker compose up -d 2>/dev/null) || echo "    ⚠ Failed to start $SERVICE_NAME"
+                        fi
+                    fi
+                done
+                ;;
+            *)
+                for dir in "$DOCKER_DIR"/*/; do
+                    if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/compose.yml" ]; then
+                        SERVICE_NAME=$(basename "$dir")
+                        echo "  Starting $SERVICE_NAME..."
+                        (cd "$dir" && docker compose up -d 2>/dev/null) || echo "    ⚠ Failed to start $SERVICE_NAME"
+                    fi
+                done
+                ;;
+        esac
     fi
 
     # Cleanup
@@ -2828,6 +2937,79 @@ PORTAINER_COMPOSE
             echo "  Start with: cd $PORTAINER_DIR && docker compose up -d"
             echo "  Access at:  https://localhost:9443"
             echo "  Create admin account on first visit"
+            echo ""
+        fi
+    fi
+
+    # ---- MESHCENTRAL SERVER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ MESHCENTRAL SERVER - Self-hosted remote management             │"
+    echo "│ Full MeshCentral server (not just agent). Manage all devices.  │"
+    echo "│ Port: 4430 (https), 4433 (agent)                               │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install MeshCentral Server? (y/n):" "n" INSTALL_MESHCENTRAL_SERVER
+
+    if [ "$INSTALL_MESHCENTRAL_SERVER" = "y" ] || [ "$INSTALL_MESHCENTRAL_SERVER" = "Y" ]; then
+        echo "Installing MeshCentral Server..."
+        MC_DIR="$DOCKER_DIR/meshcentral"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $MC_DIR"
+        else
+            mkdir -p "$MC_DIR" 2>/dev/null || true
+            cd "$MC_DIR" 2>/dev/null || cd "$DOCKER_DIR"
+
+            cat > docker-compose.yml << 'MC_COMPOSE'
+name: meshcentral
+
+services:
+  meshcentral:
+    image: ghcr.io/ylianst/meshcentral:latest
+    container_name: meshcentral
+    hostname: meshcentral
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - HOSTNAME=${MC_HOSTNAME:-localhost}
+      - REVERSE_PROXY=${MC_REVERSE_PROXY:-false}
+      - REVERSE_PROXY_TLS_PORT=${MC_TLS_PORT:-443}
+      - IFRAME=false
+      - ALLOW_NEW_ACCOUNTS=true
+      - WEBRTC=true
+    volumes:
+      - ./data:/opt/meshcentral/meshcentral-data
+      - ./files:/opt/meshcentral/meshcentral-files
+      - ./backups:/opt/meshcentral/meshcentral-backups
+    ports:
+      - "4430:443"
+      - "4433:4433"
+MC_COMPOSE
+            echo "✓ Installed docker-compose.yml"
+
+            # Ask for hostname
+            echo ""
+            prompt_text "MeshCentral hostname (domain or IP) [localhost]:" "localhost" MC_HOSTNAME 2>/dev/null || MC_HOSTNAME="localhost"
+
+            cat > .env << MC_ENV
+MC_HOSTNAME=$MC_HOSTNAME
+MC_REVERSE_PROXY=false
+MC_TLS_PORT=443
+MC_ENV
+
+            mkdir -p data files backups 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR" 2>/dev/null || true
+
+            echo ""
+            echo "✓ MeshCentral Server installed at $MC_DIR"
+            echo "  Start: cd $MC_DIR && docker compose up -d"
+            echo "  Access: https://localhost:4430"
+            echo ""
+            echo "  First visit: Create admin account"
+            echo "  Then: Add devices → Download agent for each OS"
+            echo ""
+            echo "  ⚠️  For remote access, set MC_HOSTNAME in .env to your domain/IP"
+            echo "  Docs: https://meshcentral.com/docs/"
             echo ""
         fi
     fi
