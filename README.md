@@ -231,11 +231,15 @@ sudo ./ubuntu-post-install.sh --restore
 
 ### What the Recovery Does
 
-1. **Finds your backup drive** - Shows available drives, auto-detects Kopia repo
-2. **Installs Docker** - If not already installed
-3. **Lists snapshots** - Shows all available backups, lets you choose
-4. **Restores services** - Detects which apps were backed up, restores them all
-5. **Starts containers** - Optionally starts all services immediately
+1. **Installs core utilities** - openssh-server, git, curl, Kopia, etc.
+2. **Finds your backup drive** - Shows available drives, auto-detects Kopia repo
+3. **Gets Kopia password** - For repository access
+4. **Installs Docker** - If not already installed
+5. **Lists snapshots** - Shows all available backups, lets you choose
+6. **Restores from backup** - Extracts files to temp location
+7. **Selects services** - Whiptail checklist to pick which services to restore
+8. **Starts containers** - Optionally starts all services immediately
+9. **Reconnects Kopia** - Sets up ongoing backups to the same repository
 
 ### What Gets Restored
 
@@ -1044,12 +1048,14 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
-- **v2.9**: Immich photo library, Watchtower, documentation
+- **v2.9**: Immich photo library, Watchtower, recovery improvements
   - **Immich**: Now asks for photo storage location (default: `~/drives/primary/photos`)
   - **Immich**: External library support for existing photos (read-only, no duplication)
   - **Immich**: Storage template guidance for yyyy/mm folder organization
   - Added Watchtower for container update monitoring (notify-only by default)
   - Documented what Docker data lives where and what gets backed up
+  - **Recovery**: Now installs Kopia during recovery (Step 1)
+  - **Recovery**: Reconnects Kopia repository after restore (Step 9) for ongoing backups
 - **v2.8**: MeshCentral Server and improved recovery
   - Added MeshCentral Server (self-hosted remote management, web-based RDP/terminal)
   - Recovery mode now installs core utilities first (openssh-server, git, curl, etc.)
