@@ -139,6 +139,15 @@ run_disaster_recovery() {
         whiptail \
         2>/dev/null || echo "  ⚠ Some packages may have failed"
 
+    # Install Kopia for backup management
+    echo "Installing Kopia..."
+    if ! command -v kopia &> /dev/null; then
+        curl -s https://kopia.io/signing-key | gpg --dearmor -o /usr/share/keyrings/kopia-keyring.gpg 2>/dev/null
+        echo "deb [signed-by=/usr/share/keyrings/kopia-keyring.gpg] https://packages.kopia.io/apt/ stable main" | tee /etc/apt/sources.list.d/kopia.list
+        apt-get update
+        apt-get install -y kopia 2>/dev/null || echo "  ⚠ Kopia install failed"
+    fi
+
     # Start SSH
     systemctl enable ssh 2>/dev/null || true
     systemctl start ssh 2>/dev/null || true
@@ -449,12 +458,45 @@ run_disaster_recovery() {
         echo "✓ Cleaned up temp files"
     fi
 
+    # Step 9: Reconnect Kopia for future backups
+    echo ""
+    echo "Step 9: Setting up future backups"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Reconnecting Kopia to backup repository for future backups..."
+
+    if command -v kopia &> /dev/null && [ -n "$KOPIA_REPO" ]; then
+        # Reconnect to the repository
+        if kopia repository connect filesystem --path="$KOPIA_REPO" --password="$KOPIA_PASSWORD" 2>/dev/null; then
+            echo "✓ Kopia reconnected to repository"
+            echo "  Repository: $KOPIA_REPO"
+
+            # Verify backup scripts exist
+            if [ -f "$DOCKER_DIR/kopia/backup-containers.sh" ]; then
+                chmod +x "$DOCKER_DIR/kopia/backup-containers.sh" 2>/dev/null || true
+                echo "✓ Backup script ready: $DOCKER_DIR/kopia/backup-containers.sh"
+            else
+                echo "  ⚠ Backup script not found - run normal install to set up"
+            fi
+        else
+            echo "  ⚠ Could not reconnect to repository"
+            echo "  Run manually: kopia repository connect filesystem --path=\"$KOPIA_REPO\""
+        fi
+    else
+        echo "  ⚠ Kopia not available or repository not found"
+        echo "  Run the normal install script to set up backups"
+    fi
+    echo ""
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "DISASTER RECOVERY COMPLETE"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "Services restored to: $DOCKER_DIR"
+    echo ""
+    echo "Backups: $(command -v kopia &>/dev/null && kopia repository status &>/dev/null && echo "✓ Connected" || echo "⚠ Not connected")"
+    echo "  Run backups: $DOCKER_DIR/kopia/backup-containers.sh"
     echo ""
     echo "To check running containers:"
     echo "  docker ps"
