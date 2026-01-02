@@ -101,6 +101,7 @@ Install containerized applications to `~/docker/{appname}/`:
 - **wg-easy** - WireGuard VPN with web UI
 - **Traccar** - GPS tracking server
 - **Portainer** - Docker management UI
+- **MeshCentral Server** - Self-hosted remote management server
 - **FindMyDevice** - Self-hosted Android device tracking
 - **Frigate-Notify** - Push notifications for Frigate AI events
 
@@ -632,6 +633,7 @@ docker compose up -d
 | Traccar | 8082 | http://localhost:8082 |
 | Portainer | 9443 | https://localhost:9443 |
 | FindMyDevice | 8084 | http://localhost:8084 |
+| MeshCentral Server | 4430 | https://localhost:4430 |
 
 ### Container Backup & Restore (Kopia)
 
@@ -1034,6 +1036,11 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.8**: MeshCentral Server and improved recovery
+  - Added MeshCentral Server (self-hosted remote management, web-based RDP/terminal)
+  - Recovery mode now installs core utilities first (openssh-server, git, curl, etc.)
+  - Added whiptail checklist for service selection during restore (Ubuntu-server style)
+  - Recovery supports restoring some/none/all services instead of all-or-nothing
 - **v2.7**: Disaster recovery mode
   - **One-click restore** from Kopia backup after system failure
   - New `--restore` flag for disaster recovery mode
