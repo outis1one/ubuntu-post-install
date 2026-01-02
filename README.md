@@ -104,9 +104,15 @@ Install containerized applications to `~/docker/{appname}/`:
 - **MeshCentral Server** - Self-hosted remote management server
 - **FindMyDevice** - Self-hosted Android device tracking
 - **Frigate-Notify** - Push notifications for Frigate AI events
+- **Watchtower** - Container update monitoring (notify-only by default)
 
 ### Container Backup & Restore (Kopia)
 Backup all Docker container data (configs, databases, app data) to your backup drives for disaster recovery. Includes restore functionality to recover containers after OS drive failure.
+
+**What lives where:**
+- `~/docker/*/` (OS drive) - App configs, databases, compose files → **Backed up by Kopia**
+- `~/drives/primary/` (data drive) - Media files, photos, documents → **Backed up by rsync**
+- `/var/lib/docker/` (OS drive) - Container images, runtime state → **Not backed up** (re-pulled on restore)
 
 ### Backup System (Optional)
 
@@ -1036,6 +1042,12 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.9**: Immich photo library, Watchtower, documentation
+  - **Immich**: Now asks for photo storage location (default: `~/drives/primary/photos`)
+  - **Immich**: External library support for existing photos (read-only, no duplication)
+  - **Immich**: Storage template guidance for yyyy/mm folder organization
+  - Added Watchtower for container update monitoring (notify-only by default)
+  - Documented what Docker data lives where and what gets backed up
 - **v2.8**: MeshCentral Server and improved recovery
   - Added MeshCentral Server (self-hosted remote management, web-based RDP/terminal)
   - Recovery mode now installs core utilities first (openssh-server, git, curl, etc.)

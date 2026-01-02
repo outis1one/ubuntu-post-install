@@ -1442,14 +1442,34 @@ else
         echo "Installing Immich..."
         IMMICH_DIR="$DOCKER_DIR/immich"
 
+        # Default photo location
+        DEFAULT_PHOTO_DIR="$HOME_DIR/drives/primary/photos"
+
+        # Ask about photo storage location
+        echo ""
+        echo "Photo Storage Configuration:"
+        echo "  Immich can store photos on your data drive instead of the OS drive."
+        echo "  This keeps all photos in one place and makes backups simpler."
+        echo ""
+        echo "  Default: $DEFAULT_PHOTO_DIR"
+        echo "  (Press Enter to use default, or enter a custom path)"
+        echo ""
+        PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
+        prompt_text "Photo storage path:" "$DEFAULT_PHOTO_DIR" PHOTO_LOCATION 2>/dev/null || PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
+
+        # Expand ~ if used
+        PHOTO_LOCATION="${PHOTO_LOCATION/#\~/$HOME_DIR}"
+
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $IMMICH_DIR"
+            echo "[DRY-RUN] Would store photos at $PHOTO_LOCATION"
             echo "[DRY-RUN] Would create docker-compose.yml and .env"
         else
-            mkdir -p "$IMMICH_DIR"
-            cd "$IMMICH_DIR"
+            mkdir -p "$IMMICH_DIR" 2>/dev/null || true
+            mkdir -p "$PHOTO_LOCATION" 2>/dev/null || true
+            cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
-            # Create docker-compose.yml
+            # Create docker-compose.yml with external library support
             cat > docker-compose.yml << 'IMMICH_COMPOSE'
 name: immich
 
@@ -1458,7 +1478,10 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
+      # Main photo storage - new uploads go here
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      # External library - for existing photos (read-only by Immich)
+      - ${EXTERNAL_LIBRARY:-/dev/null}:/usr/src/app/external:ro
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
@@ -1516,8 +1539,31 @@ IMMICH_COMPOSE
 
             # Create .env file
             cat > .env << IMMICH_ENV
-# Immich Configuration
-UPLOAD_LOCATION=./library
+# ============================================================
+# IMMICH CONFIGURATION
+# ============================================================
+#
+# STORAGE TEMPLATE (configure in Immich web UI):
+#   Admin → Settings → Storage Template → Enable
+#   Template: {{y}}/{{MM}}/{{filename}}
+#   This organizes new uploads into: photos/2026/01/filename.jpg
+#
+# EXISTING PHOTOS:
+#   If you have existing photos, add them as an External Library:
+#   Admin → External Libraries → Create Library → Path: /usr/src/app/external
+#   Then scan the library to import them (read-only, no duplicates)
+#
+# ============================================================
+
+# Photo storage location (new uploads from phone/web)
+UPLOAD_LOCATION=$PHOTO_LOCATION
+
+# External library for existing photos (optional)
+# Set this to your existing photo folder to make them visible in Immich
+# They remain read-only - Immich won't modify or move them
+EXTERNAL_LIBRARY=$PHOTO_LOCATION
+
+# Database location (keep on fast storage)
 DB_DATA_LOCATION=./postgres
 
 IMMICH_VERSION=release
@@ -1529,12 +1575,26 @@ DB_DATABASE_NAME=immich
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 IMMICH_ENV
 
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR" 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PHOTO_LOCATION" 2>/dev/null || true
 
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
+            echo "  Photos stored at: $PHOTO_LOCATION"
+            echo ""
             echo "  Start with: cd $IMMICH_DIR && docker compose up -d"
             echo "  Access at:  http://localhost:2283"
+            echo ""
+            echo "  IMPORTANT - After first login, configure storage template:"
+            echo "    1. Go to Admin → Settings → Storage Template"
+            echo "    2. Enable storage template"
+            echo "    3. Set template to: {{y}}/{{MM}}/{{filename}}"
+            echo "    4. New uploads will be organized as: 2026/01/photo.jpg"
+            echo ""
+            echo "  For existing photos in $PHOTO_LOCATION:"
+            echo "    1. Go to Admin → External Libraries → Create Library"
+            echo "    2. Set import path to: /usr/src/app/external"
+            echo "    3. Scan library to import (photos stay in place, not duplicated)"
             echo ""
         fi
     fi
@@ -3166,6 +3226,127 @@ FN_CONFIG
             echo "  Start: cd $FN_DIR && docker compose up -d"
             echo "  Config: $FN_DIR/config.yml (edit if needed)"
             echo "  Docs: https://frigate-notify.0x2142.com"
+            echo ""
+        fi
+    fi
+
+    # ---- WATCHTOWER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ WATCHTOWER - Container update monitoring                        │"
+    echo "│ Monitor containers for updates. NOTIFY ONLY by default.         │"
+    echo "│ Why notify-only? Apps like Immich have breaking DB migrations.  │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Watchtower? (y/n):" "n" INSTALL_WATCHTOWER
+
+    if [ "$INSTALL_WATCHTOWER" = "y" ] || [ "$INSTALL_WATCHTOWER" = "Y" ]; then
+        echo "Installing Watchtower..."
+        WT_DIR="$DOCKER_DIR/watchtower"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $WT_DIR"
+        else
+            mkdir -p "$WT_DIR" 2>/dev/null || true
+            cd "$WT_DIR" 2>/dev/null || cd "$DOCKER_DIR"
+
+            # Ask about mode
+            echo ""
+            echo "Watchtower Mode:"
+            echo "  [M] Monitor only - Get notifications about available updates (SAFE)"
+            echo "  [A] Auto-update - Automatically pull and restart containers (RISKY)"
+            echo ""
+            echo "  ⚠️  Auto-update can break apps like Immich that need DB migrations!"
+            echo "  Recommendation: Use monitor mode, update manually when ready."
+            echo ""
+            WT_MODE="M"
+            prompt_text "Mode [M/A]:" "M" WT_MODE 2>/dev/null || WT_MODE="M"
+            WT_MODE=$(echo "$WT_MODE" | tr '[:lower:]' '[:upper:]')
+
+            if [ "$WT_MODE" = "A" ]; then
+                MONITOR_ONLY="false"
+                echo "  Mode: Auto-update (containers will be updated automatically)"
+            else
+                MONITOR_ONLY="true"
+                echo "  Mode: Monitor only (you'll be notified of updates)"
+            fi
+
+            # Check for ntfy
+            NTFY_URL=""
+            if [ -d "$DOCKER_DIR/ntfy" ]; then
+                echo "  ✓ ntfy detected - configuring notifications"
+                NTFY_URL="http://ntfy/watchtower"
+            fi
+
+            cat > docker-compose.yml << WT_COMPOSE
+name: watchtower
+
+services:
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    hostname: watchtower
+    restart: unless-stopped
+    environment:
+      # Check for updates daily at 4 AM
+      - WATCHTOWER_SCHEDULE=0 0 4 * * *
+      # Monitor only - don't auto-update (change to false for auto-update)
+      - WATCHTOWER_MONITOR_ONLY=${MONITOR_ONLY}
+      # Cleanup old images after update
+      - WATCHTOWER_CLEANUP=true
+      # Include stopped containers
+      - WATCHTOWER_INCLUDE_STOPPED=true
+      # Notification URL (ntfy, Discord, Slack, etc.)
+      - WATCHTOWER_NOTIFICATION_URL=${NOTIFICATION_URL:-}
+      # Show debug info
+      - WATCHTOWER_DEBUG=false
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+WT_COMPOSE
+
+            # Create .env
+            cat > .env << WT_ENV
+# Watchtower Configuration
+# =========================
+#
+# Monitor-only mode: Watchtower checks for updates but doesn't apply them.
+# This is SAFER because some apps (Immich, Mealie) have database migrations
+# that can break if you update without proper procedures.
+#
+# To update manually:
+#   cd ~/docker/{app}
+#   docker compose pull
+#   docker compose up -d
+
+# Set to "false" to enable auto-updates (RISKY!)
+MONITOR_ONLY=$MONITOR_ONLY
+
+# Notification URL (optional)
+# Examples:
+#   ntfy:    ntfy://ntfy.example.com/watchtower
+#   Discord: discord://token@id
+#   Slack:   slack://hook-url
+#   Gotify:  gotify://hostname/token
+#
+# Full list: https://containrrr.dev/shoutrrr/services/overview/
+NOTIFICATION_URL=$NTFY_URL
+WT_ENV
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WT_DIR" 2>/dev/null || true
+
+            echo ""
+            echo "✓ Watchtower installed at $WT_DIR"
+            echo "  Start: cd $WT_DIR && docker compose up -d"
+            echo "  Mode: $([ "$MONITOR_ONLY" = "true" ] && echo "Monitor only" || echo "Auto-update")"
+            echo ""
+            echo "  Checks for updates daily at 4 AM."
+            if [ -n "$NTFY_URL" ]; then
+                echo "  Notifications: $NTFY_URL"
+            else
+                echo "  Configure NOTIFICATION_URL in .env for alerts."
+            fi
+            echo ""
+            echo "  To exclude a container from Watchtower:"
+            echo "    Add label: com.centurylinklabs.watchtower.enable=false"
             echo ""
         fi
     fi
