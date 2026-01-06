@@ -720,44 +720,129 @@ run_migration() {
         echo ""
     fi
 
-    # Step 5: Copy containers
-    echo "Step 5: Migrating containers"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    # Step 5: Decide migration method
+    echo "Step 5: Migration method"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    # Create target directory
-    mkdir -p "$DOCKER_DIR"
-    chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+    # Check if source is on a different drive (mounted drive, not home on OS)
+    SOURCE_ON_EXTERNAL=false
+    if [[ "$SOURCE_DOCKER_DIR" == /mnt/* ]] || [[ "$SOURCE_DOCKER_DIR" == /media/* ]] || [[ "$SOURCE_DOCKER_DIR" == */drives/* ]]; then
+        SOURCE_ON_EXTERNAL=true
+    fi
 
-    MIGRATED_COUNT=0
-    for container in "${SELECTED_CONTAINERS[@]}"; do
-        for i in "${!CONTAINERS_FOUND[@]}"; do
-            if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
-                source_dir="${CONTAINER_PATHS[$i]}"
-                target_dir="$DOCKER_DIR/$container"
+    MIGRATION_METHOD="copy"
+    if [ "$SOURCE_ON_EXTERNAL" = true ]; then
+        echo "Source is on a mounted drive: $SOURCE_DOCKER_DIR"
+        echo ""
+        echo "How would you like to migrate?"
+        echo ""
+        echo "  [C] Copy - Copy containers to ~/docker on OS drive"
+        echo "             Best for: old OS drive mounted temporarily"
+        echo ""
+        echo "  [S] Symlink - Create ~/docker as symlink to source location"
+        echo "                Best for: data drive you'll keep using"
+        echo ""
+        echo "  [U] Use in-place - Use source location directly, no copy"
+        echo "                     Best for: already on your data drive"
+        echo ""
+        read -p "Method (C/S/U) [C]: " MIGRATION_METHOD
 
-                # Check if already exists
-                if [ -d "$target_dir" ]; then
-                    echo "  ⚠ $container already exists at $target_dir"
-                    read -p "    Overwrite? (y/n) [n]: " OVERWRITE
-                    if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
-                        echo "    Skipping $container"
-                        continue
-                    fi
-                    rm -rf "$target_dir"
+        case "${MIGRATION_METHOD^^}" in
+            S)
+                MIGRATION_METHOD="symlink"
+                ;;
+            U)
+                MIGRATION_METHOD="use"
+                ;;
+            *)
+                MIGRATION_METHOD="copy"
+                ;;
+        esac
+    else
+        echo "Source: $SOURCE_DOCKER_DIR"
+        echo "Target: $DOCKER_DIR"
+        echo ""
+        echo "Will copy containers to $DOCKER_DIR"
+    fi
+
+    echo ""
+
+    # Handle different migration methods
+    case "$MIGRATION_METHOD" in
+        symlink)
+            echo "Creating symlink: $DOCKER_DIR → $SOURCE_DOCKER_DIR"
+            echo ""
+
+            # Check if target exists
+            if [ -e "$DOCKER_DIR" ] || [ -L "$DOCKER_DIR" ]; then
+                echo "  ⚠ $DOCKER_DIR already exists"
+                read -p "  Remove and create symlink? (y/n) [n]: " REMOVE_EXISTING
+                if [ "$REMOVE_EXISTING" = "y" ] || [ "$REMOVE_EXISTING" = "Y" ]; then
+                    rm -rf "$DOCKER_DIR"
+                else
+                    echo "  Cancelled."
+                    return 1
                 fi
-
-                echo "  Copying $container..."
-                cp -a "$source_dir" "$target_dir"
-                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$target_dir"
-                ((MIGRATED_COUNT++))
-                echo "    ✓ $container migrated"
             fi
-        done
-    done
+
+            ln -s "$SOURCE_DOCKER_DIR" "$DOCKER_DIR"
+            chown -h "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+
+            echo "✓ Symlink created"
+            echo "  Containers stay at: $SOURCE_DOCKER_DIR"
+            echo "  Accessible via: $DOCKER_DIR → $SOURCE_DOCKER_DIR"
+            MIGRATED_COUNT=${#SELECTED_CONTAINERS[@]}
+            ;;
+
+        use)
+            echo "Using source location directly"
+            echo ""
+            DOCKER_DIR="$SOURCE_DOCKER_DIR"
+            echo "✓ DOCKER_DIR set to: $DOCKER_DIR"
+            echo "  No files copied - containers remain in place"
+            MIGRATED_COUNT=${#SELECTED_CONTAINERS[@]}
+            ;;
+
+        copy|*)
+            echo "Copying containers to $DOCKER_DIR"
+            echo ""
+
+            # Create target directory
+            mkdir -p "$DOCKER_DIR"
+            chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+
+            MIGRATED_COUNT=0
+            for container in "${SELECTED_CONTAINERS[@]}"; do
+                for i in "${!CONTAINERS_FOUND[@]}"; do
+                    if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
+                        source_dir="${CONTAINER_PATHS[$i]}"
+                        target_dir="$DOCKER_DIR/$container"
+
+                        # Check if already exists
+                        if [ -d "$target_dir" ]; then
+                            echo "  ⚠ $container already exists at $target_dir"
+                            read -p "    Overwrite? (y/n) [n]: " OVERWRITE
+                            if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
+                                echo "    Skipping $container"
+                                continue
+                            fi
+                            rm -rf "$target_dir"
+                        fi
+
+                        echo "  Copying $container..."
+                        cp -a "$source_dir" "$target_dir"
+                        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$target_dir"
+                        ((MIGRATED_COUNT++))
+                        echo "    ✓ $container copied"
+                    fi
+                done
+            done
+            ;;
+    esac
 
     echo ""
-    echo "✓ Migrated $MIGRATED_COUNT container(s) to $DOCKER_DIR"
+    echo "✓ Migrated $MIGRATED_COUNT container(s)"
     echo ""
 
     # Step 6: Start migrated containers (optional)
