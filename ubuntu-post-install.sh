@@ -528,31 +528,63 @@ run_migration() {
     echo "Step 1: Locate existing containers"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Common Docker directory locations:"
-    echo "  • /var/docker"
-    echo "  • ~/docker"
-    echo "  • /opt/docker"
-    echo "  • /home/*/docker"
-    echo ""
 
-    # Try to auto-detect
+    # Try to auto-detect Docker directories
     DETECTED_DIRS=()
+
+    # Check common locations
     for check_dir in /var/docker /opt/docker "$HOME/docker" /home/*/docker; do
         if [ -d "$check_dir" ] && [ "$(find "$check_dir" -maxdepth 2 -name 'docker-compose.yml' -o -name 'compose.yml' 2>/dev/null | head -1)" ]; then
             DETECTED_DIRS+=("$check_dir")
         fi
     done
 
+    # Check mounted drives: ~/drives/*, /mnt/*, /media/*
+    for mount_base in "$HOME/drives" "$HOME_DIR/drives" /mnt /media; do
+        if [ -d "$mount_base" ]; then
+            for mount_dir in "$mount_base"/*; do
+                if [ -d "$mount_dir/docker" ]; then
+                    check_dir="$mount_dir/docker"
+                    if [ "$(find "$check_dir" -maxdepth 2 -name 'docker-compose.yml' -o -name 'compose.yml' 2>/dev/null | head -1)" ]; then
+                        DETECTED_DIRS+=("$check_dir")
+                    fi
+                fi
+            done
+        fi
+    done
+
     if [ ${#DETECTED_DIRS[@]} -gt 0 ]; then
         echo "Auto-detected Docker directories:"
-        for dir in "${DETECTED_DIRS[@]}"; do
+        for i in "${!DETECTED_DIRS[@]}"; do
+            dir="${DETECTED_DIRS[$i]}"
             count=$(find "$dir" -maxdepth 2 \( -name 'docker-compose.yml' -o -name 'compose.yml' \) 2>/dev/null | wc -l)
-            echo "  • $dir ($count containers)"
+            echo "  [$((i+1))] $dir ($count containers)"
         done
         echo ""
+        echo "Enter a number to select, or type a custom path:"
+    else
+        echo "No Docker directories auto-detected."
+        echo ""
+        echo "Common locations:"
+        echo "  • ~/docker"
+        echo "  • ~/drives/primary/docker"
+        echo "  • /var/docker"
+        echo "  • /opt/docker"
+        echo "  • /mnt/data/docker"
+        echo ""
+        echo "Enter the full path to your Docker directory:"
     fi
+    echo ""
+    read -p "Source directory: " SOURCE_DOCKER_DIR
 
-    read -p "Enter source Docker directory: " SOURCE_DOCKER_DIR
+    # Check if user entered a number (to select from detected list)
+    if [[ "$SOURCE_DOCKER_DIR" =~ ^[0-9]+$ ]] && [ ${#DETECTED_DIRS[@]} -gt 0 ]; then
+        idx=$((SOURCE_DOCKER_DIR - 1))
+        if [ $idx -ge 0 ] && [ $idx -lt ${#DETECTED_DIRS[@]} ]; then
+            SOURCE_DOCKER_DIR="${DETECTED_DIRS[$idx]}"
+            echo "Selected: $SOURCE_DOCKER_DIR"
+        fi
+    fi
 
     # Expand ~ if used
     SOURCE_DOCKER_DIR="${SOURCE_DOCKER_DIR/#\~/$HOME}"
