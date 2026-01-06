@@ -513,6 +513,267 @@ run_disaster_recovery() {
     return 0
 }
 
+# Migration function - import existing Docker containers
+run_migration() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "MIGRATION MODE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will migrate existing Docker containers to this script's structure."
+    echo "Containers will be copied (not moved) and versions preserved."
+    echo ""
+
+    # Step 1: Get source Docker directory
+    echo "Step 1: Locate existing containers"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Common Docker directory locations:"
+    echo "  • /var/docker"
+    echo "  • ~/docker"
+    echo "  • /opt/docker"
+    echo "  • /home/*/docker"
+    echo ""
+
+    # Try to auto-detect
+    DETECTED_DIRS=()
+    for check_dir in /var/docker /opt/docker "$HOME/docker" /home/*/docker; do
+        if [ -d "$check_dir" ] && [ "$(find "$check_dir" -maxdepth 2 -name 'docker-compose.yml' -o -name 'compose.yml' 2>/dev/null | head -1)" ]; then
+            DETECTED_DIRS+=("$check_dir")
+        fi
+    done
+
+    if [ ${#DETECTED_DIRS[@]} -gt 0 ]; then
+        echo "Auto-detected Docker directories:"
+        for dir in "${DETECTED_DIRS[@]}"; do
+            count=$(find "$dir" -maxdepth 2 \( -name 'docker-compose.yml' -o -name 'compose.yml' \) 2>/dev/null | wc -l)
+            echo "  • $dir ($count containers)"
+        done
+        echo ""
+    fi
+
+    read -p "Enter source Docker directory: " SOURCE_DOCKER_DIR
+
+    # Expand ~ if used
+    SOURCE_DOCKER_DIR="${SOURCE_DOCKER_DIR/#\~/$HOME}"
+
+    if [ ! -d "$SOURCE_DOCKER_DIR" ]; then
+        echo "❌ Directory not found: $SOURCE_DOCKER_DIR"
+        return 1
+    fi
+
+    # Step 2: Scan for containers
+    echo ""
+    echo "Step 2: Scanning for containers"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    CONTAINERS_FOUND=()
+    CONTAINER_PATHS=()
+
+    while IFS= read -r compose_file; do
+        if [ -n "$compose_file" ]; then
+            container_dir=$(dirname "$compose_file")
+            container_name=$(basename "$container_dir")
+            CONTAINERS_FOUND+=("$container_name")
+            CONTAINER_PATHS+=("$container_dir")
+        fi
+    done < <(find "$SOURCE_DOCKER_DIR" -maxdepth 2 \( -name 'docker-compose.yml' -o -name 'compose.yml' \) 2>/dev/null)
+
+    if [ ${#CONTAINERS_FOUND[@]} -eq 0 ]; then
+        echo "❌ No Docker containers found in $SOURCE_DOCKER_DIR"
+        return 1
+    fi
+
+    echo "Found ${#CONTAINERS_FOUND[@]} container(s):"
+    for i in "${!CONTAINERS_FOUND[@]}"; do
+        container="${CONTAINERS_FOUND[$i]}"
+        path="${CONTAINER_PATHS[$i]}"
+        size=$(du -sh "$path" 2>/dev/null | cut -f1)
+        echo "  [$((i+1))] $container ($size)"
+    done
+    echo ""
+
+    # Step 3: Select containers to migrate
+    echo "Step 3: Select containers to migrate"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    SELECTED_CONTAINERS=()
+
+    if command -v whiptail &> /dev/null && [ ${#CONTAINERS_FOUND[@]} -gt 3 ]; then
+        # Use whiptail for many containers
+        CHECKLIST_ARGS=()
+        for container in "${CONTAINERS_FOUND[@]}"; do
+            CHECKLIST_ARGS+=("$container" "" "ON")
+        done
+
+        SELECTED=$(whiptail --title "Select Containers to Migrate" \
+            --checklist "Use SPACE to select/deselect, ENTER to confirm:" \
+            20 60 12 \
+            "${CHECKLIST_ARGS[@]}" \
+            3>&1 1>&2 2>&3)
+
+        if [ $? -eq 0 ] && [ -n "$SELECTED" ]; then
+            # Parse whiptail output
+            for container in $SELECTED; do
+                # Remove quotes
+                container="${container//\"/}"
+                SELECTED_CONTAINERS+=("$container")
+            done
+        fi
+    else
+        # Text-based selection
+        echo "Select containers to migrate:"
+        echo "  [A] All containers"
+        echo "  [S] Select individually"
+        echo "  [N] None (cancel)"
+        echo ""
+        read -p "Choice (A/S/N) [A]: " MIGRATE_CHOICE
+
+        case "${MIGRATE_CHOICE^^}" in
+            N)
+                echo "Migration cancelled."
+                return 0
+                ;;
+            S)
+                for container in "${CONTAINERS_FOUND[@]}"; do
+                    read -p "  Migrate $container? (y/n) [y]: " MIGRATE_THIS
+                    if [ "$MIGRATE_THIS" != "n" ] && [ "$MIGRATE_THIS" != "N" ]; then
+                        SELECTED_CONTAINERS+=("$container")
+                    fi
+                done
+                ;;
+            *)
+                SELECTED_CONTAINERS=("${CONTAINERS_FOUND[@]}")
+                ;;
+        esac
+    fi
+
+    if [ ${#SELECTED_CONTAINERS[@]} -eq 0 ]; then
+        echo "No containers selected."
+        return 0
+    fi
+
+    echo ""
+    echo "Will migrate ${#SELECTED_CONTAINERS[@]} container(s):"
+    for container in "${SELECTED_CONTAINERS[@]}"; do
+        echo "  • $container"
+    done
+    echo ""
+
+    # Step 4: Stop running containers (optional)
+    echo "Step 4: Container status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Should running containers be stopped before migration?"
+    echo "  • Stopping ensures clean copy of data/databases"
+    echo "  • Not stopping may result in inconsistent state"
+    echo ""
+    read -p "Stop containers before copying? (y/n) [y]: " STOP_CONTAINERS
+
+    if [ "$STOP_CONTAINERS" != "n" ] && [ "$STOP_CONTAINERS" != "N" ]; then
+        echo "Stopping containers..."
+        for container in "${SELECTED_CONTAINERS[@]}"; do
+            for i in "${!CONTAINERS_FOUND[@]}"; do
+                if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
+                    container_dir="${CONTAINER_PATHS[$i]}"
+                    if [ -f "$container_dir/docker-compose.yml" ] || [ -f "$container_dir/compose.yml" ]; then
+                        echo "  Stopping $container..."
+                        (cd "$container_dir" && docker compose down 2>/dev/null) || true
+                    fi
+                fi
+            done
+        done
+        echo ""
+    fi
+
+    # Step 5: Copy containers
+    echo "Step 5: Migrating containers"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Create target directory
+    mkdir -p "$DOCKER_DIR"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+
+    MIGRATED_COUNT=0
+    for container in "${SELECTED_CONTAINERS[@]}"; do
+        for i in "${!CONTAINERS_FOUND[@]}"; do
+            if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
+                source_dir="${CONTAINER_PATHS[$i]}"
+                target_dir="$DOCKER_DIR/$container"
+
+                # Check if already exists
+                if [ -d "$target_dir" ]; then
+                    echo "  ⚠ $container already exists at $target_dir"
+                    read -p "    Overwrite? (y/n) [n]: " OVERWRITE
+                    if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
+                        echo "    Skipping $container"
+                        continue
+                    fi
+                    rm -rf "$target_dir"
+                fi
+
+                echo "  Copying $container..."
+                cp -a "$source_dir" "$target_dir"
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$target_dir"
+                ((MIGRATED_COUNT++))
+                echo "    ✓ $container migrated"
+            fi
+        done
+    done
+
+    echo ""
+    echo "✓ Migrated $MIGRATED_COUNT container(s) to $DOCKER_DIR"
+    echo ""
+
+    # Step 6: Start migrated containers (optional)
+    echo "Step 6: Start containers"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    read -p "Start migrated containers? (y/n) [y]: " START_MIGRATED
+
+    if [ "$START_MIGRATED" != "n" ] && [ "$START_MIGRATED" != "N" ]; then
+        for container in "${SELECTED_CONTAINERS[@]}"; do
+            target_dir="$DOCKER_DIR/$container"
+            if [ -d "$target_dir" ]; then
+                echo "  Starting $container..."
+                (cd "$target_dir" && docker compose up -d 2>/dev/null) || echo "    ⚠ Failed to start $container"
+            fi
+        done
+        echo ""
+    fi
+
+    # Step 7: Offer additional services
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "MIGRATION COMPLETE"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Containers migrated to: $DOCKER_DIR"
+    echo ""
+    echo "Would you like to install additional services not in your migration?"
+    echo "This will continue with the normal install process where you can"
+    echo "choose which additional apps to install (Immich, Frigate, etc.)"
+    echo ""
+    read -p "Continue to install additional services? (y/n) [y]: " INSTALL_MORE
+
+    if [ "$INSTALL_MORE" = "n" ] || [ "$INSTALL_MORE" = "N" ]; then
+        echo ""
+        echo "Migration complete. You can run this script again to install more services."
+        echo ""
+        echo "To check running containers:"
+        echo "  docker ps"
+        echo ""
+        return 0
+    fi
+
+    # Return to continue with normal install
+    INSTALL_MODE="post-migration"
+    return 0
+}
+
 # Check for restore mode flag
 if [ "$RESTORE_MODE" = true ]; then
     run_disaster_recovery
@@ -526,14 +787,28 @@ if [ "$UNATTENDED" != true ]; then
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "  [N] Normal install - Fresh install or modify existing"
+    echo "  [M] Migration - Import existing Docker containers"
     echo "  [R] Disaster recovery - Restore from Kopia backup"
     echo ""
-    read -p "Select mode (N/R) [N]: " MODE_SELECT
+    read -p "Select mode (N/M/R) [N]: " MODE_SELECT
 
     case "${MODE_SELECT^^}" in
         R)
             run_disaster_recovery
             exit $?
+            ;;
+        M)
+            run_migration
+            # If migration returns 0 and INSTALL_MODE is post-migration, continue
+            if [ $? -ne 0 ]; then
+                exit 1
+            fi
+            if [ "$INSTALL_MODE" != "post-migration" ]; then
+                exit 0
+            fi
+            echo ""
+            echo "Continuing with additional service installation..."
+            echo ""
             ;;
         *)
             INSTALL_MODE="normal"

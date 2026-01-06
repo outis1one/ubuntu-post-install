@@ -265,10 +265,40 @@ INSTALLATION MODE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   [N] Normal install - Fresh install or modify existing
+  [M] Migration - Import existing Docker containers
   [R] Disaster recovery - Restore from Kopia backup
 
-Select mode (N/R) [N]:
+Select mode (N/M/R) [N]:
 ```
+
+## Migration Mode
+
+If you have existing Docker containers from another setup (different directory structure, another server, etc.), migration mode imports them without changing versions.
+
+### When to Use Migration
+
+- Moving from `/var/docker` or `/opt/docker` to `~/docker`
+- Importing containers from another machine
+- Adopting this script's structure for existing setups
+
+### What Migration Does
+
+1. **Scans source directory** - Auto-detects Docker directories, finds all compose files
+2. **Shows containers found** - Lists each container with size
+3. **Select what to migrate** - Whiptail checklist or text menu
+4. **Stops containers** (optional) - Ensures clean copy of databases
+5. **Copies containers** - Preserves versions, configs, and all data
+6. **Starts containers** - In the new location
+7. **Offers additional services** - Continue with normal install for more apps
+
+### Migration vs Restore
+
+| Feature | Migration | Disaster Recovery |
+|---------|-----------|-------------------|
+| Source | Existing Docker directory | Kopia backup |
+| Versions | Preserved exactly | Preserved exactly |
+| After | Install more services | Reconnect backups |
+| Use case | Restructuring setup | OS drive failure |
 
 ### 5. Follow Interactive Prompts
 
@@ -1048,6 +1078,14 @@ This script is provided as-is for Ubuntu 24.04 Desktop installations.
 
 ## Changelog
 
+- **v2.10**: Migration mode for existing Docker setups
+  - New **Migration mode** - Import existing Docker containers from any directory
+  - Auto-detects Docker directories and scans for compose files
+  - Preserves container versions (no unwanted upgrades)
+  - Whiptail checklist for selecting which containers to migrate
+  - Option to stop containers for clean database copy
+  - After migration, offers to install additional services
+  - Three modes now: Normal install, Migration, Disaster Recovery
 - **v2.9**: Immich photo library, Watchtower, recovery improvements
   - **Immich**: Now asks for photo storage location (default: `~/drives/primary/photos`)
   - **Immich**: External library support for existing photos (read-only, no duplication)
