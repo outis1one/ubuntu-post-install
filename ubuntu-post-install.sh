@@ -845,8 +845,114 @@ run_migration() {
     echo "✓ Migrated $MIGRATED_COUNT container(s)"
     echo ""
 
-    # Step 6: Start migrated containers (optional)
-    echo "Step 6: Start containers"
+    # Step 6: Update volume paths
+    echo "Step 6: Update volume paths"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Scanning docker-compose files for volume mounts that may need updating..."
+    echo ""
+
+    # Find all absolute paths in volume mounts (excluding relative paths like ./ or named volumes)
+    PATHS_FOUND=()
+    PATHS_FILES=()
+
+    for container in "${SELECTED_CONTAINERS[@]}"; do
+        compose_file="$DOCKER_DIR/$container/docker-compose.yml"
+        [ -f "$compose_file" ] || compose_file="$DOCKER_DIR/$container/compose.yml"
+        [ -f "$compose_file" ] || continue
+
+        # Extract volume mount paths (lines with : that look like /path:/container/path)
+        while IFS= read -r line; do
+            # Match absolute paths in volume mounts (starting with /)
+            if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*(/[^:]+): ]]; then
+                host_path="${BASH_REMATCH[1]}"
+                # Skip if it's a relative path or standard paths
+                if [[ "$host_path" != "./"* ]] && [[ "$host_path" != "/etc/"* ]] && [[ "$host_path" != "/var/run/"* ]]; then
+                    # Check if this path doesn't exist on current system
+                    if [ ! -e "$host_path" ]; then
+                        # Avoid duplicates
+                        if [[ ! " ${PATHS_FOUND[*]} " =~ " ${host_path} " ]]; then
+                            PATHS_FOUND+=("$host_path")
+                            PATHS_FILES+=("$compose_file")
+                        fi
+                    fi
+                fi
+            fi
+        done < "$compose_file"
+    done
+
+    if [ ${#PATHS_FOUND[@]} -eq 0 ]; then
+        echo "✓ No volume paths need updating (all paths exist or are relative)"
+        echo ""
+    else
+        echo "Found ${#PATHS_FOUND[@]} volume path(s) that don't exist on this system:"
+        echo ""
+
+        # Default new base path
+        DEFAULT_NEW_BASE="$HOME_DIR/drives/primary"
+
+        for i in "${!PATHS_FOUND[@]}"; do
+            old_path="${PATHS_FOUND[$i]}"
+            compose_file="${PATHS_FILES[$i]}"
+            container_name=$(basename "$(dirname "$compose_file")")
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Container: $container_name"
+            echo "Old path:  $old_path"
+
+            # Suggest a new path based on the old path structure
+            # Extract the last part of the path for suggestion
+            path_tail=$(basename "$old_path")
+            suggested_path="$DEFAULT_NEW_BASE/$path_tail"
+
+            echo "Suggested: $suggested_path"
+            echo ""
+            echo "Options:"
+            echo "  [Enter] Accept suggested path"
+            echo "  [S] Skip - keep original path"
+            echo "  [path]  Enter custom path"
+            echo ""
+            read -p "New path: " NEW_PATH_INPUT
+
+            case "$NEW_PATH_INPUT" in
+                ""|" ")
+                    new_path="$suggested_path"
+                    ;;
+                [Ss])
+                    echo "  Skipping - keeping original path"
+                    continue
+                    ;;
+                *)
+                    new_path="${NEW_PATH_INPUT/#\~/$HOME_DIR}"
+                    ;;
+            esac
+
+            # Update the compose file
+            echo "  Updating: $old_path → $new_path"
+
+            # Escape paths for sed (handle slashes)
+            old_escaped=$(printf '%s\n' "$old_path" | sed 's/[[\.*^$()+?{|]/\\&/g; s/\//\\\//g')
+            new_escaped=$(printf '%s\n' "$new_path" | sed 's/[[\.*^$()+?{|]/\\&/g; s/\//\\\//g')
+
+            sed -i "s|$old_path|$new_path|g" "$compose_file"
+
+            # Create directory if it doesn't exist
+            if [ ! -d "$new_path" ]; then
+                echo "  Creating directory: $new_path"
+                mkdir -p "$new_path" 2>/dev/null || echo "    ⚠ Could not create (may need manual creation)"
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$new_path" 2>/dev/null || true
+            fi
+
+            echo "  ✓ Updated"
+            echo ""
+        done
+
+        echo "✓ Volume paths updated"
+        echo ""
+    fi
+
+    # Step 7: Start migrated containers (optional)
+    echo "Step 7: Start containers"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     read -p "Start migrated containers? (y/n) [y]: " START_MIGRATED
@@ -862,7 +968,7 @@ run_migration() {
         echo ""
     fi
 
-    # Step 7: Offer additional services
+    # Step 8: Offer additional services
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "MIGRATION COMPLETE"
