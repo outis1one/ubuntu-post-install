@@ -720,48 +720,239 @@ run_migration() {
         echo ""
     fi
 
-    # Step 5: Copy containers
-    echo "Step 5: Migrating containers"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    # Step 5: Decide migration method
+    echo "Step 5: Migration method"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    # Create target directory
-    mkdir -p "$DOCKER_DIR"
-    chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+    # Check if source is on a different drive (mounted drive, not home on OS)
+    SOURCE_ON_EXTERNAL=false
+    if [[ "$SOURCE_DOCKER_DIR" == /mnt/* ]] || [[ "$SOURCE_DOCKER_DIR" == /media/* ]] || [[ "$SOURCE_DOCKER_DIR" == */drives/* ]]; then
+        SOURCE_ON_EXTERNAL=true
+    fi
 
-    MIGRATED_COUNT=0
-    for container in "${SELECTED_CONTAINERS[@]}"; do
-        for i in "${!CONTAINERS_FOUND[@]}"; do
-            if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
-                source_dir="${CONTAINER_PATHS[$i]}"
-                target_dir="$DOCKER_DIR/$container"
+    MIGRATION_METHOD="copy"
+    if [ "$SOURCE_ON_EXTERNAL" = true ]; then
+        echo "Source is on a mounted drive: $SOURCE_DOCKER_DIR"
+        echo ""
+        echo "How would you like to migrate?"
+        echo ""
+        echo "  [C] Copy - Copy containers to ~/docker on OS drive"
+        echo "             Best for: old OS drive mounted temporarily"
+        echo ""
+        echo "  [S] Symlink - Create ~/docker as symlink to source location"
+        echo "                Best for: data drive you'll keep using"
+        echo ""
+        echo "  [U] Use in-place - Use source location directly, no copy"
+        echo "                     Best for: already on your data drive"
+        echo ""
+        read -p "Method (C/S/U) [C]: " MIGRATION_METHOD
 
-                # Check if already exists
-                if [ -d "$target_dir" ]; then
-                    echo "  ⚠ $container already exists at $target_dir"
-                    read -p "    Overwrite? (y/n) [n]: " OVERWRITE
-                    if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
-                        echo "    Skipping $container"
-                        continue
-                    fi
-                    rm -rf "$target_dir"
+        case "${MIGRATION_METHOD^^}" in
+            S)
+                MIGRATION_METHOD="symlink"
+                ;;
+            U)
+                MIGRATION_METHOD="use"
+                ;;
+            *)
+                MIGRATION_METHOD="copy"
+                ;;
+        esac
+    else
+        echo "Source: $SOURCE_DOCKER_DIR"
+        echo "Target: $DOCKER_DIR"
+        echo ""
+        echo "Will copy containers to $DOCKER_DIR"
+    fi
+
+    echo ""
+
+    # Handle different migration methods
+    case "$MIGRATION_METHOD" in
+        symlink)
+            echo "Creating symlink: $DOCKER_DIR → $SOURCE_DOCKER_DIR"
+            echo ""
+
+            # Check if target exists
+            if [ -e "$DOCKER_DIR" ] || [ -L "$DOCKER_DIR" ]; then
+                echo "  ⚠ $DOCKER_DIR already exists"
+                read -p "  Remove and create symlink? (y/n) [n]: " REMOVE_EXISTING
+                if [ "$REMOVE_EXISTING" = "y" ] || [ "$REMOVE_EXISTING" = "Y" ]; then
+                    rm -rf "$DOCKER_DIR"
+                else
+                    echo "  Cancelled."
+                    return 1
                 fi
-
-                echo "  Copying $container..."
-                cp -a "$source_dir" "$target_dir"
-                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$target_dir"
-                ((MIGRATED_COUNT++))
-                echo "    ✓ $container migrated"
             fi
-        done
+
+            ln -s "$SOURCE_DOCKER_DIR" "$DOCKER_DIR"
+            chown -h "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+
+            echo "✓ Symlink created"
+            echo "  Containers stay at: $SOURCE_DOCKER_DIR"
+            echo "  Accessible via: $DOCKER_DIR → $SOURCE_DOCKER_DIR"
+            MIGRATED_COUNT=${#SELECTED_CONTAINERS[@]}
+            ;;
+
+        use)
+            echo "Using source location directly"
+            echo ""
+            DOCKER_DIR="$SOURCE_DOCKER_DIR"
+            echo "✓ DOCKER_DIR set to: $DOCKER_DIR"
+            echo "  No files copied - containers remain in place"
+            MIGRATED_COUNT=${#SELECTED_CONTAINERS[@]}
+            ;;
+
+        copy|*)
+            echo "Copying containers to $DOCKER_DIR"
+            echo ""
+
+            # Create target directory
+            mkdir -p "$DOCKER_DIR"
+            chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
+
+            MIGRATED_COUNT=0
+            for container in "${SELECTED_CONTAINERS[@]}"; do
+                for i in "${!CONTAINERS_FOUND[@]}"; do
+                    if [ "${CONTAINERS_FOUND[$i]}" = "$container" ]; then
+                        source_dir="${CONTAINER_PATHS[$i]}"
+                        target_dir="$DOCKER_DIR/$container"
+
+                        # Check if already exists
+                        if [ -d "$target_dir" ]; then
+                            echo "  ⚠ $container already exists at $target_dir"
+                            read -p "    Overwrite? (y/n) [n]: " OVERWRITE
+                            if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
+                                echo "    Skipping $container"
+                                continue
+                            fi
+                            rm -rf "$target_dir"
+                        fi
+
+                        echo "  Copying $container..."
+                        cp -a "$source_dir" "$target_dir"
+                        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$target_dir"
+                        ((MIGRATED_COUNT++))
+                        echo "    ✓ $container copied"
+                    fi
+                done
+            done
+            ;;
+    esac
+
+    echo ""
+    echo "✓ Migrated $MIGRATED_COUNT container(s)"
+    echo ""
+
+    # Step 6: Update volume paths
+    echo "Step 6: Update volume paths"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Scanning docker-compose files for volume mounts that may need updating..."
+    echo ""
+
+    # Find all absolute paths in volume mounts (excluding relative paths like ./ or named volumes)
+    PATHS_FOUND=()
+    PATHS_FILES=()
+
+    for container in "${SELECTED_CONTAINERS[@]}"; do
+        compose_file="$DOCKER_DIR/$container/docker-compose.yml"
+        [ -f "$compose_file" ] || compose_file="$DOCKER_DIR/$container/compose.yml"
+        [ -f "$compose_file" ] || continue
+
+        # Extract volume mount paths (lines with : that look like /path:/container/path)
+        while IFS= read -r line; do
+            # Match absolute paths in volume mounts (starting with /)
+            if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*(/[^:]+): ]]; then
+                host_path="${BASH_REMATCH[1]}"
+                # Skip if it's a relative path or standard paths
+                if [[ "$host_path" != "./"* ]] && [[ "$host_path" != "/etc/"* ]] && [[ "$host_path" != "/var/run/"* ]]; then
+                    # Check if this path doesn't exist on current system
+                    if [ ! -e "$host_path" ]; then
+                        # Avoid duplicates
+                        if [[ ! " ${PATHS_FOUND[*]} " =~ " ${host_path} " ]]; then
+                            PATHS_FOUND+=("$host_path")
+                            PATHS_FILES+=("$compose_file")
+                        fi
+                    fi
+                fi
+            fi
+        done < "$compose_file"
     done
 
-    echo ""
-    echo "✓ Migrated $MIGRATED_COUNT container(s) to $DOCKER_DIR"
-    echo ""
+    if [ ${#PATHS_FOUND[@]} -eq 0 ]; then
+        echo "✓ No volume paths need updating (all paths exist or are relative)"
+        echo ""
+    else
+        echo "Found ${#PATHS_FOUND[@]} volume path(s) that don't exist on this system:"
+        echo ""
 
-    # Step 6: Start migrated containers (optional)
-    echo "Step 6: Start containers"
+        # Default new base path
+        DEFAULT_NEW_BASE="$HOME_DIR/drives/primary"
+
+        for i in "${!PATHS_FOUND[@]}"; do
+            old_path="${PATHS_FOUND[$i]}"
+            compose_file="${PATHS_FILES[$i]}"
+            container_name=$(basename "$(dirname "$compose_file")")
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Container: $container_name"
+            echo "Old path:  $old_path"
+
+            # Suggest a new path based on the old path structure
+            # Extract the last part of the path for suggestion
+            path_tail=$(basename "$old_path")
+            suggested_path="$DEFAULT_NEW_BASE/$path_tail"
+
+            echo "Suggested: $suggested_path"
+            echo ""
+            echo "Options:"
+            echo "  [Enter] Accept suggested path"
+            echo "  [S] Skip - keep original path"
+            echo "  [path]  Enter custom path"
+            echo ""
+            read -p "New path: " NEW_PATH_INPUT
+
+            case "$NEW_PATH_INPUT" in
+                ""|" ")
+                    new_path="$suggested_path"
+                    ;;
+                [Ss])
+                    echo "  Skipping - keeping original path"
+                    continue
+                    ;;
+                *)
+                    new_path="${NEW_PATH_INPUT/#\~/$HOME_DIR}"
+                    ;;
+            esac
+
+            # Update the compose file
+            echo "  Updating: $old_path → $new_path"
+
+            # Escape paths for sed (handle slashes)
+            old_escaped=$(printf '%s\n' "$old_path" | sed 's/[[\.*^$()+?{|]/\\&/g; s/\//\\\//g')
+            new_escaped=$(printf '%s\n' "$new_path" | sed 's/[[\.*^$()+?{|]/\\&/g; s/\//\\\//g')
+
+            sed -i "s|$old_path|$new_path|g" "$compose_file"
+
+            # Create directory if it doesn't exist
+            if [ ! -d "$new_path" ]; then
+                echo "  Creating directory: $new_path"
+                mkdir -p "$new_path" 2>/dev/null || echo "    ⚠ Could not create (may need manual creation)"
+                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$new_path" 2>/dev/null || true
+            fi
+
+            echo "  ✓ Updated"
+            echo ""
+        done
+
+        echo "✓ Volume paths updated"
+        echo ""
+    fi
+
+    # Step 7: Start migrated containers (optional)
+    echo "Step 7: Start containers"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     read -p "Start migrated containers? (y/n) [y]: " START_MIGRATED
@@ -777,7 +968,7 @@ run_migration() {
         echo ""
     fi
 
-    # Step 7: Offer additional services
+    # Step 8: Offer additional services
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "MIGRATION COMPLETE"

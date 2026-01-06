@@ -283,13 +283,34 @@ If you have existing Docker containers from another setup (different directory s
 
 ### What Migration Does
 
-1. **Scans source directory** - Auto-detects Docker directories, finds all compose files
+1. **Scans source directory** - Auto-detects Docker directories on OS and mounted drives
 2. **Shows containers found** - Lists each container with size
 3. **Select what to migrate** - Whiptail checklist or text menu
 4. **Stops containers** (optional) - Ensures clean copy of databases
-5. **Copies containers** - Preserves versions, configs, and all data
-6. **Starts containers** - In the new location
-7. **Offers additional services** - Continue with normal install for more apps
+5. **Migration method** - Copy, Symlink, or Use in-place (for mounted drives)
+6. **Updates volume paths** - Detects old paths, suggests new ones, updates compose files
+7. **Starts containers** - In the new location
+8. **Offers additional services** - Continue with normal install for more apps
+
+### Volume Path Updates
+
+When migrating, the script detects volume mounts that don't exist on the new system:
+
+```
+Container: immich
+Old path:  /home/user1/media/driveb
+Suggested: ~/drives/primary/driveb
+
+Options:
+  [Enter] Accept suggested path
+  [S] Skip - keep original path
+  [path]  Enter custom path
+```
+
+- Scans all docker-compose.yml files for absolute volume paths
+- Only shows paths that don't exist on the current system
+- Suggests `~/drives/primary/{folder}` as default
+- Updates the compose file and creates the directory
 
 ### Migration vs Restore
 
