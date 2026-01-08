@@ -1041,6 +1041,209 @@ if [ "$UNATTENDED" != true ]; then
 fi
 
 # ============================================================================
+# DRIVE SETUP (Runs before everything else)
+# ============================================================================
+
+setup_drives() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DRIVE SETUP"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This script uses ~/drives/ for data storage:"
+    echo "  ~/drives/primary  - Main data drive (media, photos, etc.)"
+    echo "  ~/drives/backup1  - Backup drive(s)"
+    echo ""
+
+    # Create base drives directory
+    mkdir -p "$ACTUAL_HOME/drives"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
+    # Check for existing mounts
+    if mount | grep -q "$ACTUAL_HOME/drives/"; then
+        echo "Existing mounted drives:"
+        df -h | grep "$ACTUAL_HOME/drives" | awk '{print "  " $6 " (" $2 " total, " $4 " free)"}'
+        echo ""
+        prompt_yn "Configure additional drives? (y/n):" "n" SETUP_DRIVES
+    else
+        echo "No drives currently mounted in ~/drives/"
+        echo ""
+        prompt_yn "Set up drives now? (y/n):" "y" SETUP_DRIVES
+    fi
+
+    if [ "$SETUP_DRIVES" != "y" ] && [ "$SETUP_DRIVES" != "Y" ]; then
+        echo "Skipping drive setup. You can run this script again later."
+        return 0
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "AVAILABLE BLOCK DEVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+    echo ""
+
+    # Detect drives without partition tables (new drives)
+    echo "Checking for new/unpartitioned drives..."
+    NEW_DRIVES=()
+    for disk in /dev/sd? /dev/nvme?n?; do
+        [ -b "$disk" ] || continue
+        # Check if disk has no partitions
+        if ! lsblk -n "$disk" | grep -q "part"; then
+            # Check if it has no partition table
+            if ! blkid "$disk" &>/dev/null; then
+                size=$(lsblk -n -d -o SIZE "$disk" 2>/dev/null)
+                NEW_DRIVES+=("$disk ($size)")
+            fi
+        fi
+    done
+
+    if [ ${#NEW_DRIVES[@]} -gt 0 ]; then
+        echo ""
+        echo "⚠️  Found unpartitioned drives (no filesystem):"
+        for drive in "${NEW_DRIVES[@]}"; do
+            echo "  • $drive"
+        done
+        echo ""
+        prompt_yn "Would you like to partition and format any of these? (y/n):" "n" FORMAT_DRIVES
+
+        if [ "$FORMAT_DRIVES" = "y" ] || [ "$FORMAT_DRIVES" = "Y" ]; then
+            for drive_info in "${NEW_DRIVES[@]}"; do
+                drive=$(echo "$drive_info" | cut -d' ' -f1)
+                echo ""
+                prompt_yn "Format $drive_info as ext4? (ALL DATA WILL BE ERASED) (y/n):" "n" FORMAT_THIS
+
+                if [ "$FORMAT_THIS" = "y" ] || [ "$FORMAT_THIS" = "Y" ]; then
+                    echo "  Creating partition table on $drive..."
+                    parted -s "$drive" mklabel gpt
+                    parted -s "$drive" mkpart primary ext4 0% 100%
+
+                    # Wait for partition to appear
+                    sleep 2
+
+                    # Format the partition
+                    part="${drive}1"
+                    [ -b "${drive}p1" ] && part="${drive}p1"  # nvme drives
+
+                    if [ -b "$part" ]; then
+                        echo "  Formatting $part as ext4..."
+                        mkfs.ext4 -F "$part"
+                        echo "  ✓ Formatted $part"
+                    else
+                        echo "  ⚠ Could not find partition after creation"
+                    fi
+                fi
+            done
+            echo ""
+            echo "Updated block devices:"
+            lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+            echo ""
+        fi
+    fi
+
+    # Configure mount points
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "CONFIGURE MOUNT POINTS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Primary drive
+    echo "PRIMARY DRIVE (for media, photos, docker data):"
+    prompt_text "  Mount point name [primary]:" "primary" PRIMARY_NAME
+    PRIMARY_NAME="${PRIMARY_NAME:-primary}"
+    mkdir -p "$ACTUAL_HOME/drives/$PRIMARY_NAME"
+
+    # Check if already mounted
+    if mount | grep -q "$ACTUAL_HOME/drives/$PRIMARY_NAME"; then
+        echo "  ✓ Already mounted"
+    else
+        echo "  Enter device (e.g., /dev/sdb1) or leave blank to skip:"
+        read -p "  Device for $PRIMARY_NAME: " PRIMARY_DEV
+
+        if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
+            # Add to fstab
+            PRIMARY_UUID=$(blkid -s UUID -o value "$PRIMARY_DEV" 2>/dev/null)
+            if [ -n "$PRIMARY_UUID" ]; then
+                # Check if not already in fstab
+                if ! grep -q "$PRIMARY_UUID" /etc/fstab 2>/dev/null; then
+                    cp /etc/fstab /etc/fstab.backup-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+                    echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/$PRIMARY_NAME auto defaults,nofail 0 2" >> /etc/fstab
+                    echo "  ✓ Added to fstab"
+                fi
+            fi
+        fi
+    fi
+
+    # Backup drives
+    echo ""
+    echo "BACKUP DRIVES (optional, for rsync backups):"
+    prompt_text "  How many backup drives? [0-4, default: 0]:" "0" NUM_BACKUPS
+    NUM_BACKUPS="${NUM_BACKUPS:-0}"
+
+    # Validate number
+    case $NUM_BACKUPS in
+        0|1|2|3|4) ;;
+        *) NUM_BACKUPS=0 ;;
+    esac
+
+    declare -a BACKUP_NAMES
+    declare -a BACKUP_DEVS
+    for i in $(seq 1 $NUM_BACKUPS); do
+        echo ""
+        prompt_text "  Backup drive $i name [backup$i]:" "backup$i" "BACKUP_NAME"
+        BACKUP_NAMES[$i]="${BACKUP_NAME:-backup$i}"
+        mkdir -p "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"
+
+        if ! mount | grep -q "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"; then
+            read -p "  Device for ${BACKUP_NAMES[$i]}: " "BACKUP_DEV"
+            BACKUP_DEVS[$i]="$BACKUP_DEV"
+
+            if [ -n "$BACKUP_DEV" ] && [ -b "$BACKUP_DEV" ]; then
+                BACKUP_UUID=$(blkid -s UUID -o value "$BACKUP_DEV" 2>/dev/null)
+                if [ -n "$BACKUP_UUID" ]; then
+                    if ! grep -q "$BACKUP_UUID" /etc/fstab 2>/dev/null; then
+                        echo "UUID=$BACKUP_UUID $ACTUAL_HOME/drives/${BACKUP_NAMES[$i]} auto defaults,nofail 0 2" >> /etc/fstab
+                        echo "  ✓ Added ${BACKUP_NAMES[$i]} to fstab"
+                    fi
+                fi
+            fi
+        else
+            echo "  ✓ Already mounted"
+        fi
+    done
+
+    # Set permissions
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
+    # Mount all from fstab
+    echo ""
+    echo "Mounting drives from fstab..."
+    mount -a 2>/dev/null || true
+
+    echo ""
+    echo "Current mounts in ~/drives/:"
+    df -h | grep "$ACTUAL_HOME/drives" | awk '{print "  " $6 " - " $2 " total, " $4 " free"}' || echo "  (none)"
+    echo ""
+
+    # Export drive names for later use
+    export PRIMARY_DRIVE_NAME="$PRIMARY_NAME"
+    export BACKUP_DRIVE_COUNT="$NUM_BACKUPS"
+    for i in $(seq 1 $NUM_BACKUPS); do
+        export "BACKUP_DRIVE_${i}_NAME=${BACKUP_NAMES[$i]}"
+    done
+
+    echo "✓ Drive setup complete"
+    echo ""
+}
+
+# Run drive setup for normal installs (not migration/recovery)
+if [ "$INSTALL_MODE" = "normal" ] && [ "$UNATTENDED" != true ]; then
+    setup_drives
+fi
+
+# ============================================================================
 # SOFTWARE DETECTION FUNCTIONS
 # ============================================================================
 
@@ -1982,31 +2185,48 @@ else
         echo "Installing Immich..."
         IMMICH_DIR="$DOCKER_DIR/immich"
 
-        # Default photo location
-        DEFAULT_PHOTO_DIR="$HOME_DIR/drives/primary/photos"
-
-        # Ask about photo storage location
+        # Photo storage configuration
         echo ""
         echo "Photo Storage Configuration:"
-        echo "  Immich can store photos on your data drive instead of the OS drive."
-        echo "  This keeps all photos in one place and makes backups simpler."
         echo ""
-        echo "  Default: $DEFAULT_PHOTO_DIR"
-        echo "  (Press Enter to use default, or enter a custom path)"
+        echo "Immich needs two separate locations:"
+        echo "  1. UPLOAD folder - Where NEW photos from phone/web uploads go"
+        echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
         echo ""
-        PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
-        prompt_text "Photo storage path:" "$DEFAULT_PHOTO_DIR" PHOTO_LOCATION 2>/dev/null || PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
 
-        # Expand ~ if used
-        PHOTO_LOCATION="${PHOTO_LOCATION/#\~/$HOME_DIR}"
+        # Upload location (for new photos)
+        DEFAULT_UPLOAD_DIR="$HOME_DIR/drives/primary/photos/immich-uploads"
+        echo "NEW UPLOADS (from phone apps, web uploads):"
+        echo "  Default: $DEFAULT_UPLOAD_DIR"
+        prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
+        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$HOME_DIR}"
+
+        # External library (for existing photos)
+        echo ""
+        DEFAULT_EXTERNAL_DIR="$HOME_DIR/drives/primary/photos"
+        echo "EXISTING PHOTOS (external library, read-only):"
+        echo "  Default: $DEFAULT_EXTERNAL_DIR"
+        echo "  Leave blank if you don't have existing photos to import"
+        prompt_text "  Existing photos path:" "$DEFAULT_EXTERNAL_DIR" EXTERNAL_LIBRARY 2>/dev/null || EXTERNAL_LIBRARY=""
+        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$HOME_DIR}"
+
+        # If external library is same as upload, warn
+        if [ -n "$EXTERNAL_LIBRARY" ] && [ "$EXTERNAL_LIBRARY" = "$UPLOAD_LOCATION" ]; then
+            echo ""
+            echo "  ⚠️  Warning: External library and upload location are the same."
+            echo "     This may cause duplicate imports. Consider using different paths."
+            echo ""
+        fi
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $IMMICH_DIR"
-            echo "[DRY-RUN] Would store photos at $PHOTO_LOCATION"
+            echo "[DRY-RUN] Would store uploads at $UPLOAD_LOCATION"
+            [ -n "$EXTERNAL_LIBRARY" ] && echo "[DRY-RUN] Would mount external library at $EXTERNAL_LIBRARY"
             echo "[DRY-RUN] Would create docker-compose.yml and .env"
         else
             mkdir -p "$IMMICH_DIR" 2>/dev/null || true
-            mkdir -p "$PHOTO_LOCATION" 2>/dev/null || true
+            mkdir -p "$UPLOAD_LOCATION" 2>/dev/null || true
+            [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY" 2>/dev/null || true
             cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Create docker-compose.yml with external library support
@@ -2086,22 +2306,27 @@ IMMICH_COMPOSE
 # STORAGE TEMPLATE (configure in Immich web UI):
 #   Admin → Settings → Storage Template → Enable
 #   Template: {{y}}/{{MM}}/{{filename}}
-#   This organizes new uploads into: photos/2026/01/filename.jpg
+#   This organizes new uploads into: immich-uploads/2026/01/filename.jpg
 #
-# EXISTING PHOTOS:
-#   If you have existing photos, add them as an External Library:
-#   Admin → External Libraries → Create Library → Path: /usr/src/app/external
-#   Then scan the library to import them (read-only, no duplicates)
+# UPLOADING OLD PHOTOS WITH CORRECT DATES:
+#   Use immich-cli to import with proper EXIF date extraction:
+#
+#   npm install -g @immich/cli
+#   immich login http://localhost:2283/api <your-api-key>
+#   immich upload --recursive /path/to/old/photos
+#
+#   The CLI reads EXIF data to set correct dates automatically.
+#   Get your API key from: User Settings → API Keys
 #
 # ============================================================
 
 # Photo storage location (new uploads from phone/web)
-UPLOAD_LOCATION=$PHOTO_LOCATION
+UPLOAD_LOCATION=$UPLOAD_LOCATION
 
-# External library for existing photos (optional)
-# Set this to your existing photo folder to make them visible in Immich
-# They remain read-only - Immich won't modify or move them
-EXTERNAL_LIBRARY=$PHOTO_LOCATION
+# External library for existing photos (read-only)
+# Configure in: Admin → External Libraries → Create Library
+# Import path inside container: /usr/src/app/external
+EXTERNAL_LIBRARY=${EXTERNAL_LIBRARY:-}
 
 # Database location (keep on fast storage)
 DB_DATA_LOCATION=./postgres
@@ -2116,25 +2341,41 @@ TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 IMMICH_ENV
 
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR" 2>/dev/null || true
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PHOTO_LOCATION" 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPLOAD_LOCATION" 2>/dev/null || true
+            [ -n "$EXTERNAL_LIBRARY" ] && chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EXTERNAL_LIBRARY" 2>/dev/null || true
 
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
-            echo "  Photos stored at: $PHOTO_LOCATION"
+            echo "  Uploads: $UPLOAD_LOCATION"
+            [ -n "$EXTERNAL_LIBRARY" ] && echo "  External: $EXTERNAL_LIBRARY"
             echo ""
-            echo "  Start with: cd $IMMICH_DIR && docker compose up -d"
-            echo "  Access at:  http://localhost:2283"
+
+            # Ask to start container
+            prompt_yn "Start Immich now? (y/n):" "y" START_IMMICH
+            if [ "$START_IMMICH" = "y" ] || [ "$START_IMMICH" = "Y" ]; then
+                echo "  Starting Immich..."
+                docker compose up -d 2>/dev/null && echo "  ✓ Immich started" || echo "  ⚠ Failed to start"
+            fi
+
             echo ""
-            echo "  IMPORTANT - After first login, configure storage template:"
-            echo "    1. Go to Admin → Settings → Storage Template"
-            echo "    2. Enable storage template"
-            echo "    3. Set template to: {{y}}/{{MM}}/{{filename}}"
-            echo "    4. New uploads will be organized as: 2026/01/photo.jpg"
+            echo "  Access at: http://localhost:2283"
             echo ""
-            echo "  For existing photos in $PHOTO_LOCATION:"
-            echo "    1. Go to Admin → External Libraries → Create Library"
-            echo "    2. Set import path to: /usr/src/app/external"
-            echo "    3. Scan library to import (photos stay in place, not duplicated)"
+            echo "  SETUP STEPS:"
+            echo "    1. Create admin account on first visit"
+            echo "    2. Go to Admin → Settings → Storage Template"
+            echo "    3. Enable and set template to: {{y}}/{{MM}}/{{filename}}"
+            echo ""
+            if [ -n "$EXTERNAL_LIBRARY" ]; then
+                echo "  FOR EXISTING PHOTOS:"
+                echo "    1. Go to Admin → External Libraries → Create Library"
+                echo "    2. Set import path to: /usr/src/app/external"
+                echo "    3. Scan library to import"
+                echo ""
+            fi
+            echo "  UPLOADING OLD PHOTOS WITH CORRECT DATES:"
+            echo "    npm install -g @immich/cli"
+            echo "    immich login http://localhost:2283/api <your-api-key>"
+            echo "    immich upload --recursive /path/to/old/photos"
             echo ""
         fi
     fi
@@ -2190,7 +2431,12 @@ ABS_ENV
 
             echo ""
             echo "✓ Audiobookshelf configured at $ABS_DIR"
-            echo "  Start with: cd $ABS_DIR && docker compose up -d"
+
+            prompt_yn "Start Audiobookshelf now? (y/n):" "y" START_ABS
+            if [ "$START_ABS" = "y" ] || [ "$START_ABS" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Audiobookshelf started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:13378"
             echo ""
         fi
@@ -2250,7 +2496,12 @@ EMBY_ENV
 
             echo ""
             echo "✓ Emby configured at $EMBY_DIR"
-            echo "  Start with: cd $EMBY_DIR && docker compose up -d"
+
+            prompt_yn "Start Emby now? (y/n):" "y" START_EMBY
+            if [ "$START_EMBY" = "y" ] || [ "$START_EMBY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Emby started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8096"
             echo ""
         fi
@@ -2325,8 +2576,14 @@ ARM_ENV
 
             echo ""
             echo "✓ A.R.M. configured at $ARM_DIR"
-            echo "  Start with: cd $ARM_DIR && docker compose up -d"
+
+            prompt_yn "Start A.R.M. now? (y/n):" "y" START_ARM
+            if [ "$START_ARM" = "y" ] || [ "$START_ARM" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ A.R.M. started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8080"
+            echo "  ⚠️  Complete setup in browser on first visit!"
             echo "  Note: Edit docker-compose.yml to add more optical drives"
             echo ""
         fi
@@ -2395,7 +2652,12 @@ FB_SETTINGS
 
             echo ""
             echo "✓ Filebrowser configured at $FB_DIR"
-            echo "  Start with: cd $FB_DIR && docker compose up -d"
+
+            prompt_yn "Start Filebrowser now? (y/n):" "y" START_FB
+            if [ "$START_FB" = "y" ] || [ "$START_FB" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Filebrowser started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8085"
             echo "  Default login: admin / admin (change immediately!)"
             echo ""
@@ -2451,8 +2713,83 @@ MM_COMPOSE
 
                 mkdir -p config modules css
 
-                # Create basic config.js
-                cat > config/config.js << 'MM_CONFIG'
+                # Ask if user has existing config to copy
+                echo ""
+                echo "  Config options:"
+                echo "    [1] Use default config (basic modules)"
+                echo "    [2] Copy existing config from path"
+                read -p "  Choose [1]: " MM_CONFIG_CHOICE
+                MM_CONFIG_CHOICE=${MM_CONFIG_CHOICE:-1}
+
+                if [ "$MM_CONFIG_CHOICE" = "2" ]; then
+                    read -p "  Path to config.js: " MM_CONFIG_PATH
+                    if [ -f "$MM_CONFIG_PATH" ]; then
+                        cp "$MM_CONFIG_PATH" config/config.js
+                        echo "  ✓ Copied config from $MM_CONFIG_PATH"
+
+                        # Also copy custom.css if exists in same directory
+                        MM_CSS_PATH="${MM_CONFIG_PATH%/*}/custom.css"
+                        if [ -f "$MM_CSS_PATH" ]; then
+                            cp "$MM_CSS_PATH" css/custom.css
+                            echo "  ✓ Copied custom.css"
+                        fi
+
+                        # Parse config for third-party modules and offer to download
+                        echo ""
+                        echo "  Scanning for third-party modules..."
+
+                        # Extract module names starting with MMM- (third-party convention)
+                        THIRD_PARTY_MODULES=$(grep -oP 'module:\s*["\x27]MMM-[^"\x27]+["\x27]' config/config.js 2>/dev/null | sed "s/module:\s*[\"']//g" | sed "s/[\"']//g" | sort -u)
+
+                        if [ -n "$THIRD_PARTY_MODULES" ]; then
+                            echo "  Found third-party modules:"
+                            echo "$THIRD_PARTY_MODULES" | while read mod; do
+                                echo "    - $mod"
+                            done
+                            echo ""
+                            prompt_yn "  Download these modules from GitHub? (y/n):" "y" MM_DOWNLOAD_MODS
+                            if [ "$MM_DOWNLOAD_MODS" = "y" ] || [ "$MM_DOWNLOAD_MODS" = "Y" ]; then
+                                cd modules
+                                echo "$THIRD_PARTY_MODULES" | while read mod; do
+                                    if [ -n "$mod" ] && [ ! -d "$mod" ]; then
+                                        echo "  Downloading $mod..."
+                                        # Try common GitHub patterns
+                                        git clone --depth 1 "https://github.com/MichMich/$mod.git" 2>/dev/null || \
+                                        git clone --depth 1 "https://github.com/bugsounet/$mod.git" 2>/dev/null || \
+                                        git clone --depth 1 "https://github.com/MagicMirrorOrg/$mod.git" 2>/dev/null || \
+                                        echo "    ⚠ Could not find $mod - search at https://github.com/topics/magicmirror"
+                                    fi
+                                done
+                                cd ..
+
+                                # Run npm install for each downloaded module
+                                echo ""
+                                echo "  Installing npm dependencies for modules..."
+                                for mod_dir in modules/MMM-*/; do
+                                    if [ -d "$mod_dir" ] && [ -f "$mod_dir/package.json" ]; then
+                                        mod_name=$(basename "$mod_dir")
+                                        echo "  Installing dependencies for $mod_name..."
+                                        (cd "$mod_dir" && npm install --production 2>/dev/null) && \
+                                            echo "    ✓ $mod_name dependencies installed" || \
+                                            echo "    ⚠ $mod_name - npm install failed (may work anyway)"
+                                    fi
+                                done
+                                echo ""
+                            fi
+                        else
+                            echo "  No third-party modules (MMM-*) found in config"
+                        fi
+                    else
+                        echo "  ⚠ File not found: $MM_CONFIG_PATH"
+                        echo "  Using default config..."
+                        MM_CONFIG_CHOICE="1"
+                    fi
+                fi
+
+                # Create default config if not copying
+                if [ "$MM_CONFIG_CHOICE" != "2" ]; then
+                    # Create basic config.js
+                    cat > config/config.js << 'MM_CONFIG'
 let config = {
     address: "0.0.0.0",
     port: 8080,
@@ -2524,6 +2861,7 @@ let config = {
 /*************** DO NOT EDIT THE LINE BELOW ***************/
 if (typeof module !== "undefined") {module.exports = config;}
 MM_CONFIG
+                fi
 
                 chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MM_DIR"
 
@@ -2533,7 +2871,15 @@ MM_CONFIG
 
         if [ "$DRY_RUN" != true ]; then
             echo ""
-            echo "  Start with: cd ~/docker/magicmirror-808X && docker compose up -d"
+            prompt_yn "Start Magic Mirror instance(s) now? (y/n):" "y" START_MM
+            if [ "$START_MM" = "y" ] || [ "$START_MM" = "Y" ]; then
+                for i in $(seq 1 $MM_COUNT); do
+                    MM_PORT=$((8080 + i))
+                    MM_DIR="$DOCKER_DIR/magicmirror-$MM_PORT"
+                    (cd "$MM_DIR" && docker compose up -d 2>/dev/null) && echo "  ✓ Magic Mirror #$i started (port $MM_PORT)" || echo "  ⚠ Failed to start Magic Mirror #$i"
+                done
+            fi
+
             echo "  Access at:  http://localhost:808X"
             echo "  Edit config: ~/docker/magicmirror-808X/config/config.js"
             echo ""
@@ -2592,7 +2938,12 @@ LMS_ENV
 
             echo ""
             echo "✓ Lyrion Music Server configured at $LMS_DIR"
-            echo "  Start with: cd $LMS_DIR && docker compose up -d"
+
+            prompt_yn "Start Lyrion Music Server now? (y/n):" "y" START_LMS
+            if [ "$START_LMS" = "y" ] || [ "$START_LMS" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Lyrion Music Server started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:9000"
             echo "  Note: Uses host networking for Chromecast support"
             echo ""
@@ -2646,7 +2997,12 @@ MEALIE_COMPOSE
 
             echo ""
             echo "✓ Mealie configured at $MEALIE_DIR"
-            echo "  Start with: cd $MEALIE_DIR && docker compose up -d"
+
+            prompt_yn "Start Mealie now? (y/n):" "y" START_MEALIE
+            if [ "$START_MEALIE" = "y" ] || [ "$START_MEALIE" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Mealie started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:9925"
             echo "  Default:    changeme@email.com / MyPassword"
             echo ""
@@ -2716,7 +3072,12 @@ MC_ENV
 
             echo ""
             echo "✓ Minecraft Server configured at $MC_DIR"
-            echo "  Start with: cd $MC_DIR && docker compose up -d"
+
+            prompt_yn "Start Minecraft Server now? (y/n):" "y" START_MC
+            if [ "$START_MC" = "y" ] || [ "$START_MC" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Minecraft Server started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Connect:    localhost:25565"
             echo "  RAM limit:  $MC_RAM"
             echo "  Console:    docker attach minecraft (Ctrl+P, Ctrl+Q to detach)"
@@ -2862,7 +3223,12 @@ JELLYFIN_ENV
 
             echo ""
             echo "✓ Jellyfin configured at $JELLYFIN_DIR"
-            echo "  Start with: cd $JELLYFIN_DIR && docker compose up -d"
+
+            prompt_yn "Start Jellyfin now? (y/n):" "y" START_JELLYFIN
+            if [ "$START_JELLYFIN" = "y" ] || [ "$START_JELLYFIN" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Jellyfin started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8096"
             echo "  Note: Hardware acceleration enabled (Intel GPU)"
             echo ""
@@ -2974,10 +3340,14 @@ FRIGATE_CONFIG
 
             echo ""
             echo "✓ Frigate installed at $FRIGATE_DIR"
-            echo "  Start: cd $FRIGATE_DIR && docker compose up -d"
-            echo "  Access: http://localhost:5000"
             echo ""
-            echo "  ⚠️  REQUIRED: Edit config/config.yml to add your cameras!"
+            echo "  ⚠️  Note: You should edit config/config.yml to add cameras before starting."
+            prompt_yn "Start Frigate now anyway? (y/n):" "n" START_FRIGATE
+            if [ "$START_FRIGATE" = "y" ] || [ "$START_FRIGATE" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Frigate started" || echo "  ⚠ Failed to start"
+            fi
+
+            echo "  Access: http://localhost:5000"
             echo "  Docs: https://docs.frigate.video"
             echo ""
         fi
@@ -3164,7 +3534,12 @@ CADDY_FILE
 
             echo ""
             echo "✓ Caddy installed at $CADDY_DIR"
-            echo "  Start: cd $CADDY_DIR && docker compose up -d"
+
+            prompt_yn "Start Caddy now? (y/n):" "y" START_CADDY
+            if [ "$START_CADDY" = "y" ] || [ "$START_CADDY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Caddy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Domain: ${CADDY_DOMAIN:-localhost} (edit .env)"
             echo "  Config: $CADDY_DIR/Caddyfile (uncomment services)"
             echo ""
@@ -3248,9 +3623,13 @@ DDCLIENT_CONF
 
             echo ""
             echo "✓ ddclient installed at $DDCLIENT_DIR"
-            echo "  Start: cd $DDCLIENT_DIR && docker compose up -d"
             echo ""
-            echo "  ⚠️  REQUIRED: Edit config/ddclient.conf first!"
+            echo "  ⚠️  Note: You should edit config/ddclient.conf before starting."
+            prompt_yn "Start ddclient now anyway? (y/n):" "n" START_DDCLIENT
+            if [ "$START_DDCLIENT" = "y" ] || [ "$START_DDCLIENT" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ ddclient started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Docs: https://ddclient.net/"
             echo ""
         fi
@@ -3303,7 +3682,12 @@ NTFY_ENV
 
             echo ""
             echo "✓ ntfy configured at $NTFY_DIR"
-            echo "  Start with: cd $NTFY_DIR && docker compose up -d"
+
+            prompt_yn "Start ntfy now? (y/n):" "y" START_NTFY
+            if [ "$START_NTFY" = "y" ] || [ "$START_NTFY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ ntfy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8090"
             echo ""
             echo "  Send notification: curl -d \"Hello!\" localhost:8090/mytopic"
@@ -3352,7 +3736,12 @@ UPTIME_COMPOSE
 
             echo ""
             echo "✓ Uptime Kuma configured at $UPTIME_DIR"
-            echo "  Start with: cd $UPTIME_DIR && docker compose up -d"
+
+            prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME
+            if [ "$START_UPTIME" = "y" ] || [ "$START_UPTIME" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Uptime Kuma started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:3001"
             echo ""
         fi
@@ -3419,7 +3808,12 @@ WGEASY_ENV
 
             echo ""
             echo "✓ wg-easy configured at $WGEASY_DIR"
-            echo "  Start with: cd $WGEASY_DIR && docker compose up -d"
+
+            prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
+            if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ wg-easy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Web UI:     http://localhost:51821"
             echo "  Password:   $WG_PASSWORD (saved in .env)"
             echo "  VPN Port:   51820/udp (forward this in your router)"
@@ -3486,7 +3880,12 @@ TRACCAR_XML
 
             echo ""
             echo "✓ Traccar configured at $TRACCAR_DIR"
-            echo "  Start with: cd $TRACCAR_DIR && docker compose up -d"
+
+            prompt_yn "Start Traccar now? (y/n):" "y" START_TRACCAR
+            if [ "$START_TRACCAR" = "y" ] || [ "$START_TRACCAR" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Traccar started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8082"
             echo "  Default:    admin@admin.com / admin (change immediately!)"
             echo ""
@@ -3534,7 +3933,12 @@ PORTAINER_COMPOSE
 
             echo ""
             echo "✓ Portainer configured at $PORTAINER_DIR"
-            echo "  Start with: cd $PORTAINER_DIR && docker compose up -d"
+
+            prompt_yn "Start Portainer now? (y/n):" "y" START_PORTAINER
+            if [ "$START_PORTAINER" = "y" ] || [ "$START_PORTAINER" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Portainer started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  https://localhost:9443"
             echo "  Create admin account on first visit"
             echo ""
@@ -3602,7 +4006,12 @@ MC_ENV
 
             echo ""
             echo "✓ MeshCentral Server installed at $MC_DIR"
-            echo "  Start: cd $MC_DIR && docker compose up -d"
+
+            prompt_yn "Start MeshCentral now? (y/n):" "y" START_MESHCENTRAL
+            if [ "$START_MESHCENTRAL" = "y" ] || [ "$START_MESHCENTRAL" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ MeshCentral started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access: https://localhost:4430"
             echo ""
             echo "  First visit: Create admin account"
@@ -3662,7 +4071,12 @@ FMD_ENV
 
             echo ""
             echo "✓ FindMyDevice configured at $FMD_DIR"
-            echo "  Start with: cd $FMD_DIR && docker compose up -d"
+
+            prompt_yn "Start FindMyDevice now? (y/n):" "y" START_FMD
+            if [ "$START_FMD" = "y" ] || [ "$START_FMD" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ FindMyDevice started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8084"
             echo "  Admin password: $FMD_ADMIN_PASS (saved in .env)"
             echo ""
@@ -3763,7 +4177,12 @@ FN_CONFIG
 
             echo ""
             echo "✓ Frigate-Notify installed at $FN_DIR"
-            echo "  Start: cd $FN_DIR && docker compose up -d"
+
+            prompt_yn "Start Frigate-Notify now? (y/n):" "y" START_FN
+            if [ "$START_FN" = "y" ] || [ "$START_FN" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Frigate-Notify started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Config: $FN_DIR/config.yml (edit if needed)"
             echo "  Docs: https://frigate-notify.0x2142.com"
             echo ""
@@ -3875,7 +4294,12 @@ WT_ENV
 
             echo ""
             echo "✓ Watchtower installed at $WT_DIR"
-            echo "  Start: cd $WT_DIR && docker compose up -d"
+
+            prompt_yn "Start Watchtower now? (y/n):" "y" START_WATCHTOWER
+            if [ "$START_WATCHTOWER" = "y" ] || [ "$START_WATCHTOWER" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Watchtower started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Mode: $([ "$MONITOR_ONLY" = "true" ] && echo "Monitor only" || echo "Auto-update")"
             echo ""
             echo "  Checks for updates daily at 4 AM."
@@ -4044,7 +4468,12 @@ RESTORE_SCRIPT
 
             echo ""
             echo "✓ Kopia backup configured at $KOPIA_DIR"
-            echo "  Start Kopia:    cd $KOPIA_DIR && docker compose up -d"
+
+            prompt_yn "Start Kopia now? (y/n):" "y" START_KOPIA
+            if [ "$START_KOPIA" = "y" ] || [ "$START_KOPIA" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Kopia started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Web UI:         https://localhost:51515"
             echo "  Username:       admin"
             echo "  Password:       $KOPIA_PASSWORD (saved in .env)"
@@ -4616,6 +5045,119 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
             if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ] || is_samba_installed; then
                 ufw allow samba
                 echo "✓ Allowed Samba"
+            fi
+
+            # Allow Docker service ports (only if Docker was installed)
+            if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+                echo ""
+                echo "Opening firewall ports for Docker services..."
+
+                prompt_yn "Open firewall ports for installed Docker services? (y/n):" "y" OPEN_DOCKER_PORTS
+                if [ "$OPEN_DOCKER_PORTS" = "y" ] || [ "$OPEN_DOCKER_PORTS" = "Y" ]; then
+
+                    # Reverse proxies (NPM or Caddy)
+                    if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+                        ufw allow 80/tcp comment 'HTTP' 2>/dev/null
+                        ufw allow 443/tcp comment 'HTTPS' 2>/dev/null
+                        echo "  ✓ Allowed HTTP/HTTPS (80, 443)"
+                    fi
+
+                    # Media servers
+                    if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
+                        ufw allow 2283/tcp comment 'Immich' 2>/dev/null
+                        echo "  ✓ Allowed Immich (2283)"
+                    fi
+                    if [ "$INSTALL_JELLYFIN" = "y" ] || [ "$INSTALL_JELLYFIN" = "Y" ]; then
+                        ufw allow 8096/tcp comment 'Jellyfin' 2>/dev/null
+                        echo "  ✓ Allowed Jellyfin (8096)"
+                    fi
+                    if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
+                        ufw allow 8096/tcp comment 'Emby' 2>/dev/null
+                        echo "  ✓ Allowed Emby (8096)"
+                    fi
+
+                    # NVR
+                    if [ "$INSTALL_FRIGATE" = "y" ] || [ "$INSTALL_FRIGATE" = "Y" ]; then
+                        ufw allow 5000/tcp comment 'Frigate' 2>/dev/null
+                        ufw allow 8554/tcp comment 'Frigate RTSP' 2>/dev/null
+                        ufw allow 8555/tcp comment 'Frigate WebRTC' 2>/dev/null
+                        ufw allow 8555/udp comment 'Frigate WebRTC UDP' 2>/dev/null
+                        echo "  ✓ Allowed Frigate (5000, 8554, 8555)"
+                    fi
+
+                    # Utilities
+                    if [ "$INSTALL_PORTAINER" = "y" ] || [ "$INSTALL_PORTAINER" = "Y" ]; then
+                        ufw allow 9000/tcp comment 'Portainer HTTP' 2>/dev/null
+                        ufw allow 9443/tcp comment 'Portainer HTTPS' 2>/dev/null
+                        echo "  ✓ Allowed Portainer (9000, 9443)"
+                    fi
+                    if [ "$INSTALL_UPTIMEKUMA" = "y" ] || [ "$INSTALL_UPTIMEKUMA" = "Y" ]; then
+                        ufw allow 3001/tcp comment 'Uptime Kuma' 2>/dev/null
+                        echo "  ✓ Allowed Uptime Kuma (3001)"
+                    fi
+
+                    # VPN
+                    if [ "$INSTALL_WGEASY" = "y" ] || [ "$INSTALL_WGEASY" = "Y" ]; then
+                        ufw allow 51820/udp comment 'WireGuard VPN' 2>/dev/null
+                        ufw allow 51821/tcp comment 'WG-Easy Web UI' 2>/dev/null
+                        echo "  ✓ Allowed WireGuard (51820/udp, 51821)"
+                    fi
+
+                    # GPS Tracking
+                    if [ "$INSTALL_TRACCAR" = "y" ] || [ "$INSTALL_TRACCAR" = "Y" ]; then
+                        ufw allow 8082/tcp comment 'Traccar' 2>/dev/null
+                        ufw allow 5055/tcp comment 'Traccar OsmAnd' 2>/dev/null
+                        echo "  ✓ Allowed Traccar (8082, 5055)"
+                    fi
+
+                    # Music server
+                    if [ "$INSTALL_LMS" = "y" ] || [ "$INSTALL_LMS" = "Y" ]; then
+                        ufw allow 9000/tcp comment 'Lyrion Music Server' 2>/dev/null
+                        ufw allow 3483/tcp comment 'LMS Players' 2>/dev/null
+                        ufw allow 3483/udp comment 'LMS Players UDP' 2>/dev/null
+                        echo "  ✓ Allowed Lyrion Music Server (9000, 3483)"
+                    fi
+
+                    # Notifications
+                    if [ "$INSTALL_NTFY" = "y" ] || [ "$INSTALL_NTFY" = "Y" ]; then
+                        ufw allow 8090/tcp comment 'ntfy' 2>/dev/null
+                        echo "  ✓ Allowed ntfy (8090)"
+                    fi
+
+                    # Minecraft
+                    if [ "$INSTALL_MINECRAFT" = "y" ] || [ "$INSTALL_MINECRAFT" = "Y" ]; then
+                        ufw allow 25565/tcp comment 'Minecraft' 2>/dev/null
+                        echo "  ✓ Allowed Minecraft (25565)"
+                    fi
+
+                    # Other services
+                    if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
+                        ufw allow 8085/tcp comment 'Filebrowser' 2>/dev/null
+                        echo "  ✓ Allowed Filebrowser (8085)"
+                    fi
+                    if [ "$INSTALL_FMD" = "y" ] || [ "$INSTALL_FMD" = "Y" ]; then
+                        ufw allow 8084/tcp comment 'FindMyDevice' 2>/dev/null
+                        echo "  ✓ Allowed FindMyDevice (8084)"
+                    fi
+                    if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
+                        ufw allow 9925/tcp comment 'Mealie' 2>/dev/null
+                        echo "  ✓ Allowed Mealie (9925)"
+                    fi
+                    if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
+                        ufw allow 8081:8083/tcp comment 'MagicMirror' 2>/dev/null
+                        echo "  ✓ Allowed MagicMirror (8081-8083)"
+                    fi
+                    if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
+                        ufw allow 8080/tcp comment 'A.R.M.' 2>/dev/null
+                        echo "  ✓ Allowed A.R.M. (8080)"
+                    fi
+                    if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
+                        ufw allow 13378/tcp comment 'Audiobookshelf' 2>/dev/null
+                        echo "  ✓ Allowed Audiobookshelf (13378)"
+                    fi
+
+                    echo ""
+                fi
             fi
 
             # Enable UFW (with --force to avoid prompt)
