@@ -2431,7 +2431,12 @@ ABS_ENV
 
             echo ""
             echo "✓ Audiobookshelf configured at $ABS_DIR"
-            echo "  Start with: cd $ABS_DIR && docker compose up -d"
+
+            prompt_yn "Start Audiobookshelf now? (y/n):" "y" START_ABS
+            if [ "$START_ABS" = "y" ] || [ "$START_ABS" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Audiobookshelf started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:13378"
             echo ""
         fi
@@ -2491,7 +2496,12 @@ EMBY_ENV
 
             echo ""
             echo "✓ Emby configured at $EMBY_DIR"
-            echo "  Start with: cd $EMBY_DIR && docker compose up -d"
+
+            prompt_yn "Start Emby now? (y/n):" "y" START_EMBY
+            if [ "$START_EMBY" = "y" ] || [ "$START_EMBY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Emby started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8096"
             echo ""
         fi
@@ -2566,8 +2576,14 @@ ARM_ENV
 
             echo ""
             echo "✓ A.R.M. configured at $ARM_DIR"
-            echo "  Start with: cd $ARM_DIR && docker compose up -d"
+
+            prompt_yn "Start A.R.M. now? (y/n):" "y" START_ARM
+            if [ "$START_ARM" = "y" ] || [ "$START_ARM" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ A.R.M. started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8080"
+            echo "  ⚠️  Complete setup in browser on first visit!"
             echo "  Note: Edit docker-compose.yml to add more optical drives"
             echo ""
         fi
@@ -2636,7 +2652,12 @@ FB_SETTINGS
 
             echo ""
             echo "✓ Filebrowser configured at $FB_DIR"
-            echo "  Start with: cd $FB_DIR && docker compose up -d"
+
+            prompt_yn "Start Filebrowser now? (y/n):" "y" START_FB
+            if [ "$START_FB" = "y" ] || [ "$START_FB" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Filebrowser started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8085"
             echo "  Default login: admin / admin (change immediately!)"
             echo ""
@@ -2692,8 +2713,83 @@ MM_COMPOSE
 
                 mkdir -p config modules css
 
-                # Create basic config.js
-                cat > config/config.js << 'MM_CONFIG'
+                # Ask if user has existing config to copy
+                echo ""
+                echo "  Config options:"
+                echo "    [1] Use default config (basic modules)"
+                echo "    [2] Copy existing config from path"
+                read -p "  Choose [1]: " MM_CONFIG_CHOICE
+                MM_CONFIG_CHOICE=${MM_CONFIG_CHOICE:-1}
+
+                if [ "$MM_CONFIG_CHOICE" = "2" ]; then
+                    read -p "  Path to config.js: " MM_CONFIG_PATH
+                    if [ -f "$MM_CONFIG_PATH" ]; then
+                        cp "$MM_CONFIG_PATH" config/config.js
+                        echo "  ✓ Copied config from $MM_CONFIG_PATH"
+
+                        # Also copy custom.css if exists in same directory
+                        MM_CSS_PATH="${MM_CONFIG_PATH%/*}/custom.css"
+                        if [ -f "$MM_CSS_PATH" ]; then
+                            cp "$MM_CSS_PATH" css/custom.css
+                            echo "  ✓ Copied custom.css"
+                        fi
+
+                        # Parse config for third-party modules and offer to download
+                        echo ""
+                        echo "  Scanning for third-party modules..."
+
+                        # Extract module names starting with MMM- (third-party convention)
+                        THIRD_PARTY_MODULES=$(grep -oP 'module:\s*["\x27]MMM-[^"\x27]+["\x27]' config/config.js 2>/dev/null | sed "s/module:\s*[\"']//g" | sed "s/[\"']//g" | sort -u)
+
+                        if [ -n "$THIRD_PARTY_MODULES" ]; then
+                            echo "  Found third-party modules:"
+                            echo "$THIRD_PARTY_MODULES" | while read mod; do
+                                echo "    - $mod"
+                            done
+                            echo ""
+                            prompt_yn "  Download these modules from GitHub? (y/n):" "y" MM_DOWNLOAD_MODS
+                            if [ "$MM_DOWNLOAD_MODS" = "y" ] || [ "$MM_DOWNLOAD_MODS" = "Y" ]; then
+                                cd modules
+                                echo "$THIRD_PARTY_MODULES" | while read mod; do
+                                    if [ -n "$mod" ] && [ ! -d "$mod" ]; then
+                                        echo "  Downloading $mod..."
+                                        # Try common GitHub patterns
+                                        git clone --depth 1 "https://github.com/MichMich/$mod.git" 2>/dev/null || \
+                                        git clone --depth 1 "https://github.com/bugsounet/$mod.git" 2>/dev/null || \
+                                        git clone --depth 1 "https://github.com/MagicMirrorOrg/$mod.git" 2>/dev/null || \
+                                        echo "    ⚠ Could not find $mod - search at https://github.com/topics/magicmirror"
+                                    fi
+                                done
+                                cd ..
+
+                                # Run npm install for each downloaded module
+                                echo ""
+                                echo "  Installing npm dependencies for modules..."
+                                for mod_dir in modules/MMM-*/; do
+                                    if [ -d "$mod_dir" ] && [ -f "$mod_dir/package.json" ]; then
+                                        mod_name=$(basename "$mod_dir")
+                                        echo "  Installing dependencies for $mod_name..."
+                                        (cd "$mod_dir" && npm install --production 2>/dev/null) && \
+                                            echo "    ✓ $mod_name dependencies installed" || \
+                                            echo "    ⚠ $mod_name - npm install failed (may work anyway)"
+                                    fi
+                                done
+                                echo ""
+                            fi
+                        else
+                            echo "  No third-party modules (MMM-*) found in config"
+                        fi
+                    else
+                        echo "  ⚠ File not found: $MM_CONFIG_PATH"
+                        echo "  Using default config..."
+                        MM_CONFIG_CHOICE="1"
+                    fi
+                fi
+
+                # Create default config if not copying
+                if [ "$MM_CONFIG_CHOICE" != "2" ]; then
+                    # Create basic config.js
+                    cat > config/config.js << 'MM_CONFIG'
 let config = {
     address: "0.0.0.0",
     port: 8080,
@@ -2765,6 +2861,7 @@ let config = {
 /*************** DO NOT EDIT THE LINE BELOW ***************/
 if (typeof module !== "undefined") {module.exports = config;}
 MM_CONFIG
+                fi
 
                 chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MM_DIR"
 
@@ -2774,7 +2871,15 @@ MM_CONFIG
 
         if [ "$DRY_RUN" != true ]; then
             echo ""
-            echo "  Start with: cd ~/docker/magicmirror-808X && docker compose up -d"
+            prompt_yn "Start Magic Mirror instance(s) now? (y/n):" "y" START_MM
+            if [ "$START_MM" = "y" ] || [ "$START_MM" = "Y" ]; then
+                for i in $(seq 1 $MM_COUNT); do
+                    MM_PORT=$((8080 + i))
+                    MM_DIR="$DOCKER_DIR/magicmirror-$MM_PORT"
+                    (cd "$MM_DIR" && docker compose up -d 2>/dev/null) && echo "  ✓ Magic Mirror #$i started (port $MM_PORT)" || echo "  ⚠ Failed to start Magic Mirror #$i"
+                done
+            fi
+
             echo "  Access at:  http://localhost:808X"
             echo "  Edit config: ~/docker/magicmirror-808X/config/config.js"
             echo ""
@@ -2833,7 +2938,12 @@ LMS_ENV
 
             echo ""
             echo "✓ Lyrion Music Server configured at $LMS_DIR"
-            echo "  Start with: cd $LMS_DIR && docker compose up -d"
+
+            prompt_yn "Start Lyrion Music Server now? (y/n):" "y" START_LMS
+            if [ "$START_LMS" = "y" ] || [ "$START_LMS" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Lyrion Music Server started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:9000"
             echo "  Note: Uses host networking for Chromecast support"
             echo ""
@@ -2887,7 +2997,12 @@ MEALIE_COMPOSE
 
             echo ""
             echo "✓ Mealie configured at $MEALIE_DIR"
-            echo "  Start with: cd $MEALIE_DIR && docker compose up -d"
+
+            prompt_yn "Start Mealie now? (y/n):" "y" START_MEALIE
+            if [ "$START_MEALIE" = "y" ] || [ "$START_MEALIE" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Mealie started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:9925"
             echo "  Default:    changeme@email.com / MyPassword"
             echo ""
@@ -2957,7 +3072,12 @@ MC_ENV
 
             echo ""
             echo "✓ Minecraft Server configured at $MC_DIR"
-            echo "  Start with: cd $MC_DIR && docker compose up -d"
+
+            prompt_yn "Start Minecraft Server now? (y/n):" "y" START_MC
+            if [ "$START_MC" = "y" ] || [ "$START_MC" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Minecraft Server started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Connect:    localhost:25565"
             echo "  RAM limit:  $MC_RAM"
             echo "  Console:    docker attach minecraft (Ctrl+P, Ctrl+Q to detach)"
@@ -3103,7 +3223,12 @@ JELLYFIN_ENV
 
             echo ""
             echo "✓ Jellyfin configured at $JELLYFIN_DIR"
-            echo "  Start with: cd $JELLYFIN_DIR && docker compose up -d"
+
+            prompt_yn "Start Jellyfin now? (y/n):" "y" START_JELLYFIN
+            if [ "$START_JELLYFIN" = "y" ] || [ "$START_JELLYFIN" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Jellyfin started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8096"
             echo "  Note: Hardware acceleration enabled (Intel GPU)"
             echo ""
@@ -3215,10 +3340,14 @@ FRIGATE_CONFIG
 
             echo ""
             echo "✓ Frigate installed at $FRIGATE_DIR"
-            echo "  Start: cd $FRIGATE_DIR && docker compose up -d"
-            echo "  Access: http://localhost:5000"
             echo ""
-            echo "  ⚠️  REQUIRED: Edit config/config.yml to add your cameras!"
+            echo "  ⚠️  Note: You should edit config/config.yml to add cameras before starting."
+            prompt_yn "Start Frigate now anyway? (y/n):" "n" START_FRIGATE
+            if [ "$START_FRIGATE" = "y" ] || [ "$START_FRIGATE" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Frigate started" || echo "  ⚠ Failed to start"
+            fi
+
+            echo "  Access: http://localhost:5000"
             echo "  Docs: https://docs.frigate.video"
             echo ""
         fi
@@ -3405,7 +3534,12 @@ CADDY_FILE
 
             echo ""
             echo "✓ Caddy installed at $CADDY_DIR"
-            echo "  Start: cd $CADDY_DIR && docker compose up -d"
+
+            prompt_yn "Start Caddy now? (y/n):" "y" START_CADDY
+            if [ "$START_CADDY" = "y" ] || [ "$START_CADDY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Caddy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Domain: ${CADDY_DOMAIN:-localhost} (edit .env)"
             echo "  Config: $CADDY_DIR/Caddyfile (uncomment services)"
             echo ""
@@ -3489,9 +3623,13 @@ DDCLIENT_CONF
 
             echo ""
             echo "✓ ddclient installed at $DDCLIENT_DIR"
-            echo "  Start: cd $DDCLIENT_DIR && docker compose up -d"
             echo ""
-            echo "  ⚠️  REQUIRED: Edit config/ddclient.conf first!"
+            echo "  ⚠️  Note: You should edit config/ddclient.conf before starting."
+            prompt_yn "Start ddclient now anyway? (y/n):" "n" START_DDCLIENT
+            if [ "$START_DDCLIENT" = "y" ] || [ "$START_DDCLIENT" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ ddclient started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Docs: https://ddclient.net/"
             echo ""
         fi
@@ -3544,7 +3682,12 @@ NTFY_ENV
 
             echo ""
             echo "✓ ntfy configured at $NTFY_DIR"
-            echo "  Start with: cd $NTFY_DIR && docker compose up -d"
+
+            prompt_yn "Start ntfy now? (y/n):" "y" START_NTFY
+            if [ "$START_NTFY" = "y" ] || [ "$START_NTFY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ ntfy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8090"
             echo ""
             echo "  Send notification: curl -d \"Hello!\" localhost:8090/mytopic"
@@ -3593,7 +3736,12 @@ UPTIME_COMPOSE
 
             echo ""
             echo "✓ Uptime Kuma configured at $UPTIME_DIR"
-            echo "  Start with: cd $UPTIME_DIR && docker compose up -d"
+
+            prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME
+            if [ "$START_UPTIME" = "y" ] || [ "$START_UPTIME" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Uptime Kuma started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:3001"
             echo ""
         fi
@@ -3660,7 +3808,12 @@ WGEASY_ENV
 
             echo ""
             echo "✓ wg-easy configured at $WGEASY_DIR"
-            echo "  Start with: cd $WGEASY_DIR && docker compose up -d"
+
+            prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
+            if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ wg-easy started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Web UI:     http://localhost:51821"
             echo "  Password:   $WG_PASSWORD (saved in .env)"
             echo "  VPN Port:   51820/udp (forward this in your router)"
@@ -3727,7 +3880,12 @@ TRACCAR_XML
 
             echo ""
             echo "✓ Traccar configured at $TRACCAR_DIR"
-            echo "  Start with: cd $TRACCAR_DIR && docker compose up -d"
+
+            prompt_yn "Start Traccar now? (y/n):" "y" START_TRACCAR
+            if [ "$START_TRACCAR" = "y" ] || [ "$START_TRACCAR" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Traccar started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8082"
             echo "  Default:    admin@admin.com / admin (change immediately!)"
             echo ""
@@ -3775,7 +3933,12 @@ PORTAINER_COMPOSE
 
             echo ""
             echo "✓ Portainer configured at $PORTAINER_DIR"
-            echo "  Start with: cd $PORTAINER_DIR && docker compose up -d"
+
+            prompt_yn "Start Portainer now? (y/n):" "y" START_PORTAINER
+            if [ "$START_PORTAINER" = "y" ] || [ "$START_PORTAINER" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Portainer started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  https://localhost:9443"
             echo "  Create admin account on first visit"
             echo ""
@@ -3843,7 +4006,12 @@ MC_ENV
 
             echo ""
             echo "✓ MeshCentral Server installed at $MC_DIR"
-            echo "  Start: cd $MC_DIR && docker compose up -d"
+
+            prompt_yn "Start MeshCentral now? (y/n):" "y" START_MESHCENTRAL
+            if [ "$START_MESHCENTRAL" = "y" ] || [ "$START_MESHCENTRAL" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ MeshCentral started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access: https://localhost:4430"
             echo ""
             echo "  First visit: Create admin account"
@@ -3903,7 +4071,12 @@ FMD_ENV
 
             echo ""
             echo "✓ FindMyDevice configured at $FMD_DIR"
-            echo "  Start with: cd $FMD_DIR && docker compose up -d"
+
+            prompt_yn "Start FindMyDevice now? (y/n):" "y" START_FMD
+            if [ "$START_FMD" = "y" ] || [ "$START_FMD" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ FindMyDevice started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Access at:  http://localhost:8084"
             echo "  Admin password: $FMD_ADMIN_PASS (saved in .env)"
             echo ""
@@ -4004,7 +4177,12 @@ FN_CONFIG
 
             echo ""
             echo "✓ Frigate-Notify installed at $FN_DIR"
-            echo "  Start: cd $FN_DIR && docker compose up -d"
+
+            prompt_yn "Start Frigate-Notify now? (y/n):" "y" START_FN
+            if [ "$START_FN" = "y" ] || [ "$START_FN" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Frigate-Notify started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Config: $FN_DIR/config.yml (edit if needed)"
             echo "  Docs: https://frigate-notify.0x2142.com"
             echo ""
@@ -4116,7 +4294,12 @@ WT_ENV
 
             echo ""
             echo "✓ Watchtower installed at $WT_DIR"
-            echo "  Start: cd $WT_DIR && docker compose up -d"
+
+            prompt_yn "Start Watchtower now? (y/n):" "y" START_WATCHTOWER
+            if [ "$START_WATCHTOWER" = "y" ] || [ "$START_WATCHTOWER" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Watchtower started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Mode: $([ "$MONITOR_ONLY" = "true" ] && echo "Monitor only" || echo "Auto-update")"
             echo ""
             echo "  Checks for updates daily at 4 AM."
@@ -4285,7 +4468,12 @@ RESTORE_SCRIPT
 
             echo ""
             echo "✓ Kopia backup configured at $KOPIA_DIR"
-            echo "  Start Kopia:    cd $KOPIA_DIR && docker compose up -d"
+
+            prompt_yn "Start Kopia now? (y/n):" "y" START_KOPIA
+            if [ "$START_KOPIA" = "y" ] || [ "$START_KOPIA" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Kopia started" || echo "  ⚠ Failed to start"
+            fi
+
             echo "  Web UI:         https://localhost:51515"
             echo "  Username:       admin"
             echo "  Password:       $KOPIA_PASSWORD (saved in .env)"
@@ -4857,6 +5045,119 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
             if [ "$INSTALL_SAMBA" = "y" ] || [ "$INSTALL_SAMBA" = "Y" ] || is_samba_installed; then
                 ufw allow samba
                 echo "✓ Allowed Samba"
+            fi
+
+            # Allow Docker service ports (only if Docker was installed)
+            if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
+                echo ""
+                echo "Opening firewall ports for Docker services..."
+
+                prompt_yn "Open firewall ports for installed Docker services? (y/n):" "y" OPEN_DOCKER_PORTS
+                if [ "$OPEN_DOCKER_PORTS" = "y" ] || [ "$OPEN_DOCKER_PORTS" = "Y" ]; then
+
+                    # Reverse proxies (NPM or Caddy)
+                    if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+                        ufw allow 80/tcp comment 'HTTP' 2>/dev/null
+                        ufw allow 443/tcp comment 'HTTPS' 2>/dev/null
+                        echo "  ✓ Allowed HTTP/HTTPS (80, 443)"
+                    fi
+
+                    # Media servers
+                    if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
+                        ufw allow 2283/tcp comment 'Immich' 2>/dev/null
+                        echo "  ✓ Allowed Immich (2283)"
+                    fi
+                    if [ "$INSTALL_JELLYFIN" = "y" ] || [ "$INSTALL_JELLYFIN" = "Y" ]; then
+                        ufw allow 8096/tcp comment 'Jellyfin' 2>/dev/null
+                        echo "  ✓ Allowed Jellyfin (8096)"
+                    fi
+                    if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
+                        ufw allow 8096/tcp comment 'Emby' 2>/dev/null
+                        echo "  ✓ Allowed Emby (8096)"
+                    fi
+
+                    # NVR
+                    if [ "$INSTALL_FRIGATE" = "y" ] || [ "$INSTALL_FRIGATE" = "Y" ]; then
+                        ufw allow 5000/tcp comment 'Frigate' 2>/dev/null
+                        ufw allow 8554/tcp comment 'Frigate RTSP' 2>/dev/null
+                        ufw allow 8555/tcp comment 'Frigate WebRTC' 2>/dev/null
+                        ufw allow 8555/udp comment 'Frigate WebRTC UDP' 2>/dev/null
+                        echo "  ✓ Allowed Frigate (5000, 8554, 8555)"
+                    fi
+
+                    # Utilities
+                    if [ "$INSTALL_PORTAINER" = "y" ] || [ "$INSTALL_PORTAINER" = "Y" ]; then
+                        ufw allow 9000/tcp comment 'Portainer HTTP' 2>/dev/null
+                        ufw allow 9443/tcp comment 'Portainer HTTPS' 2>/dev/null
+                        echo "  ✓ Allowed Portainer (9000, 9443)"
+                    fi
+                    if [ "$INSTALL_UPTIMEKUMA" = "y" ] || [ "$INSTALL_UPTIMEKUMA" = "Y" ]; then
+                        ufw allow 3001/tcp comment 'Uptime Kuma' 2>/dev/null
+                        echo "  ✓ Allowed Uptime Kuma (3001)"
+                    fi
+
+                    # VPN
+                    if [ "$INSTALL_WGEASY" = "y" ] || [ "$INSTALL_WGEASY" = "Y" ]; then
+                        ufw allow 51820/udp comment 'WireGuard VPN' 2>/dev/null
+                        ufw allow 51821/tcp comment 'WG-Easy Web UI' 2>/dev/null
+                        echo "  ✓ Allowed WireGuard (51820/udp, 51821)"
+                    fi
+
+                    # GPS Tracking
+                    if [ "$INSTALL_TRACCAR" = "y" ] || [ "$INSTALL_TRACCAR" = "Y" ]; then
+                        ufw allow 8082/tcp comment 'Traccar' 2>/dev/null
+                        ufw allow 5055/tcp comment 'Traccar OsmAnd' 2>/dev/null
+                        echo "  ✓ Allowed Traccar (8082, 5055)"
+                    fi
+
+                    # Music server
+                    if [ "$INSTALL_LMS" = "y" ] || [ "$INSTALL_LMS" = "Y" ]; then
+                        ufw allow 9000/tcp comment 'Lyrion Music Server' 2>/dev/null
+                        ufw allow 3483/tcp comment 'LMS Players' 2>/dev/null
+                        ufw allow 3483/udp comment 'LMS Players UDP' 2>/dev/null
+                        echo "  ✓ Allowed Lyrion Music Server (9000, 3483)"
+                    fi
+
+                    # Notifications
+                    if [ "$INSTALL_NTFY" = "y" ] || [ "$INSTALL_NTFY" = "Y" ]; then
+                        ufw allow 8090/tcp comment 'ntfy' 2>/dev/null
+                        echo "  ✓ Allowed ntfy (8090)"
+                    fi
+
+                    # Minecraft
+                    if [ "$INSTALL_MINECRAFT" = "y" ] || [ "$INSTALL_MINECRAFT" = "Y" ]; then
+                        ufw allow 25565/tcp comment 'Minecraft' 2>/dev/null
+                        echo "  ✓ Allowed Minecraft (25565)"
+                    fi
+
+                    # Other services
+                    if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
+                        ufw allow 8085/tcp comment 'Filebrowser' 2>/dev/null
+                        echo "  ✓ Allowed Filebrowser (8085)"
+                    fi
+                    if [ "$INSTALL_FMD" = "y" ] || [ "$INSTALL_FMD" = "Y" ]; then
+                        ufw allow 8084/tcp comment 'FindMyDevice' 2>/dev/null
+                        echo "  ✓ Allowed FindMyDevice (8084)"
+                    fi
+                    if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
+                        ufw allow 9925/tcp comment 'Mealie' 2>/dev/null
+                        echo "  ✓ Allowed Mealie (9925)"
+                    fi
+                    if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
+                        ufw allow 8081:8083/tcp comment 'MagicMirror' 2>/dev/null
+                        echo "  ✓ Allowed MagicMirror (8081-8083)"
+                    fi
+                    if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
+                        ufw allow 8080/tcp comment 'A.R.M.' 2>/dev/null
+                        echo "  ✓ Allowed A.R.M. (8080)"
+                    fi
+                    if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
+                        ufw allow 13378/tcp comment 'Audiobookshelf' 2>/dev/null
+                        echo "  ✓ Allowed Audiobookshelf (13378)"
+                    fi
+
+                    echo ""
+                fi
             fi
 
             # Enable UFW (with --force to avoid prompt)
