@@ -1041,6 +1041,209 @@ if [ "$UNATTENDED" != true ]; then
 fi
 
 # ============================================================================
+# DRIVE SETUP (Runs before everything else)
+# ============================================================================
+
+setup_drives() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DRIVE SETUP"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This script uses ~/drives/ for data storage:"
+    echo "  ~/drives/primary  - Main data drive (media, photos, etc.)"
+    echo "  ~/drives/backup1  - Backup drive(s)"
+    echo ""
+
+    # Create base drives directory
+    mkdir -p "$ACTUAL_HOME/drives"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
+    # Check for existing mounts
+    if mount | grep -q "$ACTUAL_HOME/drives/"; then
+        echo "Existing mounted drives:"
+        df -h | grep "$ACTUAL_HOME/drives" | awk '{print "  " $6 " (" $2 " total, " $4 " free)"}'
+        echo ""
+        prompt_yn "Configure additional drives? (y/n):" "n" SETUP_DRIVES
+    else
+        echo "No drives currently mounted in ~/drives/"
+        echo ""
+        prompt_yn "Set up drives now? (y/n):" "y" SETUP_DRIVES
+    fi
+
+    if [ "$SETUP_DRIVES" != "y" ] && [ "$SETUP_DRIVES" != "Y" ]; then
+        echo "Skipping drive setup. You can run this script again later."
+        return 0
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "AVAILABLE BLOCK DEVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+    echo ""
+
+    # Detect drives without partition tables (new drives)
+    echo "Checking for new/unpartitioned drives..."
+    NEW_DRIVES=()
+    for disk in /dev/sd? /dev/nvme?n?; do
+        [ -b "$disk" ] || continue
+        # Check if disk has no partitions
+        if ! lsblk -n "$disk" | grep -q "part"; then
+            # Check if it has no partition table
+            if ! blkid "$disk" &>/dev/null; then
+                size=$(lsblk -n -d -o SIZE "$disk" 2>/dev/null)
+                NEW_DRIVES+=("$disk ($size)")
+            fi
+        fi
+    done
+
+    if [ ${#NEW_DRIVES[@]} -gt 0 ]; then
+        echo ""
+        echo "⚠️  Found unpartitioned drives (no filesystem):"
+        for drive in "${NEW_DRIVES[@]}"; do
+            echo "  • $drive"
+        done
+        echo ""
+        prompt_yn "Would you like to partition and format any of these? (y/n):" "n" FORMAT_DRIVES
+
+        if [ "$FORMAT_DRIVES" = "y" ] || [ "$FORMAT_DRIVES" = "Y" ]; then
+            for drive_info in "${NEW_DRIVES[@]}"; do
+                drive=$(echo "$drive_info" | cut -d' ' -f1)
+                echo ""
+                prompt_yn "Format $drive_info as ext4? (ALL DATA WILL BE ERASED) (y/n):" "n" FORMAT_THIS
+
+                if [ "$FORMAT_THIS" = "y" ] || [ "$FORMAT_THIS" = "Y" ]; then
+                    echo "  Creating partition table on $drive..."
+                    parted -s "$drive" mklabel gpt
+                    parted -s "$drive" mkpart primary ext4 0% 100%
+
+                    # Wait for partition to appear
+                    sleep 2
+
+                    # Format the partition
+                    part="${drive}1"
+                    [ -b "${drive}p1" ] && part="${drive}p1"  # nvme drives
+
+                    if [ -b "$part" ]; then
+                        echo "  Formatting $part as ext4..."
+                        mkfs.ext4 -F "$part"
+                        echo "  ✓ Formatted $part"
+                    else
+                        echo "  ⚠ Could not find partition after creation"
+                    fi
+                fi
+            done
+            echo ""
+            echo "Updated block devices:"
+            lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+            echo ""
+        fi
+    fi
+
+    # Configure mount points
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "CONFIGURE MOUNT POINTS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Primary drive
+    echo "PRIMARY DRIVE (for media, photos, docker data):"
+    prompt_text "  Mount point name [primary]:" "primary" PRIMARY_NAME
+    PRIMARY_NAME="${PRIMARY_NAME:-primary}"
+    mkdir -p "$ACTUAL_HOME/drives/$PRIMARY_NAME"
+
+    # Check if already mounted
+    if mount | grep -q "$ACTUAL_HOME/drives/$PRIMARY_NAME"; then
+        echo "  ✓ Already mounted"
+    else
+        echo "  Enter device (e.g., /dev/sdb1) or leave blank to skip:"
+        read -p "  Device for $PRIMARY_NAME: " PRIMARY_DEV
+
+        if [ -n "$PRIMARY_DEV" ] && [ -b "$PRIMARY_DEV" ]; then
+            # Add to fstab
+            PRIMARY_UUID=$(blkid -s UUID -o value "$PRIMARY_DEV" 2>/dev/null)
+            if [ -n "$PRIMARY_UUID" ]; then
+                # Check if not already in fstab
+                if ! grep -q "$PRIMARY_UUID" /etc/fstab 2>/dev/null; then
+                    cp /etc/fstab /etc/fstab.backup-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+                    echo "UUID=$PRIMARY_UUID $ACTUAL_HOME/drives/$PRIMARY_NAME auto defaults,nofail 0 2" >> /etc/fstab
+                    echo "  ✓ Added to fstab"
+                fi
+            fi
+        fi
+    fi
+
+    # Backup drives
+    echo ""
+    echo "BACKUP DRIVES (optional, for rsync backups):"
+    prompt_text "  How many backup drives? [0-4, default: 0]:" "0" NUM_BACKUPS
+    NUM_BACKUPS="${NUM_BACKUPS:-0}"
+
+    # Validate number
+    case $NUM_BACKUPS in
+        0|1|2|3|4) ;;
+        *) NUM_BACKUPS=0 ;;
+    esac
+
+    declare -a BACKUP_NAMES
+    declare -a BACKUP_DEVS
+    for i in $(seq 1 $NUM_BACKUPS); do
+        echo ""
+        prompt_text "  Backup drive $i name [backup$i]:" "backup$i" "BACKUP_NAME"
+        BACKUP_NAMES[$i]="${BACKUP_NAME:-backup$i}"
+        mkdir -p "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"
+
+        if ! mount | grep -q "$ACTUAL_HOME/drives/${BACKUP_NAMES[$i]}"; then
+            read -p "  Device for ${BACKUP_NAMES[$i]}: " "BACKUP_DEV"
+            BACKUP_DEVS[$i]="$BACKUP_DEV"
+
+            if [ -n "$BACKUP_DEV" ] && [ -b "$BACKUP_DEV" ]; then
+                BACKUP_UUID=$(blkid -s UUID -o value "$BACKUP_DEV" 2>/dev/null)
+                if [ -n "$BACKUP_UUID" ]; then
+                    if ! grep -q "$BACKUP_UUID" /etc/fstab 2>/dev/null; then
+                        echo "UUID=$BACKUP_UUID $ACTUAL_HOME/drives/${BACKUP_NAMES[$i]} auto defaults,nofail 0 2" >> /etc/fstab
+                        echo "  ✓ Added ${BACKUP_NAMES[$i]} to fstab"
+                    fi
+                fi
+            fi
+        else
+            echo "  ✓ Already mounted"
+        fi
+    done
+
+    # Set permissions
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ACTUAL_HOME/drives"
+
+    # Mount all from fstab
+    echo ""
+    echo "Mounting drives from fstab..."
+    mount -a 2>/dev/null || true
+
+    echo ""
+    echo "Current mounts in ~/drives/:"
+    df -h | grep "$ACTUAL_HOME/drives" | awk '{print "  " $6 " - " $2 " total, " $4 " free"}' || echo "  (none)"
+    echo ""
+
+    # Export drive names for later use
+    export PRIMARY_DRIVE_NAME="$PRIMARY_NAME"
+    export BACKUP_DRIVE_COUNT="$NUM_BACKUPS"
+    for i in $(seq 1 $NUM_BACKUPS); do
+        export "BACKUP_DRIVE_${i}_NAME=${BACKUP_NAMES[$i]}"
+    done
+
+    echo "✓ Drive setup complete"
+    echo ""
+}
+
+# Run drive setup for normal installs (not migration/recovery)
+if [ "$INSTALL_MODE" = "normal" ] && [ "$UNATTENDED" != true ]; then
+    setup_drives
+fi
+
+# ============================================================================
 # SOFTWARE DETECTION FUNCTIONS
 # ============================================================================
 
@@ -1982,31 +2185,48 @@ else
         echo "Installing Immich..."
         IMMICH_DIR="$DOCKER_DIR/immich"
 
-        # Default photo location
-        DEFAULT_PHOTO_DIR="$HOME_DIR/drives/primary/photos"
-
-        # Ask about photo storage location
+        # Photo storage configuration
         echo ""
         echo "Photo Storage Configuration:"
-        echo "  Immich can store photos on your data drive instead of the OS drive."
-        echo "  This keeps all photos in one place and makes backups simpler."
         echo ""
-        echo "  Default: $DEFAULT_PHOTO_DIR"
-        echo "  (Press Enter to use default, or enter a custom path)"
+        echo "Immich needs two separate locations:"
+        echo "  1. UPLOAD folder - Where NEW photos from phone/web uploads go"
+        echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
         echo ""
-        PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
-        prompt_text "Photo storage path:" "$DEFAULT_PHOTO_DIR" PHOTO_LOCATION 2>/dev/null || PHOTO_LOCATION="$DEFAULT_PHOTO_DIR"
 
-        # Expand ~ if used
-        PHOTO_LOCATION="${PHOTO_LOCATION/#\~/$HOME_DIR}"
+        # Upload location (for new photos)
+        DEFAULT_UPLOAD_DIR="$HOME_DIR/drives/primary/photos/immich-uploads"
+        echo "NEW UPLOADS (from phone apps, web uploads):"
+        echo "  Default: $DEFAULT_UPLOAD_DIR"
+        prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
+        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$HOME_DIR}"
+
+        # External library (for existing photos)
+        echo ""
+        DEFAULT_EXTERNAL_DIR="$HOME_DIR/drives/primary/photos"
+        echo "EXISTING PHOTOS (external library, read-only):"
+        echo "  Default: $DEFAULT_EXTERNAL_DIR"
+        echo "  Leave blank if you don't have existing photos to import"
+        prompt_text "  Existing photos path:" "$DEFAULT_EXTERNAL_DIR" EXTERNAL_LIBRARY 2>/dev/null || EXTERNAL_LIBRARY=""
+        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$HOME_DIR}"
+
+        # If external library is same as upload, warn
+        if [ -n "$EXTERNAL_LIBRARY" ] && [ "$EXTERNAL_LIBRARY" = "$UPLOAD_LOCATION" ]; then
+            echo ""
+            echo "  ⚠️  Warning: External library and upload location are the same."
+            echo "     This may cause duplicate imports. Consider using different paths."
+            echo ""
+        fi
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $IMMICH_DIR"
-            echo "[DRY-RUN] Would store photos at $PHOTO_LOCATION"
+            echo "[DRY-RUN] Would store uploads at $UPLOAD_LOCATION"
+            [ -n "$EXTERNAL_LIBRARY" ] && echo "[DRY-RUN] Would mount external library at $EXTERNAL_LIBRARY"
             echo "[DRY-RUN] Would create docker-compose.yml and .env"
         else
             mkdir -p "$IMMICH_DIR" 2>/dev/null || true
-            mkdir -p "$PHOTO_LOCATION" 2>/dev/null || true
+            mkdir -p "$UPLOAD_LOCATION" 2>/dev/null || true
+            [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY" 2>/dev/null || true
             cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Create docker-compose.yml with external library support
@@ -2086,22 +2306,27 @@ IMMICH_COMPOSE
 # STORAGE TEMPLATE (configure in Immich web UI):
 #   Admin → Settings → Storage Template → Enable
 #   Template: {{y}}/{{MM}}/{{filename}}
-#   This organizes new uploads into: photos/2026/01/filename.jpg
+#   This organizes new uploads into: immich-uploads/2026/01/filename.jpg
 #
-# EXISTING PHOTOS:
-#   If you have existing photos, add them as an External Library:
-#   Admin → External Libraries → Create Library → Path: /usr/src/app/external
-#   Then scan the library to import them (read-only, no duplicates)
+# UPLOADING OLD PHOTOS WITH CORRECT DATES:
+#   Use immich-cli to import with proper EXIF date extraction:
+#
+#   npm install -g @immich/cli
+#   immich login http://localhost:2283/api <your-api-key>
+#   immich upload --recursive /path/to/old/photos
+#
+#   The CLI reads EXIF data to set correct dates automatically.
+#   Get your API key from: User Settings → API Keys
 #
 # ============================================================
 
 # Photo storage location (new uploads from phone/web)
-UPLOAD_LOCATION=$PHOTO_LOCATION
+UPLOAD_LOCATION=$UPLOAD_LOCATION
 
-# External library for existing photos (optional)
-# Set this to your existing photo folder to make them visible in Immich
-# They remain read-only - Immich won't modify or move them
-EXTERNAL_LIBRARY=$PHOTO_LOCATION
+# External library for existing photos (read-only)
+# Configure in: Admin → External Libraries → Create Library
+# Import path inside container: /usr/src/app/external
+EXTERNAL_LIBRARY=${EXTERNAL_LIBRARY:-}
 
 # Database location (keep on fast storage)
 DB_DATA_LOCATION=./postgres
@@ -2116,25 +2341,41 @@ TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 IMMICH_ENV
 
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR" 2>/dev/null || true
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PHOTO_LOCATION" 2>/dev/null || true
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPLOAD_LOCATION" 2>/dev/null || true
+            [ -n "$EXTERNAL_LIBRARY" ] && chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EXTERNAL_LIBRARY" 2>/dev/null || true
 
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
-            echo "  Photos stored at: $PHOTO_LOCATION"
+            echo "  Uploads: $UPLOAD_LOCATION"
+            [ -n "$EXTERNAL_LIBRARY" ] && echo "  External: $EXTERNAL_LIBRARY"
             echo ""
-            echo "  Start with: cd $IMMICH_DIR && docker compose up -d"
-            echo "  Access at:  http://localhost:2283"
+
+            # Ask to start container
+            prompt_yn "Start Immich now? (y/n):" "y" START_IMMICH
+            if [ "$START_IMMICH" = "y" ] || [ "$START_IMMICH" = "Y" ]; then
+                echo "  Starting Immich..."
+                docker compose up -d 2>/dev/null && echo "  ✓ Immich started" || echo "  ⚠ Failed to start"
+            fi
+
             echo ""
-            echo "  IMPORTANT - After first login, configure storage template:"
-            echo "    1. Go to Admin → Settings → Storage Template"
-            echo "    2. Enable storage template"
-            echo "    3. Set template to: {{y}}/{{MM}}/{{filename}}"
-            echo "    4. New uploads will be organized as: 2026/01/photo.jpg"
+            echo "  Access at: http://localhost:2283"
             echo ""
-            echo "  For existing photos in $PHOTO_LOCATION:"
-            echo "    1. Go to Admin → External Libraries → Create Library"
-            echo "    2. Set import path to: /usr/src/app/external"
-            echo "    3. Scan library to import (photos stay in place, not duplicated)"
+            echo "  SETUP STEPS:"
+            echo "    1. Create admin account on first visit"
+            echo "    2. Go to Admin → Settings → Storage Template"
+            echo "    3. Enable and set template to: {{y}}/{{MM}}/{{filename}}"
+            echo ""
+            if [ -n "$EXTERNAL_LIBRARY" ]; then
+                echo "  FOR EXISTING PHOTOS:"
+                echo "    1. Go to Admin → External Libraries → Create Library"
+                echo "    2. Set import path to: /usr/src/app/external"
+                echo "    3. Scan library to import"
+                echo ""
+            fi
+            echo "  UPLOADING OLD PHOTOS WITH CORRECT DATES:"
+            echo "    npm install -g @immich/cli"
+            echo "    immich login http://localhost:2283/api <your-api-key>"
+            echo "    immich upload --recursive /path/to/old/photos"
             echo ""
         fi
     fi
