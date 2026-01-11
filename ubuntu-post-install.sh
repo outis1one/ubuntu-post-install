@@ -3051,6 +3051,274 @@ KC_COMPOSE
         fi
     fi
 
+    # ---- CADDY WEB SERVER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ CADDY - Modern Web Server & Reverse Proxy                      │"
+    echo "│ Automatic HTTPS, reverse proxy for all your services           │"
+    echo "│ Port: 80 (HTTP), 443 (HTTPS)                                   │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY
+
+    if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+        CADDY_DIR="$DOCKER_DIR/caddy"
+
+        # Check if Caddy is already installed
+        if [ -f "$CADDY_DIR/Caddyfile" ] || [ -f "$CADDY_DIR/docker-compose.yml" ]; then
+            echo ""
+            echo "⚠  Caddy appears to be already installed at $CADDY_DIR"
+            prompt_yn "Do you want to reconfigure it? (y/n):" "n" RECONFIGURE_CADDY
+            if [ "$RECONFIGURE_CADDY" != "y" ] && [ "$RECONFIGURE_CADDY" != "Y" ]; then
+                echo "  Skipping Caddy installation"
+                INSTALL_CADDY="n"
+            fi
+        fi
+
+        if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+            if [ "$DRY_RUN" = true ]; then
+                echo "[DRY-RUN] Would create $CADDY_DIR"
+            else
+                echo "Installing Caddy..."
+                mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"
+
+                # Backup existing Caddyfile if it exists
+                if [ -f "$CADDY_DIR/Caddyfile" ]; then
+                    mkdir -p "$CADDY_DIR/backups"
+                    BACKUP_FILE="$CADDY_DIR/backups/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)"
+                    cp "$CADDY_DIR/Caddyfile" "$BACKUP_FILE"
+                    echo "  ✓ Backed up existing Caddyfile to: $BACKUP_FILE"
+                fi
+
+                cd "$CADDY_DIR"
+
+                cat > docker-compose.yml << 'CADDY_COMPOSE'
+name: caddy
+
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./data:/data
+      - ./config:/config
+      - /var/log/caddy:/var/log/caddy
+    environment:
+      - ACME_AGREE=true
+    labels:
+      - "io.podman.annotations.label/fail2ban.enable=true"
+CADDY_COMPOSE
+
+                # Create Caddyfile if it doesn't exist
+                if [ ! -f "Caddyfile" ]; then
+                    cat > Caddyfile << 'CADDYFILE'
+{
+    # Global options
+    admin off
+    # Email for Let's Encrypt notifications
+    # email admin@yourdomain.com
+}
+
+# Example configuration - edit this for your services
+# Uncomment and modify these examples:
+
+# ActualBudget
+# budget.yourdomain.com {
+#     log {
+#         output file /var/log/caddy/actualbudget-access.log
+#         format json
+#         level INFO
+#     }
+#     reverse_proxy localhost:5006
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-Content-Type-Options "nosniff"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#     }
+# }
+
+# Keycloak
+# auth.yourdomain.com {
+#     log {
+#         output file /var/log/caddy/keycloak-access.log
+#         format json
+#         level INFO
+#     }
+#     reverse_proxy localhost:8180
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-Content-Type-Options "nosniff"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#     }
+# }
+
+# Add more services here...
+CADDYFILE
+                    echo "  ✓ Created example Caddyfile"
+                else
+                    echo "  ℹ Using existing Caddyfile"
+                fi
+
+                echo "  ✓ Caddy configured at $CADDY_DIR"
+
+                prompt_yn "Start Caddy now? (y/n):" "y" START_CADDY
+                if [ "$START_CADDY" = "y" ] || [ "$START_CADDY" = "Y" ]; then
+                    docker compose up -d 2>/dev/null && echo "  ✓ Caddy started" || echo "  ⚠ Failed to start Caddy"
+                fi
+
+                echo ""
+                echo "  Configuration file: $CADDY_DIR/Caddyfile"
+                echo "  Edit Caddyfile to add your domains and services"
+                echo "  Reload config:      cd $CADDY_DIR && docker exec -w /etc/caddy caddy caddy reload"
+                echo ""
+                echo "  ⚠  IMPORTANT: Edit the Caddyfile to configure your domains!"
+                echo "     - Uncomment and modify the example configurations"
+                echo "     - Add your domain names"
+                echo "     - Configure services you want to expose"
+                echo ""
+            fi
+        fi
+    fi
+
+    # ---- FAIL2BAN ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FAIL2BAN - Intrusion Prevention System                         │"
+    echo "│ Automatically ban IPs with failed auth attempts                │"
+    echo "│ Protects SSH, Caddy, and other services                        │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install and configure fail2ban? (y/n):" "n" INSTALL_FAIL2BAN
+
+    if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would install fail2ban"
+        else
+            echo "Installing fail2ban..."
+
+            # Check if fail2ban is already installed
+            if command -v fail2ban-client &> /dev/null; then
+                echo "  ✓ fail2ban is already installed"
+            else
+                echo "  Installing fail2ban package..."
+                if sudo apt update && sudo apt install -y fail2ban; then
+                    echo "  ✓ fail2ban installed successfully"
+                else
+                    echo "  ⚠ Failed to install fail2ban"
+                    echo "  You may need to install it manually: sudo apt install fail2ban"
+                fi
+            fi
+
+            # Create log directory for Caddy
+            if [ ! -d "/var/log/caddy" ]; then
+                sudo mkdir -p /var/log/caddy
+                sudo chmod 755 /var/log/caddy
+                echo "  ✓ Created /var/log/caddy directory"
+            fi
+
+            # Check if Caddy filter exists
+            FILTER_FILE="/etc/fail2ban/filter.d/caddy-auth.conf"
+            if [ ! -f "$FILTER_FILE" ]; then
+                echo "  Creating fail2ban filter for Caddy..."
+
+                FILTER_CONTENT='[Definition]
+failregex = ^.*"remote_ip":"<HOST>".*"status":(?:401|403|429).*$
+            ^.*"remote_addr":"<HOST>.*"status":(?:401|403|429).*$
+ignoreregex = ^.*"remote_ip":"(?:127\.0\.0\.1|::1)".*$
+datepattern = "ts":%%s'
+
+                if echo "$FILTER_CONTENT" | sudo tee "$FILTER_FILE" > /dev/null; then
+                    echo "  ✓ Created Caddy fail2ban filter"
+                else
+                    echo "  ⚠ Failed to create filter - you may need to create it manually"
+                fi
+            else
+                echo "  ✓ Caddy fail2ban filter already exists"
+            fi
+
+            # Check if Caddy jail exists
+            JAIL_FILE="/etc/fail2ban/jail.d/caddy.conf"
+            if [ ! -f "$JAIL_FILE" ]; then
+                echo "  Creating fail2ban jail for Caddy..."
+                echo ""
+                echo "  Configure fail2ban settings (press Enter for defaults):"
+
+                prompt_text "  Max retries before ban:" "5" F2B_MAXRETRY
+                prompt_text "  Find time window (seconds):" "600" F2B_FINDTIME
+                prompt_text "  Ban duration (seconds):" "3600" F2B_BANTIME
+
+                JAIL_CONTENT="[caddy-auth]
+enabled = true
+port = http,https
+filter = caddy-auth
+logpath = /var/log/caddy/access.log
+          /var/log/caddy/*-access.log
+maxretry = $F2B_MAXRETRY
+findtime = $F2B_FINDTIME
+bantime = $F2B_BANTIME
+action = iptables-multiport[name=CaddyAuth, port=\"http,https\", protocol=tcp]
+backend = auto"
+
+                if echo "$JAIL_CONTENT" | sudo tee "$JAIL_FILE" > /dev/null; then
+                    echo "  ✓ Created Caddy fail2ban jail"
+                else
+                    echo "  ⚠ Failed to create jail - you may need to create it manually"
+                fi
+            else
+                echo "  ✓ Caddy fail2ban jail already exists"
+            fi
+
+            # Test fail2ban configuration
+            echo ""
+            echo "  Testing fail2ban configuration..."
+            if sudo fail2ban-client -t &> /dev/null; then
+                echo "  ✓ fail2ban configuration is valid"
+            else
+                echo "  ⚠ fail2ban configuration has errors"
+                echo "  Check with: sudo fail2ban-client -t"
+            fi
+
+            # Restart fail2ban
+            prompt_yn "Restart fail2ban to apply changes? (y/n):" "y" RESTART_F2B
+            if [ "$RESTART_F2B" = "y" ] || [ "$RESTART_F2B" = "Y" ]; then
+                if sudo systemctl restart fail2ban; then
+                    echo "  ✓ fail2ban restarted successfully"
+
+                    # Wait for fail2ban to start
+                    sleep 2
+
+                    # Check jail status
+                    if sudo fail2ban-client status caddy-auth &> /dev/null; then
+                        echo "  ✓ caddy-auth jail is active"
+                        echo ""
+                        sudo fail2ban-client status caddy-auth
+                    else
+                        echo "  ⚠ caddy-auth jail is not active (may need Caddy logs to exist first)"
+                    fi
+                else
+                    echo "  ⚠ Failed to restart fail2ban"
+                    echo "  Check logs: sudo journalctl -u fail2ban -n 50"
+                fi
+            fi
+
+            echo ""
+            echo "  Useful commands:"
+            echo "    Check jail status:  sudo fail2ban-client status caddy-auth"
+            echo "    View banned IPs:    sudo fail2ban-client get caddy-auth banip"
+            echo "    Unban IP:           sudo fail2ban-client set caddy-auth unbanip 1.2.3.4"
+            echo "    View logs:          sudo tail -f /var/log/fail2ban.log"
+            echo ""
+        fi
+    fi
+
     # ---- LYRION MUSIC SERVER ----
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
