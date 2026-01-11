@@ -3148,6 +3148,221 @@ KC_COMPOSE
             if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
                 echo "  Starting Keycloak (this may take a minute)..."
                 docker compose up -d 2>/dev/null && echo "  ✓ Keycloak started" || echo "  ⚠ Failed to start Keycloak"
+
+                # Automated initial configuration
+                echo ""
+                prompt_yn "Configure Keycloak with initial realm and clients? (y/n):" "y" CONFIGURE_KC
+
+                if [ "$CONFIGURE_KC" = "y" ] || [ "$CONFIGURE_KC" = "Y" ]; then
+                    echo ""
+                    echo "  Configuring Keycloak..."
+                    echo "  This will create a realm and OAuth2 clients for your services."
+                    echo ""
+
+                    # Get realm name
+                    prompt_text "  Realm name (e.g., homelab, services):" "homelab" KC_REALM
+
+                    # Get domain for redirect URIs
+                    prompt_text "  Your domain (for OAuth callbacks, e.g., example.com):" "localhost" KC_DOMAIN
+
+                    # Wait for Keycloak to be fully ready (can take 30-60 seconds)
+                    echo ""
+                    echo "  Waiting for Keycloak to be ready..."
+                    KC_READY=false
+                    for i in {1..60}; do
+                        if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+                            KC_READY=true
+                            echo "  ✓ Keycloak is ready"
+                            break
+                        fi
+                        echo -n "."
+                        sleep 2
+                    done
+                    echo ""
+
+                    if [ "$KC_READY" = true ]; then
+                        # Login to Keycloak admin CLI
+                        echo "  Logging in to Keycloak admin CLI..."
+                        docker exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+                            --server http://localhost:8080 \
+                            --realm master \
+                            --user admin \
+                            --password "$KC_ADMIN_PASS" > /dev/null 2>&1
+
+                        if [ $? -eq 0 ]; then
+                            echo "  ✓ Logged in to Keycloak"
+
+                            # Create realm
+                            echo "  Creating realm '$KC_REALM'..."
+                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create realms \
+                                -s realm="$KC_REALM" \
+                                -s enabled=true \
+                                -s displayName="$KC_REALM" \
+                                -s registrationAllowed=false \
+                                -s resetPasswordAllowed=true \
+                                -s rememberMe=true \
+                                -s loginWithEmailAllowed=true \
+                                -s duplicateEmailsAllowed=false \
+                                -s sslRequired=EXTERNAL > /dev/null 2>&1
+
+                            if [ $? -eq 0 ]; then
+                                echo "  ✓ Created realm '$KC_REALM'"
+                            fi
+
+                            # Create OAuth2 client for ActualBudget
+                            if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
+                                echo "  Creating OAuth2 client for ActualBudget..."
+                                AB_CLIENT_SECRET=$(openssl rand -hex 32)
+
+                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
+                                    -s clientId=actualbudget \
+                                    -s name="ActualBudget" \
+                                    -s description="Personal Finance Management" \
+                                    -s enabled=true \
+                                    -s clientAuthenticatorType=client-secret \
+                                    -s secret="$AB_CLIENT_SECRET" \
+                                    -s publicClient=false \
+                                    -s standardFlowEnabled=true \
+                                    -s directAccessGrantsEnabled=true \
+                                    -s serviceAccountsEnabled=false \
+                                    -s 'redirectUris=["http://localhost:5006/*","http://'$KC_DOMAIN':5006/*","https://'$KC_DOMAIN'/*","https://budget.'$KC_DOMAIN'/*"]' \
+                                    -s 'webOrigins=["http://localhost:5006","http://'$KC_DOMAIN':5006","https://'$KC_DOMAIN'","https://budget.'$KC_DOMAIN'"]' \
+                                    -s protocol=openid-connect > /dev/null 2>&1
+
+                                if [ $? -eq 0 ]; then
+                                    echo "  ✓ Created ActualBudget client"
+                                    echo "      Client ID: actualbudget"
+                                    echo "      Client Secret: $AB_CLIENT_SECRET"
+                                    echo ""
+
+                                    # Save to file
+                                    cat > "$KC_DIR/actualbudget-oauth.txt" << EOF
+ActualBudget OAuth2 Configuration
+==================================
+
+Client ID: actualbudget
+Client Secret: $AB_CLIENT_SECRET
+
+Authorization URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
+Token URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
+User Info URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
+
+For production (with Caddy):
+Authorization URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
+Token URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
+User Info URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
+
+Redirect URIs configured:
+- http://localhost:5006/*
+- https://budget.$KC_DOMAIN/*
+
+To configure ActualBudget:
+1. Go to ActualBudget settings
+2. Enable OpenID/OAuth authentication
+3. Enter the Client ID and Secret above
+4. Use the URLs above based on your setup
+EOF
+                                    echo "  ✓ Saved OAuth config to $KC_DIR/actualbudget-oauth.txt"
+                                fi
+                            fi
+
+                            # Create a generic OAuth2 client template for other services
+                            echo "  Creating generic OAuth2 client for other services..."
+                            GENERIC_CLIENT_SECRET=$(openssl rand -hex 32)
+
+                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
+                                -s clientId=generic-app \
+                                -s name="Generic Application" \
+                                -s description="Template client for other services" \
+                                -s enabled=true \
+                                -s clientAuthenticatorType=client-secret \
+                                -s secret="$GENERIC_CLIENT_SECRET" \
+                                -s publicClient=false \
+                                -s standardFlowEnabled=true \
+                                -s directAccessGrantsEnabled=true \
+                                -s 'redirectUris=["http://localhost:*/*","https://'$KC_DOMAIN'/*","https://*.'$KC_DOMAIN'/*"]' \
+                                -s 'webOrigins=["*"]' \
+                                -s protocol=openid-connect > /dev/null 2>&1
+
+                            if [ $? -eq 0 ]; then
+                                echo "  ✓ Created generic OAuth2 client template"
+                                cat > "$KC_DIR/generic-oauth.txt" << EOF
+Generic OAuth2 Client Configuration
+====================================
+
+Client ID: generic-app
+Client Secret: $GENERIC_CLIENT_SECRET
+
+Use this as a template for other services. You can clone this client
+in the Keycloak admin console and modify the redirect URIs.
+
+Base URLs:
+- Authorization: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
+- Token: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
+- User Info: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
+
+For production: Replace localhost:8180 with https://auth.$KC_DOMAIN
+EOF
+                                echo "  ✓ Saved config to $KC_DIR/generic-oauth.txt"
+                            fi
+
+                            # Optionally create initial user
+                            echo ""
+                            prompt_yn "Create an initial user in realm '$KC_REALM'? (y/n):" "y" CREATE_USER
+
+                            if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
+                                prompt_text "  Username:" "$ACTUAL_USER" KC_USERNAME
+                                prompt_text "  Email:" "${KC_USERNAME}@${KC_DOMAIN}" KC_EMAIL
+                                prompt_text "  First name:" "" KC_FIRSTNAME
+                                prompt_text "  Last name:" "" KC_LASTNAME
+
+                                echo "  Password for $KC_USERNAME:"
+                                read -s KC_USER_PASS
+                                echo ""
+
+                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create users -r "$KC_REALM" \
+                                    -s username="$KC_USERNAME" \
+                                    -s email="$KC_EMAIL" \
+                                    -s firstName="$KC_FIRSTNAME" \
+                                    -s lastName="$KC_LASTNAME" \
+                                    -s enabled=true \
+                                    -s emailVerified=true > /dev/null 2>&1
+
+                                if [ $? -eq 0 ]; then
+                                    # Set password
+                                    KC_USER_ID=$(docker exec keycloak /opt/keycloak/bin/kcadm.sh get users -r "$KC_REALM" -q username="$KC_USERNAME" 2>/dev/null | grep -o '"id" : "[^"]*"' | cut -d'"' -f4)
+
+                                    docker exec keycloak /opt/keycloak/bin/kcadm.sh set-password -r "$KC_REALM" \
+                                        --username "$KC_USERNAME" \
+                                        --new-password "$KC_USER_PASS" > /dev/null 2>&1
+
+                                    echo "  ✓ Created user: $KC_USERNAME"
+                                    echo "  ✓ Password set"
+                                    echo ""
+                                    echo "  This user can now log in to ActualBudget and other services!"
+                                fi
+                            fi
+
+                            echo ""
+                            echo "  ✓ Keycloak configuration complete!"
+                            echo ""
+                            echo "  Next steps:"
+                            echo "    1. Go to http://localhost:8180/admin"
+                            echo "    2. Login with admin / $KC_ADMIN_PASS"
+                            echo "    3. Switch to realm '$KC_REALM' (top-left dropdown)"
+                            echo "    4. Manage users in Users menu"
+                            echo "    5. OAuth configs saved to $KC_DIR/*.txt"
+                            echo ""
+
+                        else
+                            echo "  ⚠ Failed to login to Keycloak admin CLI"
+                            echo "  You can configure Keycloak manually via the web UI"
+                        fi
+                    else
+                        echo "  ⚠ Keycloak did not become ready in time"
+                        echo "  You can configure it manually after it starts"
+                    fi
+                fi
             fi
 
             echo ""
@@ -3155,6 +3370,10 @@ KC_COMPOSE
             echo "  Username:       admin"
             echo "  Password:       $KC_ADMIN_PASS"
             echo "  Database:       PostgreSQL (./postgres-data)"
+            if [ -n "$KC_REALM" ]; then
+                echo "  Realm:          $KC_REALM"
+                echo "  Config files:   $KC_DIR/*.txt"
+            fi
             echo ""
             echo "  ⚠  For production:"
             echo "     - Use HTTPS via reverse proxy (Caddy)"
