@@ -3162,8 +3162,63 @@ KC_COMPOSE
                     # Get realm name
                     prompt_text "  Realm name (e.g., homelab, services):" "homelab" KC_REALM
 
-                    # Get domain for redirect URIs
-                    prompt_text "  Your domain (for OAuth callbacks, e.g., example.com):" "localhost" KC_DOMAIN
+                    # Get domain configuration for redirect URIs
+                    echo ""
+                    echo "  ──────────────────────────────────────────────────────────────"
+                    echo "  DOMAIN CONFIGURATION"
+                    echo "  ──────────────────────────────────────────────────────────────"
+                    echo ""
+                    echo "  Keycloak needs to know where your services are hosted."
+                    echo ""
+                    echo "  Options:"
+                    echo "    1. Local only (http://localhost:PORT)"
+                    echo "    2. Public domain (https://yourdomain.com)"
+                    echo "    3. Both local and public"
+                    echo ""
+                    prompt_text "  Enter your setup (1/2/3):" "1" KC_SETUP_TYPE
+
+                    KC_DOMAIN="localhost"
+                    KC_PUBLIC_DOMAIN=""
+                    KC_EXTERNAL_SERVICE=""
+
+                    if [ "$KC_SETUP_TYPE" = "2" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
+                        echo ""
+                        prompt_text "  Your public domain (e.g., example.com):" "" KC_PUBLIC_DOMAIN
+
+                        echo ""
+                        echo "  ⚠  IMPORTANT: For Keycloak to work with external services,"
+                        echo "     it MUST be accessible at https://auth.$KC_PUBLIC_DOMAIN"
+                        echo ""
+                        echo "  This requires:"
+                        echo "    ✓ DNS A record: auth.$KC_PUBLIC_DOMAIN → Your Server IP"
+                        echo "    ✓ Caddy reverse proxy configured"
+                        echo "    ✓ Ports 80/443 open in firewall"
+                        echo ""
+                        prompt_yn "  Is Keycloak accessible at https://auth.$KC_PUBLIC_DOMAIN? (y/n):" "n" KC_DOMAIN_READY
+
+                        if [ "$KC_DOMAIN_READY" != "y" ] && [ "$KC_DOMAIN_READY" != "Y" ]; then
+                            echo ""
+                            echo "  ⚠  WARNING: Keycloak won't work with external services until"
+                            echo "     you configure Caddy and DNS. See KEYCLOAK-SETUP-GUIDE.md"
+                            echo ""
+                            echo "  You can still proceed and configure Caddy later."
+                            echo ""
+                        fi
+
+                        # Ask about external services (like Pikapod)
+                        echo ""
+                        prompt_yn "  Are you using external hosted services (e.g., Pikapod)? (y/n):" "n" KC_HAS_EXTERNAL
+
+                        if [ "$KC_HAS_EXTERNAL" = "y" ] || [ "$KC_HAS_EXTERNAL" = "Y" ]; then
+                            echo ""
+                            echo "  Enter the URL of your external service (e.g., https://actualbudget-abc.pikapod.net)"
+                            prompt_text "  External service URL:" "" KC_EXTERNAL_SERVICE
+                        fi
+                    fi
+
+                    if [ "$KC_SETUP_TYPE" = "1" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
+                        KC_DOMAIN="localhost"
+                    fi
 
                     # Wait for Keycloak to be fully ready (can take 30-60 seconds)
                     echo ""
@@ -3214,6 +3269,33 @@ KC_COMPOSE
                                 echo "  Creating OAuth2 client for ActualBudget..."
                                 AB_CLIENT_SECRET=$(openssl rand -hex 32)
 
+                                # Build redirect URIs based on configuration
+                                AB_REDIRECT_URIS='["http://localhost:5006/*","http://localhost:5006/callback"'
+
+                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://budget.'$KC_PUBLIC_DOMAIN'/*","https://budget.'$KC_PUBLIC_DOMAIN'/callback"'
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://'$KC_PUBLIC_DOMAIN':5006/*","https://'$KC_PUBLIC_DOMAIN':5006/callback"'
+                                fi
+
+                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"'$KC_EXTERNAL_SERVICE'/*","'$KC_EXTERNAL_SERVICE'/callback"'
+                                fi
+
+                                AB_REDIRECT_URIS="$AB_REDIRECT_URIS"']'
+
+                                # Build web origins
+                                AB_WEB_ORIGINS='["http://localhost:5006"'
+
+                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"https://budget.'$KC_PUBLIC_DOMAIN'","https://'$KC_PUBLIC_DOMAIN':5006"'
+                                fi
+
+                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"'$KC_EXTERNAL_SERVICE'"'
+                                fi
+
+                                AB_WEB_ORIGINS="$AB_WEB_ORIGINS"']'
+
                                 docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
                                     -s clientId=actualbudget \
                                     -s name="ActualBudget" \
@@ -3225,8 +3307,8 @@ KC_COMPOSE
                                     -s standardFlowEnabled=true \
                                     -s directAccessGrantsEnabled=true \
                                     -s serviceAccountsEnabled=false \
-                                    -s 'redirectUris=["http://localhost:5006/*","http://'$KC_DOMAIN':5006/*","https://'$KC_DOMAIN'/*","https://budget.'$KC_DOMAIN'/*"]' \
-                                    -s 'webOrigins=["http://localhost:5006","http://'$KC_DOMAIN':5006","https://'$KC_DOMAIN'","https://budget.'$KC_DOMAIN'"]' \
+                                    -s "redirectUris=$AB_REDIRECT_URIS" \
+                                    -s "webOrigins=$AB_WEB_ORIGINS" \
                                     -s protocol=openid-connect > /dev/null 2>&1
 
                                 if [ $? -eq 0 ]; then
@@ -3235,7 +3317,12 @@ KC_COMPOSE
                                     echo "      Client Secret: $AB_CLIENT_SECRET"
                                     echo ""
 
-                                    # Save to file
+                                    # Save to file with appropriate URLs
+                                    KC_AUTH_URL="http://localhost:8180"
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        KC_AUTH_URL="https://auth.$KC_PUBLIC_DOMAIN"
+                                    fi
+
                                     cat > "$KC_DIR/actualbudget-oauth.txt" << EOF
 ActualBudget OAuth2 Configuration
 ==================================
@@ -3243,18 +3330,51 @@ ActualBudget OAuth2 Configuration
 Client ID: actualbudget
 Client Secret: $AB_CLIENT_SECRET
 
+LOCAL DEVELOPMENT:
 Authorization URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
 Token URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
 User Info URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
+EOF
 
-For production (with Caddy):
-Authorization URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
-Token URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
-User Info URL: https://auth.$KC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+PRODUCTION (with Caddy at https://auth.$KC_PUBLIC_DOMAIN):
+Authorization URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
+Token URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
+User Info URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
+EOF
+                                    fi
+
+                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+EXTERNAL SERVICE ($KC_EXTERNAL_SERVICE):
+- Use PRODUCTION URLs above
+- Keycloak MUST be accessible at: https://auth.$KC_PUBLIC_DOMAIN
+- Redirect URI configured: $KC_EXTERNAL_SERVICE/*
+EOF
+                                    fi
+
+                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
 
 Redirect URIs configured:
-- http://localhost:5006/*
-- https://budget.$KC_DOMAIN/*
+- http://localhost:5006/* (local)
+EOF
+
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+- https://budget.$KC_PUBLIC_DOMAIN/* (self-hosted)
+EOF
+                                    fi
+
+                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+- $KC_EXTERNAL_SERVICE/* (external)
+EOF
+                                    fi
+
+                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
 
 To configure ActualBudget:
 1. Go to ActualBudget settings
