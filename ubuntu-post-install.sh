@@ -2763,17 +2763,11 @@ MM_COMPOSE
                                 cd ..
 
                                 # Run npm install for each downloaded module
+                                # Note: This runs AFTER container is started, inside the container
                                 echo ""
-                                echo "  Installing npm dependencies for modules..."
-                                for mod_dir in modules/MMM-*/; do
-                                    if [ -d "$mod_dir" ] && [ -f "$mod_dir/package.json" ]; then
-                                        mod_name=$(basename "$mod_dir")
-                                        echo "  Installing dependencies for $mod_name..."
-                                        (cd "$mod_dir" && npm install --production 2>/dev/null) && \
-                                            echo "    ✓ $mod_name dependencies installed" || \
-                                            echo "    ⚠ $mod_name - npm install failed (may work anyway)"
-                                    fi
-                                done
+                                echo "  Note: Module dependencies will be installed when container starts"
+                                echo "  If you need to manually install module dependencies, run:"
+                                echo "    docker exec magicmirror-$MM_PORT sh -c 'cd /opt/magic_mirror/modules/<module-name> && npm install --production'"
                                 echo ""
                             fi
                         else
@@ -2877,11 +2871,182 @@ MM_CONFIG
                     MM_PORT=$((8080 + i))
                     MM_DIR="$DOCKER_DIR/magicmirror-$MM_PORT"
                     (cd "$MM_DIR" && docker compose up -d 2>/dev/null) && echo "  ✓ Magic Mirror #$i started (port $MM_PORT)" || echo "  ⚠ Failed to start Magic Mirror #$i"
+
+                    # Install npm dependencies for third-party modules inside container
+                    if [ -d "$MM_DIR/modules" ]; then
+                        echo "  Installing module dependencies inside container..."
+                        sleep 3  # Wait for container to fully start
+                        for mod_dir in "$MM_DIR/modules"/MMM-*/; do
+                            if [ -d "$mod_dir" ] && [ -f "$mod_dir/package.json" ]; then
+                                mod_name=$(basename "$mod_dir")
+                                echo "    Installing $mod_name dependencies..."
+                                docker exec magicmirror-$MM_PORT sh -c "cd /opt/magic_mirror/modules/$mod_name && npm install --production" 2>/dev/null && \
+                                    echo "      ✓ $mod_name dependencies installed" || \
+                                    echo "      ⚠ $mod_name - npm install failed (container may need restart)"
+                            fi
+                        done
+                    fi
                 done
             fi
 
             echo "  Access at:  http://localhost:808X"
             echo "  Edit config: ~/docker/magicmirror-808X/config/config.js"
+            echo ""
+        fi
+    fi
+
+    # ---- ACTUALBUDGET ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ ACTUALBUDGET - Open-source Personal Finance Management         │"
+    echo "│ Budget tracking with bank account synchronization via SimpleFIN│"
+    echo "│ Port: 5006                                                      │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install ActualBudget? (y/n):" "n" INSTALL_ACTUALBUDGET
+
+    if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
+        AB_DIR="$DOCKER_DIR/actualbudget"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $AB_DIR"
+        else
+            echo "Installing ActualBudget..."
+            mkdir -p "$AB_DIR/data"
+            cd "$AB_DIR"
+
+            cat > docker-compose.yml << 'AB_COMPOSE'
+name: actualbudget
+
+services:
+  actualbudget:
+    image: actualbudget/actual-server:latest
+    container_name: actualbudget
+    restart: unless-stopped
+    ports:
+      - "5006:5006"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=UTC
+    labels:
+      - "io.podman.annotations.label/fail2ban.enable=true"
+      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
+AB_COMPOSE
+
+            echo "  ✓ ActualBudget configured at $AB_DIR"
+
+            prompt_yn "Start ActualBudget now? (y/n):" "y" START_AB
+            if [ "$START_AB" = "y" ] || [ "$START_AB" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ ActualBudget started" || echo "  ⚠ Failed to start ActualBudget"
+            fi
+
+            echo ""
+            echo "  Access at:  http://localhost:5006"
+            echo "  Bank sync:  https://simplefin.org/ (SimpleFIN account required)"
+            echo "  Data dir:   $AB_DIR/data"
+            echo ""
+        fi
+    fi
+
+    # ---- KEYCLOAK ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ KEYCLOAK - Identity and Access Management (IAM)                │"
+    echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
+    echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
+
+    if [ "$INSTALL_KEYCLOAK" = "y" ] || [ "$INSTALL_KEYCLOAK" = "Y" ]; then
+        KC_DIR="$DOCKER_DIR/keycloak"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $KC_DIR"
+        else
+            echo "Installing Keycloak..."
+            echo ""
+            echo "⚠  SECURITY WARNING:"
+            echo "   You MUST change the default admin password!"
+            echo ""
+
+            read -p "Enter Keycloak admin password [admin123]: " KC_ADMIN_PASS
+            KC_ADMIN_PASS=${KC_ADMIN_PASS:-admin123}
+
+            read -p "Enter database password [keycloak_db_pass]: " KC_DB_PASS
+            KC_DB_PASS=${KC_DB_PASS:-keycloak_db_pass}
+
+            mkdir -p "$KC_DIR/data" "$KC_DIR/postgres-data"
+            cd "$KC_DIR"
+
+            cat > docker-compose.yml << KC_COMPOSE
+name: keycloak
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: keycloak-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: $KC_DB_PASS
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: keycloak
+    restart: unless-stopped
+    command:
+      - start-dev
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=$KC_DB_PASS
+      - KC_HOSTNAME_STRICT=false
+      - KC_PROXY=edge
+      - KC_HTTP_ENABLED=true
+      - KC_LOG_LEVEL=INFO
+      - KC_HEALTH_ENABLED=true
+      - KC_METRICS_ENABLED=true
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./data:/opt/keycloak/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - "io.podman.annotations.label/fail2ban.enable=true"
+      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
+KC_COMPOSE
+
+            echo "  ✓ Keycloak configured at $KC_DIR"
+
+            prompt_yn "Start Keycloak now? (y/n):" "y" START_KC
+            if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
+                echo "  Starting Keycloak (this may take a minute)..."
+                docker compose up -d 2>/dev/null && echo "  ✓ Keycloak started" || echo "  ⚠ Failed to start Keycloak"
+            fi
+
+            echo ""
+            echo "  Admin console:  http://localhost:8180/admin"
+            echo "  Username:       admin"
+            echo "  Password:       $KC_ADMIN_PASS"
+            echo "  Database:       PostgreSQL (./postgres-data)"
+            echo ""
+            echo "  ⚠  For production:"
+            echo "     - Use HTTPS via reverse proxy (Caddy)"
+            echo "     - Change command to 'start' instead of 'start-dev'"
+            echo "     - Set KC_HOSTNAME to your domain"
             echo ""
         fi
     fi
