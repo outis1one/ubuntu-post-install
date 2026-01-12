@@ -1474,6 +1474,59 @@ CADDY_BLOCK
 }
 
 # ============================================================================
+# CHECK IF SERVICE EXISTS AND ASK USER ACTION
+# ============================================================================
+check_service_exists() {
+    local SERVICE_NAME="$1"
+    local SERVICE_DIR="$2"
+    local RETURN_VAR="$3"  # Variable name to set (true/false)
+
+    if [ -f "$SERVICE_DIR/docker-compose.yml" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  $SERVICE_NAME is already installed at $SERVICE_DIR"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Options:"
+        echo "  1. Skip (keep existing configuration)"
+        echo "  2. Reconfigure (will backup existing config)"
+        echo "  3. Restart containers only"
+        echo ""
+        local ACTION=""
+        prompt_text "Choose option [1/2/3]:" "1" ACTION
+
+        case "$ACTION" in
+            2)
+                echo "  Backing up existing configuration..."
+                local BACKUP_NAME=$(echo "$SERVICE_NAME" | tr '[:upper:] ' '[:lower:]-')
+                BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-$BACKUP_NAME"
+                mkdir -p "$BACKUP_DIR"
+                cp -r "$SERVICE_DIR" "$BACKUP_DIR/"
+                echo "  ✓ Backup saved to: $BACKUP_DIR"
+                eval "$RETURN_VAR=true"
+                return 0
+                ;;
+            3)
+                echo "  Restarting $SERVICE_NAME containers..."
+                cd "$SERVICE_DIR"
+                docker compose restart 2>/dev/null && echo "  ✓ $SERVICE_NAME restarted" || echo "  ⚠ Failed to restart"
+                eval "$RETURN_VAR=false"
+                return 0
+                ;;
+            *)
+                echo "  Skipping $SERVICE_NAME (already configured)"
+                eval "$RETURN_VAR=false"
+                return 0
+                ;;
+        esac
+    else
+        # Service doesn't exist, proceed with installation
+        eval "$RETURN_VAR=true"
+        return 0
+    fi
+}
+
+# ============================================================================
 # SHOW CURRENT INSTALLATION STATUS
 # ============================================================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2633,45 +2686,8 @@ else
     if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
         IMMICH_DIR="$DOCKER_DIR/immich"
 
-        # Check if already installed
-        if [ -f "$IMMICH_DIR/docker-compose.yml" ]; then
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "  Immich is already installed at $IMMICH_DIR"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-            echo "Options:"
-            echo "  1. Skip (keep existing configuration)"
-            echo "  2. Reconfigure (will backup existing config)"
-            echo "  3. Restart containers only"
-            echo ""
-            IMMICH_ACTION=""
-            prompt_text "Choose option [1/2/3]:" "1" IMMICH_ACTION
-
-            case "$IMMICH_ACTION" in
-                2)
-                    echo "  Backing up existing configuration..."
-                    BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-immich"
-                    mkdir -p "$BACKUP_DIR"
-                    cp -r "$IMMICH_DIR" "$BACKUP_DIR/"
-                    echo "  ✓ Backup saved to: $BACKUP_DIR"
-                    IMMICH_RECONFIGURE=true
-                    ;;
-                3)
-                    echo "  Restarting Immich containers..."
-                    cd "$IMMICH_DIR"
-                    docker compose restart 2>/dev/null && echo "  ✓ Immich restarted" || echo "  ⚠ Failed to restart"
-                    IMMICH_RECONFIGURE=false
-                    ;;
-                *)
-                    echo "  Skipping Immich (already configured)"
-                    IMMICH_RECONFIGURE=false
-                    ;;
-            esac
-        else
-            # New installation
-            IMMICH_RECONFIGURE=true
-        fi
+        # Check if already installed and ask what to do
+        check_service_exists "Immich" "$IMMICH_DIR" IMMICH_RECONFIGURE
 
         if [ "$IMMICH_RECONFIGURE" = "true" ]; then
             echo "Installing Immich..."
@@ -2911,8 +2927,13 @@ IMMICH_ENV
     fi
 
     if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
-        echo "Installing Audiobookshelf..."
         ABS_DIR="$DOCKER_DIR/audiobookshelf"
+
+        # Check if already installed and ask what to do
+        check_service_exists "AudioBookshelf" "$ABS_DIR" ABS_RECONFIGURE
+
+        if [ "$ABS_RECONFIGURE" = "true" ]; then
+            echo "Installing Audiobookshelf..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $ABS_DIR"
@@ -2964,7 +2985,8 @@ ABS_ENV
             echo "  Access at:  http://localhost:13378"
             echo ""
         fi
-    fi
+        fi  # End ABS_RECONFIGURE check
+    fi  # End INSTALL_AUDIOBOOKSHELF check
 
     # ---- EMBY ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_EMBY" ]; then
@@ -2978,8 +3000,13 @@ ABS_ENV
     fi
 
     if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
-        echo "Installing Emby..."
         EMBY_DIR="$DOCKER_DIR/emby"
+
+        # Check if already installed and ask what to do
+        check_service_exists "Emby" "$EMBY_DIR" EMBY_RECONFIGURE
+
+        if [ "$EMBY_RECONFIGURE" = "true" ]; then
+            echo "Installing Emby..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $EMBY_DIR"
@@ -3034,7 +3061,8 @@ EMBY_ENV
             echo "  Access at:  http://localhost:8096"
             echo ""
         fi
-    fi
+        fi  # End EMBY_RECONFIGURE check
+    fi  # End INSTALL_EMBY check
 
     # ---- A.R.M. (Automatic Ripping Machine) ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_ARM" ]; then
