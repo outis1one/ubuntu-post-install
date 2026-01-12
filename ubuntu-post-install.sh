@@ -2631,8 +2631,50 @@ else
     fi
 
     if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
-        echo "Installing Immich..."
         IMMICH_DIR="$DOCKER_DIR/immich"
+
+        # Check if already installed
+        if [ -f "$IMMICH_DIR/docker-compose.yml" ]; then
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "  Immich is already installed at $IMMICH_DIR"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            echo "Options:"
+            echo "  1. Skip (keep existing configuration)"
+            echo "  2. Reconfigure (will backup existing config)"
+            echo "  3. Restart containers only"
+            echo ""
+            IMMICH_ACTION=""
+            prompt_text "Choose option [1/2/3]:" "1" IMMICH_ACTION
+
+            case "$IMMICH_ACTION" in
+                2)
+                    echo "  Backing up existing configuration..."
+                    BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-immich"
+                    mkdir -p "$BACKUP_DIR"
+                    cp -r "$IMMICH_DIR" "$BACKUP_DIR/"
+                    echo "  ✓ Backup saved to: $BACKUP_DIR"
+                    IMMICH_RECONFIGURE=true
+                    ;;
+                3)
+                    echo "  Restarting Immich containers..."
+                    cd "$IMMICH_DIR"
+                    docker compose restart 2>/dev/null && echo "  ✓ Immich restarted" || echo "  ⚠ Failed to restart"
+                    IMMICH_RECONFIGURE=false
+                    ;;
+                *)
+                    echo "  Skipping Immich (already configured)"
+                    IMMICH_RECONFIGURE=false
+                    ;;
+            esac
+        else
+            # New installation
+            IMMICH_RECONFIGURE=true
+        fi
+
+        if [ "$IMMICH_RECONFIGURE" = "true" ]; then
+            echo "Installing Immich..."
 
         # Photo storage configuration
         echo ""
@@ -2643,21 +2685,45 @@ else
         echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
         echo ""
 
+        # Detect available drives
+        AVAILABLE_DRIVES=""
+        if [ -d "$ACTUAL_HOME/drives" ]; then
+            echo "Detected drives:"
+            for drive in "$ACTUAL_HOME/drives"/*; do
+                if [ -d "$drive" ]; then
+                    drive_name=$(basename "$drive")
+                    echo "  - $drive_name ($drive)"
+                    if [ -z "$AVAILABLE_DRIVES" ]; then
+                        AVAILABLE_DRIVES="$drive_name"
+                    fi
+                fi
+            done
+            echo ""
+        fi
+
         # Upload location (for new photos)
-        DEFAULT_UPLOAD_DIR="$HOME_DIR/drives/primary/photos/immich-uploads"
+        if [ -n "$AVAILABLE_DRIVES" ]; then
+            DEFAULT_UPLOAD_DIR="$ACTUAL_HOME/drives/$AVAILABLE_DRIVES/photos/immich-uploads"
+        else
+            DEFAULT_UPLOAD_DIR="$ACTUAL_HOME/photos/immich-uploads"
+        fi
         echo "NEW UPLOADS (from phone apps, web uploads):"
         echo "  Default: $DEFAULT_UPLOAD_DIR"
         prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
-        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$HOME_DIR}"
+        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$ACTUAL_HOME}"
 
         # External library (for existing photos)
         echo ""
-        DEFAULT_EXTERNAL_DIR="$HOME_DIR/drives/primary/photos"
+        if [ -n "$AVAILABLE_DRIVES" ]; then
+            DEFAULT_EXTERNAL_DIR="$ACTUAL_HOME/drives/$AVAILABLE_DRIVES/photos"
+        else
+            DEFAULT_EXTERNAL_DIR="$ACTUAL_HOME/photos"
+        fi
         echo "EXISTING PHOTOS (external library, read-only):"
         echo "  Default: $DEFAULT_EXTERNAL_DIR"
         echo "  Leave blank if you don't have existing photos to import"
         prompt_text "  Existing photos path:" "$DEFAULT_EXTERNAL_DIR" EXTERNAL_LIBRARY 2>/dev/null || EXTERNAL_LIBRARY=""
-        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$HOME_DIR}"
+        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$ACTUAL_HOME}"
 
         # If external library is same as upload, warn
         if [ -n "$EXTERNAL_LIBRARY" ] && [ "$EXTERNAL_LIBRARY" = "$UPLOAD_LOCATION" ]; then
@@ -2830,7 +2896,8 @@ IMMICH_ENV
             echo "    immich upload --recursive /path/to/old/photos"
             echo ""
         fi
-    fi
+        fi  # End IMMICH_RECONFIGURE check
+    fi  # End INSTALL_IMMICH check
 
     # ---- AUDIOBOOKSHELF ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_AUDIOBOOKSHELF" ]; then
