@@ -1474,6 +1474,127 @@ CADDY_BLOCK
 }
 
 # ============================================================================
+# CHECK IF SERVICE EXISTS AND ASK USER ACTION
+# ============================================================================
+check_service_exists() {
+    local SERVICE_NAME="$1"
+    local SERVICE_DIR="$2"
+    local RETURN_VAR="$3"  # Variable name to set (true/false)
+
+    if [ -f "$SERVICE_DIR/docker-compose.yml" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  $SERVICE_NAME is already installed at $SERVICE_DIR"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Options:"
+        echo "  1. Skip (keep existing configuration)"
+        echo "  2. Reconfigure (will backup existing config)"
+        echo "  3. Restart containers only"
+        echo ""
+        local ACTION=""
+        prompt_text "Choose option [1/2/3]:" "1" ACTION
+
+        case "$ACTION" in
+            2)
+                echo "  Backing up existing configuration..."
+                local BACKUP_NAME=$(echo "$SERVICE_NAME" | tr '[:upper:] ' '[:lower:]-')
+                BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-$BACKUP_NAME"
+                mkdir -p "$BACKUP_DIR"
+                cp -r "$SERVICE_DIR" "$BACKUP_DIR/"
+                echo "  ✓ Backup saved to: $BACKUP_DIR"
+                eval "$RETURN_VAR=true"
+                return 0
+                ;;
+            3)
+                echo "  Restarting $SERVICE_NAME containers..."
+                cd "$SERVICE_DIR"
+                docker compose restart 2>/dev/null && echo "  ✓ $SERVICE_NAME restarted" || echo "  ⚠ Failed to restart"
+                eval "$RETURN_VAR=false"
+                return 0
+                ;;
+            *)
+                echo "  Skipping $SERVICE_NAME (already configured)"
+                eval "$RETURN_VAR=false"
+                return 0
+                ;;
+        esac
+    else
+        # Service doesn't exist, proceed with installation
+        eval "$RETURN_VAR=true"
+        return 0
+    fi
+}
+
+# ============================================================================
+# DETECT AVAILABLE DRIVES (RUN ONCE)
+# ============================================================================
+detect_drives() {
+    # Global variables set by this function:
+    # - DRIVES_DETECTED: true/false
+    # - PRIMARY_DRIVE: name of first drive (e.g., "storage1")
+    # - PRIMARY_DRIVE_PATH: full path to first drive
+    # - DRIVES_DIR: base drives directory
+    # - AVAILABLE_DRIVES_COUNT: number of drives found
+
+    DRIVES_DIR="$ACTUAL_HOME/drives"
+    DRIVES_DETECTED=false
+    PRIMARY_DRIVE=""
+    PRIMARY_DRIVE_PATH=""
+    AVAILABLE_DRIVES_COUNT=0
+
+    if [ -d "$DRIVES_DIR" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  DETECTED DRIVES"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        for drive in "$DRIVES_DIR"/*; do
+            if [ -d "$drive" ]; then
+                drive_name=$(basename "$drive")
+                drive_size=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $2}')
+                drive_used=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $3}')
+                drive_avail=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $4}')
+
+                echo "  ✓ $drive_name"
+                if [ -n "$drive_size" ]; then
+                    echo "    Path: $drive"
+                    echo "    Size: $drive_size (Used: $drive_used, Available: $drive_avail)"
+                else
+                    echo "    Path: $drive"
+                fi
+
+                # Set PRIMARY_DRIVE to the first drive found
+                if [ -z "$PRIMARY_DRIVE" ]; then
+                    PRIMARY_DRIVE="$drive_name"
+                    PRIMARY_DRIVE_PATH="$drive"
+                fi
+
+                AVAILABLE_DRIVES_COUNT=$((AVAILABLE_DRIVES_COUNT + 1))
+            fi
+        done
+
+        if [ $AVAILABLE_DRIVES_COUNT -gt 0 ]; then
+            DRIVES_DETECTED=true
+            echo ""
+            echo "  Using '$PRIMARY_DRIVE' as primary drive for default paths"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+    fi
+
+    # If no drives detected, use home directory
+    if [ "$DRIVES_DETECTED" = "false" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  No ~/drives directory found"
+        echo "  Using $ACTUAL_HOME for default paths"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        PRIMARY_DRIVE_PATH="$ACTUAL_HOME"
+    fi
+}
+
+# ============================================================================
 # SHOW CURRENT INSTALLATION STATUS
 # ============================================================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2313,6 +2434,11 @@ else
     fi
 
     # ============================================================================
+    # DETECT DRIVES (ONCE FOR ALL SERVICES)
+    # ============================================================================
+    detect_drives
+
+    # ============================================================================
     # SERVICE SELECTION MENU
     # ============================================================================
 
@@ -2631,8 +2757,13 @@ else
     fi
 
     if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
-        echo "Installing Immich..."
         IMMICH_DIR="$DOCKER_DIR/immich"
+
+        # Check if already installed and ask what to do
+        check_service_exists "Immich" "$IMMICH_DIR" IMMICH_RECONFIGURE
+
+        if [ "$IMMICH_RECONFIGURE" = "true" ]; then
+            echo "Installing Immich..."
 
         # Photo storage configuration
         echo ""
@@ -2643,21 +2774,22 @@ else
         echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
         echo ""
 
+        # Use globally detected drives
         # Upload location (for new photos)
-        DEFAULT_UPLOAD_DIR="$HOME_DIR/drives/primary/photos/immich-uploads"
+        DEFAULT_UPLOAD_DIR="$PRIMARY_DRIVE_PATH/photos/immich-uploads"
         echo "NEW UPLOADS (from phone apps, web uploads):"
         echo "  Default: $DEFAULT_UPLOAD_DIR"
         prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
-        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$HOME_DIR}"
+        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$ACTUAL_HOME}"
 
         # External library (for existing photos)
         echo ""
-        DEFAULT_EXTERNAL_DIR="$HOME_DIR/drives/primary/photos"
+        DEFAULT_EXTERNAL_DIR="$PRIMARY_DRIVE_PATH/photos"
         echo "EXISTING PHOTOS (external library, read-only):"
         echo "  Default: $DEFAULT_EXTERNAL_DIR"
         echo "  Leave blank if you don't have existing photos to import"
         prompt_text "  Existing photos path:" "$DEFAULT_EXTERNAL_DIR" EXTERNAL_LIBRARY 2>/dev/null || EXTERNAL_LIBRARY=""
-        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$HOME_DIR}"
+        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$ACTUAL_HOME}"
 
         # If external library is same as upload, warn
         if [ -n "$EXTERNAL_LIBRARY" ] && [ "$EXTERNAL_LIBRARY" = "$UPLOAD_LOCATION" ]; then
@@ -2830,7 +2962,8 @@ IMMICH_ENV
             echo "    immich upload --recursive /path/to/old/photos"
             echo ""
         fi
-    fi
+        fi  # End IMMICH_RECONFIGURE check
+    fi  # End INSTALL_IMMICH check
 
     # ---- AUDIOBOOKSHELF ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_AUDIOBOOKSHELF" ]; then
@@ -2844,8 +2977,13 @@ IMMICH_ENV
     fi
 
     if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
-        echo "Installing Audiobookshelf..."
         ABS_DIR="$DOCKER_DIR/audiobookshelf"
+
+        # Check if already installed and ask what to do
+        check_service_exists "AudioBookshelf" "$ABS_DIR" ABS_RECONFIGURE
+
+        if [ "$ABS_RECONFIGURE" = "true" ]; then
+            echo "Installing Audiobookshelf..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $ABS_DIR"
@@ -2853,7 +2991,7 @@ IMMICH_ENV
             mkdir -p "$ABS_DIR"
             cd "$ABS_DIR"
 
-            prompt_text "Path to audiobooks folder [default: $ACTUAL_HOME/drives/primary/audiobooks]:" "$ACTUAL_HOME/drives/primary/audiobooks" AUDIOBOOKS_PATH
+            prompt_text "Path to audiobooks folder [default: $PRIMARY_DRIVE_PATH/audiobooks]:" "$PRIMARY_DRIVE_PATH/audiobooks" AUDIOBOOKS_PATH
 
             cat > docker-compose.yml << ABS_COMPOSE
 name: audiobookshelf
@@ -2897,7 +3035,8 @@ ABS_ENV
             echo "  Access at:  http://localhost:13378"
             echo ""
         fi
-    fi
+        fi  # End ABS_RECONFIGURE check
+    fi  # End INSTALL_AUDIOBOOKSHELF check
 
     # ---- EMBY ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_EMBY" ]; then
@@ -2911,8 +3050,13 @@ ABS_ENV
     fi
 
     if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
-        echo "Installing Emby..."
         EMBY_DIR="$DOCKER_DIR/emby"
+
+        # Check if already installed and ask what to do
+        check_service_exists "Emby" "$EMBY_DIR" EMBY_RECONFIGURE
+
+        if [ "$EMBY_RECONFIGURE" = "true" ]; then
+            echo "Installing Emby..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $EMBY_DIR"
@@ -2920,7 +3064,7 @@ ABS_ENV
             mkdir -p "$EMBY_DIR"
             cd "$EMBY_DIR"
 
-            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+            prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
 
             cat > docker-compose.yml << EMBY_COMPOSE
 name: emby
@@ -2967,7 +3111,8 @@ EMBY_ENV
             echo "  Access at:  http://localhost:8096"
             echo ""
         fi
-    fi
+        fi  # End EMBY_RECONFIGURE check
+    fi  # End INSTALL_EMBY check
 
     # ---- A.R.M. (Automatic Ripping Machine) ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_ARM" ]; then
@@ -2981,8 +3126,11 @@ EMBY_ENV
     fi
 
     if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
-        echo "Installing A.R.M...."
         ARM_DIR="$DOCKER_DIR/arm"
+        check_service_exists "A.R.M." "$ARM_DIR" ARM_RECONFIGURE
+
+        if [ "$ARM_RECONFIGURE" = "true" ]; then
+            echo "Installing A.R.M...."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $ARM_DIR"
@@ -2990,7 +3138,7 @@ EMBY_ENV
             mkdir -p "$ARM_DIR"
             cd "$ARM_DIR"
 
-            prompt_text "Path for ripped media output [default: $ACTUAL_HOME/drives/primary/ripped]:" "$ACTUAL_HOME/drives/primary/ripped" ARM_OUTPUT
+            prompt_text "Path for ripped media output [default: $PRIMARY_DRIVE_PATH/ripped]:" "$PRIMARY_DRIVE_PATH/ripped" ARM_OUTPUT
 
             # Detect optical drives
             echo ""
@@ -3051,7 +3199,8 @@ ARM_ENV
             echo "  Note: Edit docker-compose.yml to add more optical drives"
             echo ""
         fi
-    fi
+        fi  # End ARM_RECONFIGURE check
+    fi  # End INSTALL_ARM check
 
     # ---- FILEBROWSER ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FILEBROWSER" ]; then
@@ -3065,8 +3214,11 @@ ARM_ENV
     fi
 
     if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
-        echo "Installing Filebrowser..."
         FB_DIR="$DOCKER_DIR/filebrowser"
+        check_service_exists "FileBrowser" "$FB_DIR" FB_RECONFIGURE
+
+        if [ "$FB_RECONFIGURE" = "true" ]; then
+            echo "Installing Filebrowser..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FB_DIR"
@@ -3074,7 +3226,7 @@ ARM_ENV
             mkdir -p "$FB_DIR"
             cd "$FB_DIR"
 
-            prompt_text "Path to browse [default: $ACTUAL_HOME/drives/primary]:" "$ACTUAL_HOME/drives/primary" FB_PATH
+            prompt_text "Path to browse [default: $PRIMARY_DRIVE_PATH]:" "$PRIMARY_DRIVE_PATH" FB_PATH
 
             cat > docker-compose.yml << FB_COMPOSE
 name: filebrowser
@@ -3128,7 +3280,8 @@ FB_SETTINGS
             echo "  Default login: admin / admin (change immediately!)"
             echo ""
         fi
-    fi
+        fi  # End FB_RECONFIGURE check
+    fi  # End INSTALL_FILEBROWSER check
 
     # ---- MAGIC MIRROR ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MAGICMIRROR" ]; then
@@ -3376,7 +3529,9 @@ MM_CONFIG
 
     if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
         AB_DIR="$DOCKER_DIR/actualbudget"
+        check_service_exists "ActualBudget" "$AB_DIR" AB_RECONFIGURE
 
+        if [ "$AB_RECONFIGURE" = "true" ]; then
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $AB_DIR"
         else
@@ -3419,7 +3574,8 @@ AB_COMPOSE
             echo "  Data dir:   $AB_DIR/data"
             echo ""
         fi
-    fi
+        fi  # End AB_RECONFIGURE check
+    fi  # End INSTALL_ACTUALBUDGET check
 
     # ---- KEYCLOAK ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_KEYCLOAK" ]; then
@@ -4232,7 +4388,7 @@ backend = auto"
             mkdir -p "$LMS_DIR"
             cd "$LMS_DIR"
 
-            prompt_text "Path to music folder [default: $ACTUAL_HOME/drives/primary/music]:" "$ACTUAL_HOME/drives/primary/music" MUSIC_PATH
+            prompt_text "Path to music folder [default: $PRIMARY_DRIVE_PATH/music]:" "$PRIMARY_DRIVE_PATH/music" MUSIC_PATH
 
             cat > docker-compose.yml << LMS_COMPOSE
 name: lyrion
@@ -4520,7 +4676,7 @@ MC_ENV
             mkdir -p "$JELLYFIN_DIR"
             cd "$JELLYFIN_DIR"
 
-            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+            prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
 
             # Get render group ID for hardware acceleration
             RENDER_GID=$(getent group render | cut -d: -f3 2>/dev/null || echo "989")
