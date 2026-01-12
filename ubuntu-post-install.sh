@@ -1342,6 +1342,138 @@ prompt_text() {
 }
 
 # ============================================================================
+# CADDY CONFIGURATION HELPER
+# ============================================================================
+configure_caddy_for_service() {
+    local SERVICE_NAME="$1"
+    local SERVICE_PORT="$2"
+    local DEFAULT_SUBDOMAIN="$3"
+    local EXTRA_CONFIG="${4:-}"  # Optional extra Caddy directives
+
+    # Check if Caddy is installed
+    if [ ! -d "$DOCKER_DIR/caddy" ]; then
+        return 0  # Caddy not installed, skip configuration
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  CADDY REVERSE PROXY CONFIGURATION"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Caddy is installed. You can configure reverse proxy for $SERVICE_NAME."
+    echo ""
+
+    local CONFIGURE_CADDY=""
+    prompt_yn "Configure Caddy reverse proxy for $SERVICE_NAME? (y/n):" "n" CONFIGURE_CADDY
+
+    if [ "$CONFIGURE_CADDY" != "y" ] && [ "$CONFIGURE_CADDY" != "Y" ]; then
+        echo "  Skipping Caddy configuration."
+        echo "  Access $SERVICE_NAME at: http://localhost:$SERVICE_PORT"
+        return 0
+    fi
+
+    # Get domain/subdomain
+    echo ""
+    echo "Enter the full domain for $SERVICE_NAME:"
+    echo "  Examples: $DEFAULT_SUBDOMAIN.example.com, $DEFAULT_SUBDOMAIN.yourdomain.com"
+    echo ""
+    local SERVICE_DOMAIN=""
+    prompt_text "Domain:" "" SERVICE_DOMAIN
+
+    if [ -z "$SERVICE_DOMAIN" ]; then
+        echo "  ⚠ No domain provided, skipping Caddy configuration."
+        return 0
+    fi
+
+    # Backup Caddyfile
+    local CADDY_DIR="$DOCKER_DIR/caddy"
+    local CADDYFILE="$CADDY_DIR/Caddyfile"
+    local BACKUP_FILE="$CADDY_DIR/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+
+    if [ -f "$CADDYFILE" ]; then
+        echo "  Backing up Caddyfile to: $(basename $BACKUP_FILE)"
+        cp "$CADDYFILE" "$BACKUP_FILE"
+    else
+        echo "  Creating new Caddyfile"
+        touch "$CADDYFILE"
+    fi
+
+    # Check if service already configured
+    if grep -q "^${SERVICE_DOMAIN}" "$CADDYFILE" 2>/dev/null; then
+        echo "  ⚠ $SERVICE_DOMAIN already exists in Caddyfile"
+        local OVERWRITE=""
+        prompt_yn "Overwrite existing configuration? (y/n):" "n" OVERWRITE
+        if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
+            echo "  Keeping existing configuration."
+            return 0
+        fi
+        # Remove existing configuration
+        sed -i "/^${SERVICE_DOMAIN}/,/^}/d" "$CADDYFILE"
+    fi
+
+    # Add service configuration to Caddyfile
+    echo "  Adding $SERVICE_NAME configuration to Caddyfile..."
+
+    cat >> "$CADDYFILE" << CADDY_BLOCK
+
+# $SERVICE_NAME
+$SERVICE_DOMAIN {
+    reverse_proxy localhost:$SERVICE_PORT
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Logging for fail2ban
+    log {
+        output file /var/log/caddy/${SERVICE_DOMAIN}.log
+        format json
+    }
+$EXTRA_CONFIG
+}
+CADDY_BLOCK
+
+    echo "  ✓ Configuration added to Caddyfile"
+
+    # Reload Caddy
+    echo "  Reloading Caddy configuration..."
+    if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+        echo "  ✓ Caddy reloaded successfully"
+    else
+        echo "  ⚠ Failed to reload Caddy (will retry after formatting)"
+    fi
+
+    # Format Caddyfile
+    echo "  Formatting Caddyfile..."
+    if docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null; then
+        echo "  ✓ Caddyfile formatted"
+    else
+        echo "  ⚠ Failed to format Caddyfile"
+    fi
+
+    # Final reload after formatting
+    echo "  Final reload..."
+    if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+        echo "  ✓ Caddy configuration active"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  $SERVICE_NAME is now accessible at:"
+        echo "  https://$SERVICE_DOMAIN"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        echo "  ⚠ Failed final reload. Check Caddy logs:"
+        echo "     docker logs caddy"
+        echo "  You can restore from backup: $BACKUP_FILE"
+    fi
+
+    echo ""
+}
+
+# ============================================================================
 # SHOW CURRENT INSTALLATION STATUS
 # ============================================================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2667,6 +2799,9 @@ IMMICH_ENV
             [ -n "$EXTERNAL_LIBRARY" ] && echo "  External: $EXTERNAL_LIBRARY"
             echo ""
 
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Immich" "2283" "photos"
+
             # Ask to start container
             prompt_yn "Start Immich now? (y/n):" "y" START_IMMICH
             if [ "$START_IMMICH" = "y" ] || [ "$START_IMMICH" = "Y" ]; then
@@ -2751,6 +2886,9 @@ ABS_ENV
             echo ""
             echo "✓ Audiobookshelf configured at $ABS_DIR"
 
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "AudioBookshelf" "13378" "audiobooks"
+
             prompt_yn "Start Audiobookshelf now? (y/n):" "y" START_ABS
             if [ "$START_ABS" = "y" ] || [ "$START_ABS" = "Y" ]; then
                 docker compose up -d 2>/dev/null && echo "  ✓ Audiobookshelf started" || echo "  ⚠ Failed to start"
@@ -2817,6 +2955,9 @@ EMBY_ENV
 
             echo ""
             echo "✓ Emby configured at $EMBY_DIR"
+
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Emby" "8096" "emby"
 
             prompt_yn "Start Emby now? (y/n):" "y" START_EMBY
             if [ "$START_EMBY" = "y" ] || [ "$START_EMBY" = "Y" ]; then
@@ -3263,6 +3404,9 @@ services:
 AB_COMPOSE
 
             echo "  ✓ ActualBudget configured at $AB_DIR"
+
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "ActualBudget" "5006" "budget"
 
             prompt_yn "Start ActualBudget now? (y/n):" "y" START_AB
             if [ "$START_AB" = "y" ] || [ "$START_AB" = "Y" ]; then
@@ -4183,6 +4327,9 @@ MEALIE_COMPOSE
             echo ""
             echo "✓ Mealie configured at $MEALIE_DIR"
 
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Mealie" "9925" "recipes"
+
             prompt_yn "Start Mealie now? (y/n):" "y" START_MEALIE
             if [ "$START_MEALIE" = "y" ] || [ "$START_MEALIE" = "Y" ]; then
                 docker compose up -d 2>/dev/null && echo "  ✓ Mealie started" || echo "  ⚠ Failed to start"
@@ -4412,6 +4559,9 @@ JELLYFIN_ENV
 
             echo ""
             echo "✓ Jellyfin configured at $JELLYFIN_DIR"
+
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Jellyfin" "8096" "jellyfin"
 
             prompt_yn "Start Jellyfin now? (y/n):" "y" START_JELLYFIN
             if [ "$START_JELLYFIN" = "y" ] || [ "$START_JELLYFIN" = "Y" ]; then
@@ -4941,6 +5091,9 @@ UPTIME_COMPOSE
 
             echo ""
             echo "✓ Uptime Kuma configured at $UPTIME_DIR"
+
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Uptime Kuma" "3001" "uptime"
 
             prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME
             if [ "$START_UPTIME" = "y" ] || [ "$START_UPTIME" = "Y" ]; then
