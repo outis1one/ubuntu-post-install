@@ -2222,30 +2222,31 @@ else
         fi
 
         # Parse selections (whiptail returns quoted strings)
-        INSTALL_IMMICH="n"
-        INSTALL_AUDIOBOOKSHELF="n"
-        INSTALL_EMBY="n"
-        INSTALL_ARM="n"
-        INSTALL_FILEBROWSER="n"
-        INSTALL_MAGICMIRROR="n"
-        INSTALL_ACTUALBUDGET="n"
-        INSTALL_KEYCLOAK="n"
-        INSTALL_CADDY="n"
-        INSTALL_FAIL2BAN="n"
-        INSTALL_LMS="n"
-        INSTALL_MEALIE="n"
-        INSTALL_MINECRAFT="n"
-        INSTALL_JELLYFIN="n"
-        INSTALL_FRIGATE="n"
-        INSTALL_NTFY="n"
-        INSTALL_UPTIMEKUMA="n"
-        INSTALL_WGEASY="n"
-        INSTALL_TRACCAR="n"
-        INSTALL_PORTAINER="n"
-        INSTALL_MESHCENTRAL_SERVER="n"
-        INSTALL_FMD="n"
-        INSTALL_FRIGATE_NOTIFY="n"
-        INSTALL_WATCHTOWER="n"
+        # Only set to "n" if not already set (preserve any earlier choices)
+        : ${INSTALL_IMMICH:="n"}
+        : ${INSTALL_AUDIOBOOKSHELF:="n"}
+        : ${INSTALL_EMBY:="n"}
+        : ${INSTALL_ARM:="n"}
+        : ${INSTALL_FILEBROWSER:="n"}
+        : ${INSTALL_MAGICMIRROR:="n"}
+        : ${INSTALL_ACTUALBUDGET:="n"}
+        : ${INSTALL_KEYCLOAK:="n"}
+        : ${INSTALL_CADDY:="n"}
+        : ${INSTALL_FAIL2BAN:="n"}
+        : ${INSTALL_LMS:="n"}
+        : ${INSTALL_MEALIE:="n"}
+        : ${INSTALL_MINECRAFT:="n"}
+        : ${INSTALL_JELLYFIN:="n"}
+        : ${INSTALL_FRIGATE:="n"}
+        : ${INSTALL_NTFY:="n"}
+        : ${INSTALL_UPTIMEKUMA:="n"}
+        : ${INSTALL_WGEASY:="n"}
+        : ${INSTALL_TRACCAR:="n"}
+        : ${INSTALL_PORTAINER:="n"}
+        : ${INSTALL_MESHCENTRAL_SERVER:="n"}
+        : ${INSTALL_FMD:="n"}
+        : ${INSTALL_FRIGATE_NOTIFY:="n"}
+        : ${INSTALL_WATCHTOWER:="n"}
 
         # Set installation flags based on selections
         if echo "$SELECTED_SERVICES" | grep -q "IMMICH"; then INSTALL_IMMICH="y"; fi
