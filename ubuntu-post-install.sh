@@ -3076,8 +3076,11 @@ EMBY_ENV
     fi
 
     if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
-        echo "Installing A.R.M...."
         ARM_DIR="$DOCKER_DIR/arm"
+        check_service_exists "A.R.M." "$ARM_DIR" ARM_RECONFIGURE
+
+        if [ "$ARM_RECONFIGURE" = "true" ]; then
+            echo "Installing A.R.M...."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $ARM_DIR"
@@ -3146,7 +3149,8 @@ ARM_ENV
             echo "  Note: Edit docker-compose.yml to add more optical drives"
             echo ""
         fi
-    fi
+        fi  # End ARM_RECONFIGURE check
+    fi  # End INSTALL_ARM check
 
     # ---- FILEBROWSER ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FILEBROWSER" ]; then
@@ -3160,8 +3164,11 @@ ARM_ENV
     fi
 
     if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
-        echo "Installing Filebrowser..."
         FB_DIR="$DOCKER_DIR/filebrowser"
+        check_service_exists "FileBrowser" "$FB_DIR" FB_RECONFIGURE
+
+        if [ "$FB_RECONFIGURE" = "true" ]; then
+            echo "Installing Filebrowser..."
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $FB_DIR"
@@ -3223,7 +3230,8 @@ FB_SETTINGS
             echo "  Default login: admin / admin (change immediately!)"
             echo ""
         fi
-    fi
+        fi  # End FB_RECONFIGURE check
+    fi  # End INSTALL_FILEBROWSER check
 
     # ---- MAGIC MIRROR ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MAGICMIRROR" ]; then
