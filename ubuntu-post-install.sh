@@ -1517,10 +1517,18 @@ fi
 
 # Import SSH keys from GitHub/Launchpad
 echo ""
-prompt_text "Import SSH keys from GitHub? (enter username or leave blank to skip):" "" GITHUB_USER
-prompt_text "Import SSH keys from Launchpad? (enter username or leave blank to skip):" "" LAUNCHPAD_USER
+echo "You can import SSH public keys from GitHub or Launchpad for easier SSH access."
+echo ""
+prompt_yn "Import SSH keys from GitHub or Launchpad? (y/n):" "n" IMPORT_SSH_KEYS
 
 KEYS_IMPORTED=false
+GITHUB_USER=""
+LAUNCHPAD_USER=""
+
+if [ "$IMPORT_SSH_KEYS" = "y" ] || [ "$IMPORT_SSH_KEYS" = "Y" ]; then
+    prompt_text "GitHub username (or leave blank to skip):" "" GITHUB_USER
+    prompt_text "Launchpad username (or leave blank to skip):" "" LAUNCHPAD_USER
+fi
 
 # Create .ssh directory if it doesn't exist
 mkdir -p "$ACTUAL_HOME/.ssh"
@@ -2214,30 +2222,31 @@ else
         fi
 
         # Parse selections (whiptail returns quoted strings)
-        INSTALL_IMMICH="n"
-        INSTALL_AUDIOBOOKSHELF="n"
-        INSTALL_EMBY="n"
-        INSTALL_ARM="n"
-        INSTALL_FILEBROWSER="n"
-        INSTALL_MAGICMIRROR="n"
-        INSTALL_ACTUALBUDGET="n"
-        INSTALL_KEYCLOAK="n"
-        INSTALL_CADDY="n"
-        INSTALL_FAIL2BAN="n"
-        INSTALL_LMS="n"
-        INSTALL_MEALIE="n"
-        INSTALL_MINECRAFT="n"
-        INSTALL_JELLYFIN="n"
-        INSTALL_FRIGATE="n"
-        INSTALL_NTFY="n"
-        INSTALL_UPTIMEKUMA="n"
-        INSTALL_WGEASY="n"
-        INSTALL_TRACCAR="n"
-        INSTALL_PORTAINER="n"
-        INSTALL_MESHCENTRAL_SERVER="n"
-        INSTALL_FMD="n"
-        INSTALL_FRIGATE_NOTIFY="n"
-        INSTALL_WATCHTOWER="n"
+        # Only set to "n" if not already set (preserve any earlier choices)
+        : ${INSTALL_IMMICH:="n"}
+        : ${INSTALL_AUDIOBOOKSHELF:="n"}
+        : ${INSTALL_EMBY:="n"}
+        : ${INSTALL_ARM:="n"}
+        : ${INSTALL_FILEBROWSER:="n"}
+        : ${INSTALL_MAGICMIRROR:="n"}
+        : ${INSTALL_ACTUALBUDGET:="n"}
+        : ${INSTALL_KEYCLOAK:="n"}
+        : ${INSTALL_CADDY:="n"}
+        : ${INSTALL_FAIL2BAN:="n"}
+        : ${INSTALL_LMS:="n"}
+        : ${INSTALL_MEALIE:="n"}
+        : ${INSTALL_MINECRAFT:="n"}
+        : ${INSTALL_JELLYFIN:="n"}
+        : ${INSTALL_FRIGATE:="n"}
+        : ${INSTALL_NTFY:="n"}
+        : ${INSTALL_UPTIMEKUMA:="n"}
+        : ${INSTALL_WGEASY:="n"}
+        : ${INSTALL_TRACCAR:="n"}
+        : ${INSTALL_PORTAINER:="n"}
+        : ${INSTALL_MESHCENTRAL_SERVER:="n"}
+        : ${INSTALL_FMD:="n"}
+        : ${INSTALL_FRIGATE_NOTIFY:="n"}
+        : ${INSTALL_WATCHTOWER:="n"}
 
         # Set installation flags based on selections
         if echo "$SELECTED_SERVICES" | grep -q "IMMICH"; then INSTALL_IMMICH="y"; fi
@@ -3143,6 +3152,80 @@ services:
 KC_COMPOSE
 
             echo "  ✓ Keycloak configured at $KC_DIR"
+
+            # If Caddy is installed/being installed, offer to configure it for Keycloak
+            if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ] || [ -d "$DOCKER_DIR/caddy" ]; then
+                echo ""
+                prompt_yn "Configure Caddy reverse proxy for Keycloak? (y/n):" "y" CONFIGURE_CADDY_KC
+
+                if [ "$CONFIGURE_CADDY_KC" = "y" ] || [ "$CONFIGURE_CADDY_KC" = "Y" ]; then
+                    CADDY_DIR="$DOCKER_DIR/caddy"
+
+                    # Ask for domain
+                    prompt_text "  Domain for Keycloak (e.g., auth.yourdomain.com):" "auth.localhost" KC_CADDY_DOMAIN
+
+                    if [ -f "$CADDY_DIR/Caddyfile" ]; then
+                        # Backup existing Caddyfile
+                        mkdir -p "$CADDY_DIR/backups"
+                        cp "$CADDY_DIR/Caddyfile" "$CADDY_DIR/backups/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)"
+                        echo "  ✓ Backed up existing Caddyfile"
+
+                        # Check if Keycloak config already exists
+                        if ! grep -q "$KC_CADDY_DOMAIN" "$CADDY_DIR/Caddyfile"; then
+                            # Add Keycloak configuration
+                            cat >> "$CADDY_DIR/Caddyfile" << EOF
+
+# Keycloak - Identity and Access Management
+$KC_CADDY_DOMAIN {
+    log {
+        output file /var/log/caddy/keycloak-access.log
+        format json
+        level INFO
+    }
+
+    reverse_proxy localhost:8180
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
+EOF
+                            echo "  ✓ Added Keycloak configuration to Caddyfile"
+
+                            # Reload Caddy if it's running
+                            if docker ps --format '{{.Names}}' | grep -q "caddy"; then
+                                CADDY_CONTAINER=$(docker ps --format '{{.Names}}' | grep "caddy" | head -1)
+                                echo "  Reloading Caddy configuration..."
+
+                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy fmt --overwrite 2>/dev/null; then
+                                    echo "  ✓ Formatted Caddyfile"
+                                fi
+
+                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy reload 2>/dev/null; then
+                                    echo "  ✓ Caddy reloaded successfully"
+                                    echo ""
+                                    echo "  Keycloak will be available at: https://$KC_CADDY_DOMAIN"
+                                else
+                                    echo "  ⚠ Failed to reload Caddy - check logs"
+                                    echo "  Manual reload: cd $CADDY_DIR && docker exec -w /etc/caddy caddy caddy reload"
+                                fi
+                            else
+                                echo "  ⚠ Caddy container not running - start it to use this configuration"
+                            fi
+                        else
+                            echo "  ℹ Keycloak configuration already exists in Caddyfile"
+                        fi
+                    else
+                        echo "  ⚠ Caddyfile not found at $CADDY_DIR/Caddyfile"
+                        echo "  You can configure Caddy manually later"
+                    fi
+                fi
+            fi
 
             prompt_yn "Start Keycloak now? (y/n):" "y" START_KC
             if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
