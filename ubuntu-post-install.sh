@@ -2186,34 +2186,121 @@ else
 
     # Use whiptail for service selection if available
     if command -v whiptail &> /dev/null; then
-        # Build checklist of all available services
-        SELECTED_SERVICES=$(whiptail --title "Select Docker Services to Install" \
-            --checklist "Use SPACE to select, ENTER to confirm:" 25 78 17 \
-            "IMMICH" "Photo & video backup (like Google Photos)" OFF \
-            "AUDIOBOOKSHELF" "Audiobook & podcast server" OFF \
-            "EMBY" "Media server for movies, TV, music" OFF \
-            "ARM" "Automatic Ripping Machine for DVDs/Blu-rays" OFF \
-            "FILEBROWSER" "Web-based file manager" OFF \
-            "MAGICMIRROR" "Smart mirror / dashboard display" OFF \
-            "ACTUALBUDGET" "Personal finance management with bank sync" OFF \
-            "KEYCLOAK" "Identity & Access Management (SSO)" OFF \
-            "CADDY" "Reverse proxy with automatic HTTPS" OFF \
-            "FAIL2BAN" "Intrusion prevention system" OFF \
-            "LYRION" "Music streaming server (LMS)" OFF \
-            "MEALIE" "Recipe manager & meal planner" OFF \
-            "MINECRAFT" "Minecraft game server" OFF \
-            "JELLYFIN" "Free media server (Emby alternative)" OFF \
-            "FRIGATE" "AI-powered NVR for security cameras" OFF \
-            "NTFY" "Push notifications server" OFF \
-            "UPTIMEKUMA" "Service monitoring dashboard" OFF \
-            "WGEASY" "WireGuard VPN with web UI" OFF \
-            "TRACCAR" "GPS tracking server" OFF \
-            "PORTAINER" "Docker management web UI" OFF \
-            "MESHCENTRAL" "Remote management server" OFF \
-            "FINDMYDEVICE" "Device tracking (like Find My)" OFF \
-            "FRIGATE_NOTIFY" "Push notifications for Frigate" OFF \
-            "WATCHTOWER" "Automatic container updates" OFF \
+        # Detect existing services
+        echo "Detecting existing services..."
+        declare -A EXISTING_SERVICES
+        [ -d "$DOCKER_DIR/immich" ] && EXISTING_SERVICES[IMMICH]="ON"
+        [ -d "$DOCKER_DIR/audiobookshelf" ] && EXISTING_SERVICES[AUDIOBOOKSHELF]="ON"
+        [ -d "$DOCKER_DIR/emby" ] && EXISTING_SERVICES[EMBY]="ON"
+        [ -d "$DOCKER_DIR/arm" ] && EXISTING_SERVICES[ARM]="ON"
+        [ -d "$DOCKER_DIR/filebrowser" ] && EXISTING_SERVICES[FILEBROWSER]="ON"
+        [ -d "$DOCKER_DIR/magicmirror" ] && EXISTING_SERVICES[MAGICMIRROR]="ON"
+        [ -d "$DOCKER_DIR/actualbudget" ] && EXISTING_SERVICES[ACTUALBUDGET]="ON"
+        [ -d "$DOCKER_DIR/keycloak" ] && EXISTING_SERVICES[KEYCLOAK]="ON"
+        [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
+        [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
+        [ -d "$DOCKER_DIR/mealie" ] && EXISTING_SERVICES[MEALIE]="ON"
+        [ -d "$DOCKER_DIR/minecraft" ] && EXISTING_SERVICES[MINECRAFT]="ON"
+        [ -d "$DOCKER_DIR/jellyfin" ] && EXISTING_SERVICES[JELLYFIN]="ON"
+        [ -d "$DOCKER_DIR/frigate" ] && EXISTING_SERVICES[FRIGATE]="ON"
+        [ -d "$DOCKER_DIR/ntfy" ] && EXISTING_SERVICES[NTFY]="ON"
+        [ -d "$DOCKER_DIR/uptime-kuma" ] && EXISTING_SERVICES[UPTIMEKUMA]="ON"
+        [ -d "$DOCKER_DIR/wg-easy" ] && EXISTING_SERVICES[WGEASY]="ON"
+        [ -d "$DOCKER_DIR/traccar" ] && EXISTING_SERVICES[TRACCAR]="ON"
+        [ -d "$DOCKER_DIR/portainer" ] && EXISTING_SERVICES[PORTAINER]="ON"
+        [ -d "$DOCKER_DIR/meshcentral" ] && EXISTING_SERVICES[MESHCENTRAL]="ON"
+        [ -d "$DOCKER_DIR/fmd" ] && EXISTING_SERVICES[FINDMYDEVICE]="ON"
+        [ -d "$DOCKER_DIR/frigate-notify" ] && EXISTING_SERVICES[FRIGATE_NOTIFY]="ON"
+        [ -d "$DOCKER_DIR/watchtower" ] && EXISTING_SERVICES[WATCHTOWER]="ON"
+        command -v fail2ban-client &> /dev/null && EXISTING_SERVICES[FAIL2BAN]="ON"
+
+        # Ask user what action to perform
+        ACTION=$(whiptail --title "Service Management" --menu \
+            "Choose an action:" 15 60 3 \
+            "1" "Install new services" \
+            "2" "Uninstall existing services" \
+            "3" "Cancel and skip" \
             3>&1 1>&2 2>&3)
+
+        case "$ACTION" in
+            1)
+                # INSTALL MODE
+                MENU_MODE="INSTALL"
+                # Build checklist - mark existing services as ON
+                SELECTED_SERVICES=$(whiptail --title "Select Docker Services to Install" \
+                    --checklist "Use SPACE to select, ENTER to confirm. [*] = already installed" 25 78 17 \
+                    "IMMICH" "Photo & video backup (like Google Photos)" ${EXISTING_SERVICES[IMMICH]:-OFF} \
+                    "AUDIOBOOKSHELF" "Audiobook & podcast server" ${EXISTING_SERVICES[AUDIOBOOKSHELF]:-OFF} \
+                    "EMBY" "Media server for movies, TV, music" ${EXISTING_SERVICES[EMBY]:-OFF} \
+                    "ARM" "Automatic Ripping Machine for DVDs/Blu-rays" ${EXISTING_SERVICES[ARM]:-OFF} \
+                    "FILEBROWSER" "Web-based file manager" ${EXISTING_SERVICES[FILEBROWSER]:-OFF} \
+                    "MAGICMIRROR" "Smart mirror / dashboard display" ${EXISTING_SERVICES[MAGICMIRROR]:-OFF} \
+                    "ACTUALBUDGET" "Personal finance management with bank sync" ${EXISTING_SERVICES[ACTUALBUDGET]:-OFF} \
+                    "KEYCLOAK" "Identity & Access Management (SSO)" ${EXISTING_SERVICES[KEYCLOAK]:-OFF} \
+                    "CADDY" "Reverse proxy with automatic HTTPS" ${EXISTING_SERVICES[CADDY]:-OFF} \
+                    "FAIL2BAN" "Intrusion prevention system" ${EXISTING_SERVICES[FAIL2BAN]:-OFF} \
+                    "LYRION" "Music streaming server (LMS)" ${EXISTING_SERVICES[LYRION]:-OFF} \
+                    "MEALIE" "Recipe manager & meal planner" ${EXISTING_SERVICES[MEALIE]:-OFF} \
+                    "MINECRAFT" "Minecraft game server" ${EXISTING_SERVICES[MINECRAFT]:-OFF} \
+                    "JELLYFIN" "Free media server (Emby alternative)" ${EXISTING_SERVICES[JELLYFIN]:-OFF} \
+                    "FRIGATE" "AI-powered NVR for security cameras" ${EXISTING_SERVICES[FRIGATE]:-OFF} \
+                    "NTFY" "Push notifications server" ${EXISTING_SERVICES[NTFY]:-OFF} \
+                    "UPTIMEKUMA" "Service monitoring dashboard" ${EXISTING_SERVICES[UPTIMEKUMA]:-OFF} \
+                    "WGEASY" "WireGuard VPN with web UI" ${EXISTING_SERVICES[WGEASY]:-OFF} \
+                    "TRACCAR" "GPS tracking server" ${EXISTING_SERVICES[TRACCAR]:-OFF} \
+                    "PORTAINER" "Docker management web UI" ${EXISTING_SERVICES[PORTAINER]:-OFF} \
+                    "MESHCENTRAL" "Remote management server" ${EXISTING_SERVICES[MESHCENTRAL]:-OFF} \
+                    "FINDMYDEVICE" "Device tracking (like Find My)" ${EXISTING_SERVICES[FINDMYDEVICE]:-OFF} \
+                    "FRIGATE_NOTIFY" "Push notifications for Frigate" ${EXISTING_SERVICES[FRIGATE_NOTIFY]:-OFF} \
+                    "WATCHTOWER" "Automatic container updates" ${EXISTING_SERVICES[WATCHTOWER]:-OFF} \
+                    3>&1 1>&2 2>&3)
+                ;;
+            2)
+                # UNINSTALL MODE
+                MENU_MODE="UNINSTALL"
+                # Only show services that exist
+                UNINSTALL_OPTIONS=""
+                [ -n "${EXISTING_SERVICES[IMMICH]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS IMMICH \"Photo & video backup\" ON"
+                [ -n "${EXISTING_SERVICES[AUDIOBOOKSHELF]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS AUDIOBOOKSHELF \"Audiobook server\" ON"
+                [ -n "${EXISTING_SERVICES[EMBY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS EMBY \"Media server\" ON"
+                [ -n "${EXISTING_SERVICES[ARM]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ARM \"Automatic Ripping Machine\" ON"
+                [ -n "${EXISTING_SERVICES[FILEBROWSER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FILEBROWSER \"Web file manager\" ON"
+                [ -n "${EXISTING_SERVICES[MAGICMIRROR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MAGICMIRROR \"Smart mirror\" ON"
+                [ -n "${EXISTING_SERVICES[ACTUALBUDGET]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ACTUALBUDGET \"Personal finance\" ON"
+                [ -n "${EXISTING_SERVICES[KEYCLOAK]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS KEYCLOAK \"Identity management\" ON"
+                [ -n "${EXISTING_SERVICES[CADDY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CADDY \"Reverse proxy\" ON"
+                [ -n "${EXISTING_SERVICES[FAIL2BAN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FAIL2BAN \"Intrusion prevention\" ON"
+                [ -n "${EXISTING_SERVICES[LYRION]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS LYRION \"Music server\" ON"
+                [ -n "${EXISTING_SERVICES[MEALIE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MEALIE \"Recipe manager\" ON"
+                [ -n "${EXISTING_SERVICES[MINECRAFT]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MINECRAFT \"Game server\" ON"
+                [ -n "${EXISTING_SERVICES[JELLYFIN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS JELLYFIN \"Media server\" ON"
+                [ -n "${EXISTING_SERVICES[FRIGATE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FRIGATE \"NVR cameras\" ON"
+                [ -n "${EXISTING_SERVICES[NTFY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS NTFY \"Push notifications\" ON"
+                [ -n "${EXISTING_SERVICES[UPTIMEKUMA]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS UPTIMEKUMA \"Service monitoring\" ON"
+                [ -n "${EXISTING_SERVICES[WGEASY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS WGEASY \"WireGuard VPN\" ON"
+                [ -n "${EXISTING_SERVICES[TRACCAR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS TRACCAR \"GPS tracking\" ON"
+                [ -n "${EXISTING_SERVICES[PORTAINER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS PORTAINER \"Docker management\" ON"
+                [ -n "${EXISTING_SERVICES[MESHCENTRAL]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MESHCENTRAL \"Remote management\" ON"
+                [ -n "${EXISTING_SERVICES[FINDMYDEVICE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FINDMYDEVICE \"Device tracking\" ON"
+                [ -n "${EXISTING_SERVICES[FRIGATE_NOTIFY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FRIGATE_NOTIFY \"Frigate notifications\" ON"
+                [ -n "${EXISTING_SERVICES[WATCHTOWER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS WATCHTOWER \"Container updates\" ON"
+
+                if [ -z "$UNINSTALL_OPTIONS" ]; then
+                    whiptail --title "No Services Found" --msgbox "No services detected to uninstall." 8 50
+                    SELECTED_SERVICES=""
+                else
+                    SELECTED_SERVICES=$(eval "whiptail --title 'Select Services to Uninstall' \
+                        --checklist 'WARNING: Data will be backed up but services will be removed' 25 78 17 \
+                        $UNINSTALL_OPTIONS \
+                        3>&1 1>&2 2>&3")
+                fi
+                ;;
+            3|*)
+                # Cancel
+                SELECTED_SERVICES=""
+                MENU_MODE="CANCEL"
+                ;;
+        esac
 
         # Check if user cancelled
         if [ $? -ne 0 ]; then
@@ -2274,20 +2361,134 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then INSTALL_FRIGATE_NOTIFY="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then INSTALL_WATCHTOWER="y"; fi
 
-        echo ""
-        echo "Selected services:"
-        echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
-        echo ""
+        if [ "$MENU_MODE" = "UNINSTALL" ]; then
+            echo ""
+            echo "Services selected for uninstallation:"
+            echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
+            echo ""
 
-        # Mark that whiptail was used - skip all individual prompts
-        WHIPTAIL_USED=true
+            # Process uninstalls
+            if [ -n "$SELECTED_SERVICES" ]; then
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  UNINSTALLING SERVICES"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+
+                # Define uninstall function
+                uninstall_service() {
+                    local SERVICE_NAME=$1
+                    local SERVICE_DIR=$2
+                    local CONTAINER_NAME=$3
+
+                    echo "Uninstalling $SERVICE_NAME..."
+
+                    if [ -d "$SERVICE_DIR" ]; then
+                        cd "$SERVICE_DIR" 2>/dev/null || return
+
+                        # Stop and remove containers
+                        if [ -f "docker-compose.yml" ]; then
+                            echo "  Stopping containers..."
+                            docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
+                        fi
+
+                        # Backup data
+                        BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-$SERVICE_NAME"
+                        mkdir -p "$BACKUP_DIR"
+                        echo "  Backing up to $BACKUP_DIR..."
+                        cp -r "$SERVICE_DIR" "$BACKUP_DIR/" 2>/dev/null || true
+
+                        # Remove service directory
+                        echo "  Removing $SERVICE_DIR..."
+                        rm -rf "$SERVICE_DIR"
+
+                        echo "  ✓ $SERVICE_NAME uninstalled (backup: $BACKUP_DIR)"
+                    else
+                        echo "  ⚠ $SERVICE_NAME directory not found, skipping"
+                    fi
+                    echo ""
+                }
+
+                # Uninstall selected services
+                if echo "$SELECTED_SERVICES" | grep -q "IMMICH"; then uninstall_service "Immich" "$DOCKER_DIR/immich" "immich"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "AUDIOBOOKSHELF"; then uninstall_service "AudioBookshelf" "$DOCKER_DIR/audiobookshelf" "audiobookshelf"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "EMBY"; then uninstall_service "Emby" "$DOCKER_DIR/emby" "emby"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "ARM"; then uninstall_service "ARM" "$DOCKER_DIR/arm" "arm"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then uninstall_service "FileBrowser" "$DOCKER_DIR/filebrowser" "filebrowser"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then uninstall_service "MagicMirror" "$DOCKER_DIR/magicmirror" "magicmirror"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then uninstall_service "ActualBudget" "$DOCKER_DIR/actualbudget" "actualbudget"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then uninstall_service "Keycloak" "$DOCKER_DIR/keycloak" "keycloak"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then uninstall_service "Mealie" "$DOCKER_DIR/mealie" "mealie"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then uninstall_service "Minecraft" "$DOCKER_DIR/minecraft" "minecraft"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "JELLYFIN"; then uninstall_service "Jellyfin" "$DOCKER_DIR/jellyfin" "jellyfin"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FRIGATE\""; then uninstall_service "Frigate" "$DOCKER_DIR/frigate" "frigate"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "NTFY"; then uninstall_service "ntfy" "$DOCKER_DIR/ntfy" "ntfy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "UPTIMEKUMA"; then uninstall_service "Uptime Kuma" "$DOCKER_DIR/uptime-kuma" "uptime-kuma"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "WGEASY"; then uninstall_service "wg-easy" "$DOCKER_DIR/wg-easy" "wg-easy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "TRACCAR"; then uninstall_service "Traccar" "$DOCKER_DIR/traccar" "traccar"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "PORTAINER"; then uninstall_service "Portainer" "$DOCKER_DIR/portainer" "portainer"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MESHCENTRAL"; then uninstall_service "MeshCentral" "$DOCKER_DIR/meshcentral" "meshcentral"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FINDMYDEVICE"; then uninstall_service "FindMyDevice" "$DOCKER_DIR/fmd" "fmd"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then uninstall_service "Frigate-Notify" "$DOCKER_DIR/frigate-notify" "frigate-notify"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then uninstall_service "Watchtower" "$DOCKER_DIR/watchtower" "watchtower"; fi
+
+                # Special handling for fail2ban (system package)
+                if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then
+                    echo "Uninstalling fail2ban..."
+                    echo "  Stopping fail2ban service..."
+                    systemctl stop fail2ban 2>/dev/null || true
+                    systemctl disable fail2ban 2>/dev/null || true
+                    echo "  Removing fail2ban package..."
+                    apt-get remove --purge -y fail2ban 2>/dev/null || true
+                    echo "  ✓ fail2ban uninstalled"
+                    echo ""
+                fi
+
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  Uninstallation complete!"
+                echo "  Backups saved to: $DOCKER_DIR/backups/"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+            fi
+
+            # After uninstall, exit the Docker apps section
+            WHIPTAIL_USED=true
+
+        elif [ "$MENU_MODE" = "INSTALL" ]; then
+            echo ""
+            echo "Selected services:"
+            echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
+            echo ""
+
+            # Mark that whiptail was used - skip all individual prompts
+            WHIPTAIL_USED=true
+        else
+            # Cancel or other mode
+            WHIPTAIL_USED=false
+        fi
     else
         # Whiptail not available - will use individual prompts
         WHIPTAIL_USED=false
+        MENU_MODE="INSTALL"
     fi
 
-    # ---- IMMICH ----
-    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_IMMICH" ]; then
+    # Skip installation section if we just did uninstalls
+    if [ "$MENU_MODE" = "UNINSTALL" ]; then
+        echo "Skipping installation section (uninstall mode was selected)."
+        # Jump to end of Docker section by setting a flag
+        SKIP_DOCKER_INSTALLS=true
+    else
+        SKIP_DOCKER_INSTALLS=false
+    fi
+
+    # ============================================================================
+    # DOCKER SERVICE INSTALLATIONS
+    # ============================================================================
+
+    if [ "$SKIP_DOCKER_INSTALLS" != true ]; then
+        # ---- IMMICH ----
+        if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_IMMICH" ]; then
         echo ""
         echo "┌─────────────────────────────────────────────────────────────────┐"
         echo "│ IMMICH - Self-hosted photo & video backup                       │"
@@ -5332,6 +5533,8 @@ WT_ENV
             echo ""
         fi
     fi
+
+    fi  # End SKIP_DOCKER_INSTALLS check
 
     # ============================================================================
     # KOPIA BACKUP FOR DOCKER CONTAINERS
