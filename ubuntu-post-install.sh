@@ -3479,7 +3479,9 @@ MM_CONFIG
 
     if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
         AB_DIR="$DOCKER_DIR/actualbudget"
+        check_service_exists "ActualBudget" "$AB_DIR" AB_RECONFIGURE
 
+        if [ "$AB_RECONFIGURE" = "true" ]; then
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $AB_DIR"
         else
@@ -3522,7 +3524,8 @@ AB_COMPOSE
             echo "  Data dir:   $AB_DIR/data"
             echo ""
         fi
-    fi
+        fi  # End AB_RECONFIGURE check
+    fi  # End INSTALL_ACTUALBUDGET check
 
     # ---- KEYCLOAK ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_KEYCLOAK" ]; then
