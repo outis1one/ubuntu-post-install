@@ -1527,6 +1527,74 @@ check_service_exists() {
 }
 
 # ============================================================================
+# DETECT AVAILABLE DRIVES (RUN ONCE)
+# ============================================================================
+detect_drives() {
+    # Global variables set by this function:
+    # - DRIVES_DETECTED: true/false
+    # - PRIMARY_DRIVE: name of first drive (e.g., "storage1")
+    # - PRIMARY_DRIVE_PATH: full path to first drive
+    # - DRIVES_DIR: base drives directory
+    # - AVAILABLE_DRIVES_COUNT: number of drives found
+
+    DRIVES_DIR="$ACTUAL_HOME/drives"
+    DRIVES_DETECTED=false
+    PRIMARY_DRIVE=""
+    PRIMARY_DRIVE_PATH=""
+    AVAILABLE_DRIVES_COUNT=0
+
+    if [ -d "$DRIVES_DIR" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  DETECTED DRIVES"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        for drive in "$DRIVES_DIR"/*; do
+            if [ -d "$drive" ]; then
+                drive_name=$(basename "$drive")
+                drive_size=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $2}')
+                drive_used=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $3}')
+                drive_avail=$(df -h "$drive" 2>/dev/null | awk 'NR==2 {print $4}')
+
+                echo "  ✓ $drive_name"
+                if [ -n "$drive_size" ]; then
+                    echo "    Path: $drive"
+                    echo "    Size: $drive_size (Used: $drive_used, Available: $drive_avail)"
+                else
+                    echo "    Path: $drive"
+                fi
+
+                # Set PRIMARY_DRIVE to the first drive found
+                if [ -z "$PRIMARY_DRIVE" ]; then
+                    PRIMARY_DRIVE="$drive_name"
+                    PRIMARY_DRIVE_PATH="$drive"
+                fi
+
+                AVAILABLE_DRIVES_COUNT=$((AVAILABLE_DRIVES_COUNT + 1))
+            fi
+        done
+
+        if [ $AVAILABLE_DRIVES_COUNT -gt 0 ]; then
+            DRIVES_DETECTED=true
+            echo ""
+            echo "  Using '$PRIMARY_DRIVE' as primary drive for default paths"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+    fi
+
+    # If no drives detected, use home directory
+    if [ "$DRIVES_DETECTED" = "false" ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  No ~/drives directory found"
+        echo "  Using $ACTUAL_HOME for default paths"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        PRIMARY_DRIVE_PATH="$ACTUAL_HOME"
+    fi
+}
+
+# ============================================================================
 # SHOW CURRENT INSTALLATION STATUS
 # ============================================================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2366,6 +2434,11 @@ else
     fi
 
     # ============================================================================
+    # DETECT DRIVES (ONCE FOR ALL SERVICES)
+    # ============================================================================
+    detect_drives
+
+    # ============================================================================
     # SERVICE SELECTION MENU
     # ============================================================================
 
@@ -2701,28 +2774,9 @@ else
         echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
         echo ""
 
-        # Detect available drives
-        AVAILABLE_DRIVES=""
-        if [ -d "$ACTUAL_HOME/drives" ]; then
-            echo "Detected drives:"
-            for drive in "$ACTUAL_HOME/drives"/*; do
-                if [ -d "$drive" ]; then
-                    drive_name=$(basename "$drive")
-                    echo "  - $drive_name ($drive)"
-                    if [ -z "$AVAILABLE_DRIVES" ]; then
-                        AVAILABLE_DRIVES="$drive_name"
-                    fi
-                fi
-            done
-            echo ""
-        fi
-
+        # Use globally detected drives
         # Upload location (for new photos)
-        if [ -n "$AVAILABLE_DRIVES" ]; then
-            DEFAULT_UPLOAD_DIR="$ACTUAL_HOME/drives/$AVAILABLE_DRIVES/photos/immich-uploads"
-        else
-            DEFAULT_UPLOAD_DIR="$ACTUAL_HOME/photos/immich-uploads"
-        fi
+        DEFAULT_UPLOAD_DIR="$PRIMARY_DRIVE_PATH/photos/immich-uploads"
         echo "NEW UPLOADS (from phone apps, web uploads):"
         echo "  Default: $DEFAULT_UPLOAD_DIR"
         prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
@@ -2730,11 +2784,7 @@ else
 
         # External library (for existing photos)
         echo ""
-        if [ -n "$AVAILABLE_DRIVES" ]; then
-            DEFAULT_EXTERNAL_DIR="$ACTUAL_HOME/drives/$AVAILABLE_DRIVES/photos"
-        else
-            DEFAULT_EXTERNAL_DIR="$ACTUAL_HOME/photos"
-        fi
+        DEFAULT_EXTERNAL_DIR="$PRIMARY_DRIVE_PATH/photos"
         echo "EXISTING PHOTOS (external library, read-only):"
         echo "  Default: $DEFAULT_EXTERNAL_DIR"
         echo "  Leave blank if you don't have existing photos to import"
@@ -2941,7 +2991,7 @@ IMMICH_ENV
             mkdir -p "$ABS_DIR"
             cd "$ABS_DIR"
 
-            prompt_text "Path to audiobooks folder [default: $ACTUAL_HOME/drives/primary/audiobooks]:" "$ACTUAL_HOME/drives/primary/audiobooks" AUDIOBOOKS_PATH
+            prompt_text "Path to audiobooks folder [default: $PRIMARY_DRIVE_PATH/audiobooks]:" "$PRIMARY_DRIVE_PATH/audiobooks" AUDIOBOOKS_PATH
 
             cat > docker-compose.yml << ABS_COMPOSE
 name: audiobookshelf
@@ -3014,7 +3064,7 @@ ABS_ENV
             mkdir -p "$EMBY_DIR"
             cd "$EMBY_DIR"
 
-            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+            prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
 
             cat > docker-compose.yml << EMBY_COMPOSE
 name: emby
@@ -3088,7 +3138,7 @@ EMBY_ENV
             mkdir -p "$ARM_DIR"
             cd "$ARM_DIR"
 
-            prompt_text "Path for ripped media output [default: $ACTUAL_HOME/drives/primary/ripped]:" "$ACTUAL_HOME/drives/primary/ripped" ARM_OUTPUT
+            prompt_text "Path for ripped media output [default: $PRIMARY_DRIVE_PATH/ripped]:" "$PRIMARY_DRIVE_PATH/ripped" ARM_OUTPUT
 
             # Detect optical drives
             echo ""
@@ -3176,7 +3226,7 @@ ARM_ENV
             mkdir -p "$FB_DIR"
             cd "$FB_DIR"
 
-            prompt_text "Path to browse [default: $ACTUAL_HOME/drives/primary]:" "$ACTUAL_HOME/drives/primary" FB_PATH
+            prompt_text "Path to browse [default: $PRIMARY_DRIVE_PATH]:" "$PRIMARY_DRIVE_PATH" FB_PATH
 
             cat > docker-compose.yml << FB_COMPOSE
 name: filebrowser
@@ -4338,7 +4388,7 @@ backend = auto"
             mkdir -p "$LMS_DIR"
             cd "$LMS_DIR"
 
-            prompt_text "Path to music folder [default: $ACTUAL_HOME/drives/primary/music]:" "$ACTUAL_HOME/drives/primary/music" MUSIC_PATH
+            prompt_text "Path to music folder [default: $PRIMARY_DRIVE_PATH/music]:" "$PRIMARY_DRIVE_PATH/music" MUSIC_PATH
 
             cat > docker-compose.yml << LMS_COMPOSE
 name: lyrion
@@ -4626,7 +4676,7 @@ MC_ENV
             mkdir -p "$JELLYFIN_DIR"
             cd "$JELLYFIN_DIR"
 
-            prompt_text "Path to media folder [default: $ACTUAL_HOME/drives/primary/media]:" "$ACTUAL_HOME/drives/primary/media" MEDIA_PATH
+            prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
 
             # Get render group ID for hardware acceleration
             RENDER_GID=$(getent group render | cut -d: -f3 2>/dev/null || echo "989")
