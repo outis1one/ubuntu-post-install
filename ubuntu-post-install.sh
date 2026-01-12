@@ -2186,34 +2186,121 @@ else
 
     # Use whiptail for service selection if available
     if command -v whiptail &> /dev/null; then
-        # Build checklist of all available services
-        SELECTED_SERVICES=$(whiptail --title "Select Docker Services to Install" \
-            --checklist "Use SPACE to select, ENTER to confirm:" 25 78 17 \
-            "IMMICH" "Photo & video backup (like Google Photos)" OFF \
-            "AUDIOBOOKSHELF" "Audiobook & podcast server" OFF \
-            "EMBY" "Media server for movies, TV, music" OFF \
-            "ARM" "Automatic Ripping Machine for DVDs/Blu-rays" OFF \
-            "FILEBROWSER" "Web-based file manager" OFF \
-            "MAGICMIRROR" "Smart mirror / dashboard display" OFF \
-            "ACTUALBUDGET" "Personal finance management with bank sync" OFF \
-            "KEYCLOAK" "Identity & Access Management (SSO)" OFF \
-            "CADDY" "Reverse proxy with automatic HTTPS" OFF \
-            "FAIL2BAN" "Intrusion prevention system" OFF \
-            "LYRION" "Music streaming server (LMS)" OFF \
-            "MEALIE" "Recipe manager & meal planner" OFF \
-            "MINECRAFT" "Minecraft game server" OFF \
-            "JELLYFIN" "Free media server (Emby alternative)" OFF \
-            "FRIGATE" "AI-powered NVR for security cameras" OFF \
-            "NTFY" "Push notifications server" OFF \
-            "UPTIMEKUMA" "Service monitoring dashboard" OFF \
-            "WGEASY" "WireGuard VPN with web UI" OFF \
-            "TRACCAR" "GPS tracking server" OFF \
-            "PORTAINER" "Docker management web UI" OFF \
-            "MESHCENTRAL" "Remote management server" OFF \
-            "FINDMYDEVICE" "Device tracking (like Find My)" OFF \
-            "FRIGATE_NOTIFY" "Push notifications for Frigate" OFF \
-            "WATCHTOWER" "Automatic container updates" OFF \
+        # Detect existing services
+        echo "Detecting existing services..."
+        declare -A EXISTING_SERVICES
+        [ -d "$DOCKER_DIR/immich" ] && EXISTING_SERVICES[IMMICH]="ON"
+        [ -d "$DOCKER_DIR/audiobookshelf" ] && EXISTING_SERVICES[AUDIOBOOKSHELF]="ON"
+        [ -d "$DOCKER_DIR/emby" ] && EXISTING_SERVICES[EMBY]="ON"
+        [ -d "$DOCKER_DIR/arm" ] && EXISTING_SERVICES[ARM]="ON"
+        [ -d "$DOCKER_DIR/filebrowser" ] && EXISTING_SERVICES[FILEBROWSER]="ON"
+        [ -d "$DOCKER_DIR/magicmirror" ] && EXISTING_SERVICES[MAGICMIRROR]="ON"
+        [ -d "$DOCKER_DIR/actualbudget" ] && EXISTING_SERVICES[ACTUALBUDGET]="ON"
+        [ -d "$DOCKER_DIR/keycloak" ] && EXISTING_SERVICES[KEYCLOAK]="ON"
+        [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
+        [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
+        [ -d "$DOCKER_DIR/mealie" ] && EXISTING_SERVICES[MEALIE]="ON"
+        [ -d "$DOCKER_DIR/minecraft" ] && EXISTING_SERVICES[MINECRAFT]="ON"
+        [ -d "$DOCKER_DIR/jellyfin" ] && EXISTING_SERVICES[JELLYFIN]="ON"
+        [ -d "$DOCKER_DIR/frigate" ] && EXISTING_SERVICES[FRIGATE]="ON"
+        [ -d "$DOCKER_DIR/ntfy" ] && EXISTING_SERVICES[NTFY]="ON"
+        [ -d "$DOCKER_DIR/uptime-kuma" ] && EXISTING_SERVICES[UPTIMEKUMA]="ON"
+        [ -d "$DOCKER_DIR/wg-easy" ] && EXISTING_SERVICES[WGEASY]="ON"
+        [ -d "$DOCKER_DIR/traccar" ] && EXISTING_SERVICES[TRACCAR]="ON"
+        [ -d "$DOCKER_DIR/portainer" ] && EXISTING_SERVICES[PORTAINER]="ON"
+        [ -d "$DOCKER_DIR/meshcentral" ] && EXISTING_SERVICES[MESHCENTRAL]="ON"
+        [ -d "$DOCKER_DIR/fmd" ] && EXISTING_SERVICES[FINDMYDEVICE]="ON"
+        [ -d "$DOCKER_DIR/frigate-notify" ] && EXISTING_SERVICES[FRIGATE_NOTIFY]="ON"
+        [ -d "$DOCKER_DIR/watchtower" ] && EXISTING_SERVICES[WATCHTOWER]="ON"
+        command -v fail2ban-client &> /dev/null && EXISTING_SERVICES[FAIL2BAN]="ON"
+
+        # Ask user what action to perform
+        ACTION=$(whiptail --title "Service Management" --menu \
+            "Choose an action:" 15 60 3 \
+            "1" "Install new services" \
+            "2" "Uninstall existing services" \
+            "3" "Cancel and skip" \
             3>&1 1>&2 2>&3)
+
+        case "$ACTION" in
+            1)
+                # INSTALL MODE
+                MENU_MODE="INSTALL"
+                # Build checklist - mark existing services as ON
+                SELECTED_SERVICES=$(whiptail --title "Select Docker Services to Install" \
+                    --checklist "Use SPACE to select, ENTER to confirm. [*] = already installed" 25 78 17 \
+                    "IMMICH" "Photo & video backup (like Google Photos)" ${EXISTING_SERVICES[IMMICH]:-OFF} \
+                    "AUDIOBOOKSHELF" "Audiobook & podcast server" ${EXISTING_SERVICES[AUDIOBOOKSHELF]:-OFF} \
+                    "EMBY" "Media server for movies, TV, music" ${EXISTING_SERVICES[EMBY]:-OFF} \
+                    "ARM" "Automatic Ripping Machine for DVDs/Blu-rays" ${EXISTING_SERVICES[ARM]:-OFF} \
+                    "FILEBROWSER" "Web-based file manager" ${EXISTING_SERVICES[FILEBROWSER]:-OFF} \
+                    "MAGICMIRROR" "Smart mirror / dashboard display" ${EXISTING_SERVICES[MAGICMIRROR]:-OFF} \
+                    "ACTUALBUDGET" "Personal finance management with bank sync" ${EXISTING_SERVICES[ACTUALBUDGET]:-OFF} \
+                    "KEYCLOAK" "Identity & Access Management (SSO)" ${EXISTING_SERVICES[KEYCLOAK]:-OFF} \
+                    "CADDY" "Reverse proxy with automatic HTTPS" ${EXISTING_SERVICES[CADDY]:-OFF} \
+                    "FAIL2BAN" "Intrusion prevention system" ${EXISTING_SERVICES[FAIL2BAN]:-OFF} \
+                    "LYRION" "Music streaming server (LMS)" ${EXISTING_SERVICES[LYRION]:-OFF} \
+                    "MEALIE" "Recipe manager & meal planner" ${EXISTING_SERVICES[MEALIE]:-OFF} \
+                    "MINECRAFT" "Minecraft game server" ${EXISTING_SERVICES[MINECRAFT]:-OFF} \
+                    "JELLYFIN" "Free media server (Emby alternative)" ${EXISTING_SERVICES[JELLYFIN]:-OFF} \
+                    "FRIGATE" "AI-powered NVR for security cameras" ${EXISTING_SERVICES[FRIGATE]:-OFF} \
+                    "NTFY" "Push notifications server" ${EXISTING_SERVICES[NTFY]:-OFF} \
+                    "UPTIMEKUMA" "Service monitoring dashboard" ${EXISTING_SERVICES[UPTIMEKUMA]:-OFF} \
+                    "WGEASY" "WireGuard VPN with web UI" ${EXISTING_SERVICES[WGEASY]:-OFF} \
+                    "TRACCAR" "GPS tracking server" ${EXISTING_SERVICES[TRACCAR]:-OFF} \
+                    "PORTAINER" "Docker management web UI" ${EXISTING_SERVICES[PORTAINER]:-OFF} \
+                    "MESHCENTRAL" "Remote management server" ${EXISTING_SERVICES[MESHCENTRAL]:-OFF} \
+                    "FINDMYDEVICE" "Device tracking (like Find My)" ${EXISTING_SERVICES[FINDMYDEVICE]:-OFF} \
+                    "FRIGATE_NOTIFY" "Push notifications for Frigate" ${EXISTING_SERVICES[FRIGATE_NOTIFY]:-OFF} \
+                    "WATCHTOWER" "Automatic container updates" ${EXISTING_SERVICES[WATCHTOWER]:-OFF} \
+                    3>&1 1>&2 2>&3)
+                ;;
+            2)
+                # UNINSTALL MODE
+                MENU_MODE="UNINSTALL"
+                # Only show services that exist
+                UNINSTALL_OPTIONS=""
+                [ -n "${EXISTING_SERVICES[IMMICH]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS IMMICH \"Photo & video backup\" ON"
+                [ -n "${EXISTING_SERVICES[AUDIOBOOKSHELF]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS AUDIOBOOKSHELF \"Audiobook server\" ON"
+                [ -n "${EXISTING_SERVICES[EMBY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS EMBY \"Media server\" ON"
+                [ -n "${EXISTING_SERVICES[ARM]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ARM \"Automatic Ripping Machine\" ON"
+                [ -n "${EXISTING_SERVICES[FILEBROWSER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FILEBROWSER \"Web file manager\" ON"
+                [ -n "${EXISTING_SERVICES[MAGICMIRROR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MAGICMIRROR \"Smart mirror\" ON"
+                [ -n "${EXISTING_SERVICES[ACTUALBUDGET]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ACTUALBUDGET \"Personal finance\" ON"
+                [ -n "${EXISTING_SERVICES[KEYCLOAK]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS KEYCLOAK \"Identity management\" ON"
+                [ -n "${EXISTING_SERVICES[CADDY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CADDY \"Reverse proxy\" ON"
+                [ -n "${EXISTING_SERVICES[FAIL2BAN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FAIL2BAN \"Intrusion prevention\" ON"
+                [ -n "${EXISTING_SERVICES[LYRION]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS LYRION \"Music server\" ON"
+                [ -n "${EXISTING_SERVICES[MEALIE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MEALIE \"Recipe manager\" ON"
+                [ -n "${EXISTING_SERVICES[MINECRAFT]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MINECRAFT \"Game server\" ON"
+                [ -n "${EXISTING_SERVICES[JELLYFIN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS JELLYFIN \"Media server\" ON"
+                [ -n "${EXISTING_SERVICES[FRIGATE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FRIGATE \"NVR cameras\" ON"
+                [ -n "${EXISTING_SERVICES[NTFY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS NTFY \"Push notifications\" ON"
+                [ -n "${EXISTING_SERVICES[UPTIMEKUMA]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS UPTIMEKUMA \"Service monitoring\" ON"
+                [ -n "${EXISTING_SERVICES[WGEASY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS WGEASY \"WireGuard VPN\" ON"
+                [ -n "${EXISTING_SERVICES[TRACCAR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS TRACCAR \"GPS tracking\" ON"
+                [ -n "${EXISTING_SERVICES[PORTAINER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS PORTAINER \"Docker management\" ON"
+                [ -n "${EXISTING_SERVICES[MESHCENTRAL]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MESHCENTRAL \"Remote management\" ON"
+                [ -n "${EXISTING_SERVICES[FINDMYDEVICE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FINDMYDEVICE \"Device tracking\" ON"
+                [ -n "${EXISTING_SERVICES[FRIGATE_NOTIFY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FRIGATE_NOTIFY \"Frigate notifications\" ON"
+                [ -n "${EXISTING_SERVICES[WATCHTOWER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS WATCHTOWER \"Container updates\" ON"
+
+                if [ -z "$UNINSTALL_OPTIONS" ]; then
+                    whiptail --title "No Services Found" --msgbox "No services detected to uninstall." 8 50
+                    SELECTED_SERVICES=""
+                else
+                    SELECTED_SERVICES=$(eval "whiptail --title 'Select Services to Uninstall' \
+                        --checklist 'WARNING: Data will be backed up but services will be removed' 25 78 17 \
+                        $UNINSTALL_OPTIONS \
+                        3>&1 1>&2 2>&3")
+                fi
+                ;;
+            3|*)
+                # Cancel
+                SELECTED_SERVICES=""
+                MENU_MODE="CANCEL"
+                ;;
+        esac
 
         # Check if user cancelled
         if [ $? -ne 0 ]; then
@@ -2274,14 +2361,134 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then INSTALL_FRIGATE_NOTIFY="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then INSTALL_WATCHTOWER="y"; fi
 
-        echo ""
-        echo "Selected services:"
-        echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
-        echo ""
+        if [ "$MENU_MODE" = "UNINSTALL" ]; then
+            echo ""
+            echo "Services selected for uninstallation:"
+            echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
+            echo ""
+
+            # Process uninstalls
+            if [ -n "$SELECTED_SERVICES" ]; then
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  UNINSTALLING SERVICES"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+
+                # Define uninstall function
+                uninstall_service() {
+                    local SERVICE_NAME=$1
+                    local SERVICE_DIR=$2
+                    local CONTAINER_NAME=$3
+
+                    echo "Uninstalling $SERVICE_NAME..."
+
+                    if [ -d "$SERVICE_DIR" ]; then
+                        cd "$SERVICE_DIR" 2>/dev/null || return
+
+                        # Stop and remove containers
+                        if [ -f "docker-compose.yml" ]; then
+                            echo "  Stopping containers..."
+                            docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
+                        fi
+
+                        # Backup data
+                        BACKUP_DIR="$DOCKER_DIR/backups/$(date +%Y%m%d-%H%M%S)-$SERVICE_NAME"
+                        mkdir -p "$BACKUP_DIR"
+                        echo "  Backing up to $BACKUP_DIR..."
+                        cp -r "$SERVICE_DIR" "$BACKUP_DIR/" 2>/dev/null || true
+
+                        # Remove service directory
+                        echo "  Removing $SERVICE_DIR..."
+                        rm -rf "$SERVICE_DIR"
+
+                        echo "  ✓ $SERVICE_NAME uninstalled (backup: $BACKUP_DIR)"
+                    else
+                        echo "  ⚠ $SERVICE_NAME directory not found, skipping"
+                    fi
+                    echo ""
+                }
+
+                # Uninstall selected services
+                if echo "$SELECTED_SERVICES" | grep -q "IMMICH"; then uninstall_service "Immich" "$DOCKER_DIR/immich" "immich"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "AUDIOBOOKSHELF"; then uninstall_service "AudioBookshelf" "$DOCKER_DIR/audiobookshelf" "audiobookshelf"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "EMBY"; then uninstall_service "Emby" "$DOCKER_DIR/emby" "emby"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "ARM"; then uninstall_service "ARM" "$DOCKER_DIR/arm" "arm"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then uninstall_service "FileBrowser" "$DOCKER_DIR/filebrowser" "filebrowser"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then uninstall_service "MagicMirror" "$DOCKER_DIR/magicmirror" "magicmirror"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then uninstall_service "ActualBudget" "$DOCKER_DIR/actualbudget" "actualbudget"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then uninstall_service "Keycloak" "$DOCKER_DIR/keycloak" "keycloak"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then uninstall_service "Mealie" "$DOCKER_DIR/mealie" "mealie"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then uninstall_service "Minecraft" "$DOCKER_DIR/minecraft" "minecraft"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "JELLYFIN"; then uninstall_service "Jellyfin" "$DOCKER_DIR/jellyfin" "jellyfin"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FRIGATE\""; then uninstall_service "Frigate" "$DOCKER_DIR/frigate" "frigate"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "NTFY"; then uninstall_service "ntfy" "$DOCKER_DIR/ntfy" "ntfy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "UPTIMEKUMA"; then uninstall_service "Uptime Kuma" "$DOCKER_DIR/uptime-kuma" "uptime-kuma"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "WGEASY"; then uninstall_service "wg-easy" "$DOCKER_DIR/wg-easy" "wg-easy"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "TRACCAR"; then uninstall_service "Traccar" "$DOCKER_DIR/traccar" "traccar"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "PORTAINER"; then uninstall_service "Portainer" "$DOCKER_DIR/portainer" "portainer"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "MESHCENTRAL"; then uninstall_service "MeshCentral" "$DOCKER_DIR/meshcentral" "meshcentral"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FINDMYDEVICE"; then uninstall_service "FindMyDevice" "$DOCKER_DIR/fmd" "fmd"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then uninstall_service "Frigate-Notify" "$DOCKER_DIR/frigate-notify" "frigate-notify"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then uninstall_service "Watchtower" "$DOCKER_DIR/watchtower" "watchtower"; fi
+
+                # Special handling for fail2ban (system package)
+                if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then
+                    echo "Uninstalling fail2ban..."
+                    echo "  Stopping fail2ban service..."
+                    systemctl stop fail2ban 2>/dev/null || true
+                    systemctl disable fail2ban 2>/dev/null || true
+                    echo "  Removing fail2ban package..."
+                    apt-get remove --purge -y fail2ban 2>/dev/null || true
+                    echo "  ✓ fail2ban uninstalled"
+                    echo ""
+                fi
+
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  Uninstallation complete!"
+                echo "  Backups saved to: $DOCKER_DIR/backups/"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+            fi
+
+            # After uninstall, exit the Docker apps section
+            WHIPTAIL_USED=true
+
+        elif [ "$MENU_MODE" = "INSTALL" ]; then
+            echo ""
+            echo "Selected services:"
+            echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
+            echo ""
+
+            # Mark that whiptail was used - skip all individual prompts
+            WHIPTAIL_USED=true
+        else
+            # Cancel or other mode
+            WHIPTAIL_USED=false
+        fi
+    else
+        # Whiptail not available - will use individual prompts
+        WHIPTAIL_USED=false
+        MENU_MODE="INSTALL"
     fi
 
-    # ---- IMMICH ----
-    if [ -z "$INSTALL_IMMICH" ]; then
+    # Skip installation section if we just did uninstalls
+    if [ "$MENU_MODE" = "UNINSTALL" ]; then
+        echo "Skipping installation section (uninstall mode was selected)."
+        # Jump to end of Docker section by setting a flag
+        SKIP_DOCKER_INSTALLS=true
+    else
+        SKIP_DOCKER_INSTALLS=false
+    fi
+
+    # ============================================================================
+    # DOCKER SERVICE INSTALLATIONS
+    # ============================================================================
+
+    if [ "$SKIP_DOCKER_INSTALLS" != true ]; then
+        # ---- IMMICH ----
+        if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_IMMICH" ]; then
         echo ""
         echo "┌─────────────────────────────────────────────────────────────────┐"
         echo "│ IMMICH - Self-hosted photo & video backup                       │"
@@ -2491,13 +2698,15 @@ IMMICH_ENV
     fi
 
     # ---- AUDIOBOOKSHELF ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ AUDIOBOOKSHELF - Audiobook & podcast server                     │"
-    echo "│ Stream audiobooks with progress sync across devices.            │"
-    echo "│ Port: 13378                                                     │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Audiobookshelf? (y/n):" "n" INSTALL_AUDIOBOOKSHELF
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_AUDIOBOOKSHELF" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ AUDIOBOOKSHELF - Audiobook & podcast server                     │"
+        echo "│ Stream audiobooks with progress sync across devices.            │"
+        echo "│ Port: 13378                                                     │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Audiobookshelf? (y/n):" "n" INSTALL_AUDIOBOOKSHELF
+    fi
 
     if [ "$INSTALL_AUDIOBOOKSHELF" = "y" ] || [ "$INSTALL_AUDIOBOOKSHELF" = "Y" ]; then
         echo "Installing Audiobookshelf..."
@@ -2553,14 +2762,14 @@ ABS_ENV
     fi
 
     # ---- EMBY ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ EMBY - Media server for movies, TV, music                       │"
-    echo "│ Stream your media library to any device.                        │"
-    echo "│ Port: 8096 (web), 8920 (https)                                  │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_EMBY" ]; then
-    prompt_yn "Install Emby? (y/n):" "n" INSTALL_EMBY
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_EMBY" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ EMBY - Media server for movies, TV, music                       │"
+        echo "│ Stream your media library to any device.                        │"
+        echo "│ Port: 8096 (web), 8920 (https)                                  │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Emby? (y/n):" "n" INSTALL_EMBY
     fi
 
     if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
@@ -2620,14 +2829,14 @@ EMBY_ENV
     fi
 
     # ---- A.R.M. (Automatic Ripping Machine) ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ A.R.M. - Automatic Ripping Machine                              │"
-    echo "│ Automatically rip DVDs, Blu-rays, and CDs.                      │"
-    echo "│ Port: 8080                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_ARM" ]; then
-    prompt_yn "Install A.R.M.? (y/n):" "n" INSTALL_ARM
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_ARM" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ A.R.M. - Automatic Ripping Machine                              │"
+        echo "│ Automatically rip DVDs, Blu-rays, and CDs.                      │"
+        echo "│ Port: 8080                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install A.R.M.? (y/n):" "n" INSTALL_ARM
     fi
 
     if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
@@ -2704,14 +2913,14 @@ ARM_ENV
     fi
 
     # ---- FILEBROWSER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ FILEBROWSER - Web-based file manager                            │"
-    echo "│ Browse, upload, download files via web interface.               │"
-    echo "│ Port: 8085                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_FILEBROWSER" ]; then
-    prompt_yn "Install Filebrowser? (y/n):" "n" INSTALL_FILEBROWSER
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FILEBROWSER" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FILEBROWSER - Web-based file manager                            │"
+        echo "│ Browse, upload, download files via web interface.               │"
+        echo "│ Port: 8085                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Filebrowser? (y/n):" "n" INSTALL_FILEBROWSER
     fi
 
     if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
@@ -2781,14 +2990,14 @@ FB_SETTINGS
     fi
 
     # ---- MAGIC MIRROR ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ MAGIC MIRROR - Smart mirror / dashboard display                 │"
-    echo "│ Modular smart mirror platform. Run up to 3 instances.           │"
-    echo "│ Ports: 8081, 8082, 8083                                         │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_MAGICMIRROR" ]; then
-    prompt_yn "Install Magic Mirror? (y/n):" "n" INSTALL_MAGICMIRROR
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MAGICMIRROR" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ MAGIC MIRROR - Smart mirror / dashboard display                 │"
+        echo "│ Modular smart mirror platform. Run up to 3 instances.           │"
+        echo "│ Ports: 8081, 8082, 8083                                         │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Magic Mirror? (y/n):" "n" INSTALL_MAGICMIRROR
     fi
 
     if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
@@ -3014,13 +3223,13 @@ MM_CONFIG
     fi
 
     # ---- ACTUALBUDGET ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ ACTUALBUDGET - Open-source Personal Finance Management         │"
-    echo "│ Budget tracking with bank account synchronization via SimpleFIN│"
-    echo "│ Port: 5006                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_ACTUALBUDGET" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_ACTUALBUDGET" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ ACTUALBUDGET - Open-source Personal Finance Management         │"
+        echo "│ Budget tracking with bank account synchronization via SimpleFIN│"
+        echo "│ Port: 5006                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
         prompt_yn "Install ActualBudget? (y/n):" "n" INSTALL_ACTUALBUDGET
     fi
 
@@ -3069,13 +3278,13 @@ AB_COMPOSE
     fi
 
     # ---- KEYCLOAK ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ KEYCLOAK - Identity and Access Management (IAM)                │"
-    echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
-    echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_KEYCLOAK" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_KEYCLOAK" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ KEYCLOAK - Identity and Access Management (IAM)                │"
+        echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
+        echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
         prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
     fi
 
@@ -3587,13 +3796,13 @@ EOF
     fi
 
     # ---- CADDY WEB SERVER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ CADDY - Modern Web Server & Reverse Proxy                      │"
-    echo "│ Automatic HTTPS, reverse proxy for all your services           │"
-    echo "│ Port: 80 (HTTP), 443 (HTTPS)                                   │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_CADDY" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_CADDY" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ CADDY - Modern Web Server & Reverse Proxy                      │"
+        echo "│ Automatic HTTPS, reverse proxy for all your services           │"
+        echo "│ Port: 80 (HTTP), 443 (HTTPS)                                   │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
         prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY
     fi
 
@@ -3727,13 +3936,13 @@ CADDYFILE
     fi
 
     # ---- FAIL2BAN ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ FAIL2BAN - Intrusion Prevention System                         │"
-    echo "│ Automatically ban IPs with failed auth attempts                │"
-    echo "│ Protects SSH, Caddy, and other services                        │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_FAIL2BAN" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FAIL2BAN" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FAIL2BAN - Intrusion Prevention System                         │"
+        echo "│ Automatically ban IPs with failed auth attempts                │"
+        echo "│ Protects SSH, Caddy, and other services                        │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
         prompt_yn "Install and configure fail2ban? (y/n):" "n" INSTALL_FAIL2BAN
     fi
 
@@ -3859,14 +4068,14 @@ backend = auto"
     fi
 
     # ---- LYRION MUSIC SERVER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ LYRION MUSIC SERVER (LMS) - Music streaming server              │"
-    echo "│ Stream music to Squeezebox devices, apps, and Chromecast.       │"
-    echo "│ Port: 9000 (web), 9090 (CLI), 3483 (players)                    │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_LMS" ]; then
-    prompt_yn "Install Lyrion Music Server? (y/n):" "n" INSTALL_LMS
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_LMS" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ LYRION MUSIC SERVER (LMS) - Music streaming server              │"
+        echo "│ Stream music to Squeezebox devices, apps, and Chromecast.       │"
+        echo "│ Port: 9000 (web), 9090 (CLI), 3483 (players)                    │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Lyrion Music Server? (y/n):" "n" INSTALL_LMS
     fi
 
     if [ "$INSTALL_LMS" = "y" ] || [ "$INSTALL_LMS" = "Y" ]; then
@@ -3925,14 +4134,14 @@ LMS_ENV
     fi
 
     # ---- MEALIE ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ MEALIE - Recipe manager & meal planner                          │"
-    echo "│ Save recipes, plan meals, generate shopping lists.              │"
-    echo "│ Port: 9925                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_MEALIE" ]; then
-    prompt_yn "Install Mealie? (y/n):" "n" INSTALL_MEALIE
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MEALIE" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ MEALIE - Recipe manager & meal planner                          │"
+        echo "│ Save recipes, plan meals, generate shopping lists.              │"
+        echo "│ Port: 9925                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Mealie? (y/n):" "n" INSTALL_MEALIE
     fi
 
     if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
@@ -3986,14 +4195,14 @@ MEALIE_COMPOSE
     fi
 
     # ---- MINECRAFT SERVER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ MINECRAFT SERVER - Game server with RAM limit                   │"
-    echo "│ Fabric server with configurable memory allocation.              │"
-    echo "│ Port: 25565                                                     │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    if [ -z "$INSTALL_MINECRAFT" ]; then
-    prompt_yn "Install Minecraft Server? (y/n):" "n" INSTALL_MINECRAFT
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MINECRAFT" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ MINECRAFT SERVER - Game server with RAM limit                   │"
+        echo "│ Fabric server with configurable memory allocation.              │"
+        echo "│ Port: 25565                                                     │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Minecraft Server? (y/n):" "n" INSTALL_MINECRAFT
     fi
 
     if [ "$INSTALL_MINECRAFT" = "y" ] || [ "$INSTALL_MINECRAFT" = "Y" ]; then
@@ -4144,13 +4353,15 @@ MC_ENV
     fi
 
     # ---- JELLYFIN (Alternative to Emby) ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ JELLYFIN - Free media server (alternative to Emby)              │"
-    echo "│ Stream movies, TV, music. No premium features locked.           │"
-    echo "│ Port: 8096                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Jellyfin? (y/n):" "n" INSTALL_JELLYFIN
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_JELLYFIN" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ JELLYFIN - Free media server (alternative to Emby)              │"
+        echo "│ Stream movies, TV, music. No premium features locked.           │"
+        echo "│ Port: 8096                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Jellyfin? (y/n):" "n" INSTALL_JELLYFIN
+    fi
 
     if [ "$INSTALL_JELLYFIN" = "y" ] || [ "$INSTALL_JELLYFIN" = "Y" ]; then
         echo "Installing Jellyfin..."
@@ -4214,13 +4425,15 @@ JELLYFIN_ENV
     fi
 
     # ---- FRIGATE NVR ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ FRIGATE - AI-powered NVR for security cameras                   │"
-    echo "│ Object detection, recordings, 24/7 monitoring.                  │"
-    echo "│ Port: 5000 (web), 8554 (RTSP), 8555 (WebRTC)                    │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Frigate? (y/n):" "n" INSTALL_FRIGATE
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FRIGATE" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FRIGATE - AI-powered NVR for security cameras                   │"
+        echo "│ Object detection, recordings, 24/7 monitoring.                  │"
+        echo "│ Port: 5000 (web), 8554 (RTSP), 8555 (WebRTC)                    │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Frigate? (y/n):" "n" INSTALL_FRIGATE
+    fi
 
     if [ "$INSTALL_FRIGATE" = "y" ] || [ "$INSTALL_FRIGATE" = "Y" ]; then
         echo "Installing Frigate..."
@@ -4536,13 +4749,15 @@ CADDY_FILE
     fi
 
     # ---- DDCLIENT DYNAMIC DNS ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ DDCLIENT - Dynamic DNS updater                                  │"
-    echo "│ Keep your domain pointing to your home IP.                      │"
-    echo "│ Supports: Cloudflare, DuckDNS, No-IP, and more.                 │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install ddclient? (y/n):" "n" INSTALL_DDCLIENT
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_DDCLIENT" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ DDCLIENT - Dynamic DNS updater                                  │"
+        echo "│ Keep your domain pointing to your home IP.                      │"
+        echo "│ Supports: Cloudflare, DuckDNS, No-IP, and more.                 │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install ddclient? (y/n):" "n" INSTALL_DDCLIENT
+    fi
 
     if [ "$INSTALL_DDCLIENT" = "y" ] || [ "$INSTALL_DDCLIENT" = "Y" ]; then
         echo "Installing ddclient..."
@@ -4622,13 +4837,15 @@ DDCLIENT_CONF
     fi
 
     # ---- NTFY NOTIFICATIONS ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ NTFY - Push notifications server                                │"
-    echo "│ Send notifications from scripts to your phone.                  │"
-    echo "│ Port: 8090                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install ntfy? (y/n):" "n" INSTALL_NTFY
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_NTFY" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ NTFY - Push notifications server                                │"
+        echo "│ Send notifications from scripts to your phone.                  │"
+        echo "│ Port: 8090                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install ntfy? (y/n):" "n" INSTALL_NTFY
+    fi
 
     if [ "$INSTALL_NTFY" = "y" ] || [ "$INSTALL_NTFY" = "Y" ]; then
         echo "Installing ntfy..."
@@ -4683,13 +4900,15 @@ NTFY_ENV
     fi
 
     # ---- UPTIME KUMA ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ UPTIME KUMA - Service monitoring dashboard                      │"
-    echo "│ Monitor websites, servers, Docker containers.                   │"
-    echo "│ Port: 3001                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Uptime Kuma? (y/n):" "n" INSTALL_UPTIMEKUMA
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_UPTIMEKUMA" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ UPTIME KUMA - Service monitoring dashboard                      │"
+        echo "│ Monitor websites, servers, Docker containers.                   │"
+        echo "│ Port: 3001                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Uptime Kuma? (y/n):" "n" INSTALL_UPTIMEKUMA
+    fi
 
     if [ "$INSTALL_UPTIMEKUMA" = "y" ] || [ "$INSTALL_UPTIMEKUMA" = "Y" ]; then
         echo "Installing Uptime Kuma..."
@@ -4734,13 +4953,15 @@ UPTIME_COMPOSE
     fi
 
     # ---- WG-EASY (WireGuard with Web UI) ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ WG-EASY - WireGuard VPN with web management                     │"
-    echo "│ Easy WireGuard setup with QR codes for clients.                 │"
-    echo "│ Port: 51821 (web), 51820 (VPN)                                  │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install wg-easy? (y/n):" "n" INSTALL_WGEASY
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_WGEASY" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ WG-EASY - WireGuard VPN with web management                     │"
+        echo "│ Easy WireGuard setup with QR codes for clients.                 │"
+        echo "│ Port: 51821 (web), 51820 (VPN)                                  │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install wg-easy? (y/n):" "n" INSTALL_WGEASY
+    fi
 
     if [ "$INSTALL_WGEASY" = "y" ] || [ "$INSTALL_WGEASY" = "Y" ]; then
         echo "Installing wg-easy..."
@@ -4808,13 +5029,15 @@ WGEASY_ENV
     fi
 
     # ---- TRACCAR GPS TRACKING ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ TRACCAR - GPS tracking server                                   │"
-    echo "│ Track phones, vehicles, assets with OwnTracks/Traccar apps.     │"
-    echo "│ Port: 8082 (web), 5055 (OsmAnd), 5000+ (devices)                │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Traccar? (y/n):" "n" INSTALL_TRACCAR
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_TRACCAR" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ TRACCAR - GPS tracking server                                   │"
+        echo "│ Track phones, vehicles, assets with OwnTracks/Traccar apps.     │"
+        echo "│ Port: 8082 (web), 5055 (OsmAnd), 5000+ (devices)                │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Traccar? (y/n):" "n" INSTALL_TRACCAR
+    fi
 
     if [ "$INSTALL_TRACCAR" = "y" ] || [ "$INSTALL_TRACCAR" = "Y" ]; then
         echo "Installing Traccar..."
@@ -4879,13 +5102,15 @@ TRACCAR_XML
     fi
 
     # ---- PORTAINER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ PORTAINER - Docker management web UI                            │"
-    echo "│ Manage containers, images, volumes via browser.                 │"
-    echo "│ Port: 9443 (https), 9000 (http)                                 │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Portainer? (y/n):" "n" INSTALL_PORTAINER
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_PORTAINER" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ PORTAINER - Docker management web UI                            │"
+        echo "│ Manage containers, images, volumes via browser.                 │"
+        echo "│ Port: 9443 (https), 9000 (http)                                 │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Portainer? (y/n):" "n" INSTALL_PORTAINER
+    fi
 
     if [ "$INSTALL_PORTAINER" = "y" ] || [ "$INSTALL_PORTAINER" = "Y" ]; then
         echo "Installing Portainer..."
@@ -4932,13 +5157,15 @@ PORTAINER_COMPOSE
     fi
 
     # ---- MESHCENTRAL SERVER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ MESHCENTRAL SERVER - Self-hosted remote management             │"
-    echo "│ Full MeshCentral server (not just agent). Manage all devices.  │"
-    echo "│ Port: 4430 (https), 4433 (agent)                               │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install MeshCentral Server? (y/n):" "n" INSTALL_MESHCENTRAL_SERVER
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MESHCENTRAL_SERVER" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ MESHCENTRAL SERVER - Self-hosted remote management             │"
+        echo "│ Full MeshCentral server (not just agent). Manage all devices.  │"
+        echo "│ Port: 4430 (https), 4433 (agent)                               │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install MeshCentral Server? (y/n):" "n" INSTALL_MESHCENTRAL_SERVER
+    fi
 
     if [ "$INSTALL_MESHCENTRAL_SERVER" = "y" ] || [ "$INSTALL_MESHCENTRAL_SERVER" = "Y" ]; then
         echo "Installing MeshCentral Server..."
@@ -5010,13 +5237,15 @@ MC_ENV
     fi
 
     # ---- FINDMYDEVICE (FMD) ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ FINDMYDEVICE - Self-hosted device tracking                      │"
-    echo "│ Track and locate Android devices. Alternative to Google Find.  │"
-    echo "│ Port: 8084                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install FindMyDevice server? (y/n):" "n" INSTALL_FMD
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FMD" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FINDMYDEVICE - Self-hosted device tracking                      │"
+        echo "│ Track and locate Android devices. Alternative to Google Find.  │"
+        echo "│ Port: 8084                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install FindMyDevice server? (y/n):" "n" INSTALL_FMD
+    fi
 
     if [ "$INSTALL_FMD" = "y" ] || [ "$INSTALL_FMD" = "Y" ]; then
         echo "Installing FindMyDevice..."
@@ -5073,13 +5302,15 @@ FMD_ENV
     fi
 
     # ---- FRIGATE-NOTIFY ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ FRIGATE-NOTIFY - Push notifications for Frigate events         │"
-    echo "│ Get alerts when Frigate detects people, cars, etc.             │"
-    echo "│ Sends to: ntfy, Pushover, Discord, Gotify, and more.           │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Frigate-Notify? (y/n):" "n" INSTALL_FRIGATE_NOTIFY
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FRIGATE_NOTIFY" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FRIGATE-NOTIFY - Push notifications for Frigate events         │"
+        echo "│ Get alerts when Frigate detects people, cars, etc.             │"
+        echo "│ Sends to: ntfy, Pushover, Discord, Gotify, and more.           │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Frigate-Notify? (y/n):" "n" INSTALL_FRIGATE_NOTIFY
+    fi
 
     if [ "$INSTALL_FRIGATE_NOTIFY" = "y" ] || [ "$INSTALL_FRIGATE_NOTIFY" = "Y" ]; then
         echo "Installing Frigate-Notify..."
@@ -5176,13 +5407,15 @@ FN_CONFIG
     fi
 
     # ---- WATCHTOWER ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ WATCHTOWER - Container update monitoring                        │"
-    echo "│ Monitor containers for updates. NOTIFY ONLY by default.         │"
-    echo "│ Why notify-only? Apps like Immich have breaking DB migrations.  │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Watchtower? (y/n):" "n" INSTALL_WATCHTOWER
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_WATCHTOWER" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ WATCHTOWER - Container update monitoring                        │"
+        echo "│ Monitor containers for updates. NOTIFY ONLY by default.         │"
+        echo "│ Why notify-only? Apps like Immich have breaking DB migrations.  │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Watchtower? (y/n):" "n" INSTALL_WATCHTOWER
+    fi
 
     if [ "$INSTALL_WATCHTOWER" = "y" ] || [ "$INSTALL_WATCHTOWER" = "Y" ]; then
         echo "Installing Watchtower..."
@@ -5300,6 +5533,8 @@ WT_ENV
             echo ""
         fi
     fi
+
+    fi  # End SKIP_DOCKER_INSTALLS check
 
     # ============================================================================
     # KOPIA BACKUP FOR DOCKER CONTAINERS
