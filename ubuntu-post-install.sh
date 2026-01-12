@@ -2172,14 +2172,115 @@ else
         chown "$ACTUAL_USER:$ACTUAL_USER" "$DOCKER_DIR"
     fi
 
+    # ============================================================================
+    # SERVICE SELECTION MENU
+    # ============================================================================
+
+    # Use whiptail for service selection if available
+    if command -v whiptail &> /dev/null; then
+        # Build checklist of all available services
+        SELECTED_SERVICES=$(whiptail --title "Select Docker Services to Install" \
+            --checklist "Use SPACE to select, ENTER to confirm:" 25 78 17 \
+            "IMMICH" "Photo & video backup (like Google Photos)" OFF \
+            "AUDIOBOOKSHELF" "Audiobook & podcast server" OFF \
+            "EMBY" "Media server for movies, TV, music" OFF \
+            "ARM" "Automatic Ripping Machine for DVDs/Blu-rays" OFF \
+            "FILEBROWSER" "Web-based file manager" OFF \
+            "MAGICMIRROR" "Smart mirror / dashboard display" OFF \
+            "ACTUALBUDGET" "Personal finance management with bank sync" OFF \
+            "KEYCLOAK" "Identity & Access Management (SSO)" OFF \
+            "CADDY" "Reverse proxy with automatic HTTPS" OFF \
+            "FAIL2BAN" "Intrusion prevention system" OFF \
+            "LYRION" "Music streaming server (LMS)" OFF \
+            "MEALIE" "Recipe manager & meal planner" OFF \
+            "MINECRAFT" "Minecraft game server" OFF \
+            "JELLYFIN" "Free media server (Emby alternative)" OFF \
+            "FRIGATE" "AI-powered NVR for security cameras" OFF \
+            "NTFY" "Push notifications server" OFF \
+            "UPTIMEKUMA" "Service monitoring dashboard" OFF \
+            "WGEASY" "WireGuard VPN with web UI" OFF \
+            "TRACCAR" "GPS tracking server" OFF \
+            "PORTAINER" "Docker management web UI" OFF \
+            "MESHCENTRAL" "Remote management server" OFF \
+            "FINDMYDEVICE" "Device tracking (like Find My)" OFF \
+            "FRIGATE_NOTIFY" "Push notifications for Frigate" OFF \
+            "WATCHTOWER" "Automatic container updates" OFF \
+            3>&1 1>&2 2>&3)
+
+        # Check if user cancelled
+        if [ $? -ne 0 ]; then
+            echo "Service selection cancelled. Skipping Docker applications."
+            SELECTED_SERVICES=""
+        fi
+
+        # Parse selections (whiptail returns quoted strings)
+        INSTALL_IMMICH="n"
+        INSTALL_AUDIOBOOKSHELF="n"
+        INSTALL_EMBY="n"
+        INSTALL_ARM="n"
+        INSTALL_FILEBROWSER="n"
+        INSTALL_MAGICMIRROR="n"
+        INSTALL_ACTUALBUDGET="n"
+        INSTALL_KEYCLOAK="n"
+        INSTALL_CADDY="n"
+        INSTALL_FAIL2BAN="n"
+        INSTALL_LMS="n"
+        INSTALL_MEALIE="n"
+        INSTALL_MINECRAFT="n"
+        INSTALL_JELLYFIN="n"
+        INSTALL_FRIGATE="n"
+        INSTALL_NTFY="n"
+        INSTALL_UPTIMEKUMA="n"
+        INSTALL_WGEASY="n"
+        INSTALL_TRACCAR="n"
+        INSTALL_PORTAINER="n"
+        INSTALL_MESHCENTRAL_SERVER="n"
+        INSTALL_FMD="n"
+        INSTALL_FRIGATE_NOTIFY="n"
+        INSTALL_WATCHTOWER="n"
+
+        # Set installation flags based on selections
+        if echo "$SELECTED_SERVICES" | grep -q "IMMICH"; then INSTALL_IMMICH="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "AUDIOBOOKSHELF"; then INSTALL_AUDIOBOOKSHELF="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "EMBY"; then INSTALL_EMBY="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "ARM"; then INSTALL_ARM="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then INSTALL_FILEBROWSER="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then INSTALL_MAGICMIRROR="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then INSTALL_ACTUALBUDGET="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then INSTALL_KEYCLOAK="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then INSTALL_CADDY="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then INSTALL_FAIL2BAN="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then INSTALL_LMS="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then INSTALL_MEALIE="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then INSTALL_MINECRAFT="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "JELLYFIN"; then INSTALL_JELLYFIN="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "FRIGATE\""; then INSTALL_FRIGATE="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "NTFY"; then INSTALL_NTFY="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "UPTIMEKUMA"; then INSTALL_UPTIMEKUMA="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "WGEASY"; then INSTALL_WGEASY="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "TRACCAR"; then INSTALL_TRACCAR="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "PORTAINER"; then INSTALL_PORTAINER="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "MESHCENTRAL"; then INSTALL_MESHCENTRAL_SERVER="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "FINDMYDEVICE"; then INSTALL_FMD="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then INSTALL_FRIGATE_NOTIFY="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then INSTALL_WATCHTOWER="y"; fi
+
+        echo ""
+        echo "Selected services:"
+        echo "$SELECTED_SERVICES" | tr '"' '\n' | grep -v '^$' | sed 's/^/  - /'
+        echo ""
+    fi
+
     # ---- IMMICH ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ IMMICH - Self-hosted photo & video backup                       │"
-    echo "│ Like Google Photos but private. Mobile app auto-uploads.        │"
-    echo "│ Port: 2283                                                      │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Immich? (y/n):" "n" INSTALL_IMMICH
+    if [ -z "$INSTALL_IMMICH" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ IMMICH - Self-hosted photo & video backup                       │"
+        echo "│ Like Google Photos but private. Mobile app auto-uploads.        │"
+        echo "│ Port: 2283                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Immich? (y/n):" "n" INSTALL_IMMICH
+    fi
 
     if [ "$INSTALL_IMMICH" = "y" ] || [ "$INSTALL_IMMICH" = "Y" ]; then
         echo "Installing Immich..."
@@ -2449,7 +2550,9 @@ ABS_ENV
     echo "│ Stream your media library to any device.                        │"
     echo "│ Port: 8096 (web), 8920 (https)                                  │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_EMBY" ]; then
     prompt_yn "Install Emby? (y/n):" "n" INSTALL_EMBY
+    fi
 
     if [ "$INSTALL_EMBY" = "y" ] || [ "$INSTALL_EMBY" = "Y" ]; then
         echo "Installing Emby..."
@@ -2514,7 +2617,9 @@ EMBY_ENV
     echo "│ Automatically rip DVDs, Blu-rays, and CDs.                      │"
     echo "│ Port: 8080                                                      │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_ARM" ]; then
     prompt_yn "Install A.R.M.? (y/n):" "n" INSTALL_ARM
+    fi
 
     if [ "$INSTALL_ARM" = "y" ] || [ "$INSTALL_ARM" = "Y" ]; then
         echo "Installing A.R.M...."
@@ -2596,7 +2701,9 @@ ARM_ENV
     echo "│ Browse, upload, download files via web interface.               │"
     echo "│ Port: 8085                                                      │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_FILEBROWSER" ]; then
     prompt_yn "Install Filebrowser? (y/n):" "n" INSTALL_FILEBROWSER
+    fi
 
     if [ "$INSTALL_FILEBROWSER" = "y" ] || [ "$INSTALL_FILEBROWSER" = "Y" ]; then
         echo "Installing Filebrowser..."
@@ -2671,7 +2778,9 @@ FB_SETTINGS
     echo "│ Modular smart mirror platform. Run up to 3 instances.           │"
     echo "│ Ports: 8081, 8082, 8083                                         │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_MAGICMIRROR" ]; then
     prompt_yn "Install Magic Mirror? (y/n):" "n" INSTALL_MAGICMIRROR
+    fi
 
     if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
         echo ""
@@ -2902,7 +3011,9 @@ MM_CONFIG
     echo "│ Budget tracking with bank account synchronization via SimpleFIN│"
     echo "│ Port: 5006                                                      │"
     echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install ActualBudget? (y/n):" "n" INSTALL_ACTUALBUDGET
+    if [ -z "$INSTALL_ACTUALBUDGET" ]; then
+        prompt_yn "Install ActualBudget? (y/n):" "n" INSTALL_ACTUALBUDGET
+    fi
 
     if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
         AB_DIR="$DOCKER_DIR/actualbudget"
@@ -2955,7 +3066,9 @@ AB_COMPOSE
     echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
     echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
     echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
+    if [ -z "$INSTALL_KEYCLOAK" ]; then
+        prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
+    fi
 
     if [ "$INSTALL_KEYCLOAK" = "y" ] || [ "$INSTALL_KEYCLOAK" = "Y" ]; then
         KC_DIR="$DOCKER_DIR/keycloak"
@@ -3035,6 +3148,341 @@ KC_COMPOSE
             if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
                 echo "  Starting Keycloak (this may take a minute)..."
                 docker compose up -d 2>/dev/null && echo "  ✓ Keycloak started" || echo "  ⚠ Failed to start Keycloak"
+
+                # Automated initial configuration
+                echo ""
+                prompt_yn "Configure Keycloak with initial realm and clients? (y/n):" "y" CONFIGURE_KC
+
+                if [ "$CONFIGURE_KC" = "y" ] || [ "$CONFIGURE_KC" = "Y" ]; then
+                    echo ""
+                    echo "  Configuring Keycloak..."
+                    echo "  This will create a realm and OAuth2 clients for your services."
+                    echo ""
+
+                    # Get realm name
+                    prompt_text "  Realm name (e.g., homelab, services):" "homelab" KC_REALM
+
+                    # Get domain configuration for redirect URIs
+                    echo ""
+                    echo "  ──────────────────────────────────────────────────────────────"
+                    echo "  DOMAIN CONFIGURATION"
+                    echo "  ──────────────────────────────────────────────────────────────"
+                    echo ""
+                    echo "  Keycloak needs to know where your services are hosted."
+                    echo ""
+                    echo "  Options:"
+                    echo "    1. Local only (http://localhost:PORT)"
+                    echo "    2. Public domain (https://yourdomain.com)"
+                    echo "    3. Both local and public"
+                    echo ""
+                    prompt_text "  Enter your setup (1/2/3):" "1" KC_SETUP_TYPE
+
+                    KC_DOMAIN="localhost"
+                    KC_PUBLIC_DOMAIN=""
+                    KC_EXTERNAL_SERVICE=""
+
+                    if [ "$KC_SETUP_TYPE" = "2" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
+                        echo ""
+                        prompt_text "  Your public domain (e.g., example.com):" "" KC_PUBLIC_DOMAIN
+
+                        echo ""
+                        echo "  ⚠  IMPORTANT: For Keycloak to work with external services,"
+                        echo "     it MUST be accessible at https://auth.$KC_PUBLIC_DOMAIN"
+                        echo ""
+                        echo "  This requires:"
+                        echo "    ✓ DNS A record: auth.$KC_PUBLIC_DOMAIN → Your Server IP"
+                        echo "    ✓ Caddy reverse proxy configured"
+                        echo "    ✓ Ports 80/443 open in firewall"
+                        echo ""
+                        prompt_yn "  Is Keycloak accessible at https://auth.$KC_PUBLIC_DOMAIN? (y/n):" "n" KC_DOMAIN_READY
+
+                        if [ "$KC_DOMAIN_READY" != "y" ] && [ "$KC_DOMAIN_READY" != "Y" ]; then
+                            echo ""
+                            echo "  ⚠  WARNING: Keycloak won't work with external services until"
+                            echo "     you configure Caddy and DNS. See KEYCLOAK-SETUP-GUIDE.md"
+                            echo ""
+                            echo "  You can still proceed and configure Caddy later."
+                            echo ""
+                        fi
+
+                        # Ask about external services (like Pikapod)
+                        echo ""
+                        prompt_yn "  Are you using external hosted services (e.g., Pikapod)? (y/n):" "n" KC_HAS_EXTERNAL
+
+                        if [ "$KC_HAS_EXTERNAL" = "y" ] || [ "$KC_HAS_EXTERNAL" = "Y" ]; then
+                            echo ""
+                            echo "  Enter the URL of your external service (e.g., https://actualbudget-abc.pikapod.net)"
+                            prompt_text "  External service URL:" "" KC_EXTERNAL_SERVICE
+                        fi
+                    fi
+
+                    if [ "$KC_SETUP_TYPE" = "1" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
+                        KC_DOMAIN="localhost"
+                    fi
+
+                    # Wait for Keycloak to be fully ready (can take 30-60 seconds)
+                    echo ""
+                    echo "  Waiting for Keycloak to be ready..."
+                    KC_READY=false
+                    for i in {1..60}; do
+                        if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+                            KC_READY=true
+                            echo "  ✓ Keycloak is ready"
+                            break
+                        fi
+                        echo -n "."
+                        sleep 2
+                    done
+                    echo ""
+
+                    if [ "$KC_READY" = true ]; then
+                        # Login to Keycloak admin CLI
+                        echo "  Logging in to Keycloak admin CLI..."
+                        docker exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
+                            --server http://localhost:8080 \
+                            --realm master \
+                            --user admin \
+                            --password "$KC_ADMIN_PASS" > /dev/null 2>&1
+
+                        if [ $? -eq 0 ]; then
+                            echo "  ✓ Logged in to Keycloak"
+
+                            # Create realm
+                            echo "  Creating realm '$KC_REALM'..."
+                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create realms \
+                                -s realm="$KC_REALM" \
+                                -s enabled=true \
+                                -s displayName="$KC_REALM" \
+                                -s registrationAllowed=false \
+                                -s resetPasswordAllowed=true \
+                                -s rememberMe=true \
+                                -s loginWithEmailAllowed=true \
+                                -s duplicateEmailsAllowed=false \
+                                -s sslRequired=EXTERNAL > /dev/null 2>&1
+
+                            if [ $? -eq 0 ]; then
+                                echo "  ✓ Created realm '$KC_REALM'"
+                            fi
+
+                            # Create OAuth2 client for ActualBudget
+                            if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
+                                echo "  Creating OAuth2 client for ActualBudget..."
+                                AB_CLIENT_SECRET=$(openssl rand -hex 32)
+
+                                # Build redirect URIs based on configuration
+                                AB_REDIRECT_URIS='["http://localhost:5006/*","http://localhost:5006/callback"'
+
+                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://budget.'$KC_PUBLIC_DOMAIN'/*","https://budget.'$KC_PUBLIC_DOMAIN'/callback"'
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://'$KC_PUBLIC_DOMAIN':5006/*","https://'$KC_PUBLIC_DOMAIN':5006/callback"'
+                                fi
+
+                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"'$KC_EXTERNAL_SERVICE'/*","'$KC_EXTERNAL_SERVICE'/callback"'
+                                fi
+
+                                AB_REDIRECT_URIS="$AB_REDIRECT_URIS"']'
+
+                                # Build web origins
+                                AB_WEB_ORIGINS='["http://localhost:5006"'
+
+                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"https://budget.'$KC_PUBLIC_DOMAIN'","https://'$KC_PUBLIC_DOMAIN':5006"'
+                                fi
+
+                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"'$KC_EXTERNAL_SERVICE'"'
+                                fi
+
+                                AB_WEB_ORIGINS="$AB_WEB_ORIGINS"']'
+
+                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
+                                    -s clientId=actualbudget \
+                                    -s name="ActualBudget" \
+                                    -s description="Personal Finance Management" \
+                                    -s enabled=true \
+                                    -s clientAuthenticatorType=client-secret \
+                                    -s secret="$AB_CLIENT_SECRET" \
+                                    -s publicClient=false \
+                                    -s standardFlowEnabled=true \
+                                    -s directAccessGrantsEnabled=true \
+                                    -s serviceAccountsEnabled=false \
+                                    -s "redirectUris=$AB_REDIRECT_URIS" \
+                                    -s "webOrigins=$AB_WEB_ORIGINS" \
+                                    -s protocol=openid-connect > /dev/null 2>&1
+
+                                if [ $? -eq 0 ]; then
+                                    echo "  ✓ Created ActualBudget client"
+                                    echo "      Client ID: actualbudget"
+                                    echo "      Client Secret: $AB_CLIENT_SECRET"
+                                    echo ""
+
+                                    # Save to file with appropriate URLs
+                                    KC_AUTH_URL="http://localhost:8180"
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        KC_AUTH_URL="https://auth.$KC_PUBLIC_DOMAIN"
+                                    fi
+
+                                    cat > "$KC_DIR/actualbudget-oauth.txt" << EOF
+ActualBudget OAuth2 Configuration
+==================================
+
+Client ID: actualbudget
+Client Secret: $AB_CLIENT_SECRET
+
+LOCAL DEVELOPMENT:
+Authorization URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
+Token URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
+User Info URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
+EOF
+
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+PRODUCTION (with Caddy at https://auth.$KC_PUBLIC_DOMAIN):
+Authorization URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
+Token URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
+User Info URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
+EOF
+                                    fi
+
+                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+EXTERNAL SERVICE ($KC_EXTERNAL_SERVICE):
+- Use PRODUCTION URLs above
+- Keycloak MUST be accessible at: https://auth.$KC_PUBLIC_DOMAIN
+- Redirect URI configured: $KC_EXTERNAL_SERVICE/*
+EOF
+                                    fi
+
+                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+Redirect URIs configured:
+- http://localhost:5006/* (local)
+EOF
+
+                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+- https://budget.$KC_PUBLIC_DOMAIN/* (self-hosted)
+EOF
+                                    fi
+
+                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
+                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+- $KC_EXTERNAL_SERVICE/* (external)
+EOF
+                                    fi
+
+                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
+
+To configure ActualBudget:
+1. Go to ActualBudget settings
+2. Enable OpenID/OAuth authentication
+3. Enter the Client ID and Secret above
+4. Use the URLs above based on your setup
+EOF
+                                    echo "  ✓ Saved OAuth config to $KC_DIR/actualbudget-oauth.txt"
+                                fi
+                            fi
+
+                            # Create a generic OAuth2 client template for other services
+                            echo "  Creating generic OAuth2 client for other services..."
+                            GENERIC_CLIENT_SECRET=$(openssl rand -hex 32)
+
+                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
+                                -s clientId=generic-app \
+                                -s name="Generic Application" \
+                                -s description="Template client for other services" \
+                                -s enabled=true \
+                                -s clientAuthenticatorType=client-secret \
+                                -s secret="$GENERIC_CLIENT_SECRET" \
+                                -s publicClient=false \
+                                -s standardFlowEnabled=true \
+                                -s directAccessGrantsEnabled=true \
+                                -s 'redirectUris=["http://localhost:*/*","https://'$KC_DOMAIN'/*","https://*.'$KC_DOMAIN'/*"]' \
+                                -s 'webOrigins=["*"]' \
+                                -s protocol=openid-connect > /dev/null 2>&1
+
+                            if [ $? -eq 0 ]; then
+                                echo "  ✓ Created generic OAuth2 client template"
+                                cat > "$KC_DIR/generic-oauth.txt" << EOF
+Generic OAuth2 Client Configuration
+====================================
+
+Client ID: generic-app
+Client Secret: $GENERIC_CLIENT_SECRET
+
+Use this as a template for other services. You can clone this client
+in the Keycloak admin console and modify the redirect URIs.
+
+Base URLs:
+- Authorization: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
+- Token: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
+- User Info: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
+
+For production: Replace localhost:8180 with https://auth.$KC_DOMAIN
+EOF
+                                echo "  ✓ Saved config to $KC_DIR/generic-oauth.txt"
+                            fi
+
+                            # Optionally create initial user
+                            echo ""
+                            prompt_yn "Create an initial user in realm '$KC_REALM'? (y/n):" "y" CREATE_USER
+
+                            if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
+                                prompt_text "  Username:" "$ACTUAL_USER" KC_USERNAME
+                                prompt_text "  Email:" "${KC_USERNAME}@${KC_DOMAIN}" KC_EMAIL
+                                prompt_text "  First name:" "" KC_FIRSTNAME
+                                prompt_text "  Last name:" "" KC_LASTNAME
+
+                                echo "  Password for $KC_USERNAME:"
+                                read -s KC_USER_PASS
+                                echo ""
+
+                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create users -r "$KC_REALM" \
+                                    -s username="$KC_USERNAME" \
+                                    -s email="$KC_EMAIL" \
+                                    -s firstName="$KC_FIRSTNAME" \
+                                    -s lastName="$KC_LASTNAME" \
+                                    -s enabled=true \
+                                    -s emailVerified=true > /dev/null 2>&1
+
+                                if [ $? -eq 0 ]; then
+                                    # Set password
+                                    KC_USER_ID=$(docker exec keycloak /opt/keycloak/bin/kcadm.sh get users -r "$KC_REALM" -q username="$KC_USERNAME" 2>/dev/null | grep -o '"id" : "[^"]*"' | cut -d'"' -f4)
+
+                                    docker exec keycloak /opt/keycloak/bin/kcadm.sh set-password -r "$KC_REALM" \
+                                        --username "$KC_USERNAME" \
+                                        --new-password "$KC_USER_PASS" > /dev/null 2>&1
+
+                                    echo "  ✓ Created user: $KC_USERNAME"
+                                    echo "  ✓ Password set"
+                                    echo ""
+                                    echo "  This user can now log in to ActualBudget and other services!"
+                                fi
+                            fi
+
+                            echo ""
+                            echo "  ✓ Keycloak configuration complete!"
+                            echo ""
+                            echo "  Next steps:"
+                            echo "    1. Go to http://localhost:8180/admin"
+                            echo "    2. Login with admin / $KC_ADMIN_PASS"
+                            echo "    3. Switch to realm '$KC_REALM' (top-left dropdown)"
+                            echo "    4. Manage users in Users menu"
+                            echo "    5. OAuth configs saved to $KC_DIR/*.txt"
+                            echo ""
+
+                        else
+                            echo "  ⚠ Failed to login to Keycloak admin CLI"
+                            echo "  You can configure Keycloak manually via the web UI"
+                        fi
+                    else
+                        echo "  ⚠ Keycloak did not become ready in time"
+                        echo "  You can configure it manually after it starts"
+                    fi
+                fi
             fi
 
             echo ""
@@ -3042,11 +3490,287 @@ KC_COMPOSE
             echo "  Username:       admin"
             echo "  Password:       $KC_ADMIN_PASS"
             echo "  Database:       PostgreSQL (./postgres-data)"
+            if [ -n "$KC_REALM" ]; then
+                echo "  Realm:          $KC_REALM"
+                echo "  Config files:   $KC_DIR/*.txt"
+            fi
             echo ""
             echo "  ⚠  For production:"
             echo "     - Use HTTPS via reverse proxy (Caddy)"
             echo "     - Change command to 'start' instead of 'start-dev'"
             echo "     - Set KC_HOSTNAME to your domain"
+            echo ""
+        fi
+    fi
+
+    # ---- CADDY WEB SERVER ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ CADDY - Modern Web Server & Reverse Proxy                      │"
+    echo "│ Automatic HTTPS, reverse proxy for all your services           │"
+    echo "│ Port: 80 (HTTP), 443 (HTTPS)                                   │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_CADDY" ]; then
+        prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY
+    fi
+
+    if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+        CADDY_DIR="$DOCKER_DIR/caddy"
+
+        # Check if Caddy is already installed
+        if [ -f "$CADDY_DIR/Caddyfile" ] || [ -f "$CADDY_DIR/docker-compose.yml" ]; then
+            echo ""
+            echo "⚠  Caddy appears to be already installed at $CADDY_DIR"
+            prompt_yn "Do you want to reconfigure it? (y/n):" "n" RECONFIGURE_CADDY
+            if [ "$RECONFIGURE_CADDY" != "y" ] && [ "$RECONFIGURE_CADDY" != "Y" ]; then
+                echo "  Skipping Caddy installation"
+                INSTALL_CADDY="n"
+            fi
+        fi
+
+        if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
+            if [ "$DRY_RUN" = true ]; then
+                echo "[DRY-RUN] Would create $CADDY_DIR"
+            else
+                echo "Installing Caddy..."
+                mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"
+
+                # Backup existing Caddyfile if it exists
+                if [ -f "$CADDY_DIR/Caddyfile" ]; then
+                    mkdir -p "$CADDY_DIR/backups"
+                    BACKUP_FILE="$CADDY_DIR/backups/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)"
+                    cp "$CADDY_DIR/Caddyfile" "$BACKUP_FILE"
+                    echo "  ✓ Backed up existing Caddyfile to: $BACKUP_FILE"
+                fi
+
+                cd "$CADDY_DIR"
+
+                cat > docker-compose.yml << 'CADDY_COMPOSE'
+name: caddy
+
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./data:/data
+      - ./config:/config
+      - /var/log/caddy:/var/log/caddy
+    environment:
+      - ACME_AGREE=true
+    labels:
+      - "io.podman.annotations.label/fail2ban.enable=true"
+CADDY_COMPOSE
+
+                # Create Caddyfile if it doesn't exist
+                if [ ! -f "Caddyfile" ]; then
+                    cat > Caddyfile << 'CADDYFILE'
+{
+    # Global options
+    admin off
+    # Email for Let's Encrypt notifications
+    # email admin@yourdomain.com
+}
+
+# Example configuration - edit this for your services
+# Uncomment and modify these examples:
+
+# ActualBudget
+# budget.yourdomain.com {
+#     log {
+#         output file /var/log/caddy/actualbudget-access.log
+#         format json
+#         level INFO
+#     }
+#     reverse_proxy localhost:5006
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-Content-Type-Options "nosniff"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#     }
+# }
+
+# Keycloak
+# auth.yourdomain.com {
+#     log {
+#         output file /var/log/caddy/keycloak-access.log
+#         format json
+#         level INFO
+#     }
+#     reverse_proxy localhost:8180
+#     header {
+#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+#         X-Frame-Options "SAMEORIGIN"
+#         X-Content-Type-Options "nosniff"
+#         X-XSS-Protection "1; mode=block"
+#         Referrer-Policy "strict-origin-when-cross-origin"
+#     }
+# }
+
+# Add more services here...
+CADDYFILE
+                    echo "  ✓ Created example Caddyfile"
+                else
+                    echo "  ℹ Using existing Caddyfile"
+                fi
+
+                echo "  ✓ Caddy configured at $CADDY_DIR"
+
+                prompt_yn "Start Caddy now? (y/n):" "y" START_CADDY
+                if [ "$START_CADDY" = "y" ] || [ "$START_CADDY" = "Y" ]; then
+                    docker compose up -d 2>/dev/null && echo "  ✓ Caddy started" || echo "  ⚠ Failed to start Caddy"
+                fi
+
+                echo ""
+                echo "  Configuration file: $CADDY_DIR/Caddyfile"
+                echo "  Edit Caddyfile to add your domains and services"
+                echo "  Reload config:      cd $CADDY_DIR && docker exec -w /etc/caddy caddy caddy reload"
+                echo ""
+                echo "  ⚠  IMPORTANT: Edit the Caddyfile to configure your domains!"
+                echo "     - Uncomment and modify the example configurations"
+                echo "     - Add your domain names"
+                echo "     - Configure services you want to expose"
+                echo ""
+            fi
+        fi
+    fi
+
+    # ---- FAIL2BAN ----
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────┐"
+    echo "│ FAIL2BAN - Intrusion Prevention System                         │"
+    echo "│ Automatically ban IPs with failed auth attempts                │"
+    echo "│ Protects SSH, Caddy, and other services                        │"
+    echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_FAIL2BAN" ]; then
+        prompt_yn "Install and configure fail2ban? (y/n):" "n" INSTALL_FAIL2BAN
+    fi
+
+    if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would install fail2ban"
+        else
+            echo "Installing fail2ban..."
+
+            # Check if fail2ban is already installed
+            if command -v fail2ban-client &> /dev/null; then
+                echo "  ✓ fail2ban is already installed"
+            else
+                echo "  Installing fail2ban package..."
+                if sudo apt update && sudo apt install -y fail2ban; then
+                    echo "  ✓ fail2ban installed successfully"
+                else
+                    echo "  ⚠ Failed to install fail2ban"
+                    echo "  You may need to install it manually: sudo apt install fail2ban"
+                fi
+            fi
+
+            # Create log directory for Caddy
+            if [ ! -d "/var/log/caddy" ]; then
+                sudo mkdir -p /var/log/caddy
+                sudo chmod 755 /var/log/caddy
+                echo "  ✓ Created /var/log/caddy directory"
+            fi
+
+            # Check if Caddy filter exists
+            FILTER_FILE="/etc/fail2ban/filter.d/caddy-auth.conf"
+            if [ ! -f "$FILTER_FILE" ]; then
+                echo "  Creating fail2ban filter for Caddy..."
+
+                FILTER_CONTENT='[Definition]
+failregex = ^.*"remote_ip":"<HOST>".*"status":(?:401|403|429).*$
+            ^.*"remote_addr":"<HOST>.*"status":(?:401|403|429).*$
+ignoreregex = ^.*"remote_ip":"(?:127\.0\.0\.1|::1)".*$
+datepattern = "ts":%%s'
+
+                if echo "$FILTER_CONTENT" | sudo tee "$FILTER_FILE" > /dev/null; then
+                    echo "  ✓ Created Caddy fail2ban filter"
+                else
+                    echo "  ⚠ Failed to create filter - you may need to create it manually"
+                fi
+            else
+                echo "  ✓ Caddy fail2ban filter already exists"
+            fi
+
+            # Check if Caddy jail exists
+            JAIL_FILE="/etc/fail2ban/jail.d/caddy.conf"
+            if [ ! -f "$JAIL_FILE" ]; then
+                echo "  Creating fail2ban jail for Caddy..."
+                echo ""
+                echo "  Configure fail2ban settings (press Enter for defaults):"
+
+                prompt_text "  Max retries before ban:" "5" F2B_MAXRETRY
+                prompt_text "  Find time window (seconds):" "600" F2B_FINDTIME
+                prompt_text "  Ban duration (seconds):" "3600" F2B_BANTIME
+
+                JAIL_CONTENT="[caddy-auth]
+enabled = true
+port = http,https
+filter = caddy-auth
+logpath = /var/log/caddy/access.log
+          /var/log/caddy/*-access.log
+maxretry = $F2B_MAXRETRY
+findtime = $F2B_FINDTIME
+bantime = $F2B_BANTIME
+action = iptables-multiport[name=CaddyAuth, port=\"http,https\", protocol=tcp]
+backend = auto"
+
+                if echo "$JAIL_CONTENT" | sudo tee "$JAIL_FILE" > /dev/null; then
+                    echo "  ✓ Created Caddy fail2ban jail"
+                else
+                    echo "  ⚠ Failed to create jail - you may need to create it manually"
+                fi
+            else
+                echo "  ✓ Caddy fail2ban jail already exists"
+            fi
+
+            # Test fail2ban configuration
+            echo ""
+            echo "  Testing fail2ban configuration..."
+            if sudo fail2ban-client -t &> /dev/null; then
+                echo "  ✓ fail2ban configuration is valid"
+            else
+                echo "  ⚠ fail2ban configuration has errors"
+                echo "  Check with: sudo fail2ban-client -t"
+            fi
+
+            # Restart fail2ban
+            prompt_yn "Restart fail2ban to apply changes? (y/n):" "y" RESTART_F2B
+            if [ "$RESTART_F2B" = "y" ] || [ "$RESTART_F2B" = "Y" ]; then
+                if sudo systemctl restart fail2ban; then
+                    echo "  ✓ fail2ban restarted successfully"
+
+                    # Wait for fail2ban to start
+                    sleep 2
+
+                    # Check jail status
+                    if sudo fail2ban-client status caddy-auth &> /dev/null; then
+                        echo "  ✓ caddy-auth jail is active"
+                        echo ""
+                        sudo fail2ban-client status caddy-auth
+                    else
+                        echo "  ⚠ caddy-auth jail is not active (may need Caddy logs to exist first)"
+                    fi
+                else
+                    echo "  ⚠ Failed to restart fail2ban"
+                    echo "  Check logs: sudo journalctl -u fail2ban -n 50"
+                fi
+            fi
+
+            echo ""
+            echo "  Useful commands:"
+            echo "    Check jail status:  sudo fail2ban-client status caddy-auth"
+            echo "    View banned IPs:    sudo fail2ban-client get caddy-auth banip"
+            echo "    Unban IP:           sudo fail2ban-client set caddy-auth unbanip 1.2.3.4"
+            echo "    View logs:          sudo tail -f /var/log/fail2ban.log"
             echo ""
         fi
     fi
@@ -3058,7 +3782,9 @@ KC_COMPOSE
     echo "│ Stream music to Squeezebox devices, apps, and Chromecast.       │"
     echo "│ Port: 9000 (web), 9090 (CLI), 3483 (players)                    │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_LMS" ]; then
     prompt_yn "Install Lyrion Music Server? (y/n):" "n" INSTALL_LMS
+    fi
 
     if [ "$INSTALL_LMS" = "y" ] || [ "$INSTALL_LMS" = "Y" ]; then
         echo "Installing Lyrion Music Server..."
@@ -3122,7 +3848,9 @@ LMS_ENV
     echo "│ Save recipes, plan meals, generate shopping lists.              │"
     echo "│ Port: 9925                                                      │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_MEALIE" ]; then
     prompt_yn "Install Mealie? (y/n):" "n" INSTALL_MEALIE
+    fi
 
     if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
         echo "Installing Mealie..."
@@ -3181,7 +3909,9 @@ MEALIE_COMPOSE
     echo "│ Fabric server with configurable memory allocation.              │"
     echo "│ Port: 25565                                                     │"
     echo "└─────────────────────────────────────────────────────────────────┘"
+    if [ -z "$INSTALL_MINECRAFT" ]; then
     prompt_yn "Install Minecraft Server? (y/n):" "n" INSTALL_MINECRAFT
+    fi
 
     if [ "$INSTALL_MINECRAFT" = "y" ] || [ "$INSTALL_MINECRAFT" = "Y" ]; then
         echo "Installing Minecraft Server..."
@@ -3518,14 +4248,22 @@ FRIGATE_CONFIG
         fi
     fi
 
-    # ---- CADDY REVERSE PROXY ----
-    echo ""
-    echo "┌─────────────────────────────────────────────────────────────────┐"
-    echo "│ CADDY - Automatic HTTPS reverse proxy                           │"
-    echo "│ Route domains to containers with automatic SSL certificates.    │"
-    echo "│ Ports: 80, 443                                                  │"
-    echo "└─────────────────────────────────────────────────────────────────┘"
-    prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY
+    # ---- CADDY REVERSE PROXY (Legacy) ----
+    # Note: This is the legacy Caddy installation
+    # The newer installation above includes fail2ban support
+    # This section is kept for backwards compatibility
+    if [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ CADDY - Automatic HTTPS reverse proxy (Legacy)                  │"
+        echo "│ Route domains to containers with automatic SSL certificates.    │"
+        echo "│ Ports: 80, 443                                                  │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        if [ -z "$INSTALL_CADDY_LEGACY" ]; then
+            prompt_yn "Install Caddy reverse proxy? (y/n):" "n" INSTALL_CADDY_LEGACY
+        fi
+        INSTALL_CADDY="$INSTALL_CADDY_LEGACY"
+    fi
 
     if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ]; then
         echo "Installing Caddy..."
