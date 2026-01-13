@@ -14,11 +14,10 @@ echo "Keycloak Proxy Configuration Fix"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "This script will:"
-echo "  1. Backup your current configuration"
-echo "  2. Create .env file for credentials"
-echo "  3. Update docker-compose.yml to use env_file"
-echo "  4. Replace deprecated KC_PROXY with KC_PROXY_HEADERS"
-echo "  5. Restart Keycloak with new configuration"
+echo "  1. Backup your current .env file"
+echo "  2. Replace deprecated KC_PROXY with KC_PROXY_HEADERS"
+echo "  3. Ensure docker-compose.yml uses env_file"
+echo "  4. Restart Keycloak with new configuration"
 echo ""
 
 if [ ! -d "$KC_DIR" ]; then
@@ -28,185 +27,158 @@ fi
 
 cd "$KC_DIR"
 
-# Check if docker-compose.yml exists
-if [ ! -f "docker-compose.yml" ]; then
-    echo "❌ Error: docker-compose.yml not found in $KC_DIR"
-    exit 1
-fi
-
 # Backup existing configuration
 BACKUP_DIR="$KC_DIR/backups"
 mkdir -p "$BACKUP_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-cp docker-compose.yml "$BACKUP_DIR/docker-compose.yml.backup.$TIMESTAMP"
-echo "✓ Backed up docker-compose.yml to $BACKUP_DIR/docker-compose.yml.backup.$TIMESTAMP"
 
-# Extract passwords from existing docker-compose.yml
-echo ""
-echo "Extracting credentials from existing configuration..."
+# Check if .env exists
+if [ -f ".env" ]; then
+    echo "✓ Found existing .env file"
+    cp .env "$BACKUP_DIR/.env.backup.$TIMESTAMP"
+    echo "✓ Backed up .env to $BACKUP_DIR/.env.backup.$TIMESTAMP"
 
-KC_ADMIN_PASS=$(grep "KEYCLOAK_ADMIN_PASSWORD" docker-compose.yml | head -1 | sed 's/.*KEYCLOAK_ADMIN_PASSWORD[=:]\s*//' | tr -d '"' | tr -d "'" | xargs)
-KC_DB_PASS=$(grep "POSTGRES_PASSWORD" docker-compose.yml | head -1 | sed 's/.*POSTGRES_PASSWORD[=:]\s*//' | tr -d '"' | tr -d "'" | xargs)
-KC_HOSTNAME=$(grep "KC_HOSTNAME[=:]" docker-compose.yml | grep -v STRICT | head -1 | sed 's/.*KC_HOSTNAME[=:]\s*//' | tr -d '"' | tr -d "'" | xargs)
-KC_START_CMD=$(grep -A 2 "keycloak:" docker-compose.yml | grep "command:" -A 1 | tail -1 | sed 's/.*- //' | xargs)
+    # Check if it has the old KC_PROXY setting
+    if grep -q "KC_PROXY=" .env 2>/dev/null; then
+        echo ""
+        echo "Updating .env file..."
 
-# Validate we got the passwords
-if [ -z "$KC_ADMIN_PASS" ] || [ -z "$KC_DB_PASS" ]; then
-    echo "❌ Error: Could not extract passwords from docker-compose.yml"
-    echo "   Please check your configuration manually"
+        # Replace KC_PROXY with KC_PROXY_HEADERS
+        sed -i 's/^KC_PROXY=.*/KC_PROXY_HEADERS=xforwarded/' .env
+
+        # Add KC_PROXY_HEADERS if it doesn't exist and KC_PROXY didn't either
+        if ! grep -q "KC_PROXY_HEADERS=" .env 2>/dev/null; then
+            echo "" >> .env
+            echo "# Proxy settings (v2) - Trust X-Forwarded-* headers from Caddy2" >> .env
+            echo "KC_PROXY_HEADERS=xforwarded" >> .env
+        fi
+
+        echo "✓ Updated KC_PROXY to KC_PROXY_HEADERS=xforwarded"
+    elif grep -q "KC_PROXY_HEADERS=" .env 2>/dev/null; then
+        echo "✓ Already using KC_PROXY_HEADERS - no changes needed"
+    else
+        echo ""
+        echo "Adding KC_PROXY_HEADERS to .env..."
+        echo "" >> .env
+        echo "# Proxy settings (v2) - Trust X-Forwarded-* headers from Caddy2" >> .env
+        echo "KC_PROXY_HEADERS=xforwarded" >> .env
+        echo "✓ Added KC_PROXY_HEADERS=xforwarded"
+    fi
+else
+    echo "⚠ No .env file found"
+    echo ""
+    echo "Please create a .env file with your Keycloak credentials."
+    echo "See SECURITY-IMPROVEMENTS.md for the template."
     exit 1
 fi
 
-echo "✓ Admin password: ${KC_ADMIN_PASS:0:4}***${KC_ADMIN_PASS: -4}"
-echo "✓ Database password: ${KC_DB_PASS:0:4}***${KC_DB_PASS: -4}"
-[ -n "$KC_HOSTNAME" ] && echo "✓ Hostname: $KC_HOSTNAME"
-echo "✓ Start command: $KC_START_CMD"
+# Check docker-compose.yml
+if [ -f "docker-compose.yml" ]; then
+    cp docker-compose.yml "$BACKUP_DIR/docker-compose.yml.backup.$TIMESTAMP"
+    echo "✓ Backed up docker-compose.yml to $BACKUP_DIR/docker-compose.yml.backup.$TIMESTAMP"
 
-# Determine hostname strict mode
-if [ "$KC_START_CMD" = "start" ]; then
-    KC_HOSTNAME_STRICT="false"
-else
-    KC_HOSTNAME_STRICT="false"
-fi
+    # Check if docker-compose.yml has hardcoded KC_PROXY
+    if grep -q "KC_PROXY=" docker-compose.yml 2>/dev/null; then
+        echo ""
+        echo "⚠ Found KC_PROXY in docker-compose.yml"
+        echo "  Removing it (should be in .env file instead)..."
 
-# Create .env file
-echo ""
-echo "Creating .env file..."
-
-cat > .env << KC_ENV
-# Keycloak Environment Variables
-# ⚠ KEEP THIS FILE SECURE - Contains sensitive passwords
-# Generated: $TIMESTAMP
-
-# Admin Credentials
-KEYCLOAK_ADMIN=admin
-KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
-
-# Database Credentials
-POSTGRES_DB=keycloak
-POSTGRES_USER=keycloak
-POSTGRES_PASSWORD=$KC_DB_PASS
-KC_DB=postgres
-KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-KC_DB_USERNAME=keycloak
-KC_DB_PASSWORD=$KC_DB_PASS
-
-# Keycloak Configuration (v2 Proxy Headers)
-KC_PROXY_HEADERS=xforwarded
-KC_HTTP_ENABLED=true
-KC_HOSTNAME_STRICT=$KC_HOSTNAME_STRICT
-KC_LOG_LEVEL=INFO
-KC_HEALTH_ENABLED=true
-KC_METRICS_ENABLED=true
-KC_ENV
-
-# Add hostname if it was configured
-if [ -n "$KC_HOSTNAME" ]; then
-    echo "KC_HOSTNAME=$KC_HOSTNAME" >> .env
-fi
-
-# Set proper ownership
-chown "$USER:$USER" .env
-chmod 600 .env
-
-echo "✓ Created .env file with secure permissions (600)"
-
-# Create new docker-compose.yml
-echo ""
-echo "Creating new docker-compose.yml..."
-
-cat > docker-compose.yml << KC_COMPOSE
-name: keycloak
-
-services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: keycloak-db
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  keycloak:
-    image: quay.io/keycloak/keycloak:latest
-    container_name: keycloak
-    restart: unless-stopped
-    command:
-      - $KC_START_CMD
-    env_file:
-      - .env
-    ports:
-      - "8180:8080"
-    volumes:
-      - ./data:/opt/keycloak/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    labels:
-      - "io.podman.annotations.label/fail2ban.enable=true"
-      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
-KC_COMPOSE
-
-echo "✓ Created new docker-compose.yml with v2 proxy headers"
-
-# Restart Keycloak
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Restarting Keycloak with new configuration..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-docker compose down
-echo "✓ Stopped Keycloak"
-
-echo ""
-echo "Starting Keycloak (this may take a minute)..."
-docker compose up -d
-
-# Wait for Keycloak to be ready
-echo ""
-echo "Waiting for Keycloak to be ready..."
-KC_READY=false
-for i in {1..60}; do
-    if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
-        KC_READY=true
-        echo "✓ Keycloak is ready"
-        break
+        # Remove the KC_PROXY line from docker-compose.yml
+        sed -i '/KC_PROXY=/d' docker-compose.yml
+        echo "✓ Removed KC_PROXY from docker-compose.yml"
     fi
-    echo -n "."
-    sleep 2
-done
+
+    # Ensure it uses env_file
+    if ! grep -q "env_file:" docker-compose.yml 2>/dev/null; then
+        echo "⚠ docker-compose.yml doesn't use env_file"
+        echo "  You may need to update it manually to use 'env_file: - .env'"
+    else
+        echo "✓ docker-compose.yml uses env_file"
+    fi
+fi
+
+# Show current configuration
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Current Configuration:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-if [ "$KC_READY" = true ]; then
+if [ -f ".env" ]; then
+    echo "Proxy Settings:"
+    grep "KC_PROXY" .env | grep -v "^#" || echo "  (none found)"
+    echo ""
+
+    if grep -q "KC_HOSTNAME=" .env | grep -v "^#" 2>/dev/null; then
+        echo "Hostname:"
+        grep "KC_HOSTNAME=" .env | grep -v "^#"
+        echo ""
+    fi
+fi
+
+# Ask to restart
+echo ""
+read -p "Restart Keycloak with new configuration? (y/n): " RESTART
+
+if [ "$RESTART" = "y" ] || [ "$RESTART" = "Y" ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "✅ Keycloak successfully updated!"
+    echo "Restarting Keycloak..."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Configuration changes:"
-    echo "  • Deprecated KC_PROXY removed"
-    echo "  • New KC_PROXY_HEADERS=xforwarded added"
-    echo "  • Credentials moved to .env file"
-    echo "  • docker-compose.yml uses env_file"
+
+    docker compose down
+    echo "✓ Stopped Keycloak"
+
     echo ""
-    echo "Your Keycloak instance is now using v2 proxy configuration."
-    echo "The warnings about deprecated proxy options should be gone."
+    echo "Starting Keycloak (this may take a minute)..."
+    docker compose up -d
+
+    # Wait for Keycloak to be ready
     echo ""
-    [ -n "$KC_HOSTNAME" ] && echo "Access URL: https://$KC_HOSTNAME" || echo "Access URL: http://localhost:8180"
+    echo "Waiting for Keycloak to be ready..."
+    KC_READY=false
+    for i in {1..60}; do
+        if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+            KC_READY=true
+            echo ""
+            echo "✓ Keycloak is ready"
+            break
+        fi
+        echo -n "."
+        sleep 2
+    done
     echo ""
+
+    if [ "$KC_READY" = true ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ Keycloak successfully updated!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Changes applied:"
+        echo "  • Deprecated KC_PROXY removed"
+        echo "  • New KC_PROXY_HEADERS=xforwarded configured"
+        echo "  • Configuration stored in .env file"
+        echo ""
+        echo "The 'Hostname v1 options [proxy]' warnings should be gone."
+        echo ""
+        echo "Check the logs:"
+        echo "  docker compose logs -f keycloak"
+        echo ""
+    else
+        echo ""
+        echo "⚠ Keycloak may still be starting. Check logs:"
+        echo "   docker compose logs -f keycloak"
+    fi
 else
     echo ""
-    echo "⚠ Keycloak may still be starting. Check logs:"
-    echo "   docker compose logs -f keycloak"
+    echo "Skipping restart. To apply changes later, run:"
+    echo "  cd $KC_DIR && docker compose restart"
 fi
 
 echo ""
-echo "Backup location: $BACKUP_DIR/docker-compose.yml.backup.$TIMESTAMP"
+echo "Backup location: $BACKUP_DIR/"
+echo "  - .env.backup.$TIMESTAMP"
+echo "  - docker-compose.yml.backup.$TIMESTAMP"
 echo ""
