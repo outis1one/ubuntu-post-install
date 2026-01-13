@@ -4,9 +4,28 @@
 # DEPLOYMENT INSTRUCTIONS:
 # 1. Create directory: mkdir -p ~/docker/keycloak
 # 2. Copy this file: cp docker-compose-keycloak.yml ~/docker/keycloak/docker-compose.yml
-# 3. IMPORTANT: Update KEYCLOAK_ADMIN_PASSWORD below!
+# 3. Create .env file with credentials (see .env template below)
 # 4. Start the service: cd ~/docker/keycloak && docker compose up -d
 # 5. Access at: http://localhost:8180/admin (admin console)
+#
+# .ENV FILE TEMPLATE:
+# Create a file named .env in ~/docker/keycloak/ with:
+#   KEYCLOAK_ADMIN=admin
+#   KEYCLOAK_ADMIN_PASSWORD=<your-secure-password>
+#   POSTGRES_DB=keycloak
+#   POSTGRES_USER=keycloak
+#   POSTGRES_PASSWORD=<your-db-password>
+#   KC_DB=postgres
+#   KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+#   KC_DB_USERNAME=keycloak
+#   KC_DB_PASSWORD=<your-db-password>
+#   KC_PROXY_HEADERS=xforwarded
+#   KC_HTTP_ENABLED=true
+#   KC_HOSTNAME_STRICT=false
+#   KC_LOG_LEVEL=INFO
+#   KC_HEALTH_ENABLED=true
+#   KC_METRICS_ENABLED=true
+#   # KC_HOSTNAME=auth.yourdomain.com  # Uncomment for production
 #
 # REVERSE PROXY SETUP (with Caddy):
 # Add to your Caddyfile:
@@ -30,10 +49,8 @@ services:
     image: postgres:16-alpine
     container_name: keycloak-db
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: keycloak_db_password_CHANGE_THIS
+    env_file:
+      - .env
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -48,33 +65,8 @@ services:
     restart: unless-stopped
     command:
       - start-dev  # Use 'start' for production mode
-    environment:
-      # Admin credentials - CHANGE THESE!
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=CHANGE_THIS_SECURE_PASSWORD
-
-      # Database configuration (PostgreSQL)
-      - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-      - KC_DB_USERNAME=keycloak
-      - KC_DB_PASSWORD=keycloak_db_password_CHANGE_THIS
-
-      # Hostname configuration
-      # For production, set to your domain:
-      # - KC_HOSTNAME=auth.yourdomain.com
-      # - KC_HOSTNAME_STRICT=true
-      - KC_HOSTNAME_STRICT=false
-
-      # Proxy configuration (required when behind Caddy/nginx)
-      - KC_PROXY=edge
-      - KC_HTTP_ENABLED=true
-
-      # Logging
-      - KC_LOG_LEVEL=INFO
-
-      # Health check
-      - KC_HEALTH_ENABLED=true
-      - KC_METRICS_ENABLED=true
+    env_file:
+      - .env
     ports:
       - "8180:8080"  # HTTP port (use reverse proxy for HTTPS)
       # - "8787:8787"  # Debug port (uncomment if needed)
@@ -94,34 +86,36 @@ services:
 
 # NOTES:
 # - Admin console: http://localhost:8180/admin
-# - Default credentials: admin / CHANGE_THIS_SECURE_PASSWORD
+# - Credentials: Stored in .env file
 # - Database: PostgreSQL (persistent data in ./postgres-data)
-# - For H2 database (dev only), remove postgres service and database env vars
+# - Proxy: Uses KC_PROXY_HEADERS=xforwarded (v2 config, no deprecated warnings)
 #
 # FIRST-TIME SETUP:
-# 1. Login to admin console
-# 2. Create a realm (e.g., "myrealm")
-# 3. Create clients for your applications
-# 4. Configure authentication flows
-# 5. Add users or configure identity providers (LDAP, SAML, OAuth)
+# 1. Create .env file with secure passwords (see template above)
+# 2. Start containers: docker compose up -d
+# 3. Login to admin console at http://localhost:8180/admin
+# 4. Create a realm (e.g., "homelab" or "myrealm")
+# 5. Create clients for your applications (OAuth2/OIDC)
+# 6. Add users or configure identity providers (LDAP, SAML, Social)
 #
 # COMMON USE CASES:
 # - Single Sign-On (SSO) for multiple applications
-# - OAuth2/OIDC provider for custom apps
+# - OAuth2/OIDC provider for custom apps (ActualBudget, etc.)
 # - SAML 2.0 identity provider
 # - User federation with LDAP/Active Directory
 # - Multi-factor authentication (MFA/2FA)
-# - Social login (Google, GitHub, etc.)
+# - Social login (Google, GitHub, Facebook, etc.)
 #
 # PRODUCTION CHECKLIST:
-# [ ] Change admin password
-# [ ] Change database password
-# [ ] Set KC_HOSTNAME to your domain
-# [ ] Use 'start' instead of 'start-dev' command
-# [ ] Configure HTTPS via reverse proxy (Caddy)
-# [ ] Enable hostname strict mode
+# [ ] Create .env file with secure passwords (12+ chars, alphanumeric only)
+# [ ] Set KC_HOSTNAME in .env to your domain (e.g., auth.yourdomain.com)
+# [ ] Use 'start' instead of 'start-dev' command in docker-compose.yml
+# [ ] Configure HTTPS via reverse proxy (Caddy/nginx)
+# [ ] Set KC_HOSTNAME_STRICT=true in .env for production
+# [ ] Configure DNS A record for your hostname
+# [ ] Set proper file permissions: chmod 600 .env
 # [ ] Configure backup strategy for PostgreSQL
-# [ ] Set up monitoring (metrics on port 9000)
+# [ ] Set up monitoring (metrics enabled via KC_METRICS_ENABLED=true)
 #
 # BACKUP:
 #   docker compose down
