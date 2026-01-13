@@ -3758,7 +3758,8 @@ KC_DB_USERNAME=keycloak
 KC_DB_PASSWORD=$KC_DB_PASS
 
 # Keycloak Configuration
-KC_PROXY=edge
+# Proxy settings (v2) - Trust X-Forwarded-* headers from Caddy2
+KC_PROXY_HEADERS=xforwarded
 KC_HTTP_ENABLED=true
 KC_HOSTNAME_STRICT=$KC_HOSTNAME_STRICT
 KC_LOG_LEVEL=INFO
