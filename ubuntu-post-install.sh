@@ -306,6 +306,7 @@ run_disaster_recovery() {
     echo ""
 
     mkdir -p "$DOCKER_DIR"
+    ensure_docker_dir_ownership "$DOCKER_DIR"
 
     # Find all docker-compose.yml files in restored backup
     declare -A SERVICE_DIRS
@@ -1304,6 +1305,51 @@ run_cmd() {
     else
         "$@"
     fi
+}
+
+# Ensure Docker directories are owned by the actual user (not root)
+# Usage: ensure_docker_dir_ownership /path/to/dir [additional_paths...]
+ensure_docker_dir_ownership() {
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would set ownership of $* to $ACTUAL_USER:$ACTUAL_USER"
+        return 0
+    fi
+
+    for dir in "$@"; do
+        if [ -d "$dir" ]; then
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$dir" 2>/dev/null || true
+        fi
+    done
+}
+
+# Generate a secure random password with alphanumeric characters only (no special chars)
+# Usage: generate_password [length]
+# Default length: 32
+generate_password() {
+    local length="${1:-32}"
+    openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
+}
+
+# Validate password for Keycloak (alphanumeric only, minimum length)
+# Usage: validate_password "password" [min_length]
+# Returns 0 if valid, 1 if invalid
+validate_password() {
+    local password="$1"
+    local min_length="${2:-12}"
+
+    # Check length
+    if [ ${#password} -lt "$min_length" ]; then
+        echo "  ⚠ Password must be at least $min_length characters long"
+        return 1
+    fi
+
+    # Check for special characters (not allowed for Keycloak)
+    if echo "$password" | grep -q '[^a-zA-Z0-9]'; then
+        echo "  ⚠ Password must contain only letters and numbers (no special characters)"
+        return 1
+    fi
+
+    return 0
 }
 
 # Prompt for yes/no, with unattended default
@@ -2989,6 +3035,7 @@ IMMICH_ENV
             echo "[DRY-RUN] Would create $ABS_DIR"
         else
             mkdir -p "$ABS_DIR"
+            ensure_docker_dir_ownership "$ABS_DIR"
             cd "$ABS_DIR"
 
             prompt_text "Path to audiobooks folder [default: $PRIMARY_DRIVE_PATH/audiobooks]:" "$PRIMARY_DRIVE_PATH/audiobooks" AUDIOBOOKS_PATH
@@ -3062,6 +3109,7 @@ ABS_ENV
             echo "[DRY-RUN] Would create $EMBY_DIR"
         else
             mkdir -p "$EMBY_DIR"
+            ensure_docker_dir_ownership "$EMBY_DIR"
             cd "$EMBY_DIR"
 
             prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
@@ -3136,6 +3184,7 @@ EMBY_ENV
             echo "[DRY-RUN] Would create $ARM_DIR"
         else
             mkdir -p "$ARM_DIR"
+            ensure_docker_dir_ownership "$ARM_DIR"
             cd "$ARM_DIR"
 
             prompt_text "Path for ripped media output [default: $PRIMARY_DRIVE_PATH/ripped]:" "$PRIMARY_DRIVE_PATH/ripped" ARM_OUTPUT
@@ -3224,6 +3273,7 @@ ARM_ENV
             echo "[DRY-RUN] Would create $FB_DIR"
         else
             mkdir -p "$FB_DIR"
+            ensure_docker_dir_ownership "$FB_DIR"
             cd "$FB_DIR"
 
             prompt_text "Path to browse [default: $PRIMARY_DRIVE_PATH]:" "$PRIMARY_DRIVE_PATH" FB_PATH
@@ -3311,6 +3361,7 @@ FB_SETTINGS
                 echo "[DRY-RUN] Would create $MM_DIR (port $MM_PORT)"
             else
                 mkdir -p "$MM_DIR"
+                ensure_docker_dir_ownership "$MM_DIR"
                 cd "$MM_DIR"
 
                 cat > docker-compose.yml << MM_COMPOSE
@@ -3537,7 +3588,14 @@ MM_CONFIG
         else
             echo "Installing ActualBudget..."
             mkdir -p "$AB_DIR/data"
+            ensure_docker_dir_ownership "$AB_DIR"
             cd "$AB_DIR"
+
+            # Create .env file for environment variables
+            cat > .env << 'AB_ENV'
+# ActualBudget Environment Variables
+TZ=UTC
+AB_ENV
 
             cat > docker-compose.yml << 'AB_COMPOSE'
 name: actualbudget
@@ -3551,8 +3609,8 @@ services:
       - "5006:5006"
     volumes:
       - ./data:/data
-    environment:
-      - TZ=UTC
+    env_file:
+      - .env
     labels:
       - "io.podman.annotations.label/fail2ban.enable=true"
       - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
@@ -3596,19 +3654,124 @@ AB_COMPOSE
         else
             echo "Installing Keycloak..."
             echo ""
-            echo "⚠  SECURITY WARNING:"
-            echo "   You MUST change the default admin password!"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "PASSWORD REQUIREMENTS:"
+            echo "  • Minimum 12 characters (16+ recommended)"
+            echo "  • Letters and numbers ONLY (no special characters)"
+            echo "  • Press ENTER for secure auto-generated password"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo ""
 
-            read -p "Enter Keycloak admin password [admin123]: " KC_ADMIN_PASS
-            KC_ADMIN_PASS=${KC_ADMIN_PASS:-admin123}
+            # Prompt for admin password with validation
+            KC_ADMIN_PASS=""
+            while true; do
+                read -s -p "Enter Keycloak admin password [auto-generate]: " KC_ADMIN_PASS
+                echo ""
 
-            read -p "Enter database password [keycloak_db_pass]: " KC_DB_PASS
-            KC_DB_PASS=${KC_DB_PASS:-keycloak_db_pass}
+                # Generate secure password if user pressed Enter
+                if [ -z "$KC_ADMIN_PASS" ]; then
+                    KC_ADMIN_PASS=$(generate_password 20)
+                    echo "  ✓ Generated secure admin password (saved in .env)"
+                    break
+                fi
+
+                # Validate password
+                if validate_password "$KC_ADMIN_PASS" 12; then
+                    echo "  ✓ Admin password accepted"
+                    break
+                fi
+                echo "  Please try again."
+            done
+
+            # Prompt for database password with validation
+            KC_DB_PASS=""
+            while true; do
+                read -s -p "Enter database password [auto-generate]: " KC_DB_PASS
+                echo ""
+
+                # Generate secure password if user pressed Enter
+                if [ -z "$KC_DB_PASS" ]; then
+                    KC_DB_PASS=$(generate_password 32)
+                    echo "  ✓ Generated secure database password (saved in .env)"
+                    break
+                fi
+
+                # Validate password
+                if validate_password "$KC_DB_PASS" 12; then
+                    echo "  ✓ Database password accepted"
+                    break
+                fi
+                echo "  Please try again."
+            done
+            echo ""
+
+            # Ask about production vs development mode
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "DEPLOYMENT MODE:"
+            echo "  • Production: Requires HTTPS via Caddy2 (recommended)"
+            echo "  • Development: HTTP only, relaxed security (testing only)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            prompt_yn "Use production mode? (requires Caddy2 reverse proxy) (y/n):" "y" KC_PRODUCTION
+
+            KC_HOSTNAME=""
+            KC_START_CMD="start-dev"
+            KC_HOSTNAME_STRICT="false"
+
+            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
+                KC_START_CMD="start"
+                KC_HOSTNAME_STRICT="false"
+
+                echo ""
+                echo "Enter your Keycloak hostname (e.g., auth.yourdomain.com)"
+                echo "This should match your Caddy2 configuration."
+                read -p "Hostname: " KC_HOSTNAME
+
+                if [ -n "$KC_HOSTNAME" ]; then
+                    echo "  ✓ Production mode enabled with hostname: $KC_HOSTNAME"
+                    echo "  ⚠ Make sure Caddy2 is configured for this domain!"
+                else
+                    echo "  ⚠ No hostname provided - using relaxed mode"
+                    KC_HOSTNAME=""
+                fi
+            fi
 
             mkdir -p "$KC_DIR/data" "$KC_DIR/postgres-data"
+            ensure_docker_dir_ownership "$KC_DIR"
             cd "$KC_DIR"
 
+            # Create .env file for sensitive credentials
+            cat > .env << KC_ENV
+# Keycloak Environment Variables
+# ⚠ KEEP THIS FILE SECURE - Contains sensitive passwords
+
+# Admin Credentials
+KEYCLOAK_ADMIN=admin
+KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
+
+# Database Credentials
+POSTGRES_DB=keycloak
+POSTGRES_USER=keycloak
+POSTGRES_PASSWORD=$KC_DB_PASS
+KC_DB=postgres
+KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+KC_DB_USERNAME=keycloak
+KC_DB_PASSWORD=$KC_DB_PASS
+
+# Keycloak Configuration
+KC_PROXY=edge
+KC_HTTP_ENABLED=true
+KC_HOSTNAME_STRICT=$KC_HOSTNAME_STRICT
+KC_LOG_LEVEL=INFO
+KC_HEALTH_ENABLED=true
+KC_METRICS_ENABLED=true
+KC_ENV
+
+            # Add hostname to .env if provided
+            if [ -n "$KC_HOSTNAME" ]; then
+                echo "KC_HOSTNAME=$KC_HOSTNAME" >> .env
+            fi
+
+            # Create docker-compose.yml
             cat > docker-compose.yml << KC_COMPOSE
 name: keycloak
 
@@ -3617,10 +3780,8 @@ services:
     image: postgres:16-alpine
     container_name: keycloak-db
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: keycloak
-      POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: $KC_DB_PASS
+    env_file:
+      - .env
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -3634,20 +3795,9 @@ services:
     container_name: keycloak
     restart: unless-stopped
     command:
-      - start-dev
-    environment:
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
-      - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-      - KC_DB_USERNAME=keycloak
-      - KC_DB_PASSWORD=$KC_DB_PASS
-      - KC_HOSTNAME_STRICT=false
-      - KC_PROXY=edge
-      - KC_HTTP_ENABLED=true
-      - KC_LOG_LEVEL=INFO
-      - KC_HEALTH_ENABLED=true
-      - KC_METRICS_ENABLED=true
+      - $KC_START_CMD
+    env_file:
+      - .env
     ports:
       - "8180:8080"
     volumes:
@@ -3660,7 +3810,15 @@ services:
       - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
 KC_COMPOSE
 
+            echo ""
             echo "  ✓ Keycloak configured at $KC_DIR"
+            echo "  ✓ Credentials saved in .env file"
+            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
+                echo "  ✓ Production mode enabled"
+            else
+                echo "  ℹ Development mode (use production mode for internet-facing deployments)"
+            fi
+            echo ""
 
             # If Caddy is installed/being installed, offer to configure it for Keycloak
             if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ] || [ -d "$DOCKER_DIR/caddy" ]; then
@@ -4126,6 +4284,7 @@ EOF
             else
                 echo "Installing Caddy..."
                 mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"
+                ensure_docker_dir_ownership "$CADDY_DIR"
 
                 # Backup existing Caddyfile if it exists
                 if [ -f "$CADDY_DIR/Caddyfile" ]; then
@@ -4386,6 +4545,7 @@ backend = auto"
             echo "[DRY-RUN] Would create $LMS_DIR"
         else
             mkdir -p "$LMS_DIR"
+            ensure_docker_dir_ownership "$LMS_DIR"
             cd "$LMS_DIR"
 
             prompt_text "Path to music folder [default: $PRIMARY_DRIVE_PATH/music]:" "$PRIMARY_DRIVE_PATH/music" MUSIC_PATH
@@ -4452,6 +4612,7 @@ LMS_ENV
             echo "[DRY-RUN] Would create $MEALIE_DIR"
         else
             mkdir -p "$MEALIE_DIR"
+            ensure_docker_dir_ownership "$MEALIE_DIR"
             cd "$MEALIE_DIR"
 
             cat > docker-compose.yml << MEALIE_COMPOSE
@@ -4516,6 +4677,7 @@ MEALIE_COMPOSE
             echo "[DRY-RUN] Would create $MC_DIR"
         else
             mkdir -p "$MC_DIR"
+            ensure_docker_dir_ownership "$MC_DIR"
             cd "$MC_DIR"
 
             echo ""
@@ -4674,6 +4836,7 @@ MC_ENV
             echo "[DRY-RUN] Would create $JELLYFIN_DIR"
         else
             mkdir -p "$JELLYFIN_DIR"
+            ensure_docker_dir_ownership "$JELLYFIN_DIR"
             cd "$JELLYFIN_DIR"
 
             prompt_text "Path to media folder [default: $PRIMARY_DRIVE_PATH/media]:" "$PRIMARY_DRIVE_PATH/media" MEDIA_PATH
@@ -4750,6 +4913,7 @@ JELLYFIN_ENV
         else
             # STEP 1: Create directory and install docker-compose
             mkdir -p "$FRIGATE_DIR" 2>/dev/null || true
+            ensure_docker_dir_ownership "$FRIGATE_DIR"
             cd "$FRIGATE_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Default path
@@ -5161,6 +5325,7 @@ DDCLIENT_CONF
             echo "[DRY-RUN] Would create $NTFY_DIR"
         else
             mkdir -p "$NTFY_DIR"
+            ensure_docker_dir_ownership "$NTFY_DIR"
             cd "$NTFY_DIR"
 
             cat > docker-compose.yml << 'NTFY_COMPOSE'
@@ -5224,6 +5389,7 @@ NTFY_ENV
             echo "[DRY-RUN] Would create $UPTIME_DIR"
         else
             mkdir -p "$UPTIME_DIR"
+            ensure_docker_dir_ownership "$UPTIME_DIR"
             cd "$UPTIME_DIR"
 
             cat > docker-compose.yml << 'UPTIME_COMPOSE'
@@ -5280,6 +5446,7 @@ UPTIME_COMPOSE
             echo "[DRY-RUN] Would create $WGEASY_DIR"
         else
             mkdir -p "$WGEASY_DIR"
+            ensure_docker_dir_ownership "$WGEASY_DIR"
             cd "$WGEASY_DIR"
 
             # Get public IP or hostname
@@ -5356,6 +5523,7 @@ WGEASY_ENV
             echo "[DRY-RUN] Would create $TRACCAR_DIR"
         else
             mkdir -p "$TRACCAR_DIR"
+            ensure_docker_dir_ownership "$TRACCAR_DIR"
             cd "$TRACCAR_DIR"
 
             cat > docker-compose.yml << 'TRACCAR_COMPOSE'
@@ -5429,6 +5597,7 @@ TRACCAR_XML
             echo "[DRY-RUN] Would create $PORTAINER_DIR"
         else
             mkdir -p "$PORTAINER_DIR"
+            ensure_docker_dir_ownership "$PORTAINER_DIR"
             cd "$PORTAINER_DIR"
 
             cat > docker-compose.yml << 'PORTAINER_COMPOSE'
@@ -5484,6 +5653,7 @@ PORTAINER_COMPOSE
             echo "[DRY-RUN] Would create $MC_DIR"
         else
             mkdir -p "$MC_DIR" 2>/dev/null || true
+            ensure_docker_dir_ownership "$MC_DIR"
             cd "$MC_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'MC_COMPOSE'
@@ -5564,6 +5734,7 @@ MC_ENV
             echo "[DRY-RUN] Would create $FMD_DIR"
         else
             mkdir -p "$FMD_DIR"
+            ensure_docker_dir_ownership "$FMD_DIR"
             cd "$FMD_DIR"
 
             # Generate random admin password
@@ -5630,6 +5801,7 @@ FMD_ENV
         else
             # STEP 1: Create directory and docker-compose (always succeeds)
             mkdir -p "$FN_DIR" 2>/dev/null || true
+            ensure_docker_dir_ownership "$FN_DIR"
             cd "$FN_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             cat > docker-compose.yml << 'FN_COMPOSE'
@@ -5734,6 +5906,7 @@ FN_CONFIG
             echo "[DRY-RUN] Would create $WT_DIR"
         else
             mkdir -p "$WT_DIR" 2>/dev/null || true
+            ensure_docker_dir_ownership "$WT_DIR"
             cd "$WT_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Ask about mode
@@ -5871,6 +6044,7 @@ WT_ENV
             echo "[DRY-RUN] Would create $KOPIA_DIR"
         else
             mkdir -p "$KOPIA_DIR"
+            ensure_docker_dir_ownership "$KOPIA_DIR"
             cd "$KOPIA_DIR"
 
             KOPIA_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
