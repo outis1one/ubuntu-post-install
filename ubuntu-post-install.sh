@@ -2817,20 +2817,13 @@ else
         echo "│ PHOTO LIBRARY SETUP                                            │"
         echo "└─────────────────────────────────────────────────────────────────┘"
         echo ""
+
         DEFAULT_PHOTOS_DIR="$PRIMARY_DRIVE_PATH/photos"
-        echo "  Where should Immich store your photo library?"
-        echo "  Default: $DEFAULT_PHOTOS_DIR"
-        prompt_text "  Photo library path:" "$DEFAULT_PHOTOS_DIR" PHOTOS_DIR 2>/dev/null || PHOTOS_DIR="$DEFAULT_PHOTOS_DIR"
-        PHOTOS_DIR="${PHOTOS_DIR/#\~/$ACTUAL_HOME}"
-        # Strip trailing slash for consistent path handling
-        PHOTOS_DIR="${PHOTOS_DIR%/}"
-
-        echo ""
-        prompt_yn "  Do you have existing photos to include? (y/n):" "y" HAS_EXISTING_PHOTOS
-
         IMMICH_STRATEGY=""
         EXTERNAL_LIBRARY=""
         EXISTING_PHOTOS_SOURCE=""
+
+        prompt_yn "  Do you have existing photos to include? (y/n):" "n" HAS_EXISTING_PHOTOS
 
         if [ "$HAS_EXISTING_PHOTOS" = "y" ] || [ "$HAS_EXISTING_PHOTOS" = "Y" ]; then
             echo ""
@@ -2842,10 +2835,10 @@ else
             echo "        Your original folder names are NOT kept on disk"
             echo "        (use Immich albums to organize instead)."
             echo ""
-            echo "    [2] Keep existing photos in place (read-only)"
+            echo "    [2] Keep existing photos in place (read-only external library)"
             echo "        Immich indexes your existing photos without moving them."
-            echo "        New uploads go to a separate folder alongside them."
-            echo "        Two storage locations, but your folder structure stays."
+            echo "        New uploads go to a separate folder."
+            echo "        Your folder structure stays intact."
             echo ""
 
             if [ "$UNATTENDED" = true ]; then
@@ -2856,40 +2849,62 @@ else
                 IMMICH_STRATEGY="${IMMICH_STRATEGY:-1}"
             fi
 
-            echo ""
-            echo "  Where are your existing photos now?"
-            echo "  Default: $PHOTOS_DIR"
-            prompt_text "  Existing photos path:" "$PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$PHOTOS_DIR"
-            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
-            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
+            if [ "$IMMICH_STRATEGY" = "2" ]; then
+                # Strategy 2: external library - ask where existing photos are
+                echo ""
+                echo "  Where are your existing photos?"
+                echo "  Default: $DEFAULT_PHOTOS_DIR"
+                prompt_text "  Existing photos path:" "$DEFAULT_PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$DEFAULT_PHOTOS_DIR"
+                EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
+                EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
+
+                UPLOAD_LOCATION="$PRIMARY_DRIVE_PATH/immich-uploads"
+                EXTERNAL_LIBRARY="$EXISTING_PHOTOS_SOURCE"
+
+                echo ""
+                echo "  Setup:"
+                echo "    Existing photos: $EXISTING_PHOTOS_SOURCE  (read-only)"
+                echo "    New uploads:     $UPLOAD_LOCATION"
+            else
+                # Strategy 1 with existing photos: ask for library path, will import into it
+                echo ""
+                echo "  Where should Immich store your photo library?"
+                echo "  (Existing photos will be imported here)"
+                echo "  Default: $DEFAULT_PHOTOS_DIR"
+                prompt_text "  Photo library path:" "$DEFAULT_PHOTOS_DIR" PHOTOS_DIR 2>/dev/null || PHOTOS_DIR="$DEFAULT_PHOTOS_DIR"
+                PHOTOS_DIR="${PHOTOS_DIR/#\~/$ACTUAL_HOME}"
+                PHOTOS_DIR="${PHOTOS_DIR%/}"
+
+                echo ""
+                echo "  Where are your existing photos now?"
+                echo "  Default: $PHOTOS_DIR"
+                prompt_text "  Existing photos path:" "$PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$PHOTOS_DIR"
+                EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
+                EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
+
+                UPLOAD_LOCATION="$PHOTOS_DIR"
+                EXTERNAL_LIBRARY=""
+
+                echo ""
+                echo "  All photos (existing + new) will live in:"
+                echo "    $PHOTOS_DIR"
+                echo "    └── 2026/01/filename.jpg            organized by date"
+            fi
         else
+            # No existing photos: simplest path - just ask where to store
             IMMICH_STRATEGY="1"
-        fi
-
-        # Set paths based on chosen strategy
-        if [ "$IMMICH_STRATEGY" = "2" ]; then
-            # External library: existing photos stay in place, uploads go alongside
-            UPLOAD_LOCATION="$PRIMARY_DRIVE_PATH/immich-uploads"
-            EXTERNAL_LIBRARY="$EXISTING_PHOTOS_SOURCE"
-
             echo ""
-            echo "  Your photo library:"
-            echo "    $EXISTING_PHOTOS_SOURCE"
-            echo "    ├── [your existing folders]       ← indexed by Immich (read-only)"
-            echo "    $PRIMARY_DRIVE_PATH"
-            echo "    └── immich-uploads/               ← new phone/web uploads"
-            echo "        └── 2026/01/filename.jpg        organized by date"
-        else
-            # Unified library: everything in one place, managed by Immich
+            echo "  Where should Immich store your photo library?"
+            echo "  Default: $DEFAULT_PHOTOS_DIR"
+            prompt_text "  Photo library path:" "$DEFAULT_PHOTOS_DIR" PHOTOS_DIR 2>/dev/null || PHOTOS_DIR="$DEFAULT_PHOTOS_DIR"
+            PHOTOS_DIR="${PHOTOS_DIR/#\~/$ACTUAL_HOME}"
+            PHOTOS_DIR="${PHOTOS_DIR%/}"
+
             UPLOAD_LOCATION="$PHOTOS_DIR"
             EXTERNAL_LIBRARY=""
 
             echo ""
-            if [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
-                echo "  All photos (existing + new) will live in:"
-            else
-                echo "  All photos will be stored in:"
-            fi
+            echo "  All photos will be stored in:"
             echo "    $PHOTOS_DIR"
             echo "    └── 2026/01/filename.jpg            organized by date"
         fi
@@ -7343,10 +7358,15 @@ fi
 
 CONFIGURE_UFW="${CONFIGURE_UFW:-n}"
 
-# Full system upgrade
+# Full system upgrade (optional)
 echo ""
-echo "Performing full system upgrade..."
-run_cmd apt upgrade -y
+prompt_yn "Perform full system upgrade? (y/n):" "n" DO_SYSTEM_UPGRADE
+if [ "$DO_SYSTEM_UPGRADE" = "y" ] || [ "$DO_SYSTEM_UPGRADE" = "Y" ]; then
+    echo "Performing full system upgrade..."
+    run_cmd apt upgrade -y
+else
+    echo "Skipping system upgrade."
+fi
 
 # Clean up
 echo ""
