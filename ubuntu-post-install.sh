@@ -2811,39 +2811,89 @@ else
         if [ "$IMMICH_RECONFIGURE" = "true" ]; then
             echo "Installing Immich..."
 
-        # Photo storage configuration
+        # ── Photo library setup ─────────────────────────────────────
         echo ""
-        echo "Photo Storage Configuration:"
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ PHOTO LIBRARY SETUP                                            │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
         echo ""
-        echo "Immich needs two separate locations:"
-        echo "  1. UPLOAD folder - Where NEW photos from phone/web uploads go"
-        echo "  2. EXTERNAL folder - Where EXISTING photos are (read-only access)"
-        echo ""
+        DEFAULT_PHOTOS_DIR="$PRIMARY_DRIVE_PATH/photos"
+        echo "  Where should Immich store your photo library?"
+        echo "  Default: $DEFAULT_PHOTOS_DIR"
+        prompt_text "  Photo library path:" "$DEFAULT_PHOTOS_DIR" PHOTOS_DIR 2>/dev/null || PHOTOS_DIR="$DEFAULT_PHOTOS_DIR"
+        PHOTOS_DIR="${PHOTOS_DIR/#\~/$ACTUAL_HOME}"
+        # Strip trailing slash for consistent path handling
+        PHOTOS_DIR="${PHOTOS_DIR%/}"
 
-        # Use globally detected drives
-        # Upload location (for new photos)
-        DEFAULT_UPLOAD_DIR="$PRIMARY_DRIVE_PATH/photos/immich-uploads"
-        echo "NEW UPLOADS (from phone apps, web uploads):"
-        echo "  Default: $DEFAULT_UPLOAD_DIR"
-        prompt_text "  Upload folder path:" "$DEFAULT_UPLOAD_DIR" UPLOAD_LOCATION 2>/dev/null || UPLOAD_LOCATION="$DEFAULT_UPLOAD_DIR"
-        UPLOAD_LOCATION="${UPLOAD_LOCATION/#\~/$ACTUAL_HOME}"
-
-        # External library (for existing photos)
         echo ""
-        DEFAULT_EXTERNAL_DIR="$PRIMARY_DRIVE_PATH/photos"
-        echo "EXISTING PHOTOS (external library, read-only):"
-        echo "  Default: $DEFAULT_EXTERNAL_DIR"
-        echo "  Leave blank if you don't have existing photos to import"
-        prompt_text "  Existing photos path:" "$DEFAULT_EXTERNAL_DIR" EXTERNAL_LIBRARY 2>/dev/null || EXTERNAL_LIBRARY=""
-        EXTERNAL_LIBRARY="${EXTERNAL_LIBRARY/#\~/$ACTUAL_HOME}"
+        prompt_yn "  Do you have existing photos to include? (y/n):" "y" HAS_EXISTING_PHOTOS
 
-        # If external library is same as upload, warn
-        if [ -n "$EXTERNAL_LIBRARY" ] && [ "$EXTERNAL_LIBRARY" = "$UPLOAD_LOCATION" ]; then
+        IMMICH_STRATEGY=""
+        EXTERNAL_LIBRARY=""
+        EXISTING_PHOTOS_SOURCE=""
+
+        if [ "$HAS_EXISTING_PHOTOS" = "y" ] || [ "$HAS_EXISTING_PHOTOS" = "Y" ]; then
             echo ""
-            echo "  ⚠️  Warning: External library and upload location are the same."
-            echo "     This may cause duplicate imports. Consider using different paths."
+            echo "  Where are your existing photos now?"
+            echo "  Default: $PHOTOS_DIR"
+            prompt_text "  Existing photos path:" "$PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$PHOTOS_DIR"
+            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
+            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
+
             echo ""
+            echo "  How should Immich handle your existing photos?"
+            echo ""
+            echo "    [1] Import everything into Immich (recommended)"
+            echo "        Immich manages all photos in one unified library."
+            echo "        Dates preserved via EXIF metadata. Organized by date."
+            echo "        Your original folder names are NOT kept on disk"
+            echo "        (use Immich albums to organize instead)."
+            echo ""
+            echo "    [2] Keep existing photos in place (read-only)"
+            echo "        Immich indexes your existing photos without moving them."
+            echo "        New uploads go to a separate folder alongside them."
+            echo "        Two storage locations, but your folder structure stays."
+            echo ""
+
+            if [ "$UNATTENDED" = true ]; then
+                IMMICH_STRATEGY="1"
+                echo "  Strategy: [auto: 1]"
+            else
+                read -p "  Choose [1/2]: " IMMICH_STRATEGY
+                IMMICH_STRATEGY="${IMMICH_STRATEGY:-1}"
+            fi
+        else
+            IMMICH_STRATEGY="1"
         fi
+
+        # Set paths based on chosen strategy
+        if [ "$IMMICH_STRATEGY" = "2" ]; then
+            # External library: existing photos stay in place, uploads go alongside
+            UPLOAD_LOCATION="$PRIMARY_DRIVE_PATH/immich-uploads"
+            EXTERNAL_LIBRARY="$EXISTING_PHOTOS_SOURCE"
+
+            echo ""
+            echo "  Your photo library:"
+            echo "    $EXISTING_PHOTOS_SOURCE"
+            echo "    ├── [your existing folders]       ← indexed by Immich (read-only)"
+            echo "    $PRIMARY_DRIVE_PATH"
+            echo "    └── immich-uploads/               ← new phone/web uploads"
+            echo "        └── 2026/01/filename.jpg        organized by date"
+        else
+            # Unified library: everything in one place, managed by Immich
+            UPLOAD_LOCATION="$PHOTOS_DIR"
+            EXTERNAL_LIBRARY=""
+
+            echo ""
+            if [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
+                echo "  All photos (existing + new) will live in:"
+            else
+                echo "  All photos will be stored in:"
+            fi
+            echo "    $PHOTOS_DIR"
+            echo "    └── 2026/01/filename.jpg            organized by date"
+        fi
+        echo ""
 
         if [ "$DRY_RUN" = true ]; then
             echo "[DRY-RUN] Would create $IMMICH_DIR"
@@ -2856,8 +2906,10 @@ else
             [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY" 2>/dev/null || true
             cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
-            # Create docker-compose.yml with external library support
-            cat > docker-compose.yml << 'IMMICH_COMPOSE'
+            # Create docker-compose.yml
+            if [ -n "$EXTERNAL_LIBRARY" ]; then
+                # Strategy 2: external library mount included
+                cat > docker-compose.yml << 'IMMICH_COMPOSE'
 name: immich
 
 services:
@@ -2865,10 +2917,8 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
-      # Main photo storage - new uploads go here
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
-      # External library - for existing photos (read-only by Immich)
-      - ${EXTERNAL_LIBRARY:-/dev/null}:/usr/src/app/external:ro
+      - ${EXTERNAL_LIBRARY}:/usr/src/app/external:ro
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
@@ -2920,14 +2970,78 @@ services:
 volumes:
   model-cache:
 IMMICH_COMPOSE
+            else
+                # Strategy 1: unified library, no external mount
+                cat > docker-compose.yml << 'IMMICH_COMPOSE'
+name: immich
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    volumes:
+      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    ports:
+      - 2283:2283
+    depends_on:
+      - redis
+      - database
+    restart: always
+    healthcheck:
+      disable: false
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    volumes:
+      - model-cache:/cache
+    env_file:
+      - .env
+    restart: always
+    healthcheck:
+      disable: false
+
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:8-bookworm
+    healthcheck:
+      test: valkey-cli ping || exit 1
+    restart: always
+
+  database:
+    container_name: immich_postgres
+    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1; Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ''public'' AND c.relkind = ''r''')"; echo "googlechecksum: $$Chksum"; exit 0
+      interval: 5m
+      start_interval: 30s
+      start_period: 5m
+    command: ["postgres", "-c", "shared_preload_libraries=vectors.so", "-c", 'search_path="$$user", public, vectors', "-c", "logging_collector=on", "-c", "max_wal_size=2GB", "-c", "shared_buffers=512MB", "-c", "wal_compression=on"]
+    restart: always
+
+volumes:
+  model-cache:
+IMMICH_COMPOSE
+            fi
 
             # Generate random password
             DB_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
 
-            # Create .env file
-            cat > .env << IMMICH_ENV
+            # Create .env file with strategy-appropriate comments
+            if [ "$IMMICH_STRATEGY" = "2" ]; then
+                cat > .env << IMMICH_ENV
 # ============================================================
-# IMMICH CONFIGURATION
+# IMMICH CONFIGURATION — External Library Mode
 # ============================================================
 #
 # STORAGE TEMPLATE (configure in Immich web UI):
@@ -2935,25 +3049,19 @@ IMMICH_COMPOSE
 #   Template: {{y}}/{{MM}}/{{filename}}
 #   This organizes new uploads into: immich-uploads/2026/01/filename.jpg
 #
-# UPLOADING OLD PHOTOS WITH CORRECT DATES:
-#   Use immich-cli to import with proper EXIF date extraction:
-#
-#   npm install -g @immich/cli
-#   immich login http://localhost:2283/api <your-api-key>
-#   immich upload --recursive /path/to/old/photos
-#
-#   The CLI reads EXIF data to set correct dates automatically.
-#   Get your API key from: User Settings → API Keys
+# EXTERNAL LIBRARY SETUP:
+#   Admin → External Libraries → Create Library
+#   Import path: /usr/src/app/external
+#   Click "Scan" to index your existing photos.
 #
 # ============================================================
 
-# Photo storage location (new uploads from phone/web)
+# New uploads from phone/web
 UPLOAD_LOCATION=$UPLOAD_LOCATION
 
-# External library for existing photos (read-only)
-# Configure in: Admin → External Libraries → Create Library
-# Import path inside container: /usr/src/app/external
-EXTERNAL_LIBRARY=${EXTERNAL_LIBRARY:-}
+# Existing photos (read-only, indexed by Immich)
+# Mounted at /usr/src/app/external inside the container
+EXTERNAL_LIBRARY=$EXTERNAL_LIBRARY
 
 # Database location (keep on fast storage)
 DB_DATA_LOCATION=./postgres
@@ -2966,15 +3074,236 @@ DB_DATABASE_NAME=immich
 
 TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
 IMMICH_ENV
+            else
+                cat > .env << IMMICH_ENV
+# ============================================================
+# IMMICH CONFIGURATION — Unified Library
+# ============================================================
+#
+# All photos (imported + new uploads) are stored in one location.
+# Storage template organizes files by date automatically.
+#
+# To import existing photos, run:
+#   $IMMICH_DIR/import-photos.sh
+#
+# The import script handles storage template configuration,
+# CLI installation, and uploads with EXIF date preservation.
+#
+# ============================================================
+
+# All photos stored here (uploads + imported)
+UPLOAD_LOCATION=$UPLOAD_LOCATION
+
+# Database location (keep on fast storage)
+DB_DATA_LOCATION=./postgres
+
+IMMICH_VERSION=release
+
+DB_PASSWORD=$DB_PASS
+DB_USERNAME=postgres
+DB_DATABASE_NAME=immich
+
+TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+IMMICH_ENV
+            fi
 
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR" 2>/dev/null || true
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPLOAD_LOCATION" 2>/dev/null || true
             [ -n "$EXTERNAL_LIBRARY" ] && chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EXTERNAL_LIBRARY" 2>/dev/null || true
 
+            # Create import helper script for Strategy 1 with existing photos
+            if [ "$IMMICH_STRATEGY" != "2" ] && [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
+                cat > "$IMMICH_DIR/import-photos.sh" << 'IMPORT_SCRIPT_HEAD'
+#!/bin/bash
+################################################################################
+# Immich Photo Import Script
+# Generated by ubuntu-post-install
+#
+# This script imports your existing photo collection into Immich with proper
+# EXIF date preservation. Photos are uploaded through the API, which triggers
+# Immich's metadata extraction pipeline — dates, GPS, camera info are all
+# read from the original files.
+################################################################################
+
+IMPORT_SCRIPT_HEAD
+
+                cat >> "$IMMICH_DIR/import-photos.sh" << IMPORT_SCRIPT_VARS
+IMMICH_URL="http://localhost:2283"
+SOURCE_DIR="$EXISTING_PHOTOS_SOURCE"
+IMPORT_SCRIPT_VARS
+
+                cat >> "$IMMICH_DIR/import-photos.sh" << 'IMPORT_SCRIPT_BODY'
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────────────┐"
+echo "│ IMMICH PHOTO IMPORT                                            │"
+echo "└─────────────────────────────────────────────────────────────────┘"
+echo ""
+
+# ── Preflight checks ────────────────────────────────────────────
+# Check if Immich is running
+echo "Checking Immich server..."
+if ! curl -sf "$IMMICH_URL/api/server/ping" > /dev/null 2>&1; then
+    echo ""
+    echo "  ✗ Immich is not running at $IMMICH_URL"
+    echo "    Start it with: cd $(dirname "$0") && docker compose up -d"
+    echo ""
+    exit 1
+fi
+echo "  ✓ Immich is running"
+
+# Check source directory
+if [ ! -d "$SOURCE_DIR" ]; then
+    echo ""
+    echo "  ✗ Source directory not found: $SOURCE_DIR"
+    echo "    Update SOURCE_DIR in this script if your photos moved."
+    echo ""
+    exit 1
+fi
+
+PHOTO_COUNT=$(find "$SOURCE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.heif" -o -iname "*.webp" -o -iname "*.gif" -o -iname "*.tiff" -o -iname "*.bmp" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.mkv" -o -iname "*.webm" \) 2>/dev/null | wc -l)
+echo "  ✓ Found ~$PHOTO_COUNT photos/videos in $SOURCE_DIR"
+
+# ── Get API key ─────────────────────────────────────────────────
+echo ""
+echo "  Before continuing, you need an API key from Immich:"
+echo "    1. Open $IMMICH_URL in your browser"
+echo "    2. Log in (create admin account if first visit)"
+echo "    3. Click your avatar → Account Settings → API Keys"
+echo "    4. Create a new key and copy it"
+echo ""
+
+API_KEY="${1:-}"
+if [ -z "$API_KEY" ]; then
+    read -p "  Enter your Immich API key: " API_KEY
+fi
+
+if [ -z "$API_KEY" ]; then
+    echo "  ✗ API key is required"
+    exit 1
+fi
+
+# Verify API key works
+echo ""
+echo "  Verifying API key..."
+HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -H "x-api-key: $API_KEY" "$IMMICH_URL/api/users/me" 2>/dev/null)
+if [ "$HTTP_CODE" != "200" ]; then
+    echo "  ✗ Invalid API key (server returned $HTTP_CODE)"
+    echo "    Double-check the key and try again."
+    exit 1
+fi
+echo "  ✓ API key valid"
+
+# ── Configure storage template via API ──────────────────────────
+echo ""
+echo "  Configuring storage template ({{y}}/{{MM}}/{{filename}})..."
+# Get current config, enable storage template
+CURRENT_CONFIG=$(curl -sf -H "x-api-key: $API_KEY" "$IMMICH_URL/api/system-config" 2>/dev/null)
+if [ -n "$CURRENT_CONFIG" ] && command -v python3 &> /dev/null; then
+    UPDATED_CONFIG=$(echo "$CURRENT_CONFIG" | python3 -c "
+import sys, json
+config = json.load(sys.stdin)
+config['storageTemplate']['enabled'] = True
+config['storageTemplate']['template'] = '{{y}}/{{MM}}/{{filename}}'
+json.dump(config, sys.stdout)
+" 2>/dev/null)
+    if [ -n "$UPDATED_CONFIG" ]; then
+        RESULT=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
+            -H "x-api-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$IMMICH_URL/api/system-config" \
+            -d "$UPDATED_CONFIG" 2>/dev/null)
+        if [ "$RESULT" = "200" ]; then
+            echo "  ✓ Storage template configured automatically"
+        else
+            echo "  ⚠ Could not set storage template via API"
+            echo "    Set it manually: Admin → Settings → Storage Template → Enable"
+            echo "    Template: {{y}}/{{MM}}/{{filename}}"
+        fi
+    else
+        echo "  ⚠ Could not parse config. Set storage template manually:"
+        echo "    Admin → Settings → Storage Template → Enable"
+        echo "    Template: {{y}}/{{MM}}/{{filename}}"
+    fi
+else
+    echo "  ⚠ Set storage template manually before importing:"
+    echo "    Admin → Settings → Storage Template → Enable"
+    echo "    Template: {{y}}/{{MM}}/{{filename}}"
+fi
+
+# ── Install immich-cli if needed ────────────────────────────────
+echo ""
+IMMICH_CMD=""
+
+if command -v immich &> /dev/null; then
+    IMMICH_CMD="immich"
+    echo "  ✓ Immich CLI already installed"
+elif command -v npx &> /dev/null; then
+    IMMICH_CMD="npx --yes @immich/cli"
+    echo "  ✓ Using npx to run Immich CLI (no global install needed)"
+elif command -v npm &> /dev/null; then
+    echo "  Installing Immich CLI..."
+    npm install -g @immich/cli 2>/dev/null && IMMICH_CMD="immich"
+fi
+
+if [ -z "$IMMICH_CMD" ]; then
+    echo "  Node.js is required for the Immich CLI."
+    read -p "  Install Node.js now? (y/n): " INSTALL_NODE
+    if [ "$INSTALL_NODE" = "y" ] || [ "$INSTALL_NODE" = "Y" ]; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm 2>/dev/null
+        if command -v npx &> /dev/null; then
+            IMMICH_CMD="npx --yes @immich/cli"
+            echo "  ✓ Node.js installed"
+        else
+            echo "  ✗ Node.js installation failed"
+            exit 1
+        fi
+    else
+        echo ""
+        echo "  You can install Node.js later and run this script again,"
+        echo "  or install manually:"
+        echo "    sudo apt install nodejs npm"
+        echo "    npx @immich/cli login $IMMICH_URL/api <api-key>"
+        echo "    npx @immich/cli upload --recursive \"$SOURCE_DIR\""
+        exit 0
+    fi
+fi
+
+# ── Run the import ──────────────────────────────────────────────
+echo ""
+echo "  Logging into Immich..."
+$IMMICH_CMD login "$IMMICH_URL/api" "$API_KEY"
+
+if [ $? -ne 0 ]; then
+    echo "  ✗ Login failed"
+    exit 1
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Starting import from: $SOURCE_DIR"
+echo "  Importing ~$PHOTO_COUNT files. This may take a while."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+$IMMICH_CMD upload --recursive "$SOURCE_DIR"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Import complete!"
+echo "  View your photos at: $IMMICH_URL"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+IMPORT_SCRIPT_BODY
+
+                chmod +x "$IMMICH_DIR/import-photos.sh"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR/import-photos.sh"
+            fi
+
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
-            echo "  Uploads: $UPLOAD_LOCATION"
-            [ -n "$EXTERNAL_LIBRARY" ] && echo "  External: $EXTERNAL_LIBRARY"
+            echo "  Photo library: $PHOTOS_DIR"
+            [ -n "$EXTERNAL_LIBRARY" ] && echo "  New uploads:   $UPLOAD_LOCATION"
             echo ""
 
             # Configure Caddy reverse proxy before starting
@@ -2987,25 +3316,45 @@ IMMICH_ENV
                 docker compose up -d 2>/dev/null && echo "  ✓ Immich started" || echo "  ⚠ Failed to start"
             fi
 
+            # ── Post-setup instructions ─────────────────────────────
             echo ""
-            echo "  Access at: http://localhost:2283"
+            echo "┌─────────────────────────────────────────────────────────────────┐"
+            echo "│ IMMICH SETUP STEPS                                             │"
+            echo "└─────────────────────────────────────────────────────────────────┘"
             echo ""
-            echo "  SETUP STEPS:"
-            echo "    1. Create admin account on first visit"
-            echo "    2. Go to Admin → Settings → Storage Template"
-            echo "    3. Enable and set template to: {{y}}/{{MM}}/{{filename}}"
+            echo "  1. Open http://localhost:2283 and create your admin account"
             echo ""
-            if [ -n "$EXTERNAL_LIBRARY" ]; then
-                echo "  FOR EXISTING PHOTOS:"
-                echo "    1. Go to Admin → External Libraries → Create Library"
-                echo "    2. Set import path to: /usr/src/app/external"
-                echo "    3. Scan library to import"
+
+            if [ "$IMMICH_STRATEGY" = "2" ]; then
+                echo "  2. Enable storage template (keeps new uploads organized):"
+                echo "     Admin → Settings → Storage Template → Enable"
+                echo "     Template: {{y}}/{{MM}}/{{filename}}"
                 echo ""
+                echo "  3. Set up your existing photo library:"
+                echo "     Admin → External Libraries → Create Library"
+                echo "     Import path: /usr/src/app/external"
+                echo "     Click Scan to index your photos"
+                echo ""
+                echo "  New uploads from the mobile app or web UI are stored"
+                echo "  separately in: $UPLOAD_LOCATION"
+            elif [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
+                echo "  2. Get your API key:"
+                echo "     Click avatar → Account Settings → API Keys → New API Key"
+                echo ""
+                echo "  3. Run the import script:"
+                echo "     $IMMICH_DIR/import-photos.sh"
+                echo ""
+                echo "     The script handles everything: configures storage template,"
+                echo "     installs the CLI tool, and uploads all photos from"
+                echo "     $EXISTING_PHOTOS_SOURCE with EXIF dates preserved."
+            else
+                echo "  2. Enable storage template (keeps files organized by date):"
+                echo "     Admin → Settings → Storage Template → Enable"
+                echo "     Template: {{y}}/{{MM}}/{{filename}}"
+                echo ""
+                echo "  That's it. Upload photos from the mobile app or web UI."
+                echo "  All photos are stored in: $PHOTOS_DIR"
             fi
-            echo "  UPLOADING OLD PHOTOS WITH CORRECT DATES:"
-            echo "    npm install -g @immich/cli"
-            echo "    immich login http://localhost:2283/api <your-api-key>"
-            echo "    immich upload --recursive /path/to/old/photos"
             echo ""
         fi
         fi  # End IMMICH_RECONFIGURE check
