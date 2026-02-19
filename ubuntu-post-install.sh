@@ -3186,9 +3186,12 @@ if [ ! -d "$SOURCE_DIR" ]; then
     echo ""
     exit 1
 fi
+echo "  ✓ Source directory: $SOURCE_DIR"
 
+echo -n "  Scanning for photos/videos (this may take a while)..."
 PHOTO_COUNT=$(find "$SOURCE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.heif" -o -iname "*.webp" -o -iname "*.gif" -o -iname "*.tiff" -o -iname "*.bmp" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.mkv" -o -iname "*.webm" \) 2>/dev/null | wc -l)
-echo "  ✓ Found ~$PHOTO_COUNT photos/videos in $SOURCE_DIR"
+echo " done"
+echo "  ✓ Found ~$PHOTO_COUNT photos/videos"
 
 # ── Get or create API key ───────────────────────────────────────
 API_KEY="${1:-}"
