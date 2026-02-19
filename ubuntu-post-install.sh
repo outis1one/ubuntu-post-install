@@ -11,6 +11,7 @@
 DRY_RUN=false
 UNATTENDED=false
 LOG_FILE="/var/log/post-install.log"
+WHIPTAIL_USED=false
 
 show_help() {
     echo "Ubuntu 24.04 Post-Installation Script"
@@ -1752,6 +1753,21 @@ apt install -y openssh-server || echo "Warning: OpenSSH server installation fail
 systemctl start ssh || echo "Warning: Failed to start SSH"
 systemctl enable ssh || echo "Warning: Failed to enable SSH"
 
+# On rerun, skip SSH configuration if already set up
+SKIP_SSH_CONFIG=false
+if (systemctl is-active ssh &>/dev/null || systemctl is-active sshd &>/dev/null) && \
+   { [ -f "$ACTUAL_HOME/.ssh/authorized_keys" ] && [ -s "$ACTUAL_HOME/.ssh/authorized_keys" ]; } || \
+   [ -f "$ACTUAL_HOME/.ssh/id_rsa" ]; then
+    echo ""
+    echo "SSH is already configured on this system."
+    prompt_yn "Reconfigure SSH keys and authentication? (y/n):" "n" RECONFIG_SSH
+    if [ "$RECONFIG_SSH" != "y" ] && [ "$RECONFIG_SSH" != "Y" ]; then
+        SKIP_SSH_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_SSH_CONFIG" != true ]; then
+
 # Generate SSH key for this computer
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1924,6 +1940,8 @@ FAIL2BAN_CONFIG
 fi
 
 INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-n}"
+
+fi  # End SKIP_SSH_CONFIG
 
 # Docker Installation
 echo ""
@@ -2130,6 +2148,27 @@ else
     echo "Skipping Samba installation."
 fi
 
+# On rerun, skip VPN configuration if already set up
+SKIP_VPN_CONFIG=false
+if is_netbird_installed || is_wireguard_installed || is_tailscale_installed; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "VPN SERVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "VPN services already configured:"
+    is_netbird_installed && echo "  ✓ NetBird"
+    is_wireguard_installed && echo "  ✓ WireGuard"
+    is_tailscale_installed && echo "  ✓ Tailscale"
+    echo ""
+    prompt_yn "Reconfigure VPN services? (y/n):" "n" RECONFIG_VPN
+    if [ "$RECONFIG_VPN" != "y" ] && [ "$RECONFIG_VPN" != "Y" ]; then
+        SKIP_VPN_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_VPN_CONFIG" != true ]; then
+
 # NetBird Installation
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2289,6 +2328,29 @@ if [ "$INSTALL_TAILSCALE" = "y" ] || [ "$INSTALL_TAILSCALE" = "Y" ]; then
 else
     echo "Skipping Tailscale installation."
 fi
+
+fi  # End SKIP_VPN_CONFIG
+
+# On rerun, skip remote desktop configuration if already set up
+SKIP_RD_CONFIG=false
+if is_rustdesk_installed || is_teamviewer_installed || is_meshcentral_installed; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "REMOTE DESKTOP SERVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Remote desktop services already configured:"
+    is_rustdesk_installed && echo "  ✓ RustDesk"
+    is_teamviewer_installed && echo "  ✓ TeamViewer"
+    is_meshcentral_installed && echo "  ✓ MeshCentral Agent"
+    echo ""
+    prompt_yn "Reconfigure remote desktop services? (y/n):" "n" RECONFIG_RD
+    if [ "$RECONFIG_RD" != "y" ] && [ "$RECONFIG_RD" != "Y" ]; then
+        SKIP_RD_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_RD_CONFIG" != true ]; then
 
 # RustDesk Installation
 echo ""
@@ -2450,6 +2512,8 @@ if [ "$INSTALL_MESHCENTRAL" = "y" ] || [ "$INSTALL_MESHCENTRAL" = "Y" ]; then
 else
     echo "Skipping MeshCentral installation."
 fi
+
+fi  # End SKIP_RD_CONFIG
 
 # ============================================================================
 # SELF-HOSTED DOCKER APPLICATIONS (Optional)
@@ -3451,7 +3515,7 @@ IMPORT_SCRIPT_BODY
             echo ""
 
             if [ -n "$EXISTING_PHOTOS_SOURCE" ] && [ "$IMMICH_STRATEGY" != "2" ]; then
-                echo "  Import your existing photos:"
+                echo "  Import your existing photos AFTER this script finishes:"
                 echo "    $IMMICH_DIR/import-photos.sh"
                 echo ""
                 echo "  The script handles everything automatically:"
@@ -3459,6 +3523,10 @@ IMPORT_SCRIPT_BODY
                 echo "    configures the storage template, installs the CLI,"
                 echo "    and imports all photos from $EXISTING_PHOTOS_SOURCE"
                 echo "    with EXIF dates preserved."
+                echo ""
+                echo "  NOTE: Run import-photos.sh separately after this setup"
+                echo "  script has completed. It may take a while for large"
+                echo "  photo collections."
                 echo ""
                 echo "  After import, open http://localhost:2283 to browse your photos."
             elif [ "$IMMICH_STRATEGY" = "2" ]; then
@@ -5218,6 +5286,7 @@ MC_ENV
     fi
 
     # ---- LINUX-TO-SYNC (Private Repo) ----
+    if [ "$WHIPTAIL_USED" != true ]; then
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ LINUX-TO-SYNC - Private sync repository                         │"
@@ -5296,6 +5365,7 @@ MC_ENV
             fi
         fi
     fi
+    fi  # End WHIPTAIL_USED check for linux-to-sync
 
     # ---- JELLYFIN (Alternative to Emby) ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_JELLYFIN" ]; then
@@ -5498,7 +5568,7 @@ FRIGATE_CONFIG
     # Note: This is the legacy Caddy installation
     # The newer installation above includes fail2ban support
     # This section is kept for backwards compatibility
-    if [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
         echo ""
         echo "┌─────────────────────────────────────────────────────────────────┐"
         echo "│ CADDY - Automatic HTTPS reverse proxy (Legacy)                  │"
@@ -6501,6 +6571,7 @@ WT_ENV
     # ============================================================================
     # KOPIA BACKUP FOR DOCKER CONTAINERS
     # ============================================================================
+    if [ "$WHIPTAIL_USED" != true ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "DOCKER CONTAINER BACKUP (Kopia)"
@@ -6671,6 +6742,7 @@ RESTORE_SCRIPT
             echo ""
         fi
     fi
+    fi  # End WHIPTAIL_USED check for Kopia
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -6690,6 +6762,7 @@ RESTORE_SCRIPT
 fi
 
 # Backup System (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "LOCAL BACKUP SYSTEM (Optional)"
@@ -6945,8 +7018,10 @@ TIMER
 else
     echo "Skipping local backup setup."
 fi
+fi  # End WHIPTAIL_USED check for local backup
 
 # Cloud Backup with rclone (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "CLOUD BACKUP (Optional)"
@@ -7175,8 +7250,10 @@ CLOUD_SCRIPT
 else
     echo "Skipping cloud backup setup."
 fi
+fi  # End WHIPTAIL_USED check for cloud backup
 
 # UFW Firewall Configuration (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "UFW FIREWALL (Optional)"
@@ -7360,6 +7437,7 @@ else
 fi
 
 CONFIGURE_UFW="${CONFIGURE_UFW:-n}"
+fi  # End WHIPTAIL_USED check for UFW
 
 # Full system upgrade (optional)
 echo ""
