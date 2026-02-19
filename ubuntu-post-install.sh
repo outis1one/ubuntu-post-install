@@ -3123,6 +3123,17 @@ IMMICH_ENV
 # EXIF date preservation. Photos are uploaded through the API, which triggers
 # Immich's metadata extraction pipeline — dates, GPS, camera info are all
 # read from the original files.
+#
+# What this script does:
+#   1. Creates admin account (if first run) or logs in
+#   2. Generates an API key automatically
+#   3. Configures the storage template (date-based organization)
+#   4. Installs the Immich CLI (if needed)
+#   5. Uploads all photos with EXIF metadata preserved
+#
+# Usage:
+#   ./import-photos.sh                  # interactive (prompts for everything)
+#   ./import-photos.sh <api-key>        # skip account setup, use existing key
 ################################################################################
 
 IMPORT_SCRIPT_HEAD
@@ -3130,6 +3141,7 @@ IMPORT_SCRIPT_HEAD
                 cat >> "$IMMICH_DIR/import-photos.sh" << IMPORT_SCRIPT_VARS
 IMMICH_URL="http://localhost:2283"
 SOURCE_DIR="$EXISTING_PHOTOS_SOURCE"
+IMMICH_DIR="$IMMICH_DIR"
 IMPORT_SCRIPT_VARS
 
                 cat >> "$IMMICH_DIR/import-photos.sh" << 'IMPORT_SCRIPT_BODY'
@@ -3141,12 +3153,11 @@ echo "└───────────────────────�
 echo ""
 
 # ── Preflight checks ────────────────────────────────────────────
-# Check if Immich is running
 echo "Checking Immich server..."
-if ! curl -sf "$IMMICH_URL/api/server/ping" > /dev/null 2>&1; then
+if ! curl -s "$IMMICH_URL/api/server/ping" > /dev/null 2>&1; then
     echo ""
     echo "  ✗ Immich is not running at $IMMICH_URL"
-    echo "    Start it with: cd $(dirname "$0") && docker compose up -d"
+    echo "    Start it with: cd $IMMICH_DIR && docker compose up -d"
     echo ""
     exit 1
 fi
@@ -3164,41 +3175,137 @@ fi
 PHOTO_COUNT=$(find "$SOURCE_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.heic" -o -iname "*.heif" -o -iname "*.webp" -o -iname "*.gif" -o -iname "*.tiff" -o -iname "*.bmp" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.mkv" -o -iname "*.webm" \) 2>/dev/null | wc -l)
 echo "  ✓ Found ~$PHOTO_COUNT photos/videos in $SOURCE_DIR"
 
-# ── Get API key ─────────────────────────────────────────────────
-echo ""
-echo "  Before continuing, you need an API key from Immich:"
-echo "    1. Open $IMMICH_URL in your browser"
-echo "    2. Log in (create admin account if first visit)"
-echo "    3. Click your avatar → Account Settings → API Keys"
-echo "    4. Create a new key and copy it"
-echo ""
-
+# ── Get or create API key ───────────────────────────────────────
 API_KEY="${1:-}"
-if [ -z "$API_KEY" ]; then
-    read -p "  Enter your Immich API key: " API_KEY
-fi
 
 if [ -z "$API_KEY" ]; then
-    echo "  ✗ API key is required"
-    exit 1
-fi
+    echo ""
+    # Check if server needs initial setup
+    SERVER_CONFIG=$(curl -s "$IMMICH_URL/api/server/config" 2>/dev/null)
+    IS_INITIALIZED=$(echo "$SERVER_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin).get('isInitialized', True))" 2>/dev/null)
 
-# Verify API key works
-echo ""
-echo "  Verifying API key..."
-HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -H "x-api-key: $API_KEY" "$IMMICH_URL/api/users/me" 2>/dev/null)
-if [ "$HTTP_CODE" != "200" ]; then
-    echo "  ✗ Invalid API key (server returned $HTTP_CODE)"
-    echo "    Double-check the key and try again."
-    exit 1
+    if [ "$IS_INITIALIZED" = "False" ]; then
+        # ── First-time setup: create admin account ──────────────
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ FIRST-TIME SETUP — Creating admin account                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        echo ""
+        echo "  Immich needs an admin account. Enter your details:"
+        echo ""
+        read -p "  Admin email: " ADMIN_EMAIL
+        while [ -z "$ADMIN_EMAIL" ]; do
+            read -p "  Admin email (required): " ADMIN_EMAIL
+        done
+        read -sp "  Admin password: " ADMIN_PASS
+        echo ""
+        while [ ${#ADMIN_PASS} -lt 8 ]; do
+            echo "  Password must be at least 8 characters."
+            read -sp "  Admin password: " ADMIN_PASS
+            echo ""
+        done
+        read -p "  Your name [Admin]: " ADMIN_NAME
+        ADMIN_NAME="${ADMIN_NAME:-Admin}"
+
+        echo ""
+        echo "  Creating admin account..."
+        SIGNUP_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            "$IMMICH_URL/api/auth/admin-sign-up" \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\",\"name\":\"$ADMIN_NAME\"}" 2>/dev/null)
+        SIGNUP_CODE=$(echo "$SIGNUP_RESPONSE" | tail -1)
+        SIGNUP_BODY=$(echo "$SIGNUP_RESPONSE" | sed '$d')
+
+        if [ "$SIGNUP_CODE" = "201" ]; then
+            echo "  ✓ Admin account created"
+        else
+            echo "  ✗ Failed to create admin account (HTTP $SIGNUP_CODE)"
+            echo "  Response: $SIGNUP_BODY"
+            echo ""
+            echo "  Create your account manually at $IMMICH_URL"
+            echo "  Then re-run this script with your API key:"
+            echo "    $0 <api-key>"
+            exit 1
+        fi
+    else
+        # Server already initialized, need credentials to log in
+        echo "  Immich is already set up. Log in to generate an API key."
+        echo ""
+        read -p "  Admin email: " ADMIN_EMAIL
+        while [ -z "$ADMIN_EMAIL" ]; do
+            read -p "  Admin email (required): " ADMIN_EMAIL
+        done
+        read -sp "  Admin password: " ADMIN_PASS
+        echo ""
+    fi
+
+    # ── Login to get bearer token ───────────────────────────────
+    echo "  Logging in..."
+    LOGIN_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        "$IMMICH_URL/api/auth/login" \
+        -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASS\"}" 2>/dev/null)
+    LOGIN_CODE=$(echo "$LOGIN_RESPONSE" | tail -1)
+    LOGIN_BODY=$(echo "$LOGIN_RESPONSE" | sed '$d')
+
+    if [ "$LOGIN_CODE" != "201" ]; then
+        echo "  ✗ Login failed (HTTP $LOGIN_CODE)"
+        echo ""
+        echo "  Check your email/password and try again, or pass an API key:"
+        echo "    $0 <api-key>"
+        exit 1
+    fi
+
+    ACCESS_TOKEN=$(echo "$LOGIN_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['accessToken'])" 2>/dev/null)
+    if [ -z "$ACCESS_TOKEN" ]; then
+        echo "  ✗ Could not extract access token from login response"
+        exit 1
+    fi
+    echo "  ✓ Logged in"
+
+    # ── Create API key ──────────────────────────────────────────
+    echo "  Creating API key..."
+    APIKEY_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "$IMMICH_URL/api/api-keys" \
+        -d '{"name":"import-photos-script"}' 2>/dev/null)
+    APIKEY_CODE=$(echo "$APIKEY_RESPONSE" | tail -1)
+    APIKEY_BODY=$(echo "$APIKEY_RESPONSE" | sed '$d')
+
+    if [ "$APIKEY_CODE" = "201" ]; then
+        API_KEY=$(echo "$APIKEY_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['secret'])" 2>/dev/null)
+        if [ -n "$API_KEY" ]; then
+            echo "  ✓ API key created"
+        else
+            echo "  ✗ Could not extract API key from response"
+            echo "  Create one manually: $IMMICH_URL → Account Settings → API Keys"
+            echo "  Then re-run: $0 <api-key>"
+            exit 1
+        fi
+    else
+        echo "  ✗ Failed to create API key (HTTP $APIKEY_CODE)"
+        echo "  Create one manually: $IMMICH_URL → Account Settings → API Keys"
+        echo "  Then re-run: $0 <api-key>"
+        exit 1
+    fi
+else
+    # API key provided as argument — verify it
+    echo ""
+    echo "  Verifying API key..."
+    VERIFY_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "x-api-key: $API_KEY" "$IMMICH_URL/api/users/me" 2>/dev/null)
+    if [ "$VERIFY_CODE" != "200" ]; then
+        echo "  ✗ Invalid API key (HTTP $VERIFY_CODE)"
+        echo "    Double-check the key and try again."
+        exit 1
+    fi
+    echo "  ✓ API key valid"
 fi
-echo "  ✓ API key valid"
 
 # ── Configure storage template via API ──────────────────────────
 echo ""
 echo "  Configuring storage template ({{y}}/{{MM}}/{{filename}})..."
-# Get current config, enable storage template
-CURRENT_CONFIG=$(curl -sf -H "x-api-key: $API_KEY" "$IMMICH_URL/api/system-config" 2>/dev/null)
+CURRENT_CONFIG=$(curl -s -H "x-api-key: $API_KEY" "$IMMICH_URL/api/system-config" 2>/dev/null)
 if [ -n "$CURRENT_CONFIG" ] && command -v python3 &> /dev/null; then
     UPDATED_CONFIG=$(echo "$CURRENT_CONFIG" | python3 -c "
 import sys, json
@@ -3208,16 +3315,16 @@ config['storageTemplate']['template'] = '{{y}}/{{MM}}/{{filename}}'
 json.dump(config, sys.stdout)
 " 2>/dev/null)
     if [ -n "$UPDATED_CONFIG" ]; then
-        RESULT=$(curl -sf -o /dev/null -w "%{http_code}" -X PUT \
+        RESULT=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
             -H "x-api-key: $API_KEY" \
             -H "Content-Type: application/json" \
             "$IMMICH_URL/api/system-config" \
             -d "$UPDATED_CONFIG" 2>/dev/null)
         if [ "$RESULT" = "200" ]; then
-            echo "  ✓ Storage template configured automatically"
+            echo "  ✓ Storage template configured"
         else
-            echo "  ⚠ Could not set storage template via API"
-            echo "    Set it manually: Admin → Settings → Storage Template → Enable"
+            echo "  ⚠ Could not set storage template (HTTP $RESULT)"
+            echo "    Set manually: Admin → Settings → Storage Template → Enable"
             echo "    Template: {{y}}/{{MM}}/{{filename}}"
         fi
     else
@@ -3226,7 +3333,7 @@ json.dump(config, sys.stdout)
         echo "    Template: {{y}}/{{MM}}/{{filename}}"
     fi
 else
-    echo "  ⚠ Set storage template manually before importing:"
+    echo "  ⚠ python3 not found. Set storage template manually:"
     echo "    Admin → Settings → Storage Template → Enable"
     echo "    Template: {{y}}/{{MM}}/{{filename}}"
 fi
@@ -3237,45 +3344,47 @@ IMMICH_CMD=""
 
 if command -v immich &> /dev/null; then
     IMMICH_CMD="immich"
-    echo "  ✓ Immich CLI already installed"
+    echo "  ✓ Immich CLI found"
 elif command -v npx &> /dev/null; then
+    echo "  Immich CLI not installed. Will use npx (downloads temporarily)."
     IMMICH_CMD="npx --yes @immich/cli"
-    echo "  ✓ Using npx to run Immich CLI (no global install needed)"
 elif command -v npm &> /dev/null; then
-    echo "  Installing Immich CLI..."
-    npm install -g @immich/cli 2>/dev/null && IMMICH_CMD="immich"
+    echo "  Installing Immich CLI globally..."
+    if npm install -g @immich/cli 2>/dev/null; then
+        IMMICH_CMD="immich"
+        echo "  ✓ Immich CLI installed"
+    else
+        echo "  ✗ npm install failed"
+    fi
 fi
 
 if [ -z "$IMMICH_CMD" ]; then
     echo "  Node.js is required for the Immich CLI."
-    read -p "  Install Node.js now? (y/n): " INSTALL_NODE
-    if [ "$INSTALL_NODE" = "y" ] || [ "$INSTALL_NODE" = "Y" ]; then
+    read -p "  Install Node.js now? (y/n): " INSTALL_NODE_YN
+    if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
+        echo "  Installing nodejs and npm..."
         sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm 2>/dev/null
         if command -v npx &> /dev/null; then
             IMMICH_CMD="npx --yes @immich/cli"
             echo "  ✓ Node.js installed"
         else
-            echo "  ✗ Node.js installation failed"
+            echo "  ✗ Installation failed. Install manually: sudo apt install nodejs npm"
             exit 1
         fi
     else
         echo ""
-        echo "  You can install Node.js later and run this script again,"
-        echo "  or install manually:"
+        echo "  Install Node.js later and re-run this script:"
         echo "    sudo apt install nodejs npm"
-        echo "    npx @immich/cli login $IMMICH_URL/api <api-key>"
-        echo "    npx @immich/cli upload --recursive \"$SOURCE_DIR\""
+        echo "    $0 $API_KEY"
         exit 0
     fi
 fi
 
 # ── Run the import ──────────────────────────────────────────────
 echo ""
-echo "  Logging into Immich..."
-$IMMICH_CMD login "$IMMICH_URL/api" "$API_KEY"
-
-if [ $? -ne 0 ]; then
-    echo "  ✗ Login failed"
+echo "  Authenticating CLI with Immich..."
+if ! $IMMICH_CMD login "$IMMICH_URL/api" "$API_KEY"; then
+    echo "  ✗ CLI login failed"
     exit 1
 fi
 
@@ -3338,15 +3447,14 @@ IMPORT_SCRIPT_BODY
                 echo "  New uploads from the mobile app or web UI are stored"
                 echo "  separately in: $UPLOAD_LOCATION"
             elif [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
-                echo "  2. Get your API key:"
-                echo "     Click avatar → Account Settings → API Keys → New API Key"
-                echo ""
-                echo "  3. Run the import script:"
+                echo "  2. Run the import script:"
                 echo "     $IMMICH_DIR/import-photos.sh"
                 echo ""
-                echo "     The script handles everything: configures storage template,"
-                echo "     installs the CLI tool, and uploads all photos from"
-                echo "     $EXISTING_PHOTOS_SOURCE with EXIF dates preserved."
+                echo "     The script handles everything automatically:"
+                echo "     creates your admin account, generates an API key,"
+                echo "     configures the storage template, installs the CLI,"
+                echo "     and imports all photos from $EXISTING_PHOTOS_SOURCE"
+                echo "     with EXIF dates preserved."
             else
                 echo "  2. Enable storage template (keeps files organized by date):"
                 echo "     Admin → Settings → Storage Template → Enable"
