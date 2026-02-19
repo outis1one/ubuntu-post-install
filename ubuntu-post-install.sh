@@ -2983,6 +2983,13 @@ else
             mkdir -p "$IMMICH_DIR" 2>/dev/null || true
             mkdir -p "$UPLOAD_LOCATION" 2>/dev/null || true
             [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY" 2>/dev/null || true
+
+            # Create required subdirectories with .immich marker files
+            # Immich checks these on startup and fails if they're missing
+            for subdir in thumbs upload backups library profile encoded-video; do
+                mkdir -p "$UPLOAD_LOCATION/$subdir" 2>/dev/null || true
+                touch "$UPLOAD_LOCATION/$subdir/.immich" 2>/dev/null || true
+            done
             cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Create docker-compose.yml
@@ -3023,14 +3030,14 @@ services:
 
   redis:
     container_name: immich_redis
-    image: docker.io/valkey/valkey:8-bookworm
+    image: docker.io/valkey/valkey:9-bookworm
     healthcheck:
       test: valkey-cli ping || exit 1
     restart: always
 
   database:
     container_name: immich_postgres
-    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
@@ -3038,28 +3045,6 @@ services:
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
-    healthcheck:
-      test: >-
-        pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1;
-        Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align
-        --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0)
-        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = ''public'' AND c.relkind = ''r''')";
-        echo "googlechecksum: $$Chksum";
-        exit 0
-      interval: 5m
-      start_interval: 30s
-      start_period: 5m
-    command:
-      [
-        "postgres",
-        "-c", "shared_preload_libraries=vectors.so",
-        "-c", 'search_path="$$user", public, vectors',
-        "-c", "logging_collector=on",
-        "-c", "max_wal_size=2GB",
-        "-c", "shared_buffers=512MB",
-        "-c", "wal_compression=on",
-      ]
     restart: always
 
 volumes:
@@ -3101,14 +3086,14 @@ services:
 
   redis:
     container_name: immich_redis
-    image: docker.io/valkey/valkey:8-bookworm
+    image: docker.io/valkey/valkey:9-bookworm
     healthcheck:
       test: valkey-cli ping || exit 1
     restart: always
 
   database:
     container_name: immich_postgres
-    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
@@ -3116,28 +3101,6 @@ services:
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
-    healthcheck:
-      test: >-
-        pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1;
-        Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align
-        --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0)
-        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = ''public'' AND c.relkind = ''r''')";
-        echo "googlechecksum: $$Chksum";
-        exit 0
-      interval: 5m
-      start_interval: 30s
-      start_period: 5m
-    command:
-      [
-        "postgres",
-        "-c", "shared_preload_libraries=vectors.so",
-        "-c", 'search_path="$$user", public, vectors',
-        "-c", "logging_collector=on",
-        "-c", "max_wal_size=2GB",
-        "-c", "shared_buffers=512MB",
-        "-c", "wal_compression=on",
-      ]
     restart: always
 
 volumes:
@@ -3525,8 +3488,12 @@ IMPORT_SCRIPT_BODY
 
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
-            echo "  Photo library: $PHOTOS_DIR"
-            [ -n "$EXTERNAL_LIBRARY" ] && echo "  New uploads:   $UPLOAD_LOCATION"
+            if [ -n "$EXTERNAL_LIBRARY" ]; then
+                echo "  Existing photos: $EXTERNAL_LIBRARY (read-only)"
+                echo "  New uploads:     $UPLOAD_LOCATION"
+            else
+                echo "  Photo library: $UPLOAD_LOCATION"
+            fi
             echo ""
 
             # Configure Caddy reverse proxy before starting
