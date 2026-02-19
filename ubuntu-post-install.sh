@@ -2834,13 +2834,6 @@ else
 
         if [ "$HAS_EXISTING_PHOTOS" = "y" ] || [ "$HAS_EXISTING_PHOTOS" = "Y" ]; then
             echo ""
-            echo "  Where are your existing photos now?"
-            echo "  Default: $PHOTOS_DIR"
-            prompt_text "  Existing photos path:" "$PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$PHOTOS_DIR"
-            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
-            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
-
-            echo ""
             echo "  How should Immich handle your existing photos?"
             echo ""
             echo "    [1] Import everything into Immich (recommended)"
@@ -2862,6 +2855,13 @@ else
                 read -p "  Choose [1/2]: " IMMICH_STRATEGY
                 IMMICH_STRATEGY="${IMMICH_STRATEGY:-1}"
             fi
+
+            echo ""
+            echo "  Where are your existing photos now?"
+            echo "  Default: $PHOTOS_DIR"
+            prompt_text "  Existing photos path:" "$PHOTOS_DIR" EXISTING_PHOTOS_SOURCE 2>/dev/null || EXISTING_PHOTOS_SOURCE="$PHOTOS_DIR"
+            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE/#\~/$ACTUAL_HOME}"
+            EXISTING_PHOTOS_SOURCE="${EXISTING_PHOTOS_SOURCE%/}"
         else
             IMMICH_STRATEGY="1"
         fi
