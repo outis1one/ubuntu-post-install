@@ -3419,6 +3419,42 @@ fi
 echo ""
 IMMICH_CMD=""
 
+# Immich CLI requires Node.js >= 20 (File global class)
+NODE_OK=false
+if command -v node &> /dev/null; then
+    NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    if [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null; then
+        NODE_OK=true
+    fi
+fi
+
+if [ "$NODE_OK" = false ]; then
+    echo "  Immich CLI requires Node.js >= 20 (found: $(node -v 2>/dev/null || echo 'none'))."
+    read -p "  Install Node.js 22 LTS now? (y/n): " INSTALL_NODE_YN
+    if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
+        echo "  Installing Node.js 22 LTS from NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - 2>/dev/null
+        sudo apt-get install -y -qq nodejs 2>/dev/null
+        NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+        if [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null; then
+            NODE_OK=true
+            echo "  ✓ Node.js $(node -v) installed"
+        else
+            echo "  ✗ Installation failed."
+            echo "    Install Node.js 20+ manually: https://nodejs.org/"
+            echo "    Then re-run: $0 $API_KEY"
+            exit 1
+        fi
+    else
+        echo ""
+        echo "  Install Node.js 20+ later and re-run this script:"
+        echo "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -"
+        echo "    sudo apt-get install -y nodejs"
+        echo "    $0 $API_KEY"
+        exit 0
+    fi
+fi
+
 if command -v immich &> /dev/null; then
     IMMICH_CMD="immich"
     echo "  ✓ Immich CLI found"
@@ -3431,30 +3467,16 @@ elif command -v npm &> /dev/null; then
         IMMICH_CMD="immich"
         echo "  ✓ Immich CLI installed"
     else
-        echo "  ✗ npm install failed"
+        echo "  ✗ npm install failed. Trying npx..."
+        IMMICH_CMD="npx --yes @immich/cli"
     fi
 fi
 
 if [ -z "$IMMICH_CMD" ]; then
-    echo "  Node.js is required for the Immich CLI."
-    read -p "  Install Node.js now? (y/n): " INSTALL_NODE_YN
-    if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
-        echo "  Installing nodejs and npm..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm 2>/dev/null
-        if command -v npx &> /dev/null; then
-            IMMICH_CMD="npx --yes @immich/cli"
-            echo "  ✓ Node.js installed"
-        else
-            echo "  ✗ Installation failed. Install manually: sudo apt install nodejs npm"
-            exit 1
-        fi
-    else
-        echo ""
-        echo "  Install Node.js later and re-run this script:"
-        echo "    sudo apt install nodejs npm"
-        echo "    $0 $API_KEY"
-        exit 0
-    fi
+    echo "  ✗ Could not find npm or npx despite Node.js being installed."
+    echo "    Install manually: npm install -g @immich/cli"
+    echo "    Then re-run: $0 $API_KEY"
+    exit 1
 fi
 
 # ── Run the import ──────────────────────────────────────────────
