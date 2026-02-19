@@ -3431,10 +3431,21 @@ IMPORT_SCRIPT_BODY
             echo "│ IMMICH SETUP STEPS                                             │"
             echo "└─────────────────────────────────────────────────────────────────┘"
             echo ""
-            echo "  1. Open http://localhost:2283 and create your admin account"
-            echo ""
 
-            if [ "$IMMICH_STRATEGY" = "2" ]; then
+            if [ -n "$EXISTING_PHOTOS_SOURCE" ] && [ "$IMMICH_STRATEGY" != "2" ]; then
+                echo "  Import your existing photos:"
+                echo "    $IMMICH_DIR/import-photos.sh"
+                echo ""
+                echo "  The script handles everything automatically:"
+                echo "    creates your admin account, generates an API key,"
+                echo "    configures the storage template, installs the CLI,"
+                echo "    and imports all photos from $EXISTING_PHOTOS_SOURCE"
+                echo "    with EXIF dates preserved."
+                echo ""
+                echo "  After import, open http://localhost:2283 to browse your photos."
+            elif [ "$IMMICH_STRATEGY" = "2" ]; then
+                echo "  1. Open http://localhost:2283 and create your admin account"
+                echo ""
                 echo "  2. Enable storage template (keeps new uploads organized):"
                 echo "     Admin → Settings → Storage Template → Enable"
                 echo "     Template: {{y}}/{{MM}}/{{filename}}"
@@ -3446,16 +3457,9 @@ IMPORT_SCRIPT_BODY
                 echo ""
                 echo "  New uploads from the mobile app or web UI are stored"
                 echo "  separately in: $UPLOAD_LOCATION"
-            elif [ -n "$EXISTING_PHOTOS_SOURCE" ]; then
-                echo "  2. Run the import script:"
-                echo "     $IMMICH_DIR/import-photos.sh"
-                echo ""
-                echo "     The script handles everything automatically:"
-                echo "     creates your admin account, generates an API key,"
-                echo "     configures the storage template, installs the CLI,"
-                echo "     and imports all photos from $EXISTING_PHOTOS_SOURCE"
-                echo "     with EXIF dates preserved."
             else
+                echo "  1. Open http://localhost:2283 and create your admin account"
+                echo ""
                 echo "  2. Enable storage template (keeps files organized by date):"
                 echo "     Admin → Settings → Storage Template → Enable"
                 echo "     Template: {{y}}/{{MM}}/{{filename}}"
