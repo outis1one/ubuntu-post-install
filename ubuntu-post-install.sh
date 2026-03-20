@@ -11,6 +11,7 @@
 DRY_RUN=false
 UNATTENDED=false
 LOG_FILE="/var/log/post-install.log"
+WHIPTAIL_USED=false
 
 show_help() {
     echo "Ubuntu 24.04 Post-Installation Script"
@@ -1752,6 +1753,21 @@ apt install -y openssh-server || echo "Warning: OpenSSH server installation fail
 systemctl start ssh || echo "Warning: Failed to start SSH"
 systemctl enable ssh || echo "Warning: Failed to enable SSH"
 
+# On rerun, skip SSH configuration if already set up
+SKIP_SSH_CONFIG=false
+if (systemctl is-active ssh &>/dev/null || systemctl is-active sshd &>/dev/null) && \
+   { [ -f "$ACTUAL_HOME/.ssh/authorized_keys" ] && [ -s "$ACTUAL_HOME/.ssh/authorized_keys" ]; } || \
+   [ -f "$ACTUAL_HOME/.ssh/id_rsa" ]; then
+    echo ""
+    echo "SSH is already configured on this system."
+    prompt_yn "Reconfigure SSH keys and authentication? (y/n):" "n" RECONFIG_SSH
+    if [ "$RECONFIG_SSH" != "y" ] && [ "$RECONFIG_SSH" != "Y" ]; then
+        SKIP_SSH_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_SSH_CONFIG" != true ]; then
+
 # Generate SSH key for this computer
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1924,6 +1940,8 @@ FAIL2BAN_CONFIG
 fi
 
 INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-n}"
+
+fi  # End SKIP_SSH_CONFIG
 
 # Docker Installation
 echo ""
@@ -2130,6 +2148,27 @@ else
     echo "Skipping Samba installation."
 fi
 
+# On rerun, skip VPN configuration if already set up
+SKIP_VPN_CONFIG=false
+if is_netbird_installed || is_wireguard_installed || is_tailscale_installed; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "VPN SERVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "VPN services already configured:"
+    is_netbird_installed && echo "  ✓ NetBird"
+    is_wireguard_installed && echo "  ✓ WireGuard"
+    is_tailscale_installed && echo "  ✓ Tailscale"
+    echo ""
+    prompt_yn "Reconfigure VPN services? (y/n):" "n" RECONFIG_VPN
+    if [ "$RECONFIG_VPN" != "y" ] && [ "$RECONFIG_VPN" != "Y" ]; then
+        SKIP_VPN_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_VPN_CONFIG" != true ]; then
+
 # NetBird Installation
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -2289,6 +2328,29 @@ if [ "$INSTALL_TAILSCALE" = "y" ] || [ "$INSTALL_TAILSCALE" = "Y" ]; then
 else
     echo "Skipping Tailscale installation."
 fi
+
+fi  # End SKIP_VPN_CONFIG
+
+# On rerun, skip remote desktop configuration if already set up
+SKIP_RD_CONFIG=false
+if is_rustdesk_installed || is_teamviewer_installed || is_meshcentral_installed; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "REMOTE DESKTOP SERVICES"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Remote desktop services already configured:"
+    is_rustdesk_installed && echo "  ✓ RustDesk"
+    is_teamviewer_installed && echo "  ✓ TeamViewer"
+    is_meshcentral_installed && echo "  ✓ MeshCentral Agent"
+    echo ""
+    prompt_yn "Reconfigure remote desktop services? (y/n):" "n" RECONFIG_RD
+    if [ "$RECONFIG_RD" != "y" ] && [ "$RECONFIG_RD" != "Y" ]; then
+        SKIP_RD_CONFIG=true
+    fi
+fi
+
+if [ "$SKIP_RD_CONFIG" != true ]; then
 
 # RustDesk Installation
 echo ""
@@ -2450,6 +2512,8 @@ if [ "$INSTALL_MESHCENTRAL" = "y" ] || [ "$INSTALL_MESHCENTRAL" = "Y" ]; then
 else
     echo "Skipping MeshCentral installation."
 fi
+
+fi  # End SKIP_RD_CONFIG
 
 # ============================================================================
 # SELF-HOSTED DOCKER APPLICATIONS (Optional)
@@ -2919,6 +2983,13 @@ else
             mkdir -p "$IMMICH_DIR" 2>/dev/null || true
             mkdir -p "$UPLOAD_LOCATION" 2>/dev/null || true
             [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY" 2>/dev/null || true
+
+            # Create required subdirectories with .immich marker files
+            # Immich checks these on startup and fails if they're missing
+            for subdir in thumbs upload backups library profile encoded-video; do
+                mkdir -p "$UPLOAD_LOCATION/$subdir" 2>/dev/null || true
+                touch "$UPLOAD_LOCATION/$subdir/.immich" 2>/dev/null || true
+            done
             cd "$IMMICH_DIR" 2>/dev/null || cd "$DOCKER_DIR"
 
             # Create docker-compose.yml
@@ -2959,14 +3030,14 @@ services:
 
   redis:
     container_name: immich_redis
-    image: docker.io/valkey/valkey:8-bookworm
+    image: docker.io/valkey/valkey:9-bookworm
     healthcheck:
       test: valkey-cli ping || exit 1
     restart: always
 
   database:
     container_name: immich_postgres
-    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
@@ -2974,12 +3045,6 @@ services:
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
-    healthcheck:
-      test: pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1; Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ''public'' AND c.relkind = ''r''')"; echo "googlechecksum: $$Chksum"; exit 0
-      interval: 5m
-      start_interval: 30s
-      start_period: 5m
-    command: ["postgres", "-c", "shared_preload_libraries=vectors.so", "-c", 'search_path="$$user", public, vectors', "-c", "logging_collector=on", "-c", "max_wal_size=2GB", "-c", "shared_buffers=512MB", "-c", "wal_compression=on"]
     restart: always
 
 volumes:
@@ -3021,14 +3086,14 @@ services:
 
   redis:
     container_name: immich_redis
-    image: docker.io/valkey/valkey:8-bookworm
+    image: docker.io/valkey/valkey:9-bookworm
     healthcheck:
       test: valkey-cli ping || exit 1
     restart: always
 
   database:
     container_name: immich_postgres
-    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
@@ -3036,12 +3101,6 @@ services:
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
       - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
-    healthcheck:
-      test: pg_isready --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' || exit 1; Chksum="$$(psql --dbname='${DB_DATABASE_NAME}' --username='${DB_USERNAME}' --tuples-only --no-align --command='SELECT COALESCE(SUM(googlechecksum(googlechecksum(SPLIT_PART(googlechecksum::text, ''x'', 2)::bit(32)::int)), 0) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ''public'' AND c.relkind = ''r''')"; echo "googlechecksum: $$Chksum"; exit 0
-      interval: 5m
-      start_interval: 30s
-      start_period: 5m
-    command: ["postgres", "-c", "shared_preload_libraries=vectors.so", "-c", 'search_path="$$user", public, vectors', "-c", "logging_collector=on", "-c", "max_wal_size=2GB", "-c", "shared_buffers=512MB", "-c", "wal_compression=on"]
     restart: always
 
 volumes:
@@ -3360,6 +3419,42 @@ fi
 echo ""
 IMMICH_CMD=""
 
+# Immich CLI requires Node.js >= 20 (File global class)
+NODE_OK=false
+if command -v node &> /dev/null; then
+    NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    if [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null; then
+        NODE_OK=true
+    fi
+fi
+
+if [ "$NODE_OK" = false ]; then
+    echo "  Immich CLI requires Node.js >= 20 (found: $(node -v 2>/dev/null || echo 'none'))."
+    read -p "  Install Node.js 22 LTS now? (y/n): " INSTALL_NODE_YN
+    if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
+        echo "  Installing Node.js 22 LTS from NodeSource..."
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - 2>/dev/null
+        sudo apt-get install -y -qq nodejs 2>/dev/null
+        NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+        if [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null; then
+            NODE_OK=true
+            echo "  ✓ Node.js $(node -v) installed"
+        else
+            echo "  ✗ Installation failed."
+            echo "    Install Node.js 20+ manually: https://nodejs.org/"
+            echo "    Then re-run: $0 $API_KEY"
+            exit 1
+        fi
+    else
+        echo ""
+        echo "  Install Node.js 20+ later and re-run this script:"
+        echo "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -"
+        echo "    sudo apt-get install -y nodejs"
+        echo "    $0 $API_KEY"
+        exit 0
+    fi
+fi
+
 if command -v immich &> /dev/null; then
     IMMICH_CMD="immich"
     echo "  ✓ Immich CLI found"
@@ -3372,30 +3467,16 @@ elif command -v npm &> /dev/null; then
         IMMICH_CMD="immich"
         echo "  ✓ Immich CLI installed"
     else
-        echo "  ✗ npm install failed"
+        echo "  ✗ npm install failed. Trying npx..."
+        IMMICH_CMD="npx --yes @immich/cli"
     fi
 fi
 
 if [ -z "$IMMICH_CMD" ]; then
-    echo "  Node.js is required for the Immich CLI."
-    read -p "  Install Node.js now? (y/n): " INSTALL_NODE_YN
-    if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
-        echo "  Installing nodejs and npm..."
-        sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm 2>/dev/null
-        if command -v npx &> /dev/null; then
-            IMMICH_CMD="npx --yes @immich/cli"
-            echo "  ✓ Node.js installed"
-        else
-            echo "  ✗ Installation failed. Install manually: sudo apt install nodejs npm"
-            exit 1
-        fi
-    else
-        echo ""
-        echo "  Install Node.js later and re-run this script:"
-        echo "    sudo apt install nodejs npm"
-        echo "    $0 $API_KEY"
-        exit 0
-    fi
+    echo "  ✗ Could not find npm or npx despite Node.js being installed."
+    echo "    Install manually: npm install -g @immich/cli"
+    echo "    Then re-run: $0 $API_KEY"
+    exit 1
 fi
 
 # ── Run the import ──────────────────────────────────────────────
@@ -3429,8 +3510,12 @@ IMPORT_SCRIPT_BODY
 
             echo ""
             echo "✓ Immich configured at $IMMICH_DIR"
-            echo "  Photo library: $PHOTOS_DIR"
-            [ -n "$EXTERNAL_LIBRARY" ] && echo "  New uploads:   $UPLOAD_LOCATION"
+            if [ -n "$EXTERNAL_LIBRARY" ]; then
+                echo "  Existing photos: $EXTERNAL_LIBRARY (read-only)"
+                echo "  New uploads:     $UPLOAD_LOCATION"
+            else
+                echo "  Photo library: $UPLOAD_LOCATION"
+            fi
             echo ""
 
             # Configure Caddy reverse proxy before starting
@@ -3451,7 +3536,7 @@ IMPORT_SCRIPT_BODY
             echo ""
 
             if [ -n "$EXISTING_PHOTOS_SOURCE" ] && [ "$IMMICH_STRATEGY" != "2" ]; then
-                echo "  Import your existing photos:"
+                echo "  Import your existing photos AFTER this script finishes:"
                 echo "    $IMMICH_DIR/import-photos.sh"
                 echo ""
                 echo "  The script handles everything automatically:"
@@ -3459,6 +3544,10 @@ IMPORT_SCRIPT_BODY
                 echo "    configures the storage template, installs the CLI,"
                 echo "    and imports all photos from $EXISTING_PHOTOS_SOURCE"
                 echo "    with EXIF dates preserved."
+                echo ""
+                echo "  NOTE: Run import-photos.sh separately after this setup"
+                echo "  script has completed. It may take a while for large"
+                echo "  photo collections."
                 echo ""
                 echo "  After import, open http://localhost:2283 to browse your photos."
             elif [ "$IMMICH_STRATEGY" = "2" ]; then
@@ -5218,6 +5307,7 @@ MC_ENV
     fi
 
     # ---- LINUX-TO-SYNC (Private Repo) ----
+    if [ "$WHIPTAIL_USED" != true ]; then
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ LINUX-TO-SYNC - Private sync repository                         │"
@@ -5296,6 +5386,7 @@ MC_ENV
             fi
         fi
     fi
+    fi  # End WHIPTAIL_USED check for linux-to-sync
 
     # ---- JELLYFIN (Alternative to Emby) ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_JELLYFIN" ]; then
@@ -5498,7 +5589,7 @@ FRIGATE_CONFIG
     # Note: This is the legacy Caddy installation
     # The newer installation above includes fail2ban support
     # This section is kept for backwards compatibility
-    if [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
+    if [ "$WHIPTAIL_USED" != true ] && [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
         echo ""
         echo "┌─────────────────────────────────────────────────────────────────┐"
         echo "│ CADDY - Automatic HTTPS reverse proxy (Legacy)                  │"
@@ -6501,6 +6592,7 @@ WT_ENV
     # ============================================================================
     # KOPIA BACKUP FOR DOCKER CONTAINERS
     # ============================================================================
+    if [ "$WHIPTAIL_USED" != true ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "DOCKER CONTAINER BACKUP (Kopia)"
@@ -6671,6 +6763,7 @@ RESTORE_SCRIPT
             echo ""
         fi
     fi
+    fi  # End WHIPTAIL_USED check for Kopia
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -6690,6 +6783,7 @@ RESTORE_SCRIPT
 fi
 
 # Backup System (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "LOCAL BACKUP SYSTEM (Optional)"
@@ -6945,8 +7039,10 @@ TIMER
 else
     echo "Skipping local backup setup."
 fi
+fi  # End WHIPTAIL_USED check for local backup
 
 # Cloud Backup with rclone (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "CLOUD BACKUP (Optional)"
@@ -7175,8 +7271,10 @@ CLOUD_SCRIPT
 else
     echo "Skipping cloud backup setup."
 fi
+fi  # End WHIPTAIL_USED check for cloud backup
 
 # UFW Firewall Configuration (Optional)
+if [ "$WHIPTAIL_USED" != true ]; then
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "UFW FIREWALL (Optional)"
@@ -7360,6 +7458,7 @@ else
 fi
 
 CONFIGURE_UFW="${CONFIGURE_UFW:-n}"
+fi  # End WHIPTAIL_USED check for UFW
 
 # Full system upgrade (optional)
 echo ""
