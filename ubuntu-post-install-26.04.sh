@@ -2196,6 +2196,7 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would download and run NetBird install script"
         echo "[DRY-RUN] Would ensure openssh-server is installed (required for NetBird SSH)"
+        echo "[DRY-RUN] Would configure netbird systemd service with --allow-server-ssh"
     else
         # NetBird v0.60.0+ requires openssh-server for SSH access.
         # It injects /etc/ssh/sshd_config.d/99-netbird.conf and listens on port 22022.
@@ -2206,18 +2207,30 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
 
         curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
 
+        # Persist --allow-server-ssh so this machine accepts NetBird SSH connections
+        # without requiring interactive re-authentication on every connection.
+        echo "Configuring NetBird to allow SSH server (persistent across reboots)..."
+        mkdir -p /etc/systemd/system/netbird.service.d
+        cat > /etc/systemd/system/netbird.service.d/ssh-server.conf << 'NETBIRD_OVERRIDE'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/netbird service run --allow-server-ssh
+NETBIRD_OVERRIDE
+        systemctl daemon-reload 2>/dev/null || true
+        echo "  ✓ NetBird will start with --allow-server-ssh on every boot"
+
         echo ""
         echo "NetBird installed. Setup instructions:"
         echo "  1. Create account at https://app.netbird.io (or self-host)"
         echo "  2. Run 'netbird up' and authenticate via browser"
         echo ""
-        echo "For NetBird SSH functionality (v0.60.0+ new method):"
-        echo "  • NetBird now uses openssh-server (installed above) for SSH access"
+        echo "For NetBird SSH functionality (v0.60.0+ method):"
+        echo "  • openssh-server is installed and --allow-server-ssh is persisted"
         echo "  • Enable SSH per-peer in the NetBird dashboard (Peers > [peer] > SSH)"
         echo "  • NetBird injects /etc/ssh/sshd_config.d/99-netbird.conf automatically"
-        echo "  • Connect from another NetBird peer with: ssh user@<netbird-ip>"
+        echo "  • Connect from another NetBird peer: ssh user@<netbird-ip>"
         echo "  • Get peer IPs with: netbird status"
-        echo "  • Note: 'netbird ssh <peer-name>' (old command) no longer works"
+        echo "  • SSH will work without re-authenticating each connection"
         echo ""
     fi
 else
@@ -7638,7 +7651,10 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
     echo "    2. View connected peers: netbird status"
     echo "    3. Configure ACLs in dashboard: https://app.netbird.io"
     echo "    4. Enable SSH per-peer: Peers > [peer] > SSH (in dashboard)"
-    echo "    5. Connect via SSH: ssh user@<netbird-ip>  (NOT 'netbird ssh')"
+    echo "    5. Connect via SSH: ssh user@<netbird-ip>"
+    echo "    Note: --allow-server-ssh is pre-configured in systemd override"
+    echo "          (/etc/systemd/system/netbird.service.d/ssh-server.conf)"
+    echo "          so SSH works without re-authenticating on every connection"
     echo ""
 fi
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
