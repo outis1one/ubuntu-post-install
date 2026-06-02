@@ -2195,20 +2195,42 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would download and run NetBird install script"
+        echo "[DRY-RUN] Would ensure openssh-server is installed (required for NetBird SSH)"
+        echo "[DRY-RUN] Would configure netbird systemd service with --allow-server-ssh"
     else
+        # NetBird v0.60.0+ requires openssh-server for SSH access.
+        # It injects /etc/ssh/sshd_config.d/99-netbird.conf and listens on port 22022.
+        echo "Ensuring openssh-server is installed (required for NetBird SSH)..."
+        apt install -y openssh-server 2>/dev/null || echo "Warning: openssh-server install failed, continuing..."
+        systemctl enable ssh 2>/dev/null || true
+        systemctl start ssh 2>/dev/null || true
+
         curl -fsSL https://pkgs.netbird.io/install.sh | sh || echo "Warning: NetBird installation failed, continuing..."
+
+        # Persist --allow-server-ssh so this machine accepts NetBird SSH connections
+        # without requiring interactive re-authentication on every connection.
+        echo "Configuring NetBird to allow SSH server (persistent across reboots)..."
+        mkdir -p /etc/systemd/system/netbird.service.d
+        cat > /etc/systemd/system/netbird.service.d/ssh-server.conf << 'NETBIRD_OVERRIDE'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/netbird service run --allow-server-ssh
+NETBIRD_OVERRIDE
+        systemctl daemon-reload 2>/dev/null || true
+        echo "  ✓ NetBird will start with --allow-server-ssh on every boot"
 
         echo ""
         echo "NetBird installed. Setup instructions:"
         echo "  1. Create account at https://app.netbird.io (or self-host)"
         echo "  2. Run 'netbird up' and authenticate via browser"
         echo ""
-        echo "For NetBird SSH functionality:"
-        echo "  • Enable SSH in NetBird dashboard settings"
-        echo "  • Use 'netbird ssh <peer-name>' to connect to peers"
-        echo "  • NetBird manages SSH keys automatically when using 'netbird ssh'"
-        echo "  • Traditional SSH also works using peer IPs from 'netbird status'"
-        echo "  • Configure ACL rules in dashboard for SSH access (port 22)"
+        echo "For NetBird SSH functionality (v0.60.0+ method):"
+        echo "  • openssh-server is installed and --allow-server-ssh is persisted"
+        echo "  • Enable SSH per-peer in the NetBird dashboard (Peers > [peer] > SSH)"
+        echo "  • NetBird injects /etc/ssh/sshd_config.d/99-netbird.conf automatically"
+        echo "  • Connect from another NetBird peer: ssh user@<netbird-ip>"
+        echo "  • Get peer IPs with: netbird status"
+        echo "  • SSH will work without re-authenticating each connection"
         echo ""
     fi
 else
@@ -2565,6 +2587,7 @@ else
         [ -d "$DOCKER_DIR/magicmirror" ] && EXISTING_SERVICES[MAGICMIRROR]="ON"
         [ -d "$DOCKER_DIR/actualbudget" ] && EXISTING_SERVICES[ACTUALBUDGET]="ON"
         [ -d "$DOCKER_DIR/keycloak" ] && EXISTING_SERVICES[KEYCLOAK]="ON"
+        [ -d "$DOCKER_DIR/authelia" ] && EXISTING_SERVICES[AUTHELIA]="ON"
         [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
         [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
         [ -d "$DOCKER_DIR/mealie" ] && EXISTING_SERVICES[MEALIE]="ON"
@@ -2605,6 +2628,7 @@ else
                     "MAGICMIRROR" "Smart mirror / dashboard display" ${EXISTING_SERVICES[MAGICMIRROR]:-OFF} \
                     "ACTUALBUDGET" "Personal finance management with bank sync" ${EXISTING_SERVICES[ACTUALBUDGET]:-OFF} \
                     "KEYCLOAK" "Identity & Access Management (SSO)" ${EXISTING_SERVICES[KEYCLOAK]:-OFF} \
+                    "AUTHELIA" "SSO + 2FA auth portal for Caddy" ${EXISTING_SERVICES[AUTHELIA]:-OFF} \
                     "CADDY" "Reverse proxy with automatic HTTPS" ${EXISTING_SERVICES[CADDY]:-OFF} \
                     "FAIL2BAN" "Intrusion prevention system" ${EXISTING_SERVICES[FAIL2BAN]:-OFF} \
                     "LYRION" "Music streaming server (LMS)" ${EXISTING_SERVICES[LYRION]:-OFF} \
@@ -2636,6 +2660,7 @@ else
                 [ -n "${EXISTING_SERVICES[MAGICMIRROR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MAGICMIRROR \"Smart mirror\" ON"
                 [ -n "${EXISTING_SERVICES[ACTUALBUDGET]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ACTUALBUDGET \"Personal finance\" ON"
                 [ -n "${EXISTING_SERVICES[KEYCLOAK]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS KEYCLOAK \"Identity management\" ON"
+                [ -n "${EXISTING_SERVICES[AUTHELIA]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS AUTHELIA \"SSO + 2FA auth portal\" ON"
                 [ -n "${EXISTING_SERVICES[CADDY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CADDY \"Reverse proxy\" ON"
                 [ -n "${EXISTING_SERVICES[FAIL2BAN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FAIL2BAN \"Intrusion prevention\" ON"
                 [ -n "${EXISTING_SERVICES[LYRION]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS LYRION \"Music server\" ON"
@@ -2686,6 +2711,7 @@ else
         : ${INSTALL_MAGICMIRROR:="n"}
         : ${INSTALL_ACTUALBUDGET:="n"}
         : ${INSTALL_KEYCLOAK:="n"}
+        : ${INSTALL_AUTHELIA:="n"}
         : ${INSTALL_CADDY:="n"}
         : ${INSTALL_FAIL2BAN:="n"}
         : ${INSTALL_LMS:="n"}
@@ -2712,6 +2738,7 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then INSTALL_MAGICMIRROR="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then INSTALL_ACTUALBUDGET="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then INSTALL_KEYCLOAK="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then INSTALL_AUTHELIA="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then INSTALL_CADDY="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then INSTALL_FAIL2BAN="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then INSTALL_LMS="y"; fi
@@ -2785,6 +2812,7 @@ else
                 if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then uninstall_service "MagicMirror" "$DOCKER_DIR/magicmirror" "magicmirror"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then uninstall_service "ActualBudget" "$DOCKER_DIR/actualbudget" "actualbudget"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then uninstall_service "Keycloak" "$DOCKER_DIR/keycloak" "keycloak"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then uninstall_service "Authelia" "$DOCKER_DIR/authelia" "authelia"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then uninstall_service "Mealie" "$DOCKER_DIR/mealie" "mealie"; fi
@@ -4901,6 +4929,26 @@ CADDY_COMPOSE
 # Example configuration - edit this for your services
 # Uncomment and modify these examples:
 
+# ── Authelia SSO snippet (auto-added by installer if Authelia is installed) ───
+# (authelia) {
+#     forward_auth authelia:9091 {
+#         uri /api/authz/forward-auth
+#         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+#     }
+# }
+#
+# Authelia login portal
+# auth.yourdomain.com {
+#     reverse_proxy authelia:9091
+# }
+#
+# To protect any service with Authelia, add:  import authelia
+# Example:
+# myservice.yourdomain.com {
+#     import authelia
+#     reverse_proxy localhost:PORT
+# }
+
 # ActualBudget
 # budget.yourdomain.com {
 #     log {
@@ -4962,6 +5010,305 @@ CADDYFILE
             fi
         fi
     fi
+
+    # ---- AUTHELIA ----
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_AUTHELIA" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ AUTHELIA - SSO & Two-Factor Authentication Portal              │"
+        echo "│ Protects any Caddy subdomain with a single login + TOTP       │"
+        echo "│ Port: 9091 (internal only, accessed via Caddy)                 │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Authelia? (y/n):" "n" INSTALL_AUTHELIA
+    fi
+
+    if [ "$INSTALL_AUTHELIA" = "y" ] || [ "$INSTALL_AUTHELIA" = "Y" ]; then
+        AUTHELIA_DIR="$DOCKER_DIR/authelia"
+        check_service_exists "Authelia" "$AUTHELIA_DIR" AUTHELIA_RECONFIGURE
+
+        if [ "$AUTHELIA_RECONFIGURE" = "true" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $AUTHELIA_DIR"
+        else
+            echo "Installing Authelia..."
+            mkdir -p "$AUTHELIA_DIR/config/secrets" "$AUTHELIA_DIR/data"
+
+            # Collect configuration from user
+            echo ""
+            echo "  Authelia needs a few details to configure."
+            echo ""
+            prompt_text "  Your domain (e.g., example.com):" "example.com" AUTHELIA_DOMAIN
+            prompt_text "  Admin username:" "admin" AUTHELIA_ADMIN_USER
+            prompt_text "  Admin display name:" "Administrator" AUTHELIA_ADMIN_DISPLAY
+            prompt_text "  Admin email:" "admin@${AUTHELIA_DOMAIN}" AUTHELIA_ADMIN_EMAIL
+            prompt_text "  SMTP server (e.g., smtp.migadu.com):" "smtp.migadu.com" AUTHELIA_SMTP_HOST
+            prompt_text "  SMTP port:" "587" AUTHELIA_SMTP_PORT
+            prompt_text "  SMTP username (full email):" "authelia@${AUTHELIA_DOMAIN}" AUTHELIA_SMTP_USER
+            prompt_text "  SMTP password:" "" AUTHELIA_SMTP_PASS
+            prompt_text "  Timezone (e.g., America/New_York):" "America/New_York" AUTHELIA_TZ
+
+            # Generate secrets
+            echo ""
+            echo "  Generating secrets..."
+            JWT_SECRET=$(openssl rand -hex 32)
+            SESSION_SECRET=$(openssl rand -hex 32)
+            STORAGE_SECRET=$(openssl rand -hex 32)
+
+            echo "$JWT_SECRET"     > "$AUTHELIA_DIR/config/secrets/jwt_secret"
+            echo "$SESSION_SECRET" > "$AUTHELIA_DIR/config/secrets/session_secret"
+            echo "$STORAGE_SECRET" > "$AUTHELIA_DIR/config/secrets/storage_secret"
+            echo "$AUTHELIA_SMTP_PASS" > "$AUTHELIA_DIR/config/secrets/smtp_password"
+            chmod 600 "$AUTHELIA_DIR/config/secrets/"*
+            echo "  ✓ Secrets generated"
+
+            # Generate password hash for admin user
+            echo ""
+            echo "  Generating password hash for admin user..."
+            prompt_text "  Temporary password for admin (users reset via email):" "TempPass2026!" AUTHELIA_TEMP_PASS
+            AUTHELIA_HASH=$(docker run --rm authelia/authelia:4.39.20 \
+                authelia crypto hash generate argon2 --password "$AUTHELIA_TEMP_PASS" 2>/dev/null \
+                | grep -oP '(?<=Digest: ).*' || echo "REPLACE_WITH_HASH")
+            if [ "$AUTHELIA_HASH" = "REPLACE_WITH_HASH" ]; then
+                echo "  ⚠ Could not generate hash automatically. Run this after install:"
+                echo "    docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate argon2 --password 'yourpassword'"
+                echo "    Then update $AUTHELIA_DIR/config/users.yml"
+            else
+                echo "  ✓ Password hash generated"
+            fi
+
+            ensure_docker_dir_ownership "$AUTHELIA_DIR"
+            # Authelia requires its config/data owned by uid 1000
+            chown -R 1000:1000 "$AUTHELIA_DIR/config" "$AUTHELIA_DIR/data"
+
+            cd "$AUTHELIA_DIR"
+
+            # .env file
+            cat > .env << AUTHELIA_ENV
+MY_DOMAIN=${AUTHELIA_DOMAIN}
+SMTP_USER=${AUTHELIA_SMTP_USER}
+DOCKER_MY_NETWORK=caddy_net
+TZ=${AUTHELIA_TZ}
+AUTHELIA_ENV
+
+            # docker-compose.yml
+            cat > docker-compose.yml << 'AUTHELIA_COMPOSE'
+name: authelia
+
+services:
+  authelia:
+    image: authelia/authelia:4.39.20
+    pull_policy: missing
+    container_name: authelia
+    user: "1000:1000"
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    environment:
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/config/secrets/jwt_secret
+      - AUTHELIA_SESSION_SECRET_FILE=/config/secrets/session_secret
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/config/secrets/storage_secret
+      - AUTHELIA_NOTIFIER_SMTP_PASSWORD_FILE=/config/secrets/smtp_password
+      - AUTHELIA_NOTIFIER_SMTP_USERNAME=${SMTP_USER}
+      - AUTHELIA_NOTIFIER_SMTP_SENDER=Authelia <${SMTP_USER}>
+    expose:
+      - 9091
+    restart: unless-stopped
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+AUTHELIA_COMPOSE
+
+            # configuration.yml
+            cat > config/configuration.yml << AUTHELIA_CONFIG
+---
+# Authelia configuration
+# Secrets are injected via AUTHELIA_* environment variables in docker-compose.yml
+
+theme: dark
+
+server:
+  address: tcp://0.0.0.0:9091
+
+log:
+  level: info
+  file_path: /data/authelia.log
+
+totp:
+  period: 30
+  skew: 1
+
+authentication_backend:
+  file:
+    path: /config/users.yml
+    password:
+      algorithm: argon2
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
+
+access_control:
+  default_policy: deny
+  rules:
+    - domain: "*.${AUTHELIA_DOMAIN}"
+      policy: two_factor
+
+session:
+  name: authelia_session
+  expiration: 12h
+  inactivity: 2h
+  remember_me: 7d
+  cookies:
+    - domain: ${AUTHELIA_DOMAIN}
+      authelia_url: https://auth.${AUTHELIA_DOMAIN}
+      default_redirection_url: https://${AUTHELIA_DOMAIN}
+
+storage:
+  local:
+    path: /data/db.sqlite3
+
+notifier:
+  disable_startup_check: false
+  smtp:
+    address: smtp://${AUTHELIA_SMTP_HOST}:${AUTHELIA_SMTP_PORT}
+    timeout: 10s
+    identifier: localhost
+    subject: "[Authelia] {title}"
+    startup_check_address: ${AUTHELIA_SMTP_USER}
+    disable_require_tls: false
+    disable_starttls: false
+AUTHELIA_CONFIG
+
+            # users.yml
+            cat > config/users.yml << AUTHELIA_USERS
+---
+# Authelia users database
+# To add users: copy a block, update username/email/displayname, restart authelia
+# To generate a hash: docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate argon2 --password 'thepassword'
+# Login with username (not email). Tell users to use "Forgot Password" to set their own password.
+
+users:
+  ${AUTHELIA_ADMIN_USER}:
+    displayname: "${AUTHELIA_ADMIN_DISPLAY}"
+    email: ${AUTHELIA_ADMIN_EMAIL}
+    password: "${AUTHELIA_HASH}"
+    groups:
+      - admins
+      - users
+AUTHELIA_USERS
+
+            chown -R 1000:1000 "$AUTHELIA_DIR/config" "$AUTHELIA_DIR/data"
+
+            echo "  ✓ Authelia configured at $AUTHELIA_DIR"
+            echo ""
+
+            # Ensure caddy_net Docker network exists
+            if ! docker network ls --format '{{.Name}}' | grep -q "^caddy_net$"; then
+                echo "  Creating Docker network caddy_net..."
+                docker network create caddy_net && echo "  ✓ caddy_net created" || echo "  ⚠ Failed to create caddy_net"
+            else
+                echo "  ✓ Docker network caddy_net already exists"
+            fi
+
+            # Inject Authelia snippet into Caddyfile if Caddy is installed
+            CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
+            if [ -f "$CADDY_FILE" ]; then
+                echo ""
+                echo "  Configuring Caddy for Authelia..."
+
+                # Add (authelia) snippet at top if not already present
+                if ! grep -q "(authelia)" "$CADDY_FILE"; then
+                    cp "$CADDY_FILE" "$CADDY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+                    AUTHELIA_SNIPPET=$(cat << 'SNIPPET_EOF'
+# ── Authelia forward auth snippet ─────────────────────────────────────────────
+(authelia) {
+    forward_auth authelia:9091 {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+    }
+}
+
+SNIPPET_EOF
+)
+                    # Prepend snippet before existing content
+                    echo "$AUTHELIA_SNIPPET" | cat - "$CADDY_FILE" > "$CADDY_FILE.tmp" && mv "$CADDY_FILE.tmp" "$CADDY_FILE"
+                    echo "  ✓ Authelia snippet added to Caddyfile"
+                else
+                    echo "  ✓ Authelia snippet already in Caddyfile"
+                fi
+
+                # Add auth portal site block if not already present
+                AUTH_DOMAIN="auth.${AUTHELIA_DOMAIN}"
+                if ! grep -q "$AUTH_DOMAIN" "$CADDY_FILE"; then
+                    cat >> "$CADDY_FILE" << CADDY_AUTH_BLOCK
+
+# ── Authelia login portal ──────────────────────────────────────────────────────
+${AUTH_DOMAIN} {
+    reverse_proxy authelia:9091
+    log {
+        output file /var/log/caddy/auth.log
+    }
+}
+CADDY_AUTH_BLOCK
+                    echo "  ✓ Authelia portal block added for ${AUTH_DOMAIN}"
+                fi
+
+                # Reload Caddy if it's running
+                if docker ps --format '{{.Names}}' | grep -q "^caddy$"; then
+                    docker exec -w /etc/caddy caddy caddy reload 2>/dev/null \
+                        && echo "  ✓ Caddy reloaded" \
+                        || echo "  ⚠ Caddy reload failed — reload manually after fixing Caddyfile"
+                fi
+            else
+                echo "  ℹ Caddy not yet installed. Install Caddy and add this to your Caddyfile:"
+                echo ""
+                echo '  (authelia) {'
+                echo '      forward_auth authelia:9091 {'
+                echo '          uri /api/authz/forward-auth'
+                echo '          copy_headers Remote-User Remote-Groups Remote-Name Remote-Email'
+                echo '      }'
+                echo '  }'
+                echo ""
+                echo "  auth.${AUTHELIA_DOMAIN} {"
+                echo "      reverse_proxy authelia:9091"
+                echo "  }"
+                echo ""
+            fi
+
+            prompt_yn "Start Authelia now? (y/n):" "y" START_AUTHELIA
+            if [ "$START_AUTHELIA" = "y" ] || [ "$START_AUTHELIA" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Authelia started" || echo "  ⚠ Failed to start Authelia"
+                sleep 2
+                docker compose logs --tail=20 authelia 2>/dev/null || true
+            fi
+
+            echo ""
+            echo "  Auth portal:  https://auth.${AUTHELIA_DOMAIN}"
+            echo "  Config dir:   $AUTHELIA_DIR/config"
+            echo "  Users file:   $AUTHELIA_DIR/config/users.yml"
+            echo "  Data dir:     $AUTHELIA_DIR/data"
+            echo ""
+            echo "  Admin login:  ${AUTHELIA_ADMIN_USER}  (use Forgot Password to set real password)"
+            echo ""
+            echo "  To protect a Caddy site, add 'import authelia' to its block:"
+            echo "    myservice.${AUTHELIA_DOMAIN} {"
+            echo "        import authelia"
+            echo "        reverse_proxy localhost:PORT"
+            echo "    }"
+            echo ""
+            echo "  To add users:"
+            echo "    Edit $AUTHELIA_DIR/config/users.yml then:"
+            echo "    cd $AUTHELIA_DIR && docker compose restart authelia"
+            echo ""
+        fi
+        fi  # End AUTHELIA_RECONFIGURE check
+    fi  # End INSTALL_AUTHELIA check
 
     # ---- FAIL2BAN ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FAIL2BAN" ]; then
