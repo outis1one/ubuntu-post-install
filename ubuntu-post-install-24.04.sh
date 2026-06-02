@@ -4983,12 +4983,14 @@ authentication_backend:
   file:
     path: /config/users.yml
     password:
-      algorithm: argon2id
-      iterations: 3
-      memory: 65536
-      parallelism: 4
-      key_length: 32
-      salt_length: 16
+      algorithm: argon2
+      argon2:
+        variant: argon2id
+        iterations: 3
+        memory: 65536
+        parallelism: 4
+        key_length: 32
+        salt_length: 16
 
 access_control:
   default_policy: deny
