@@ -121,6 +121,26 @@ prompt_text() {
     eval "$varname='${response:-$default}'"
 }
 
+# ── Per-service README generation ────────────────────────────────────────────
+# Write <dir>/README.md from stdin (markdown). Every module is encouraged to
+# call this so each ~/docker/<service>/ folder is self-documenting.
+# Usage:
+#   write_readme "$DIR" <<MD
+#   # Title
+#   ...
+#   MD
+write_readme() {
+    local dir="$1"
+    if [ "$DRY_RUN" = true ]; then
+        cat >/dev/null            # consume the heredoc so the caller isn't blocked
+        echo "[DRY-RUN] Would write $dir/README.md"
+        return 0
+    fi
+    mkdir -p "$dir"
+    cat > "$dir/README.md"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$dir/README.md" 2>/dev/null || true
+}
+
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
 # Usage: configure_caddy_for_service "Name" "PORT" "default-subdomain" ["extra"]
 configure_caddy_for_service() {
