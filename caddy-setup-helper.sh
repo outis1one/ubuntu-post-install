@@ -394,7 +394,6 @@ print_info "You can now add your services to the Caddyfile"
 echo ""
 echo "Available services to add:"
 echo "  - ActualBudget (Personal Finance) - Port 5006"
-echo "  - Keycloak (Identity & Access Management) - Port 8180"
 echo ""
 
 if ask_yn "Would you like to add ActualBudget to Caddyfile?" "n"; then
@@ -428,41 +427,6 @@ $AB_DOMAIN {
         else
             print_error "Failed to add ActualBudget configuration"
             ERROR_MESSAGES+=("Add ActualBudget manually - see CADDY-FAIL2BAN-SETUP.md")
-        fi
-    fi
-fi
-
-if ask_yn "Would you like to add Keycloak to Caddyfile?" "n"; then
-    read -p "Enter domain for Keycloak (e.g., auth.yourdomain.com): " KC_DOMAIN
-
-    if [ -n "$KC_DOMAIN" ]; then
-        KC_CONFIG="
-# Keycloak - Identity & Access Management
-$KC_DOMAIN {
-    log {
-        output file /var/log/caddy/keycloak-access.log
-        format json
-        level INFO
-    }
-
-    reverse_proxy localhost:8180
-
-    # Security headers
-    header {
-        Strict-Transport-Security \"max-age=31536000; includeSubDomains; preload\"
-        X-Frame-Options \"SAMEORIGIN\"
-        X-Content-Type-Options \"nosniff\"
-        X-XSS-Protection \"1; mode=block\"
-        Referrer-Policy \"strict-origin-when-cross-origin\"
-    }
-}
-"
-
-        if echo "$KC_CONFIG" >> "$CADDYFILE_PATH"; then
-            print_success "Added Keycloak configuration to Caddyfile"
-        else
-            print_error "Failed to add Keycloak configuration"
-            ERROR_MESSAGES+=("Add Keycloak manually - see CADDY-FAIL2BAN-SETUP.md")
         fi
     fi
 fi
