@@ -4,6 +4,28 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.5] - 2026-06-03
+
+### Added
+- `services/minecraft.sh` *(gaming)* — full port of the standalone
+  `setupminecraft.sh`, converted to the per-service-folder model. Each server
+  is its own `~/docker/<instance>/` with a standalone compose, so multiple
+  servers run side by side (port auto-bumps 25565→25566…). Preserves all the
+  niceties: Fabric/Quilt/Paper/Vanilla/Forge flavours, the live Modrinth
+  version/mod-availability picker, curated mods, Vanilla Tweaks datapacks,
+  whitelist UUID pre-population, LuckPerms bootstrap, Chunky pre-gen, playit.gg
+  tunnel, generated MINECRAFT_NETWORKING.md / CLIENT_MODS.md, and the
+  client-mods download web page (its own folder + compose).
+
+### Fixed
+- Minecraft compose env-block emission (trailing-newline bug from the original
+  that glued `ports:` onto the last env line — now valid YAML).
+
+### Notes
+- `gaming` group now: `js99er`, `minecraft`, `wolf`.
+- Still pending: `whitelist` Minecraft helper; migrating the ~65 monolith
+  services into `services/`.
+
 ## [0.9.4] - 2026-06-03
 
 The first versioned release. Introduces the **modular post-install system** so
