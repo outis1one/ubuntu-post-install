@@ -72,10 +72,13 @@ single shared compose file.
 
 ## Groups
 
-`base` · `homelab` · `gaming` · `backup`. The menu and `--list` are grouped by
-these. The **gaming** group (Wolf, js99er, Minecraft) makes this script a
-sensible base for either a homelab box or a gaming box — install only what that
-machine needs.
+`base` · `homelab` · `utilities` · `media` · `cameras` · `gaming` · `backup`.
+The guided menu (`sudo ./setup.sh`) shows the **required** packages first with a
+cancel option, then offers **Caddy** (most services proxy through it), then a
+**category menu you loop through** — pick a category, tick services (already
+installed ones are marked `[installed]`), install, and you land back on the menu
+to pick the next category. Within `homelab`, Caddy → CrowdSec → Authelia are
+ordered first.
 
 ## Migration status
 

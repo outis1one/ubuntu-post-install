@@ -4,6 +4,53 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.7] - 2026-06-03
+
+### Added
+- `services/caddy.sh` *(homelab)* — Caddy reverse proxy + automatic HTTPS, own
+  `~/docker/caddy/` folder (compose + starter Caddyfile + README). Services add
+  their site blocks to its Caddyfile.
+- `services/crowdsec.sh` *(homelab)* — system-level intrusion prevention
+  (agent + firewall bouncer + Caddy log acquisition + optional ntfy ban alerts);
+  README in `~/docker/crowdsec/`.
+- **Guided menu redesign** in `setup.sh`:
+  - Prints the **required** set (essential packages incl. glow + a Docker check)
+    up front and lets you **cancel** before anything changes.
+  - Offers **Caddy first** (most services depend on it).
+  - **Category menu loop**: pick a category → checklist (already-installed shown
+    as `[installed]`) → install → back to the menu for the next category, until
+    you choose Done. whiptail UI with a plain-text fallback.
+
+### Changed
+- **Categories** reorganized: `base · homelab · utilities · media · cameras ·
+  gaming · backup`. Moved ntfy, filebrowser, portainer, uptimekuma, watchtower
+  to `utilities`. Within `homelab`, Caddy → CrowdSec → Authelia sort first.
+
+## [0.9.6] - 2026-06-03
+
+### Added
+- **Per-service README generation.** New `write_readme` helper in
+  `lib/common.sh`; every module now writes a `README.md` into its
+  `~/docker/<service>/` folder (what it is, access URL, start/stop, data
+  location, reverse-proxy notes) — so each service folder is self-documenting.
+- Migrated 6 services from the monolith into modules (all in the `homelab`
+  group, each with a README):
+  - `authelia` — SSO + 2FA portal, ported from the `authelia-setup` repo + the
+    monolith's working block: prompts for domain/SMTP, generates
+    jwt/session/storage secrets + the admin Argon2 hash, writes
+    compose/config/users, creates `caddy_net`, and injects the forward-auth
+    snippet + portal block into the Caddyfile. Won't clobber an existing install.
+  - `filebrowser` (8085), `ntfy` (8090), `uptimekuma` (3001),
+    `portainer` (9443), `watchtower` (no web port).
+
+### Notes
+- `homelab` group now: authelia, filebrowser, homeassistant, ntfy, portainer,
+  uptimekuma, watchtower.
+- Remaining monolith services still to migrate: ActualBudget, ARM,
+  AudioBookshelf, Caddy, CrowdSec, Emby, FindMyDevice, Frigate, Frigate-Notify,
+  Immich, Jellyfin, Lyrion, MagicMirror, Mealie, MeshCentral, Traccar, ddclient,
+  wg-easy.
+
 ## [0.9.5] - 2026-06-03
 
 ### Added
