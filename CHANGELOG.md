@@ -4,6 +4,41 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.11] - 2026-06-03
+
+### Added
+- **Utilities batch** — 8 service modules migrated from the monolith:
+  - `services/mealie.sh` *(utilities)* — Recipe manager & meal planner. PUID/PGID baked;
+    default creds noted (change immediately). Port 9925 → internal 9000.
+  - `services/actualbudget.sh` *(utilities)* — Open-source personal finance (Actual Budget).
+    Minimal container; bank sync via SimpleFIN optional. Port 5006.
+  - `services/traccar.sh` *(utilities)* — GPS tracking server for phones, vehicles, assets.
+    Ships a starter `config/traccar.xml` with H2 embedded DB. Port 8082 + 5000-5150 device
+    protocols (TCP+UDP).
+  - `services/fmd.sh` *(utilities)* — FindMyDevice server for Android. Generates a random
+    admin password; mobile app from F-Droid (not Play Store). Port 8084.
+  - `services/ddclient.sh` *(utilities)* — Dynamic DNS updater; no web UI. Ships a
+    `config/ddclient.conf` template covering Cloudflare, DuckDNS, No-IP. Default start
+    prompt is "n" — edit config first.
+  - `services/wg-easy.sh` *(utilities)* — WireGuard VPN with web UI. Auto-detects public
+    IP for `WG_HOST`; generates random password; requires `NET_ADMIN` + `SYS_MODULE` caps
+    and `ip_forward` sysctl. Ports 51820/udp (VPN) + 51821/tcp (web).
+  - `services/meshcentral.sh` *(utilities)* — Self-hosted remote device management server.
+    Prompts for hostname (domain/IP for agent connections). Ports 4430 (HTTPS) + 4433 (agent).
+  - `services/magicmirror.sh` *(utilities)* — Modular smart mirror / info dashboard.
+    Multi-instance (1-3, ports 8081-8083); each instance in `~/docker/magicmirror/<N>/`.
+    Optionally copies existing `config.js` and auto-clones `MMM-*` third-party modules
+    from GitHub (tries MichMich → bugsounet → MagicMirrorOrg org order).
+- **Cameras batch** — 2 service modules:
+  - `services/frigate.sh` *(cameras)* — AI-powered NVR with object detection. Auto-enables
+    `/dev/dri/renderD128` for hardware-accelerated detection when present; ships a starter
+    `config/config.yml` with camera examples. `privileged: true` + 1 GB tmpfs cache.
+    Ports 5000 (web), 8554 (RTSP restream), 8555 (WebRTC). Default start prompt is "n" —
+    edit config first.
+  - `services/frigate-notify.sh` *(cameras)* — Push notification sidecar for Frigate events.
+    Auto-detects local Frigate and ntfy installs to pre-fill config defaults. Supports ntfy,
+    Pushover, Discord, Gotify, Telegram, and more. No web UI.
+
 ## [0.9.10] - 2026-06-03
 
 ### Added
