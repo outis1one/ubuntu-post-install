@@ -85,17 +85,17 @@ ordered first.
 
 ## Migration status
 
-This is an incremental migration. The big `ubuntu-post-install-*-crowdsec.sh`
-script remains the current "install everything" entry point until the modules
-reach parity, at which point it is retired (like the `original` and
-`-no-keycloak` tiers, which stay frozen as the evolution record).
+Migration is complete. `setup.sh` + `services/` now cover every service
+from `ubuntu-post-install-*-crowdsec.sh` plus several extras. The monolith
+is retained as a frozen evolution record.
 
-| Module | Status |
-|--------|--------|
-| `base` (incl. glow) | ✅ done |
-| `homeassistant` | ✅ done |
-| `minecraft` (multi-instance, rich) | ⏳ porting from `setupminecraft.sh` |
-| `wolf` (gaming) | ⏳ porting from `setupwolf.sh` |
-| `js99er` (gaming) | ⏳ porting from `setupjs99er.sh` |
-| `backup` (Kopia, cross-cutting) | ⏳ porting from `setupbackup.sh` |
-| remaining ~65 services | ⏳ migrate from the monolith incrementally |
+| Group | Modules |
+|-------|---------|
+| `base` | `base`, `glow` |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant` |
+| `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `magicmirror`, `mealie`, `meshcentral`, `ntfy`, `portainer`, `traccar`, `uptimekuma`, `watchtower`, `wg-easy` |
+| `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
+| `cameras` | `frigate`, `frigate-notify` |
+| `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
+| `extras` | `linux-to-sync`, `silent-send` |
+| `backup` | `backup` |

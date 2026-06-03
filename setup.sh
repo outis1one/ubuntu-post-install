@@ -80,6 +80,7 @@ is_installed() {
         glow) command -v glow >/dev/null 2>&1 ;;
         crowdsec) command -v cscli >/dev/null 2>&1 ;;
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
+        linux-to-sync) [ -d "$ACTUAL_HOME/linux-to-sync/.git" ] ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }

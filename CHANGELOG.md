@@ -4,6 +4,22 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [1.0.0] - 2026-06-03
+
+### Milestone: full parity with the monolith
+
+Every service from `ubuntu-post-install-24.04-crowdsec.sh` is now a module.
+The modular system (`setup.sh` + `services/`) is the primary install path.
+The monolith is retained as a frozen evolution record.
+
+### Added
+- `services/linux-to-sync.sh` *(extras)* — clones the private
+  `outis1one/linux-to-sync` repository to `~/linux-to-sync` via SSH key or
+  GitHub PAT (PAT is stripped from the remote URL after clone for security).
+  `is_installed` marker checks `~/linux-to-sync/.git`.
+- Updated `MODULAR.md` migration table to show the completed module inventory
+  grouped by category.
+
 ## [0.9.11] - 2026-06-03
 
 ### Added
