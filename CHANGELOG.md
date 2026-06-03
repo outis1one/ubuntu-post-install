@@ -4,6 +4,17 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.8] - 2026-06-03
+
+### Added
+- `services/wolf-pair.sh` *(gaming)* — browser-based Moonlight pairing UI for
+  Wolf. Builds a tiny Python HTTP container (`python:3.12-alpine` + `docker-cli`)
+  that watches `docker logs wolf` for the current pairing secret and serves a
+  PIN entry form on port 8090. Eliminates the `./manage.sh pin` CLI workflow —
+  open `http://<server>:8090`, type the 4-digit PIN, done. Runs with
+  `network_mode: host` so it can reach Wolf's `/pin/` API at `localhost:47989`;
+  mounts the Docker socket read-only for log access. Optional Caddy subdomain.
+
 ## [0.9.7] - 2026-06-03
 
 ### Added
