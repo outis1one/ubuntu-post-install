@@ -12,6 +12,13 @@ complete, standalone script).
 
 `<ver>` is `24.04` or `26.04`.
 
+> New services are added to the **`-crowdsec`** tier only (the current tip of
+> the evolution); the original and `-no-keycloak` scripts are frozen as
+> historical snapshots. For example, **Home Assistant** (home-automation hub,
+> port 8123) is available in the `-crowdsec` variants. It ships with a
+> `trusted_proxies` config pre-seeded so it works behind the Caddy reverse
+> proxy out of the box.
+
 ## Which one?
 
 - **Original (`.sh`)** — unchanged baseline, kept for fallback. Still offers
