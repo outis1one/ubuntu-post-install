@@ -4728,6 +4728,45 @@ labels:
             echo "    Subscribe to community/3rd-party blocklists at:"
             echo "      https://app.crowdsec.net/"
 
+            # Optional: push ban alerts to ntfy
+            prompt_yn "Send CrowdSec ban alerts to an ntfy topic? (y/n):" "n" CS_NTFY
+            if [ "$CS_NTFY" = "y" ] || [ "$CS_NTFY" = "Y" ]; then
+                prompt_text "  ntfy topic URL (e.g. https://ntfy.sh/my-crowdsec):" "https://ntfy.sh/crowdsec-alerts" CS_NTFY_URL
+                sudo mkdir -p /etc/crowdsec/notifications
+                NTFY_FILE="/etc/crowdsec/notifications/ntfy.yaml"
+                NTFY_CONTENT="type: http
+name: ntfy
+log_level: info
+format: |
+  {{range . -}}
+  {{range .Decisions -}}
+  {{.Value}} banned: {{.Scenario}} for {{.Duration}}
+  {{end -}}
+  {{end -}}
+url: $CS_NTFY_URL
+method: POST
+headers:
+  Title: CrowdSec ban
+  Priority: high
+  Tags: rotating_light"
+                if echo "$NTFY_CONTENT" | sudo tee "$NTFY_FILE" > /dev/null; then
+                    echo "  ✓ Created ntfy notification ($NTFY_FILE)"
+                    # Wire the notification into the default profile (only once)
+                    if ! grep -qE "^\s*- ntfy" /etc/crowdsec/profiles.yaml 2>/dev/null; then
+                        sudo awk '1; /^on_success:/ && !d {print "notifications:"; print "  - ntfy"; d=1}' \
+                            /etc/crowdsec/profiles.yaml | sudo tee /etc/crowdsec/profiles.yaml.new > /dev/null \
+                            && sudo mv /etc/crowdsec/profiles.yaml.new /etc/crowdsec/profiles.yaml
+                        echo "  ✓ Enabled ntfy alerts in CrowdSec default profile"
+                    else
+                        echo "  ✓ ntfy already referenced in CrowdSec profile"
+                    fi
+                    echo "  ℹ Alerts fire when an IP is banned (after repeated failed attempts),"
+                    echo "    not on every individual failed login."
+                else
+                    echo "  ⚠ Failed to write ntfy notification config"
+                fi
+            fi
+
             # Restart services to apply
             prompt_yn "Restart CrowdSec to apply changes? (y/n):" "y" RESTART_CS
             if [ "$RESTART_CS" = "y" ] || [ "$RESTART_CS" = "Y" ]; then

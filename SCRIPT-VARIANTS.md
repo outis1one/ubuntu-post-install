@@ -28,6 +28,26 @@ complete, standalone script).
   - Enforcement via `crowdsec-firewall-bouncer-iptables`
   - **Geo-blocking + community IP-reputation blocklists** — the capability
     that fail2ban and Authelia both lack
+  - **Optional ntfy alerts on bans** — when configuring CrowdSec the script
+    can wire up an [ntfy](https://ntfy.sh/) push notification (via CrowdSec's
+    HTTP notification plugin). It writes `/etc/crowdsec/notifications/ntfy.yaml`
+    and references it from the default profile in
+    `/etc/crowdsec/profiles.yaml`. The same script can also install a
+    self-hosted **ntfy server** (separate menu option), so alerts can stay on
+    your own infrastructure.
+
+### A note on "notification of failed attempts"
+
+CrowdSec alerts fire on a **ban decision** — i.e. once an IP crosses the
+failed-attempt threshold for a scenario (e.g. `crowdsecurity/ssh-bf`), not on
+every individual failed login. That gives you one actionable "X banned for Y"
+push instead of a flood. To alert on a single failed login you'd lower the
+scenario threshold or write a custom scenario, but the ban-level alert is the
+recommended default.
+
+Authelia, by contrast, only sends **email/SMTP** notifications (for password
+reset and 2FA device registration) — it has no built-in "failed login" push,
+which is why CrowdSec → ntfy is the path used here.
 
 ## Notes on the security layers
 
