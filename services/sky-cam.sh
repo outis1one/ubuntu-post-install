@@ -43,8 +43,7 @@ install_sky-cam() {
 
     # ── Python packages ──────────────────────────────────────────────────────
     log_info "Installing Python packages..."
-    local PIP="pip3 install --user --quiet"
-    sudo -u "$ACTUAL_USER" $PIP suntime pytz requests skyfield Pillow numpy scipy \
+    pip_user_install suntime pytz requests skyfield Pillow numpy scipy \
         || log_warning "Some pip packages may have failed — check output above"
     log_success "Python packages installed"
 

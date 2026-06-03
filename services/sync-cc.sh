@@ -48,10 +48,8 @@ install_sync-cc() {
     log_success "System packages installed"
 
     # ── pip packages ─────────────────────────────────────────────────────────
-    # Install as the actual (non-root) user so packages land in ~/.local
     log_info "Installing Python packages (openai-whisper, ffsubsync)..."
-    local PIP_CMD="pip3 install --user --quiet openai-whisper ffsubsync"
-    if sudo -u "$ACTUAL_USER" $PIP_CMD; then
+    if pip_user_install openai-whisper ffsubsync; then
         log_success "Python packages installed"
     else
         log_warning "pip install reported errors — the tool may still work if packages were partially installed"

@@ -96,6 +96,41 @@ save_site_config() {
 # Load immediately so all service modules inherit the values when sourced
 load_site_config
 
+# ── OS detection ─────────────────────────────────────────────────────────────
+OS_DISTRO="unknown"
+OS_VERSION="unknown"
+OS_CODENAME="unknown"
+
+detect_os() {
+    [ -f /etc/os-release ] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        val="${val//\"/}"
+        case "$key" in
+            ID)              OS_DISTRO="$val"                                       ;;
+            VERSION_ID)      OS_VERSION="$val"                                      ;;
+            VERSION_CODENAME|UBUNTU_CODENAME)
+                [ "$OS_CODENAME" = "unknown" ] && OS_CODENAME="$val"               ;;
+        esac
+    done < /etc/os-release
+    export OS_DISTRO OS_VERSION OS_CODENAME
+}
+
+# Return 0 (true) if the detected Ubuntu version is >= the argument (e.g., "24.04").
+ubuntu_version_ge() {
+    [ "$OS_DISTRO" = "ubuntu" ] || return 1
+    local a="${OS_VERSION//./}" b="${1//./}"
+    [ "${a:-0}" -ge "${b:-0}" ] 2>/dev/null
+}
+
+# pip install --user as actual user.
+# Centralised so any future version-specific pip flags land in one place.
+pip_user_install() {
+    sudo -u "$ACTUAL_USER" pip3 install --user --quiet "$@"
+}
+
+detect_os
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 require_root() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then

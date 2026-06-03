@@ -153,12 +153,13 @@ fi
 require_root
 
 _VER="$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
+_OS_LINE="${OS_DISTRO^} ${OS_VERSION} (${OS_CODENAME})"
 
 if is_installed base; then
     # ── Re-run: base already present — skip required step ────────────────────
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Ubuntu Post-Install  ·  v${_VER}"
+    echo "║  Ubuntu Post-Install  ·  v${_VER}  ·  ${_OS_LINE}"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     echo "  Base packages already installed — skipping required setup."
@@ -168,9 +169,16 @@ else
     # ── First run: show required banner, confirm, install ────────────────────
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Ubuntu Post-Install  ·  v${_VER}"
+    echo "║  Ubuntu Post-Install  ·  v${_VER}  ·  ${_OS_LINE}"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
+    if [ "$OS_DISTRO" != "ubuntu" ]; then
+        log_warning "Detected OS: ${_OS_LINE} — this script targets Ubuntu. Proceed with caution."
+        echo ""
+    elif ! ubuntu_version_ge "24.04"; then
+        log_warning "Ubuntu ${OS_VERSION} detected — tested on 24.04+. Some packages may differ."
+        echo ""
+    fi
     echo "REQUIRED (installed/verified first):"
     echo "  • Essential CLI packages: net-tools, git, curl, wget, htop, tree,"
     echo "    ncdu, zip/unzip, jq, rsync, and glow (markdown reader)"
