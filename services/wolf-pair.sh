@@ -1,0 +1,315 @@
+#!/bin/bash
+# services/wolf-pair.sh — Moonlight pairing web UI for Wolf.
+# Part of the modular post-install system (sourced by setup.sh).
+#
+# Builds a tiny Python HTTP container (server.py + Dockerfile baked below)
+# that watches Wolf's docker logs for pairing secrets and serves a PIN entry
+# form on port 8090.  No command line needed: visit the URL, type the PIN.
+#
+# The container runs with network_mode: host so that server.py can reach
+# Wolf's pairing API at http://localhost:47989 and tail `docker logs wolf`
+# via the mounted docker socket.
+
+register_service wolf-pair gaming "Moonlight pairing web UI for Wolf" 8090
+
+install_wolf-pair() {
+    require_docker || return 1
+
+    local WOLFPAIR_DIR="$DOCKER_DIR/wolf-pair"
+    local WOLFPAIR_PORT=8090
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] wolf-pair install would:"
+        echo "  - Create $WOLFPAIR_DIR with server.py, Dockerfile, docker-compose.yml"
+        echo "  - Build the wolf-pair image (python:3.12-alpine + docker-cli)"
+        echo "  - Run the container with network_mode: host (for localhost:47989 access)"
+        echo "  - Mount /var/run/docker.sock:ro (for docker logs wolf)"
+        echo "  - Open port $WOLFPAIR_PORT in UFW"
+        echo "  - Optionally configure a Caddy reverse proxy"
+        return 0
+    fi
+
+    mkdir -p "$WOLFPAIR_DIR"
+    ensure_docker_dir_ownership "$WOLFPAIR_DIR"
+    cd "$WOLFPAIR_DIR" || return 1
+
+    # ── 1. server.py ──────────────────────────────────────────────────────────
+    log_info "Writing server.py..."
+    cat > "$WOLFPAIR_DIR/server.py" << 'PYEOF'
+#!/usr/bin/env python3
+"""
+wolf-pair — single-backend pairing helper for Wolf/Moonlight.
+
+GET /   → if a fresh pairing secret is pending: serve a PIN form.
+          if none: serve a waiting page that auto-refreshes.
+POST /  → take the PIN from the form, attach the freshest secret read from
+          Wolf's logs, and proxy {pin, secret} to Wolf's /pin/ endpoint.
+
+Wolf's pairing secrets are SINGLE-USE: Wolf erases a secret from its map the
+instant any PIN is submitted for it (correct or not). Because the secret stays
+in `docker logs` forever, we must never re-offer a secret we've already
+submitted — otherwise the user resubmits a dead secret and Wolf returns
+"key not found". We track submitted secrets and fall back to the waiting page
+until Moonlight initiates a brand-new pairing (which mints a new secret).
+"""
+import json, subprocess, re, urllib.request, urllib.error
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+WOLF_HTTP = "http://localhost:47989"
+
+# Secrets already submitted to Wolf. Wolf erases a secret on first submit, so a
+# secret in here is dead — show the waiting page instead of re-offering it.
+_submitted_hashes: set = set()
+
+PIN_LOG_RE = re.compile(r'Insert pin at http://\S+/pin/#([0-9A-Fa-f]+)')
+
+HTML_WAITING = b"""<!DOCTYPE html>
+<html><head>
+<meta http-equiv="refresh" content="3">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wolf Pairing</title>
+<style>
+  body{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;
+       justify-content:center;min-height:100vh;margin:0;
+       background:linear-gradient(132deg,#720082,#3f00c3,#0047ff);color:#fff}
+  h2{font-size:1.6rem;margin-bottom:.5rem}p{opacity:.85;margin:.3rem 0;text-align:center}
+</style>
+</head><body>
+<h2>No pairing request yet</h2>
+<p>In Moonlight, add this server, then return here.<br>
+This page refreshes automatically every 3 seconds.</p>
+</body></html>"""
+
+
+def parse_latest_hash(log_text):
+    """Return the most recent pairing secret found in log text, or None."""
+    matches = PIN_LOG_RE.findall(log_text)
+    return matches[-1] if matches else None
+
+
+def latest_hash():
+    """Freshest pairing secret that hasn't been submitted yet, or None."""
+    try:
+        r = subprocess.run(
+            ['docker', 'logs', '--tail', '200', 'wolf'],
+            capture_output=True, text=True, timeout=5)
+        h = parse_latest_hash(r.stdout + r.stderr)
+        return h if (h and h not in _submitted_hashes) else None
+    except Exception:
+        return None
+
+
+def build_pin_form(secret):
+    """Self-contained PIN form. Submits only the PIN; the server attaches the
+    secret at POST time so a stale page can't send an already-used secret."""
+    body = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wolf Pairing</title>
+<style>
+  body{{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;
+       justify-content:center;min-height:100vh;margin:0;
+       background:linear-gradient(132deg,#720082,#3f00c3,#0047ff);color:#fff}}
+  h2{{font-size:1.6rem;margin-bottom:.5rem}}
+  p{{opacity:.85;margin:.3rem 0;text-align:center}}
+  input{{font-size:2rem;width:5.5rem;text-align:center;padding:.4rem;
+         border:none;border-radius:.4rem;letter-spacing:.3rem}}
+  button{{margin-top:1rem;font-size:1.1rem;padding:.5rem 1.8rem;border:none;
+          border-radius:.4rem;cursor:pointer;background:#fff;color:#3f00c3;font-weight:bold}}
+  #msg{{margin-top:1rem;min-height:1.4em;max-width:22rem;text-align:center}}
+</style>
+</head><body>
+<h2>Moonlight Pairing</h2>
+<p>Enter the 4-digit PIN shown in Moonlight</p>
+<input id="pin" type="text" inputmode="numeric" maxlength="4" autofocus autocomplete="off">
+<button onclick="submitPin()">Pair</button>
+<div id="msg"></div>
+<script>
+function submitPin() {{
+  var pin = document.getElementById('pin').value.trim();
+  var msg = document.getElementById('msg');
+  if (!/^\\d{{4}}$/.test(pin)) {{ msg.textContent = 'Enter the 4-digit PIN from Moonlight'; return; }}
+  msg.textContent = 'Pairing…';
+  fetch('/', {{method:'POST',
+    headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify({{pin:pin}})
+  }}).then(function(r){{return r.text().then(function(t){{return {{ok:r.ok,body:t}}}});}})
+    .then(function(r){{msg.textContent = r.ok ? 'Paired! You can close this page.' : r.body;}})
+    .catch(function(){{msg.textContent='Network error — try again.';}});
+}}
+document.getElementById('pin').addEventListener('keydown',function(e){{if(e.key==='Enter')submitPin();}});
+</script>
+</body></html>"""
+    return body.encode('utf-8')
+
+
+def send_response_body(handler, status, content_type, body):
+    handler.send_response(status)
+    handler.send_header('Content-Type', content_type)
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Connection', 'close')
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+
+    def do_GET(self):
+        secret = latest_hash()
+        if secret:
+            send_response_body(self, 200, 'text/html; charset=utf-8', build_pin_form(secret))
+            return
+        send_response_body(self, 200, 'text/html; charset=utf-8', HTML_WAITING)
+
+    def do_POST(self):
+        # Read the freshest secret NOW (not whatever a stale page baked in).
+        secret = latest_hash()
+        length = int(self.headers.get('Content-Length', 0))
+        raw = self.rfile.read(length) if length else b''
+
+        if not secret:
+            send_response_body(self, 409, 'text/plain; charset=utf-8',
+                ('No active pairing request. In Moonlight, add this host again '
+                 'to start a fresh pairing, then enter the new PIN here.').encode())
+            return
+
+        try:
+            pin = str(json.loads(raw).get('pin', '')).strip()
+        except Exception:
+            pin = ''
+
+        payload = json.dumps({'pin': pin, 'secret': secret}).encode()
+        req = urllib.request.Request(WOLF_HTTP + '/pin/', data=payload,
+                                     headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+            _submitted_hashes.add(secret)  # consumed by Wolf — never reuse
+            send_response_body(self, resp.status,
+                               resp.headers.get('Content-Type', 'text/plain'), data)
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                # Secret wasn't in Wolf's map (expired/already used) — retire it.
+                _submitted_hashes.add(secret)
+                send_response_body(self, 400, 'text/plain; charset=utf-8',
+                    ('This pairing request expired or was already used. '
+                     'Re-add the host in Moonlight and enter the new PIN.').encode())
+            else:
+                send_response_body(self, e.code, 'text/plain; charset=utf-8',
+                    ('Wolf returned an error (%s). Try again.' % e.code).encode())
+        except Exception:
+            send_response_body(self, 502, 'text/plain; charset=utf-8',
+                               b'Could not reach Wolf. Is the wolf container running?')
+
+    def log_message(self, *a): pass
+
+
+if __name__ == '__main__':
+    HTTPServer(('0.0.0.0', 8090), Handler).serve_forever()
+PYEOF
+    log_success "server.py written"
+
+    # ── 2. Dockerfile ─────────────────────────────────────────────────────────
+    log_info "Writing Dockerfile..."
+    cat > "$WOLFPAIR_DIR/Dockerfile" << 'DOCKERFILE'
+FROM python:3.12-alpine
+RUN apk add --no-cache docker-cli
+WORKDIR /app
+COPY server.py .
+CMD ["python3", "server.py"]
+DOCKERFILE
+    log_success "Dockerfile written"
+
+    # ── 3. docker-compose.yml ─────────────────────────────────────────────────
+    # network_mode: host — server.py reaches Wolf at localhost:47989 directly.
+    # Docker socket (ro) — server.py calls `docker logs wolf` to read secrets.
+    log_info "Writing docker-compose.yml..."
+    cat > "$WOLFPAIR_DIR/docker-compose.yml" << 'COMPOSE'
+name: wolf-pair
+
+services:
+  wolf-pair:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wolf-pair
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+COMPOSE
+    log_success "docker-compose.yml written"
+
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WOLFPAIR_DIR"
+
+    # ── 4. Firewall ───────────────────────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        ufw allow "${WOLFPAIR_PORT}/tcp" comment "wolf-pair pairing UI" >/dev/null 2>&1 || true
+        log_success "UFW: opened port $WOLFPAIR_PORT/tcp"
+    fi
+
+    # ── 5. Caddy (optional) ───────────────────────────────────────────────────
+    configure_caddy_for_service "wolf-pair" "$WOLFPAIR_PORT" "wolf-pair"
+
+    # ── 6. README ─────────────────────────────────────────────────────────────
+    write_readme "$WOLFPAIR_DIR" << 'MD'
+# wolf-pair
+
+Browser-based Moonlight pairing helper for Wolf.
+
+Visit `http://<server-ip>:8090` when Moonlight shows a pairing PIN — the page
+detects the pending request automatically (auto-refreshes every 3 s while
+waiting) and lets you type the PIN without running any CLI commands.
+
+## How it works
+
+1. In Moonlight, add this server → a 4-digit PIN appears.
+2. Open `http://<server-ip>:8090` in any browser.
+3. The page shows a PIN form — type the PIN and press **Pair**.
+
+The server reads Wolf's docker logs for the current pairing secret, submits
+`{pin, secret}` to Wolf's `/pin/` API, and marks the secret as used so a
+stale browser tab can never re-submit a dead secret.
+
+## Manage
+
+```bash
+cd ~/docker/wolf-pair
+docker compose up -d          # start
+docker compose down           # stop
+docker compose up -d --build  # rebuild after source changes
+docker compose logs -f        # follow logs
+```
+
+## Notes
+
+- Requires the Wolf container (`wolf`) to be running.
+- Moonlight's actual video/audio stream is direct UDP/TCP to the server IP
+  and cannot be proxied — only the pairing page goes through wolf-pair.
+- If you set up a Caddy subdomain (e.g. `wolf-pair.yourdomain.com`), that
+  subdomain is for the PIN form only.
+MD
+
+    # ── 7. Build & start ──────────────────────────────────────────────────────
+    echo ""
+    log_success "wolf-pair configured at $WOLFPAIR_DIR"
+    echo ""
+    local START_WOLFPAIR=""
+    prompt_yn "Build and start wolf-pair now? (y/n):" "y" START_WOLFPAIR
+    if [ "$START_WOLFPAIR" = "y" ] || [ "$START_WOLFPAIR" = "Y" ]; then
+        log_info "Building wolf-pair (python:3.12-alpine + docker-cli)..."
+        if docker compose up -d --build; then
+            log_success "wolf-pair started"
+        else
+            log_warning "Build failed — check: docker compose logs"
+            return 1
+        fi
+    fi
+
+    echo ""
+    echo "  Pairing UI: http://localhost:${WOLFPAIR_PORT}"
+    echo "  When Moonlight shows a PIN, open that URL and enter it."
+    echo ""
+}

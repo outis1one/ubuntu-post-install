@@ -20,7 +20,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Category display order (groups not listed here are appended alphabetically).
-CATEGORY_ORDER=(base homelab utilities media cameras gaming backup)
+CATEGORY_ORDER=(base homelab utilities media cameras gaming extras backup)
 # Service ordering hint within a category (lower = earlier). Default 50.
 declare -A SERVICE_PRIORITY=( [caddy]=1 [crowdsec]=2 [authelia]=3 )
 
@@ -79,6 +79,8 @@ is_installed() {
         base) command -v ncdu >/dev/null 2>&1 ;;
         glow) command -v glow >/dev/null 2>&1 ;;
         crowdsec) command -v cscli >/dev/null 2>&1 ;;
+        silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
+        linux-to-sync) [ -d "$ACTUAL_HOME/linux-to-sync/.git" ] ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
