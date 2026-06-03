@@ -145,11 +145,68 @@ print(snaps[0] if snaps else '')
     [[ $WHITELIST =~ ^[Yy]$ ]] && WHITELIST_ENABLED=true || WHITELIST_ENABLED=false
 
     local WHITELIST_PLAYERS=()
+    declare -A WHITELIST_PRELOADED   # name → uuid, already resolved from existing file
     if [ "$WHITELIST_ENABLED" = true ] && [ "$UNATTENDED" != true ]; then
         echo ""
         log_info "Whitelist Players"
-        echo "  Enter player gamertags to pre-populate the whitelist."
-        echo "  UUIDs are looked up automatically. Press Enter alone when done."
+
+        # Import from existing whitelist.json when re-running against an existing instance
+        local _EXISTING_WL="$MC_DIR/data/whitelist.json"
+        if [ -f "$_EXISTING_WL" ]; then
+            local -a _EX_NAMES _EX_UUIDS
+            mapfile -t _EX_NAMES < <(python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    for p in data:
+        if p.get('name'): print(p['name'])
+except: pass
+" "$_EXISTING_WL" 2>/dev/null)
+            mapfile -t _EX_UUIDS < <(python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    for p in data:
+        if p.get('uuid'): print(p['uuid'])
+except: pass
+" "$_EXISTING_WL" 2>/dev/null)
+            if [ ${#_EX_NAMES[@]} -gt 0 ]; then
+                echo ""
+                echo "  Existing whitelist found (${#_EX_NAMES[@]} player(s)):"
+                local _i
+                for _i in "${!_EX_NAMES[@]}"; do
+                    printf "    %d) %s\n" "$((_i+1))" "${_EX_NAMES[$_i]}"
+                done
+                echo ""
+                echo "  Import from existing? Enter numbers (e.g. 1,3,4), 0=all, Enter=skip:"
+                local _WL_IMPORT=""
+                read -p "  Selection: " _WL_IMPORT
+                if [ -n "$_WL_IMPORT" ]; then
+                    if [ "$_WL_IMPORT" = "0" ]; then
+                        for _i in "${!_EX_NAMES[@]}"; do
+                            WHITELIST_PRELOADED["${_EX_NAMES[$_i]}"]="${_EX_UUIDS[$_i]}"
+                        done
+                        log_success "  Imported all ${#_EX_NAMES[@]} existing player(s)"
+                    else
+                        local -a _SEL_NUMS
+                        IFS=',' read -ra _SEL_NUMS <<< "$_WL_IMPORT"
+                        local _n
+                        for _n in "${_SEL_NUMS[@]}"; do
+                            _n="${_n// /}"
+                            if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && \
+                               [ "$_n" -le "${#_EX_NAMES[@]}" ]; then
+                                WHITELIST_PRELOADED["${_EX_NAMES[$((_n-1))]}"]="${_EX_UUIDS[$((_n-1))]}"
+                                log_info "    Imported: ${_EX_NAMES[$((_n-1))]}"
+                            fi
+                        done
+                    fi
+                fi
+            fi
+        fi
+
+        echo ""
+        echo "  Enter additional gamertags to add. UUIDs looked up automatically."
+        echo "  Press Enter alone when done."
         echo ""
         while true; do
             local _GT=""
@@ -158,8 +215,9 @@ print(snaps[0] if snaps else '')
             WHITELIST_PLAYERS+=("$_GT")
             log_info "    Added: $_GT"
         done
-        if [ ${#WHITELIST_PLAYERS[@]} -gt 0 ]; then
-            log_success "  ${#WHITELIST_PLAYERS[@]} player(s) queued for whitelist"
+        local _WL_TOTAL=$(( ${#WHITELIST_PLAYERS[@]} + ${#WHITELIST_PRELOADED[@]} ))
+        if [ "$_WL_TOTAL" -gt 0 ]; then
+            log_success "  $_WL_TOTAL player(s) queued for whitelist"
         else
             log_info "  No players entered — whitelist will be empty until you add players manually"
         fi
@@ -918,38 +976,61 @@ print(snaps[0] if snaps else '')
     cd "$MC_DIR" || return 1
 
     # ── Whitelist pre-population ────────────────────────────────────────────────
-    if [ "$WHITELIST_ENABLED" = true ] && [ ${#WHITELIST_PLAYERS[@]} -gt 0 ]; then
-        log_info "Looking up UUIDs for whitelist players..."
+    local _WL_NEED_WRITE=false
+    [ "$WHITELIST_ENABLED" = true ] && \
+        [ $(( ${#WHITELIST_PLAYERS[@]} + ${#WHITELIST_PRELOADED[@]} )) -gt 0 ] && \
+        _WL_NEED_WRITE=true
+
+    if [ "$_WL_NEED_WRITE" = true ]; then
+        log_info "Building whitelist.json..."
         local _WL_JSON="["
         local _WL_FIRST=true
         local _WL_COUNT=0
-        local _player _resp _uuid _name
-        for _player in "${WHITELIST_PLAYERS[@]}"; do
-            _resp=$(curl -sf --max-time 10 \
-                "https://api.mojang.com/users/profiles/minecraft/${_player}" 2>/dev/null || echo "")
-            if [ -z "$_resp" ]; then
-                log_warning "  '$_player' not found — skipping (account may not exist)"
-                continue
-            fi
-            _uuid=$(echo "$_resp" | python3 -c "
+
+        # Preloaded entries — UUIDs already known, no API call needed
+        local _wl_name _uuid
+        for _wl_name in "${!WHITELIST_PRELOADED[@]}"; do
+            _uuid="${WHITELIST_PRELOADED[$_wl_name]}"
+            log_success "  $_wl_name → $_uuid (from existing whitelist)"
+            [ "$_WL_FIRST" = true ] || _WL_JSON+=","
+            _WL_FIRST=false
+            _WL_COUNT=$((_WL_COUNT + 1))
+            _WL_JSON+="
+  {\"uuid\": \"$_uuid\", \"name\": \"$_wl_name\"}"
+        done
+
+        # New gamertags — look up via Mojang API
+        if [ ${#WHITELIST_PLAYERS[@]} -gt 0 ]; then
+            log_info "  Looking up UUIDs via Mojang API..."
+            local _player _resp _name
+            for _player in "${WHITELIST_PLAYERS[@]}"; do
+                _resp=$(curl -sf --max-time 10 \
+                    "https://api.mojang.com/users/profiles/minecraft/${_player}" 2>/dev/null || echo "")
+                if [ -z "$_resp" ]; then
+                    log_warning "  '$_player' not found — skipping (account may not exist)"
+                    continue
+                fi
+                _uuid=$(echo "$_resp" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 uid = d['id']
 print(f'{uid[:8]}-{uid[8:12]}-{uid[12:16]}-{uid[16:20]}-{uid[20:]}')
 " 2>/dev/null || echo "")
-            _name=$(echo "$_resp" | python3 -c "
+                _name=$(echo "$_resp" | python3 -c "
 import sys, json; d=json.load(sys.stdin); print(d.get('name',''))" 2>/dev/null || echo "$_player")
-            if [ -z "$_uuid" ]; then
-                log_warning "  Could not parse UUID for '$_player' — skipping"
-                continue
-            fi
-            log_success "  $_name → $_uuid"
-            [ "$_WL_FIRST" = true ] || _WL_JSON+=","
-            _WL_FIRST=false
-            _WL_COUNT=$((_WL_COUNT + 1))
-            _WL_JSON+="
+                if [ -z "$_uuid" ]; then
+                    log_warning "  Could not parse UUID for '$_player' — skipping"
+                    continue
+                fi
+                log_success "  $_name → $_uuid"
+                [ "$_WL_FIRST" = true ] || _WL_JSON+=","
+                _WL_FIRST=false
+                _WL_COUNT=$((_WL_COUNT + 1))
+                _WL_JSON+="
   {\"uuid\": \"$_uuid\", \"name\": \"$_name\"}"
-        done
+            done
+        fi
+
         _WL_JSON+="
 ]"
         echo "$_WL_JSON" > "$MC_DIR/data/whitelist.json"
@@ -1012,9 +1093,13 @@ for v in versions:
         echo ""
         log_info "Vanilla Tweaks — download your selected packs manually:"
         echo ""
-        echo "  1. Go to: https://vanillatweaks.net/picker/datapacks/"
-        echo "  2. Select Minecraft version ${VT_VERSION} in the version dropdown"
-        echo "  3. Enable these packs (your selections from the toggle menu):"
+        echo "  ┌─ Quick start: pre-configured share links (opens VT pre-selected) ─┐"
+        echo "  │  Datapacks:       https://vanillatweaks.net/share#B3QqSd           │"
+        echo "  │  Crafting tweaks: https://vanillatweaks.net/share#SqzGkO           │"
+        echo "  └───────────────────────────────────────────────────────────────────-┘"
+        echo ""
+        echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
+        echo "  and select version ${VT_VERSION}, then enable your chosen packs:"
         echo ""
         local _LAST_CAT="" _cat dp
         for dp in "${DPACK_ORDER[@]}"; do
@@ -1027,13 +1112,20 @@ for v in versions:
             echo "         • ${DPACKS[$dp]}"
         done
         echo ""
-        echo "  4. Click Download and save the .zip file"
-        echo "  5. Place the .zip in:  ${MC_DIR}/datapacks-download/"
-        echo "  6. Rebuild:  cd ${MC_DIR} && docker compose build"
-        echo "  7. Restart:  cd ${MC_DIR} && docker compose up -d"
-        echo ""
+        echo "  ── How to install ────────────────────────────────────────────────────"
+        echo "  1. Download the ZIP from vanillatweaks.net (use share link or pick)"
+        echo "  2. SCP it to this server (run on your local machine):"
+        echo "       scp ~/Downloads/VanillaTweaks*.zip $(whoami)@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
+        echo "  3. On this server:"
+        echo "       cd ${MC_DIR}/datapacks-download"
+        echo "       unzip 'VanillaTweaks*.zip' && rm VanillaTweaks*.zip"
+        echo "  4. Rebuild:  cd ${MC_DIR} && docker compose build"
+        echo "  5. Restart:  cd ${MC_DIR} && docker compose up -d"
+        echo "  ──────────────────────────────────────────────────────────────────────"
         echo "  The itzg image extracts .zip files from /datapacks/ on startup."
         echo "  Datapacks land in ${MC_NAME}/data/datapacks/ and persist across restarts."
+        echo ""
+        read -p "  Press Enter when datapacks are in datapacks-download/ (or Enter to skip): "
     fi
 
     # ── LuckPerms bootstrap script ──────────────────────────────────────────────
