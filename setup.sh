@@ -27,6 +27,7 @@ for arg in "$@"; do
         --dry-run)    DRY_RUN=true ;;
         --unattended) UNATTENDED=true ;;
         --list|-l)    DO_LIST=true ;;
+        --version|-V) cat "$HERE/VERSION" 2>/dev/null || echo "unknown"; exit 0 ;;
         -h|--help)
             sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
