@@ -1741,6 +1741,23 @@ run_cmd apt install -y \
     unzip \
     rclone || echo "Warning: Some utilities failed to install, continuing..."
 
+# Install glow (terminal markdown reader) from the Charm apt repo
+echo ""
+echo "Installing glow (terminal markdown reader)..."
+if command -v glow >/dev/null 2>&1; then
+    echo "  ✓ glow already installed"
+elif [ "$DRY_RUN" = true ]; then
+    echo "[DRY-RUN] Would add repo.charm.sh apt repo and install glow"
+else
+    sudo mkdir -p /etc/apt/keyrings
+    if curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/charm.gpg; then
+        echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list >/dev/null
+        sudo apt update -y && sudo apt install -y glow && echo "  ✓ glow installed" || echo "  ⚠ glow install failed"
+    else
+        echo "  ⚠ Could not fetch Charm signing key - skipping glow"
+    fi
+fi
+
 # Install OpenSSH Server
 echo ""
 echo "Installing OpenSSH Server..."
@@ -2595,6 +2612,7 @@ else
         [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
         [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
         [ -d "$DOCKER_DIR/mealie" ] && EXISTING_SERVICES[MEALIE]="ON"
+        [ -d "$DOCKER_DIR/homeassistant" ] && EXISTING_SERVICES[HOMEASSISTANT]="ON"
         [ -d "$DOCKER_DIR/minecraft" ] && EXISTING_SERVICES[MINECRAFT]="ON"
         [ -d "$DOCKER_DIR/jellyfin" ] && EXISTING_SERVICES[JELLYFIN]="ON"
         [ -d "$DOCKER_DIR/frigate" ] && EXISTING_SERVICES[FRIGATE]="ON"
@@ -2636,6 +2654,7 @@ else
                     "CROWDSEC" "Intrusion prevention (CrowdSec: bans + geo + reputation)" ${EXISTING_SERVICES[CROWDSEC]:-OFF} \
                     "LYRION" "Music streaming server (LMS)" ${EXISTING_SERVICES[LYRION]:-OFF} \
                     "MEALIE" "Recipe manager & meal planner" ${EXISTING_SERVICES[MEALIE]:-OFF} \
+                    "HOMEASSISTANT" "Home automation hub (Home Assistant)" ${EXISTING_SERVICES[HOMEASSISTANT]:-OFF} \
                     "MINECRAFT" "Minecraft game server" ${EXISTING_SERVICES[MINECRAFT]:-OFF} \
                     "JELLYFIN" "Free media server (Emby alternative)" ${EXISTING_SERVICES[JELLYFIN]:-OFF} \
                     "FRIGATE" "AI-powered NVR for security cameras" ${EXISTING_SERVICES[FRIGATE]:-OFF} \
@@ -2667,6 +2686,7 @@ else
                 [ -n "${EXISTING_SERVICES[CROWDSEC]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CROWDSEC \"Intrusion prevention\" ON"
                 [ -n "${EXISTING_SERVICES[LYRION]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS LYRION \"Music server\" ON"
                 [ -n "${EXISTING_SERVICES[MEALIE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MEALIE \"Recipe manager\" ON"
+                [ -n "${EXISTING_SERVICES[HOMEASSISTANT]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS HOMEASSISTANT \"Home automation\" ON"
                 [ -n "${EXISTING_SERVICES[MINECRAFT]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MINECRAFT \"Game server\" ON"
                 [ -n "${EXISTING_SERVICES[JELLYFIN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS JELLYFIN \"Media server\" ON"
                 [ -n "${EXISTING_SERVICES[FRIGATE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FRIGATE \"NVR cameras\" ON"
@@ -2717,6 +2737,7 @@ else
         : ${INSTALL_CROWDSEC:="n"}
         : ${INSTALL_LMS:="n"}
         : ${INSTALL_MEALIE:="n"}
+        : ${INSTALL_HOMEASSISTANT:="n"}
         : ${INSTALL_MINECRAFT:="n"}
         : ${INSTALL_JELLYFIN:="n"}
         : ${INSTALL_FRIGATE:="n"}
@@ -2743,6 +2764,7 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "CROWDSEC"; then INSTALL_CROWDSEC="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then INSTALL_LMS="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then INSTALL_MEALIE="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "HOMEASSISTANT"; then INSTALL_HOMEASSISTANT="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then INSTALL_MINECRAFT="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "JELLYFIN"; then INSTALL_JELLYFIN="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "FRIGATE\""; then INSTALL_FRIGATE="y"; fi
@@ -2815,6 +2837,7 @@ else
                 if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then uninstall_service "Mealie" "$DOCKER_DIR/mealie" "mealie"; fi
+                if echo "$SELECTED_SERVICES" | grep -q "HOMEASSISTANT"; then uninstall_service "Home Assistant" "$DOCKER_DIR/homeassistant" "homeassistant"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then uninstall_service "Minecraft" "$DOCKER_DIR/minecraft" "minecraft"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "JELLYFIN"; then uninstall_service "Jellyfin" "$DOCKER_DIR/jellyfin" "jellyfin"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "FRIGATE\""; then uninstall_service "Frigate" "$DOCKER_DIR/frigate" "frigate"; fi
@@ -4926,6 +4949,106 @@ MEALIE_COMPOSE
         fi
     fi
 
+    # ---- HOME ASSISTANT ----
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_HOMEASSISTANT" ]; then
+        echo ""
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ HOME ASSISTANT - Open-source home automation hub                │"
+        echo "│ Smart-home control, automations, dashboards.                    │"
+        echo "│ Port: 8123                                                      │"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        prompt_yn "Install Home Assistant? (y/n):" "n" INSTALL_HOMEASSISTANT
+    fi
+
+    if [ "$INSTALL_HOMEASSISTANT" = "y" ] || [ "$INSTALL_HOMEASSISTANT" = "Y" ]; then
+        echo "Installing Home Assistant..."
+        HOMEASSISTANT_DIR="$DOCKER_DIR/homeassistant"
+
+        if [ "$DRY_RUN" = true ]; then
+            echo "[DRY-RUN] Would create $HOMEASSISTANT_DIR"
+        else
+            mkdir -p "$HOMEASSISTANT_DIR"
+            ensure_docker_dir_ownership "$HOMEASSISTANT_DIR"
+            cd "$HOMEASSISTANT_DIR"
+
+            # Networking mode: bridge (published port) vs host networking.
+            echo ""
+            echo "  Home Assistant networking mode:"
+            echo "    1) Bridge  - container gets its own network; port 8123 is published"
+            echo "                 to the host. Works behind the Caddy reverse proxy and"
+            echo "                 keeps HA isolated. Recommended for most setups."
+            echo "    2) Host    - HA shares the host's network directly. Needed for"
+            echo "                 auto-discovery of devices on your LAN (Chromecast/Cast,"
+            echo "                 HomeKit, mDNS/Zeroconf, some Zigbee/Z-Wave & Bluetooth)."
+            prompt_text "  Choose networking mode [1]:" "1" HA_NETMODE
+            if [ "$HA_NETMODE" = "2" ]; then
+                HA_NET_LINES="    network_mode: host"
+                echo "  → Host networking selected (best device discovery)."
+            else
+                HA_NET_LINES="    ports:
+      - \"8123:8123\""
+                echo "  → Bridge networking selected (port 8123 published)."
+            fi
+
+            cat > docker-compose.yml << HOMEASSISTANT_COMPOSE
+name: homeassistant
+
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    hostname: homeassistant
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    volumes:
+      - ./config:/config
+      - /run/dbus:/run/dbus:ro
+${HA_NET_LINES}
+HOMEASSISTANT_COMPOSE
+
+            mkdir -p config
+
+            # Pre-seed trusted_proxies so HA works behind the Caddy reverse proxy.
+            # Only written on a fresh install (never clobber an existing config).
+            if [ ! -f config/configuration.yaml ]; then
+                cat > config/configuration.yaml << 'HA_CONFIG'
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Allow access through a reverse proxy (e.g. Caddy)
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 10.0.0.0/8
+    - 127.0.0.1
+    - ::1
+HA_CONFIG
+            fi
+
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HOMEASSISTANT_DIR"
+
+            echo ""
+            echo "✓ Home Assistant configured at $HOMEASSISTANT_DIR"
+
+            # Configure Caddy reverse proxy before starting
+            configure_caddy_for_service "Home Assistant" "8123" "home"
+
+            prompt_yn "Start Home Assistant now? (y/n):" "y" START_HOMEASSISTANT
+            if [ "$START_HOMEASSISTANT" = "y" ] || [ "$START_HOMEASSISTANT" = "Y" ]; then
+                docker compose up -d 2>/dev/null && echo "  ✓ Home Assistant started" || echo "  ⚠ Failed to start"
+            fi
+
+            echo "  Access at:  http://localhost:8123"
+            echo "  First run:  open the URL and create your admin account (onboarding)."
+            echo "  Note:       first startup can take a minute while HA initializes."
+            echo ""
+        fi
+    fi
+
     # ---- MINECRAFT SERVER ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_MINECRAFT" ]; then
         echo ""
@@ -5441,6 +5564,11 @@ CADDY_ENV
 # Mealie (recipes)
 # recipes.{$MY_DOMAIN} {
 #     reverse_proxy mealie:9000
+# }
+
+# Home Assistant (home)
+# home.{$MY_DOMAIN} {
+#     reverse_proxy homeassistant:8123
 # }
 
 # ntfy (notifications)
@@ -7123,6 +7251,10 @@ if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then
                     if [ "$INSTALL_MEALIE" = "y" ] || [ "$INSTALL_MEALIE" = "Y" ]; then
                         ufw allow 9925/tcp comment 'Mealie' 2>/dev/null
                         echo "  ✓ Allowed Mealie (9925)"
+                    fi
+                    if [ "$INSTALL_HOMEASSISTANT" = "y" ] || [ "$INSTALL_HOMEASSISTANT" = "Y" ]; then
+                        ufw allow 8123/tcp comment 'Home Assistant' 2>/dev/null
+                        echo "  ✓ Allowed Home Assistant (8123)"
                     fi
                     if [ "$INSTALL_MAGICMIRROR" = "y" ] || [ "$INSTALL_MAGICMIRROR" = "Y" ]; then
                         ufw allow 8081:8083/tcp comment 'MagicMirror' 2>/dev/null
