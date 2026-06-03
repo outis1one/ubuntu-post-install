@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Ubuntu 26.04 Post-Installation Script
+# Ubuntu 24.04 Post-Installation Script
 # Run with: sudo bash post-install.sh
 # This script is rerunnable - it detects existing installations
 
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/post-install.log"
 WHIPTAIL_USED=false
 
 show_help() {
-    echo "Ubuntu 26.04 Post-Installation Script"
+    echo "Ubuntu 24.04 Post-Installation Script"
     echo ""
     echo "Usage: sudo ./post-install.sh [OPTIONS]"
     echo ""
@@ -68,7 +68,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "=== Post-Install Log Started: $(date) ===" >> "$LOG_FILE"
 
-echo "=== Ubuntu 26.04 Post-Installation Script ==="
+echo "=== Ubuntu 24.04 Post-Installation Script ==="
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
@@ -1331,7 +1331,7 @@ generate_password() {
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
 }
 
-# Validate password for Keycloak (alphanumeric only, minimum length)
+# Validate password (alphanumeric only, minimum length)
 # Usage: validate_password "password" [min_length]
 # Returns 0 if valid, 1 if invalid
 validate_password() {
@@ -1344,7 +1344,7 @@ validate_password() {
         return 1
     fi
 
-    # Check for special characters (not allowed for Keycloak)
+    # Check for special characters (not allowed)
     if echo "$password" | grep -q '[^a-zA-Z0-9]'; then
         echo "  ⚠ Password must contain only letters and numbers (no special characters)"
         return 1
@@ -1475,7 +1475,7 @@ $SERVICE_DOMAIN {
         Referrer-Policy "strict-origin-when-cross-origin"
     }
 
-    # Logging for fail2ban
+    # Logging for CrowdSec (Caddy JSON access logs)
     log {
         output file /var/log/caddy/${SERVICE_DOMAIN}.log
         format json
@@ -1898,48 +1898,53 @@ else
     echo ""
     echo "No SSH keys imported. Password authentication remains enabled."
 
-    # Offer fail2ban since password auth is still enabled
+    # Offer CrowdSec since password auth is still enabled
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "FAIL2BAN (Recommended with password SSH)"
+    echo "CROWDSEC (Recommended with password SSH)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Since password authentication is enabled, fail2ban is recommended"
-    echo "to protect against brute-force SSH attacks."
+    echo "Since password authentication is enabled, CrowdSec is recommended"
+    echo "to protect against brute-force SSH attacks. CrowdSec is the modern"
+    echo "successor to fail2ban and also adds geo-blocking and a community"
+    echo "IP-reputation blocklist."
     echo ""
 
-    prompt_yn "Install and enable fail2ban? (y/n):" "y" INSTALL_FAIL2BAN
+    prompt_yn "Install and enable CrowdSec? (y/n):" "y" INSTALL_CROWDSEC
 
-    if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+    if [ "$INSTALL_CROWDSEC" = "y" ] || [ "$INSTALL_CROWDSEC" = "Y" ]; then
         echo ""
-        echo "Installing fail2ban..."
-        run_cmd apt install -y fail2ban
+        echo "Installing CrowdSec..."
 
         if [ "$DRY_RUN" != true ]; then
-            # Create local config to protect SSH
-            cat > /etc/fail2ban/jail.local << 'FAIL2BAN_CONFIG'
-[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-findtime = 600
-FAIL2BAN_CONFIG
+            # Add the CrowdSec APT repository and install the agent
+            if ! command -v cscli &> /dev/null; then
+                curl -s https://install.crowdsec.net | sudo sh
+                sudo apt install -y crowdsec
+            else
+                echo "✓ CrowdSec is already installed"
+            fi
 
-            run_cmd systemctl enable fail2ban
-            run_cmd systemctl restart fail2ban
-            echo "✓ fail2ban installed and configured"
-            echo "  - 5 failed attempts = 1 hour ban"
-            echo "  - View banned IPs: sudo fail2ban-client status sshd"
+            # Firewall bouncer enforces decisions via iptables/nftables
+            sudo apt install -y crowdsec-firewall-bouncer-iptables
+
+            # SSH brute-force + base Linux detection scenarios
+            sudo cscli collections install crowdsecurity/sshd crowdsecurity/linux 2>/dev/null || true
+
+            run_cmd systemctl enable crowdsec
+            run_cmd systemctl restart crowdsec
+            run_cmd systemctl enable crowdsec-firewall-bouncer
+            run_cmd systemctl restart crowdsec-firewall-bouncer
+            echo "✓ CrowdSec installed and configured"
+            echo "  - Detects SSH brute-force via /var/log/auth.log"
+            echo "  - View active bans: sudo cscli decisions list"
         fi
     else
-        echo "Skipping fail2ban installation."
+        echo "Skipping CrowdSec installation."
     fi
 fi
 
-INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-n}"
+INSTALL_CROWDSEC="${INSTALL_CROWDSEC:-n}"
 
 fi  # End SKIP_SSH_CONFIG
 
@@ -2325,8 +2330,8 @@ if [ "$INSTALL_TAILSCALE" = "y" ] || [ "$INSTALL_TAILSCALE" = "Y" ]; then
         echo "[DRY-RUN] Would install tailscale"
     else
         # Add Tailscale's package signing key and repository
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/resolute.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
-        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/resolute.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+        curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list
 
         apt update
         apt install -y tailscale || echo "Warning: Tailscale installation failed, continuing..."
@@ -2586,7 +2591,6 @@ else
         [ -d "$DOCKER_DIR/filebrowser" ] && EXISTING_SERVICES[FILEBROWSER]="ON"
         [ -d "$DOCKER_DIR/magicmirror" ] && EXISTING_SERVICES[MAGICMIRROR]="ON"
         [ -d "$DOCKER_DIR/actualbudget" ] && EXISTING_SERVICES[ACTUALBUDGET]="ON"
-        [ -d "$DOCKER_DIR/keycloak" ] && EXISTING_SERVICES[KEYCLOAK]="ON"
         [ -d "$DOCKER_DIR/authelia" ] && EXISTING_SERVICES[AUTHELIA]="ON"
         [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
         [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
@@ -2603,7 +2607,7 @@ else
         [ -d "$DOCKER_DIR/fmd" ] && EXISTING_SERVICES[FINDMYDEVICE]="ON"
         [ -d "$DOCKER_DIR/frigate-notify" ] && EXISTING_SERVICES[FRIGATE_NOTIFY]="ON"
         [ -d "$DOCKER_DIR/watchtower" ] && EXISTING_SERVICES[WATCHTOWER]="ON"
-        command -v fail2ban-client &> /dev/null && EXISTING_SERVICES[FAIL2BAN]="ON"
+        command -v cscli &> /dev/null && EXISTING_SERVICES[CROWDSEC]="ON"
 
         # Ask user what action to perform
         ACTION=$(whiptail --title "Service Management" --menu \
@@ -2627,10 +2631,9 @@ else
                     "FILEBROWSER" "Web-based file manager" ${EXISTING_SERVICES[FILEBROWSER]:-OFF} \
                     "MAGICMIRROR" "Smart mirror / dashboard display" ${EXISTING_SERVICES[MAGICMIRROR]:-OFF} \
                     "ACTUALBUDGET" "Personal finance management with bank sync" ${EXISTING_SERVICES[ACTUALBUDGET]:-OFF} \
-                    "KEYCLOAK" "Identity & Access Management (SSO)" ${EXISTING_SERVICES[KEYCLOAK]:-OFF} \
                     "AUTHELIA" "SSO + 2FA auth portal for Caddy" ${EXISTING_SERVICES[AUTHELIA]:-OFF} \
                     "CADDY" "Reverse proxy with automatic HTTPS" ${EXISTING_SERVICES[CADDY]:-OFF} \
-                    "FAIL2BAN" "Intrusion prevention system" ${EXISTING_SERVICES[FAIL2BAN]:-OFF} \
+                    "CROWDSEC" "Intrusion prevention (CrowdSec: bans + geo + reputation)" ${EXISTING_SERVICES[CROWDSEC]:-OFF} \
                     "LYRION" "Music streaming server (LMS)" ${EXISTING_SERVICES[LYRION]:-OFF} \
                     "MEALIE" "Recipe manager & meal planner" ${EXISTING_SERVICES[MEALIE]:-OFF} \
                     "MINECRAFT" "Minecraft game server" ${EXISTING_SERVICES[MINECRAFT]:-OFF} \
@@ -2659,10 +2662,9 @@ else
                 [ -n "${EXISTING_SERVICES[FILEBROWSER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FILEBROWSER \"Web file manager\" ON"
                 [ -n "${EXISTING_SERVICES[MAGICMIRROR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MAGICMIRROR \"Smart mirror\" ON"
                 [ -n "${EXISTING_SERVICES[ACTUALBUDGET]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ACTUALBUDGET \"Personal finance\" ON"
-                [ -n "${EXISTING_SERVICES[KEYCLOAK]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS KEYCLOAK \"Identity management\" ON"
                 [ -n "${EXISTING_SERVICES[AUTHELIA]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS AUTHELIA \"SSO + 2FA auth portal\" ON"
                 [ -n "${EXISTING_SERVICES[CADDY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CADDY \"Reverse proxy\" ON"
-                [ -n "${EXISTING_SERVICES[FAIL2BAN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FAIL2BAN \"Intrusion prevention\" ON"
+                [ -n "${EXISTING_SERVICES[CROWDSEC]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CROWDSEC \"Intrusion prevention\" ON"
                 [ -n "${EXISTING_SERVICES[LYRION]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS LYRION \"Music server\" ON"
                 [ -n "${EXISTING_SERVICES[MEALIE]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MEALIE \"Recipe manager\" ON"
                 [ -n "${EXISTING_SERVICES[MINECRAFT]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MINECRAFT \"Game server\" ON"
@@ -2710,10 +2712,9 @@ else
         : ${INSTALL_FILEBROWSER:="n"}
         : ${INSTALL_MAGICMIRROR:="n"}
         : ${INSTALL_ACTUALBUDGET:="n"}
-        : ${INSTALL_KEYCLOAK:="n"}
         : ${INSTALL_AUTHELIA:="n"}
         : ${INSTALL_CADDY:="n"}
-        : ${INSTALL_FAIL2BAN:="n"}
+        : ${INSTALL_CROWDSEC:="n"}
         : ${INSTALL_LMS:="n"}
         : ${INSTALL_MEALIE:="n"}
         : ${INSTALL_MINECRAFT:="n"}
@@ -2737,10 +2738,9 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then INSTALL_FILEBROWSER="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then INSTALL_MAGICMIRROR="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then INSTALL_ACTUALBUDGET="y"; fi
-        if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then INSTALL_KEYCLOAK="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then INSTALL_AUTHELIA="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then INSTALL_CADDY="y"; fi
-        if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then INSTALL_FAIL2BAN="y"; fi
+        if echo "$SELECTED_SERVICES" | grep -q "CROWDSEC"; then INSTALL_CROWDSEC="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then INSTALL_LMS="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MEALIE"; then INSTALL_MEALIE="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MINECRAFT"; then INSTALL_MINECRAFT="y"; fi
@@ -2811,7 +2811,6 @@ else
                 if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then uninstall_service "FileBrowser" "$DOCKER_DIR/filebrowser" "filebrowser"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then uninstall_service "MagicMirror" "$DOCKER_DIR/magicmirror" "magicmirror"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then uninstall_service "ActualBudget" "$DOCKER_DIR/actualbudget" "actualbudget"; fi
-                if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then uninstall_service "Keycloak" "$DOCKER_DIR/keycloak" "keycloak"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then uninstall_service "Authelia" "$DOCKER_DIR/authelia" "authelia"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
@@ -2829,15 +2828,17 @@ else
                 if echo "$SELECTED_SERVICES" | grep -q "FRIGATE_NOTIFY"; then uninstall_service "Frigate-Notify" "$DOCKER_DIR/frigate-notify" "frigate-notify"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "WATCHTOWER"; then uninstall_service "Watchtower" "$DOCKER_DIR/watchtower" "watchtower"; fi
 
-                # Special handling for fail2ban (system package)
-                if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then
-                    echo "Uninstalling fail2ban..."
-                    echo "  Stopping fail2ban service..."
-                    systemctl stop fail2ban 2>/dev/null || true
-                    systemctl disable fail2ban 2>/dev/null || true
-                    echo "  Removing fail2ban package..."
-                    apt-get remove --purge -y fail2ban 2>/dev/null || true
-                    echo "  ✓ fail2ban uninstalled"
+                # Special handling for CrowdSec (system packages)
+                if echo "$SELECTED_SERVICES" | grep -q "CROWDSEC"; then
+                    echo "Uninstalling CrowdSec..."
+                    echo "  Stopping CrowdSec services..."
+                    systemctl stop crowdsec 2>/dev/null || true
+                    systemctl stop crowdsec-firewall-bouncer 2>/dev/null || true
+                    systemctl disable crowdsec 2>/dev/null || true
+                    systemctl disable crowdsec-firewall-bouncer 2>/dev/null || true
+                    echo "  Removing CrowdSec packages..."
+                    apt-get remove --purge -y crowdsec crowdsec-firewall-bouncer-iptables 2>/dev/null || true
+                    echo "  ✓ CrowdSec uninstalled"
                     echo ""
                 fi
 
@@ -4208,8 +4209,7 @@ services:
     env_file:
       - .env
     labels:
-      - "io.podman.annotations.label/fail2ban.enable=true"
-      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
+      - "io.podman.annotations.label/crowdsec.enable=true"
 AB_COMPOSE
 
             echo "  ✓ ActualBudget configured at $AB_DIR"
@@ -4230,625 +4230,6 @@ AB_COMPOSE
         fi
         fi  # End AB_RECONFIGURE check
     fi  # End INSTALL_ACTUALBUDGET check
-
-    # ---- KEYCLOAK ----
-    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_KEYCLOAK" ]; then
-        echo ""
-        echo "┌─────────────────────────────────────────────────────────────────┐"
-        echo "│ KEYCLOAK - Identity and Access Management (IAM)                │"
-        echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
-        echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
-        echo "└─────────────────────────────────────────────────────────────────┘"
-        prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
-    fi
-
-    if [ "$INSTALL_KEYCLOAK" = "y" ] || [ "$INSTALL_KEYCLOAK" = "Y" ]; then
-        KC_DIR="$DOCKER_DIR/keycloak"
-
-        if [ "$DRY_RUN" = true ]; then
-            echo "[DRY-RUN] Would create $KC_DIR"
-        else
-            echo "Installing Keycloak..."
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "PASSWORD REQUIREMENTS:"
-            echo "  • Minimum 12 characters (16+ recommended)"
-            echo "  • Letters and numbers ONLY (no special characters)"
-            echo "  • Press ENTER for secure auto-generated password"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-
-            # Prompt for admin password with validation
-            KC_ADMIN_PASS=""
-            while true; do
-                read -s -p "Enter Keycloak admin password [auto-generate]: " KC_ADMIN_PASS
-                echo ""
-
-                # Generate secure password if user pressed Enter
-                if [ -z "$KC_ADMIN_PASS" ]; then
-                    KC_ADMIN_PASS=$(generate_password 20)
-                    echo "  ✓ Generated secure admin password (saved in .env)"
-                    break
-                fi
-
-                # Validate password
-                if validate_password "$KC_ADMIN_PASS" 12; then
-                    echo "  ✓ Admin password accepted"
-                    break
-                fi
-                echo "  Please try again."
-            done
-
-            # Prompt for database password with validation
-            KC_DB_PASS=""
-            while true; do
-                read -s -p "Enter database password [auto-generate]: " KC_DB_PASS
-                echo ""
-
-                # Generate secure password if user pressed Enter
-                if [ -z "$KC_DB_PASS" ]; then
-                    KC_DB_PASS=$(generate_password 32)
-                    echo "  ✓ Generated secure database password (saved in .env)"
-                    break
-                fi
-
-                # Validate password
-                if validate_password "$KC_DB_PASS" 12; then
-                    echo "  ✓ Database password accepted"
-                    break
-                fi
-                echo "  Please try again."
-            done
-            echo ""
-
-            # Ask about production vs development mode
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "DEPLOYMENT MODE:"
-            echo "  • Production: Requires HTTPS via Caddy2 (recommended)"
-            echo "  • Development: HTTP only, relaxed security (testing only)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            prompt_yn "Use production mode? (requires Caddy2 reverse proxy) (y/n):" "y" KC_PRODUCTION
-
-            KC_HOSTNAME=""
-            KC_START_CMD="start-dev"
-            KC_HOSTNAME_STRICT="false"
-
-            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
-                KC_START_CMD="start"
-                KC_HOSTNAME_STRICT="false"
-
-                echo ""
-                echo "Enter your Keycloak hostname (e.g., auth.yourdomain.com)"
-                echo "This should match your Caddy2 configuration."
-                read -p "Hostname: " KC_HOSTNAME
-
-                if [ -n "$KC_HOSTNAME" ]; then
-                    echo "  ✓ Production mode enabled with hostname: $KC_HOSTNAME"
-                    echo "  ⚠ Make sure Caddy2 is configured for this domain!"
-                else
-                    echo "  ⚠ No hostname provided - using relaxed mode"
-                    KC_HOSTNAME=""
-                fi
-            fi
-
-            mkdir -p "$KC_DIR/data" "$KC_DIR/postgres-data"
-            ensure_docker_dir_ownership "$KC_DIR"
-            cd "$KC_DIR"
-
-            # Create .env file for sensitive credentials
-            cat > .env << KC_ENV
-# Keycloak Environment Variables
-# ⚠ KEEP THIS FILE SECURE - Contains sensitive passwords
-
-# Admin Credentials
-KEYCLOAK_ADMIN=admin
-KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
-
-# Database Credentials
-POSTGRES_DB=keycloak
-POSTGRES_USER=keycloak
-POSTGRES_PASSWORD=$KC_DB_PASS
-KC_DB=postgres
-KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-KC_DB_USERNAME=keycloak
-KC_DB_PASSWORD=$KC_DB_PASS
-
-# Keycloak Configuration
-# Proxy settings (v2) - Trust X-Forwarded-* headers from Caddy2
-KC_PROXY_HEADERS=xforwarded
-KC_HTTP_ENABLED=true
-KC_HOSTNAME_STRICT=$KC_HOSTNAME_STRICT
-KC_LOG_LEVEL=INFO
-KC_HEALTH_ENABLED=true
-KC_METRICS_ENABLED=true
-KC_ENV
-
-            # Add hostname to .env if provided
-            if [ -n "$KC_HOSTNAME" ]; then
-                echo "KC_HOSTNAME=$KC_HOSTNAME" >> .env
-            fi
-
-            # Create docker-compose.yml
-            cat > docker-compose.yml << KC_COMPOSE
-name: keycloak
-
-services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: keycloak-db
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  keycloak:
-    image: quay.io/keycloak/keycloak:latest
-    container_name: keycloak
-    restart: unless-stopped
-    command:
-      - $KC_START_CMD
-    env_file:
-      - .env
-    ports:
-      - "8180:8080"
-    volumes:
-      - ./data:/opt/keycloak/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    labels:
-      - "io.podman.annotations.label/fail2ban.enable=true"
-      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
-KC_COMPOSE
-
-            echo ""
-            echo "  ✓ Keycloak configured at $KC_DIR"
-            echo "  ✓ Credentials saved in .env file"
-            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
-                echo "  ✓ Production mode enabled"
-            else
-                echo "  ℹ Development mode (use production mode for internet-facing deployments)"
-            fi
-            echo ""
-
-            # If Caddy is installed/being installed, offer to configure it for Keycloak
-            if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ] || [ -d "$DOCKER_DIR/caddy" ]; then
-                echo ""
-                prompt_yn "Configure Caddy reverse proxy for Keycloak? (y/n):" "y" CONFIGURE_CADDY_KC
-
-                if [ "$CONFIGURE_CADDY_KC" = "y" ] || [ "$CONFIGURE_CADDY_KC" = "Y" ]; then
-                    CADDY_DIR="$DOCKER_DIR/caddy"
-
-                    # Ask for domain
-                    prompt_text "  Domain for Keycloak (e.g., auth.yourdomain.com):" "auth.localhost" KC_CADDY_DOMAIN
-
-                    if [ -f "$CADDY_DIR/Caddyfile" ]; then
-                        # Backup existing Caddyfile
-                        mkdir -p "$CADDY_DIR/backups"
-                        cp "$CADDY_DIR/Caddyfile" "$CADDY_DIR/backups/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)"
-                        echo "  ✓ Backed up existing Caddyfile"
-
-                        # Check if Keycloak config already exists
-                        if ! grep -q "$KC_CADDY_DOMAIN" "$CADDY_DIR/Caddyfile"; then
-                            # Add Keycloak configuration
-                            cat >> "$CADDY_DIR/Caddyfile" << EOF
-
-# Keycloak - Identity and Access Management
-$KC_CADDY_DOMAIN {
-    log {
-        output file /var/log/caddy/keycloak-access.log
-        format json
-        level INFO
-    }
-
-    reverse_proxy localhost:8180
-
-    # Security headers
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Frame-Options "SAMEORIGIN"
-        X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-    }
-}
-EOF
-                            echo "  ✓ Added Keycloak configuration to Caddyfile"
-
-                            # Reload Caddy if it's running
-                            if docker ps --format '{{.Names}}' | grep -q "caddy"; then
-                                CADDY_CONTAINER=$(docker ps --format '{{.Names}}' | grep "caddy" | head -1)
-                                echo "  Reloading Caddy configuration..."
-
-                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy fmt --overwrite 2>/dev/null; then
-                                    echo "  ✓ Formatted Caddyfile"
-                                fi
-
-                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy reload 2>/dev/null; then
-                                    echo "  ✓ Caddy reloaded successfully"
-                                    echo ""
-                                    echo "  Keycloak will be available at: https://$KC_CADDY_DOMAIN"
-                                else
-                                    echo "  ⚠ Failed to reload Caddy - check logs"
-                                    echo "  Manual reload: cd $CADDY_DIR && docker exec -w /etc/caddy caddy caddy reload"
-                                fi
-                            else
-                                echo "  ⚠ Caddy container not running - start it to use this configuration"
-                            fi
-                        else
-                            echo "  ℹ Keycloak configuration already exists in Caddyfile"
-                        fi
-                    else
-                        echo "  ⚠ Caddyfile not found at $CADDY_DIR/Caddyfile"
-                        echo "  You can configure Caddy manually later"
-                    fi
-                fi
-            fi
-
-            prompt_yn "Start Keycloak now? (y/n):" "y" START_KC
-            if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
-                echo "  Starting Keycloak (this may take a minute)..."
-                docker compose up -d 2>/dev/null && echo "  ✓ Keycloak started" || echo "  ⚠ Failed to start Keycloak"
-
-                # Automated initial configuration
-                echo ""
-                prompt_yn "Configure Keycloak with initial realm and clients? (y/n):" "y" CONFIGURE_KC
-
-                if [ "$CONFIGURE_KC" = "y" ] || [ "$CONFIGURE_KC" = "Y" ]; then
-                    echo ""
-                    echo "  Configuring Keycloak..."
-                    echo "  This will create a realm and OAuth2 clients for your services."
-                    echo ""
-
-                    # Get realm name
-                    prompt_text "  Realm name (e.g., homelab, services):" "homelab" KC_REALM
-
-                    # Get domain configuration for redirect URIs
-                    echo ""
-                    echo "  ──────────────────────────────────────────────────────────────"
-                    echo "  DOMAIN CONFIGURATION"
-                    echo "  ──────────────────────────────────────────────────────────────"
-                    echo ""
-                    echo "  Keycloak needs to know where your services are hosted."
-                    echo ""
-                    echo "  Options:"
-                    echo "    1. Local only (http://localhost:PORT)"
-                    echo "    2. Public domain (https://yourdomain.com)"
-                    echo "    3. Both local and public"
-                    echo ""
-                    prompt_text "  Enter your setup (1/2/3):" "1" KC_SETUP_TYPE
-
-                    KC_DOMAIN="localhost"
-                    KC_PUBLIC_DOMAIN=""
-                    KC_EXTERNAL_SERVICE=""
-
-                    if [ "$KC_SETUP_TYPE" = "2" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
-                        echo ""
-                        prompt_text "  Your public domain (e.g., example.com):" "" KC_PUBLIC_DOMAIN
-
-                        echo ""
-                        echo "  ⚠  IMPORTANT: For Keycloak to work with external services,"
-                        echo "     it MUST be accessible at https://auth.$KC_PUBLIC_DOMAIN"
-                        echo ""
-                        echo "  This requires:"
-                        echo "    ✓ DNS A record: auth.$KC_PUBLIC_DOMAIN → Your Server IP"
-                        echo "    ✓ Caddy reverse proxy configured"
-                        echo "    ✓ Ports 80/443 open in firewall"
-                        echo ""
-                        prompt_yn "  Is Keycloak accessible at https://auth.$KC_PUBLIC_DOMAIN? (y/n):" "n" KC_DOMAIN_READY
-
-                        if [ "$KC_DOMAIN_READY" != "y" ] && [ "$KC_DOMAIN_READY" != "Y" ]; then
-                            echo ""
-                            echo "  ⚠  WARNING: Keycloak won't work with external services until"
-                            echo "     you configure Caddy and DNS. See KEYCLOAK-SETUP-GUIDE.md"
-                            echo ""
-                            echo "  You can still proceed and configure Caddy later."
-                            echo ""
-                        fi
-
-                        # Ask about external services (like Pikapod)
-                        echo ""
-                        prompt_yn "  Are you using external hosted services (e.g., Pikapod)? (y/n):" "n" KC_HAS_EXTERNAL
-
-                        if [ "$KC_HAS_EXTERNAL" = "y" ] || [ "$KC_HAS_EXTERNAL" = "Y" ]; then
-                            echo ""
-                            echo "  Enter the URL of your external service (e.g., https://actualbudget-abc.pikapod.net)"
-                            prompt_text "  External service URL:" "" KC_EXTERNAL_SERVICE
-                        fi
-                    fi
-
-                    if [ "$KC_SETUP_TYPE" = "1" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
-                        KC_DOMAIN="localhost"
-                    fi
-
-                    # Wait for Keycloak to be fully ready (can take 30-60 seconds)
-                    echo ""
-                    echo "  Waiting for Keycloak to be ready..."
-                    KC_READY=false
-                    for i in {1..60}; do
-                        if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
-                            KC_READY=true
-                            echo "  ✓ Keycloak is ready"
-                            break
-                        fi
-                        echo -n "."
-                        sleep 2
-                    done
-                    echo ""
-
-                    if [ "$KC_READY" = true ]; then
-                        # Login to Keycloak admin CLI
-                        echo "  Logging in to Keycloak admin CLI..."
-                        docker exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-                            --server http://localhost:8080 \
-                            --realm master \
-                            --user admin \
-                            --password "$KC_ADMIN_PASS" > /dev/null 2>&1
-
-                        if [ $? -eq 0 ]; then
-                            echo "  ✓ Logged in to Keycloak"
-
-                            # Create realm
-                            echo "  Creating realm '$KC_REALM'..."
-                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create realms \
-                                -s realm="$KC_REALM" \
-                                -s enabled=true \
-                                -s displayName="$KC_REALM" \
-                                -s registrationAllowed=false \
-                                -s resetPasswordAllowed=true \
-                                -s rememberMe=true \
-                                -s loginWithEmailAllowed=true \
-                                -s duplicateEmailsAllowed=false \
-                                -s sslRequired=EXTERNAL > /dev/null 2>&1
-
-                            if [ $? -eq 0 ]; then
-                                echo "  ✓ Created realm '$KC_REALM'"
-                            fi
-
-                            # Create OAuth2 client for ActualBudget
-                            if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
-                                echo "  Creating OAuth2 client for ActualBudget..."
-                                AB_CLIENT_SECRET=$(openssl rand -hex 32)
-
-                                # Build redirect URIs based on configuration
-                                AB_REDIRECT_URIS='["http://localhost:5006/*","http://localhost:5006/callback"'
-
-                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://budget.'$KC_PUBLIC_DOMAIN'/*","https://budget.'$KC_PUBLIC_DOMAIN'/callback"'
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://'$KC_PUBLIC_DOMAIN':5006/*","https://'$KC_PUBLIC_DOMAIN':5006/callback"'
-                                fi
-
-                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"'$KC_EXTERNAL_SERVICE'/*","'$KC_EXTERNAL_SERVICE'/callback"'
-                                fi
-
-                                AB_REDIRECT_URIS="$AB_REDIRECT_URIS"']'
-
-                                # Build web origins
-                                AB_WEB_ORIGINS='["http://localhost:5006"'
-
-                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"https://budget.'$KC_PUBLIC_DOMAIN'","https://'$KC_PUBLIC_DOMAIN':5006"'
-                                fi
-
-                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"'$KC_EXTERNAL_SERVICE'"'
-                                fi
-
-                                AB_WEB_ORIGINS="$AB_WEB_ORIGINS"']'
-
-                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
-                                    -s clientId=actualbudget \
-                                    -s name="ActualBudget" \
-                                    -s description="Personal Finance Management" \
-                                    -s enabled=true \
-                                    -s clientAuthenticatorType=client-secret \
-                                    -s secret="$AB_CLIENT_SECRET" \
-                                    -s publicClient=false \
-                                    -s standardFlowEnabled=true \
-                                    -s directAccessGrantsEnabled=true \
-                                    -s serviceAccountsEnabled=false \
-                                    -s "redirectUris=$AB_REDIRECT_URIS" \
-                                    -s "webOrigins=$AB_WEB_ORIGINS" \
-                                    -s protocol=openid-connect > /dev/null 2>&1
-
-                                if [ $? -eq 0 ]; then
-                                    echo "  ✓ Created ActualBudget client"
-                                    echo "      Client ID: actualbudget"
-                                    echo "      Client Secret: $AB_CLIENT_SECRET"
-                                    echo ""
-
-                                    # Save to file with appropriate URLs
-                                    KC_AUTH_URL="http://localhost:8180"
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        KC_AUTH_URL="https://auth.$KC_PUBLIC_DOMAIN"
-                                    fi
-
-                                    cat > "$KC_DIR/actualbudget-oauth.txt" << EOF
-ActualBudget OAuth2 Configuration
-==================================
-
-Client ID: actualbudget
-Client Secret: $AB_CLIENT_SECRET
-
-LOCAL DEVELOPMENT:
-Authorization URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
-Token URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
-User Info URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
-EOF
-
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-PRODUCTION (with Caddy at https://auth.$KC_PUBLIC_DOMAIN):
-Authorization URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
-Token URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
-User Info URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
-EOF
-                                    fi
-
-                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-EXTERNAL SERVICE ($KC_EXTERNAL_SERVICE):
-- Use PRODUCTION URLs above
-- Keycloak MUST be accessible at: https://auth.$KC_PUBLIC_DOMAIN
-- Redirect URI configured: $KC_EXTERNAL_SERVICE/*
-EOF
-                                    fi
-
-                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-Redirect URIs configured:
-- http://localhost:5006/* (local)
-EOF
-
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-- https://budget.$KC_PUBLIC_DOMAIN/* (self-hosted)
-EOF
-                                    fi
-
-                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-- $KC_EXTERNAL_SERVICE/* (external)
-EOF
-                                    fi
-
-                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-To configure ActualBudget:
-1. Go to ActualBudget settings
-2. Enable OpenID/OAuth authentication
-3. Enter the Client ID and Secret above
-4. Use the URLs above based on your setup
-EOF
-                                    echo "  ✓ Saved OAuth config to $KC_DIR/actualbudget-oauth.txt"
-                                fi
-                            fi
-
-                            # Create a generic OAuth2 client template for other services
-                            echo "  Creating generic OAuth2 client for other services..."
-                            GENERIC_CLIENT_SECRET=$(openssl rand -hex 32)
-
-                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
-                                -s clientId=generic-app \
-                                -s name="Generic Application" \
-                                -s description="Template client for other services" \
-                                -s enabled=true \
-                                -s clientAuthenticatorType=client-secret \
-                                -s secret="$GENERIC_CLIENT_SECRET" \
-                                -s publicClient=false \
-                                -s standardFlowEnabled=true \
-                                -s directAccessGrantsEnabled=true \
-                                -s 'redirectUris=["http://localhost:*/*","https://'$KC_DOMAIN'/*","https://*.'$KC_DOMAIN'/*"]' \
-                                -s 'webOrigins=["*"]' \
-                                -s protocol=openid-connect > /dev/null 2>&1
-
-                            if [ $? -eq 0 ]; then
-                                echo "  ✓ Created generic OAuth2 client template"
-                                cat > "$KC_DIR/generic-oauth.txt" << EOF
-Generic OAuth2 Client Configuration
-====================================
-
-Client ID: generic-app
-Client Secret: $GENERIC_CLIENT_SECRET
-
-Use this as a template for other services. You can clone this client
-in the Keycloak admin console and modify the redirect URIs.
-
-Base URLs:
-- Authorization: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
-- Token: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
-- User Info: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
-
-For production: Replace localhost:8180 with https://auth.$KC_DOMAIN
-EOF
-                                echo "  ✓ Saved config to $KC_DIR/generic-oauth.txt"
-                            fi
-
-                            # Optionally create initial user
-                            echo ""
-                            prompt_yn "Create an initial user in realm '$KC_REALM'? (y/n):" "y" CREATE_USER
-
-                            if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
-                                prompt_text "  Username:" "$ACTUAL_USER" KC_USERNAME
-                                prompt_text "  Email:" "${KC_USERNAME}@${KC_DOMAIN}" KC_EMAIL
-                                prompt_text "  First name:" "" KC_FIRSTNAME
-                                prompt_text "  Last name:" "" KC_LASTNAME
-
-                                echo "  Password for $KC_USERNAME:"
-                                read -s KC_USER_PASS
-                                echo ""
-
-                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create users -r "$KC_REALM" \
-                                    -s username="$KC_USERNAME" \
-                                    -s email="$KC_EMAIL" \
-                                    -s firstName="$KC_FIRSTNAME" \
-                                    -s lastName="$KC_LASTNAME" \
-                                    -s enabled=true \
-                                    -s emailVerified=true > /dev/null 2>&1
-
-                                if [ $? -eq 0 ]; then
-                                    # Set password
-                                    KC_USER_ID=$(docker exec keycloak /opt/keycloak/bin/kcadm.sh get users -r "$KC_REALM" -q username="$KC_USERNAME" 2>/dev/null | grep -o '"id" : "[^"]*"' | cut -d'"' -f4)
-
-                                    docker exec keycloak /opt/keycloak/bin/kcadm.sh set-password -r "$KC_REALM" \
-                                        --username "$KC_USERNAME" \
-                                        --new-password "$KC_USER_PASS" > /dev/null 2>&1
-
-                                    echo "  ✓ Created user: $KC_USERNAME"
-                                    echo "  ✓ Password set"
-                                    echo ""
-                                    echo "  This user can now log in to ActualBudget and other services!"
-                                fi
-                            fi
-
-                            echo ""
-                            echo "  ✓ Keycloak configuration complete!"
-                            echo ""
-                            echo "  Next steps:"
-                            echo "    1. Go to http://localhost:8180/admin"
-                            echo "    2. Login with admin / $KC_ADMIN_PASS"
-                            echo "    3. Switch to realm '$KC_REALM' (top-left dropdown)"
-                            echo "    4. Manage users in Users menu"
-                            echo "    5. OAuth configs saved to $KC_DIR/*.txt"
-                            echo ""
-
-                        else
-                            echo "  ⚠ Failed to login to Keycloak admin CLI"
-                            echo "  You can configure Keycloak manually via the web UI"
-                        fi
-                    else
-                        echo "  ⚠ Keycloak did not become ready in time"
-                        echo "  You can configure it manually after it starts"
-                    fi
-                fi
-            fi
-
-            echo ""
-            echo "  Admin console:  http://localhost:8180/admin"
-            echo "  Username:       admin"
-            echo "  Password:       $KC_ADMIN_PASS"
-            echo "  Database:       PostgreSQL (./postgres-data)"
-            if [ -n "$KC_REALM" ]; then
-                echo "  Realm:          $KC_REALM"
-                echo "  Config files:   $KC_DIR/*.txt"
-            fi
-            echo ""
-            echo "  ⚠  For production:"
-            echo "     - Use HTTPS via reverse proxy (Caddy)"
-            echo "     - Change command to 'start' instead of 'start-dev'"
-            echo "     - Set KC_HOSTNAME to your domain"
-            echo ""
-        fi
-    fi
 
     # ---- CADDY WEB SERVER ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_CADDY" ]; then
@@ -4913,7 +4294,7 @@ services:
     environment:
       - ACME_AGREE=true
     labels:
-      - "io.podman.annotations.label/fail2ban.enable=true"
+      - "io.podman.annotations.label/crowdsec.enable=true"
 CADDY_COMPOSE
 
                 # Create Caddyfile if it doesn't exist
@@ -4929,6 +4310,26 @@ CADDY_COMPOSE
 # Example configuration - edit this for your services
 # Uncomment and modify these examples:
 
+# ── Authelia SSO snippet (auto-added by installer if Authelia is installed) ───
+# (authelia) {
+#     forward_auth authelia:9091 {
+#         uri /api/authz/forward-auth
+#         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+#     }
+# }
+#
+# Authelia login portal
+# auth.yourdomain.com {
+#     reverse_proxy authelia:9091
+# }
+#
+# To protect any service with Authelia, add:  import authelia
+# Example:
+# myservice.yourdomain.com {
+#     import authelia
+#     reverse_proxy localhost:PORT
+# }
+
 # ActualBudget
 # budget.yourdomain.com {
 #     log {
@@ -4937,23 +4338,6 @@ CADDY_COMPOSE
 #         level INFO
 #     }
 #     reverse_proxy localhost:5006
-#     header {
-#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-#         X-Frame-Options "SAMEORIGIN"
-#         X-Content-Type-Options "nosniff"
-#         X-XSS-Protection "1; mode=block"
-#         Referrer-Policy "strict-origin-when-cross-origin"
-#     }
-# }
-
-# Keycloak
-# auth.yourdomain.com {
-#     log {
-#         output file /var/log/caddy/keycloak-access.log
-#         format json
-#         level INFO
-#     }
-#     reverse_proxy localhost:8180
 #     header {
 #         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 #         X-Frame-Options "SAMEORIGIN"
@@ -5290,35 +4674,40 @@ CADDY_AUTH_BLOCK
         fi  # End AUTHELIA_RECONFIGURE check
     fi  # End INSTALL_AUTHELIA check
 
-    # ---- FAIL2BAN ----
-    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_FAIL2BAN" ]; then
+    # ---- CROWDSEC ----
+    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_CROWDSEC" ]; then
         echo ""
         echo "┌─────────────────────────────────────────────────────────────────┐"
-        echo "│ FAIL2BAN - Intrusion Prevention System                         │"
-        echo "│ Automatically ban IPs with failed auth attempts                │"
+        echo "│ CROWDSEC - Intrusion Prevention (fail2ban successor)           │"
+        echo "│ Bans malicious IPs + geo-blocking + community IP reputation    │"
         echo "│ Protects SSH, Caddy, and other services                        │"
         echo "└─────────────────────────────────────────────────────────────────┘"
-        prompt_yn "Install and configure fail2ban? (y/n):" "n" INSTALL_FAIL2BAN
+        prompt_yn "Install and configure CrowdSec? (y/n):" "n" INSTALL_CROWDSEC
     fi
 
-    if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
+    if [ "$INSTALL_CROWDSEC" = "y" ] || [ "$INSTALL_CROWDSEC" = "Y" ]; then
         if [ "$DRY_RUN" = true ]; then
-            echo "[DRY-RUN] Would install fail2ban"
+            echo "[DRY-RUN] Would install CrowdSec + Caddy acquisition + firewall bouncer"
         else
-            echo "Installing fail2ban..."
+            echo "Installing CrowdSec..."
 
-            # Check if fail2ban is already installed
-            if command -v fail2ban-client &> /dev/null; then
-                echo "  ✓ fail2ban is already installed"
+            # Install the CrowdSec agent if not already present
+            if command -v cscli &> /dev/null; then
+                echo "  ✓ CrowdSec is already installed"
             else
-                echo "  Installing fail2ban package..."
-                if sudo apt update && sudo apt install -y fail2ban; then
-                    echo "  ✓ fail2ban installed successfully"
+                echo "  Adding CrowdSec repository and installing agent..."
+                if curl -s https://install.crowdsec.net | sudo sh && sudo apt install -y crowdsec; then
+                    echo "  ✓ CrowdSec installed successfully"
                 else
-                    echo "  ⚠ Failed to install fail2ban"
-                    echo "  You may need to install it manually: sudo apt install fail2ban"
+                    echo "  ⚠ Failed to install CrowdSec"
+                    echo "  See https://docs.crowdsec.net/ for manual installation"
                 fi
             fi
+
+            # Firewall bouncer (enforces bans via iptables/nftables)
+            echo "  Installing firewall bouncer..."
+            sudo apt install -y crowdsec-firewall-bouncer-iptables 2>/dev/null || \
+                echo "  ⚠ Could not install firewall bouncer automatically"
 
             # Create log directory for Caddy
             if [ ! -d "/var/log/caddy" ]; then
@@ -5327,97 +4716,61 @@ CADDY_AUTH_BLOCK
                 echo "  ✓ Created /var/log/caddy directory"
             fi
 
-            # Check if Caddy filter exists
-            FILTER_FILE="/etc/fail2ban/filter.d/caddy-auth.conf"
-            if [ ! -f "$FILTER_FILE" ]; then
-                echo "  Creating fail2ban filter for Caddy..."
+            # Detection collections: SSH, Caddy HTTP scenarios, base http
+            echo "  Installing CrowdSec collections (sshd, caddy, base-http)..."
+            sudo cscli collections install crowdsecurity/sshd crowdsecurity/linux crowdsecurity/caddy crowdsecurity/base-http-scenarios 2>/dev/null || \
+                echo "  ⚠ Some collections may already be installed"
 
-                FILTER_CONTENT='[Definition]
-failregex = ^.*"remote_ip":"<HOST>".*"status":(?:401|403|429).*$
-            ^.*"remote_addr":"<HOST>.*"status":(?:401|403|429).*$
-ignoreregex = ^.*"remote_ip":"(?:127\.0\.0\.1|::1)".*$
-datepattern = "ts":%%s'
-
-                if echo "$FILTER_CONTENT" | sudo tee "$FILTER_FILE" > /dev/null; then
-                    echo "  ✓ Created Caddy fail2ban filter"
+            # Tell CrowdSec to read Caddy's JSON access logs
+            ACQUIS_FILE="/etc/crowdsec/acquis.d/caddy.yaml"
+            if [ ! -f "$ACQUIS_FILE" ]; then
+                echo "  Creating Caddy log acquisition for CrowdSec..."
+                sudo mkdir -p /etc/crowdsec/acquis.d
+                ACQUIS_CONTENT='filenames:
+  - /var/log/caddy/*.log
+  - /var/log/caddy/*-access.log
+labels:
+  type: caddy'
+                if echo "$ACQUIS_CONTENT" | sudo tee "$ACQUIS_FILE" > /dev/null; then
+                    echo "  ✓ Created Caddy acquisition ($ACQUIS_FILE)"
                 else
-                    echo "  ⚠ Failed to create filter - you may need to create it manually"
+                    echo "  ⚠ Failed to create acquisition - create it manually"
                 fi
             else
-                echo "  ✓ Caddy fail2ban filter already exists"
+                echo "  ✓ Caddy acquisition already exists"
             fi
 
-            # Check if Caddy jail exists
-            JAIL_FILE="/etc/fail2ban/jail.d/caddy.conf"
-            if [ ! -f "$JAIL_FILE" ]; then
-                echo "  Creating fail2ban jail for Caddy..."
-                echo ""
-                echo "  Configure fail2ban settings (press Enter for defaults):"
-
-                prompt_text "  Max retries before ban:" "5" F2B_MAXRETRY
-                prompt_text "  Find time window (seconds):" "600" F2B_FINDTIME
-                prompt_text "  Ban duration (seconds):" "3600" F2B_BANTIME
-
-                JAIL_CONTENT="[caddy-auth]
-enabled = true
-port = http,https
-filter = caddy-auth
-logpath = /var/log/caddy/access.log
-          /var/log/caddy/*-access.log
-maxretry = $F2B_MAXRETRY
-findtime = $F2B_FINDTIME
-bantime = $F2B_BANTIME
-action = iptables-multiport[name=CaddyAuth, port=\"http,https\", protocol=tcp]
-backend = auto"
-
-                if echo "$JAIL_CONTENT" | sudo tee "$JAIL_FILE" > /dev/null; then
-                    echo "  ✓ Created Caddy fail2ban jail"
-                else
-                    echo "  ⚠ Failed to create jail - you may need to create it manually"
-                fi
-            else
-                echo "  ✓ Caddy fail2ban jail already exists"
-            fi
-
-            # Test fail2ban configuration
+            # Geo-blocking + reputation (the capability fail2ban/Authelia lack)
             echo ""
-            echo "  Testing fail2ban configuration..."
-            if sudo fail2ban-client -t &> /dev/null; then
-                echo "  ✓ fail2ban configuration is valid"
-            else
-                echo "  ⚠ fail2ban configuration has errors"
-                echo "  Check with: sudo fail2ban-client -t"
-            fi
+            echo "  Geo-blocking & IP reputation (optional):"
+            echo "    Enrich events with country/ASN data:"
+            echo "      sudo cscli collections install crowdsecurity/geoip-enrich"
+            echo "    Subscribe to community/3rd-party blocklists at:"
+            echo "      https://app.crowdsec.net/"
 
-            # Restart fail2ban
-            prompt_yn "Restart fail2ban to apply changes? (y/n):" "y" RESTART_F2B
-            if [ "$RESTART_F2B" = "y" ] || [ "$RESTART_F2B" = "Y" ]; then
-                if sudo systemctl restart fail2ban; then
-                    echo "  ✓ fail2ban restarted successfully"
-
-                    # Wait for fail2ban to start
+            # Restart services to apply
+            prompt_yn "Restart CrowdSec to apply changes? (y/n):" "y" RESTART_CS
+            if [ "$RESTART_CS" = "y" ] || [ "$RESTART_CS" = "Y" ]; then
+                sudo systemctl enable crowdsec 2>/dev/null || true
+                if sudo systemctl restart crowdsec; then
+                    echo "  ✓ CrowdSec restarted successfully"
+                    sudo systemctl enable crowdsec-firewall-bouncer 2>/dev/null || true
+                    sudo systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
                     sleep 2
-
-                    # Check jail status
-                    if sudo fail2ban-client status caddy-auth &> /dev/null; then
-                        echo "  ✓ caddy-auth jail is active"
-                        echo ""
-                        sudo fail2ban-client status caddy-auth
-                    else
-                        echo "  ⚠ caddy-auth jail is not active (may need Caddy logs to exist first)"
-                    fi
+                    sudo cscli metrics 2>/dev/null | head -20 || true
                 else
-                    echo "  ⚠ Failed to restart fail2ban"
-                    echo "  Check logs: sudo journalctl -u fail2ban -n 50"
+                    echo "  ⚠ Failed to restart CrowdSec"
+                    echo "  Check logs: sudo journalctl -u crowdsec -n 50"
                 fi
             fi
 
             echo ""
             echo "  Useful commands:"
-            echo "    Check jail status:  sudo fail2ban-client status caddy-auth"
-            echo "    View banned IPs:    sudo fail2ban-client get caddy-auth banip"
-            echo "    Unban IP:           sudo fail2ban-client set caddy-auth unbanip 1.2.3.4"
-            echo "    View logs:          sudo tail -f /var/log/fail2ban.log"
+            echo "    List active bans:   sudo cscli decisions list"
+            echo "    List alerts:        sudo cscli alerts list"
+            echo "    Manually ban IP:    sudo cscli decisions add --ip 1.2.3.4"
+            echo "    Unban IP:           sudo cscli decisions delete --ip 1.2.3.4"
+            echo "    Show metrics:       sudo cscli metrics"
             echo ""
         fi
     fi
@@ -5914,7 +5267,7 @@ FRIGATE_CONFIG
 
     # ---- CADDY REVERSE PROXY (Legacy) ----
     # Note: This is the legacy Caddy installation
-    # The newer installation above includes fail2ban support
+    # The newer installation above includes CrowdSec support
     # This section is kept for backwards compatibility
     if [ "$WHIPTAIL_USED" != true ] && [ "$INSTALL_CADDY" != "y" ] && [ "$INSTALL_CADDY" != "Y" ]; then
         echo ""
@@ -7809,8 +7162,8 @@ echo ""
 echo "Installed Software:"
 echo "  ✓ net-tools, ncdu, git, curl, wget, htop, tree, zip/unzip"
 echo "  ✓ OpenSSH Server - SSH remote access"
-if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
-    echo "  ✓ fail2ban - SSH brute-force protection"
+if [ "$INSTALL_CROWDSEC" = "y" ] || [ "$INSTALL_CROWDSEC" = "Y" ]; then
+    echo "  ✓ CrowdSec - intrusion prevention (SSH/Caddy, geo + IP reputation)"
 fi
 if [ "$INSTALL_DOCKER" = "y" ] || [ "$INSTALL_DOCKER" = "Y" ]; then
     echo "  ✓ Docker Engine + Docker Compose"
@@ -7881,13 +7234,11 @@ else
 echo "    - Password login: ENABLED"
 fi
 echo ""
-echo "  NetBird SSH Access (v0.60.0+ method):"
-echo "    - Requires openssh-server running (installed by this script)"
-echo "    - Enable per-peer in NetBird dashboard: Peers > [peer] > SSH"
-echo "    - NetBird injects /etc/ssh/sshd_config.d/99-netbird.conf"
-echo "    - Connect from another peer: ssh user@<netbird-ip>"
-echo "    - Get peer IPs with: netbird status"
-echo "    - Note: old 'netbird ssh <peer-name>' command no longer works"
+echo "  NetBird SSH Access (independent of traditional SSH):"
+echo "    - NetBird manages its own keys automatically"
+echo "    - Works even with password auth disabled"
+echo "    - Connect with: netbird ssh <peer-name>"
+echo "    - Enable in NetBird dashboard first"
 echo ""
 echo "  You can use ANY combination:"
 echo "    ✓ GitHub + Launchpad + NetBird SSH"
@@ -7955,22 +7306,17 @@ if [ "$INSTALL_NETBIRD" = "y" ] || [ "$INSTALL_NETBIRD" = "Y" ]; then
     echo "    1. Run 'netbird up' (opens browser for authentication)"
     echo "    2. View connected peers: netbird status"
     echo "    3. Configure ACLs in dashboard: https://app.netbird.io"
-    echo "    4. Enable SSH per-peer: Peers > [peer] > SSH (in dashboard)"
-    echo "    5. Connect via SSH: ssh user@<netbird-ip>"
-    echo "    Note: --allow-server-ssh is pre-configured in systemd override"
-    echo "          (/etc/systemd/system/netbird.service.d/ssh-server.conf)"
-    echo "          so SSH works without re-authenticating on every connection"
     echo ""
 fi
 if [ "$INSTALL_RUSTDESK" = "y" ] || [ "$INSTALL_RUSTDESK" = "Y" ]; then
     echo "  RustDesk: Launch from applications menu or run 'rustdesk'"
     echo ""
 fi
-if [ "$INSTALL_FAIL2BAN" = "y" ] || [ "$INSTALL_FAIL2BAN" = "Y" ]; then
-    echo "  fail2ban:"
-    echo "    • Check status: sudo fail2ban-client status sshd"
-    echo "    • View banned IPs: sudo fail2ban-client status sshd"
-    echo "    • Unban IP: sudo fail2ban-client set sshd unbanip <IP>"
+if [ "$INSTALL_CROWDSEC" = "y" ] || [ "$INSTALL_CROWDSEC" = "Y" ]; then
+    echo "  CrowdSec:"
+    echo "    • Check metrics: sudo cscli metrics"
+    echo "    • View active bans: sudo cscli decisions list"
+    echo "    • Unban IP: sudo cscli decisions delete --ip <IP>"
     echo ""
 fi
 if [ "$CONFIGURE_UFW" = "y" ] || [ "$CONFIGURE_UFW" = "Y" ]; then

@@ -1331,7 +1331,7 @@ generate_password() {
     openssl rand -base64 48 | tr -dc 'a-zA-Z0-9' | head -c "$length"
 }
 
-# Validate password for Keycloak (alphanumeric only, minimum length)
+# Validate password (alphanumeric only, minimum length)
 # Usage: validate_password "password" [min_length]
 # Returns 0 if valid, 1 if invalid
 validate_password() {
@@ -1344,7 +1344,7 @@ validate_password() {
         return 1
     fi
 
-    # Check for special characters (not allowed for Keycloak)
+    # Check for special characters (not allowed)
     if echo "$password" | grep -q '[^a-zA-Z0-9]'; then
         echo "  ⚠ Password must contain only letters and numbers (no special characters)"
         return 1
@@ -2586,7 +2586,6 @@ else
         [ -d "$DOCKER_DIR/filebrowser" ] && EXISTING_SERVICES[FILEBROWSER]="ON"
         [ -d "$DOCKER_DIR/magicmirror" ] && EXISTING_SERVICES[MAGICMIRROR]="ON"
         [ -d "$DOCKER_DIR/actualbudget" ] && EXISTING_SERVICES[ACTUALBUDGET]="ON"
-        [ -d "$DOCKER_DIR/keycloak" ] && EXISTING_SERVICES[KEYCLOAK]="ON"
         [ -d "$DOCKER_DIR/authelia" ] && EXISTING_SERVICES[AUTHELIA]="ON"
         [ -d "$DOCKER_DIR/caddy" ] && EXISTING_SERVICES[CADDY]="ON"
         [ -d "$DOCKER_DIR/lms" ] && EXISTING_SERVICES[LYRION]="ON"
@@ -2627,7 +2626,6 @@ else
                     "FILEBROWSER" "Web-based file manager" ${EXISTING_SERVICES[FILEBROWSER]:-OFF} \
                     "MAGICMIRROR" "Smart mirror / dashboard display" ${EXISTING_SERVICES[MAGICMIRROR]:-OFF} \
                     "ACTUALBUDGET" "Personal finance management with bank sync" ${EXISTING_SERVICES[ACTUALBUDGET]:-OFF} \
-                    "KEYCLOAK" "Identity & Access Management (SSO)" ${EXISTING_SERVICES[KEYCLOAK]:-OFF} \
                     "AUTHELIA" "SSO + 2FA auth portal for Caddy" ${EXISTING_SERVICES[AUTHELIA]:-OFF} \
                     "CADDY" "Reverse proxy with automatic HTTPS" ${EXISTING_SERVICES[CADDY]:-OFF} \
                     "FAIL2BAN" "Intrusion prevention system" ${EXISTING_SERVICES[FAIL2BAN]:-OFF} \
@@ -2659,7 +2657,6 @@ else
                 [ -n "${EXISTING_SERVICES[FILEBROWSER]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FILEBROWSER \"Web file manager\" ON"
                 [ -n "${EXISTING_SERVICES[MAGICMIRROR]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS MAGICMIRROR \"Smart mirror\" ON"
                 [ -n "${EXISTING_SERVICES[ACTUALBUDGET]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS ACTUALBUDGET \"Personal finance\" ON"
-                [ -n "${EXISTING_SERVICES[KEYCLOAK]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS KEYCLOAK \"Identity management\" ON"
                 [ -n "${EXISTING_SERVICES[AUTHELIA]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS AUTHELIA \"SSO + 2FA auth portal\" ON"
                 [ -n "${EXISTING_SERVICES[CADDY]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS CADDY \"Reverse proxy\" ON"
                 [ -n "${EXISTING_SERVICES[FAIL2BAN]}" ] && UNINSTALL_OPTIONS="$UNINSTALL_OPTIONS FAIL2BAN \"Intrusion prevention\" ON"
@@ -2710,7 +2707,6 @@ else
         : ${INSTALL_FILEBROWSER:="n"}
         : ${INSTALL_MAGICMIRROR:="n"}
         : ${INSTALL_ACTUALBUDGET:="n"}
-        : ${INSTALL_KEYCLOAK:="n"}
         : ${INSTALL_AUTHELIA:="n"}
         : ${INSTALL_CADDY:="n"}
         : ${INSTALL_FAIL2BAN:="n"}
@@ -2737,7 +2733,6 @@ else
         if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then INSTALL_FILEBROWSER="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then INSTALL_MAGICMIRROR="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then INSTALL_ACTUALBUDGET="y"; fi
-        if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then INSTALL_KEYCLOAK="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then INSTALL_AUTHELIA="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then INSTALL_CADDY="y"; fi
         if echo "$SELECTED_SERVICES" | grep -q "FAIL2BAN"; then INSTALL_FAIL2BAN="y"; fi
@@ -2811,7 +2806,6 @@ else
                 if echo "$SELECTED_SERVICES" | grep -q "FILEBROWSER"; then uninstall_service "FileBrowser" "$DOCKER_DIR/filebrowser" "filebrowser"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "MAGICMIRROR"; then uninstall_service "MagicMirror" "$DOCKER_DIR/magicmirror" "magicmirror"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "ACTUALBUDGET"; then uninstall_service "ActualBudget" "$DOCKER_DIR/actualbudget" "actualbudget"; fi
-                if echo "$SELECTED_SERVICES" | grep -q "KEYCLOAK"; then uninstall_service "Keycloak" "$DOCKER_DIR/keycloak" "keycloak"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "AUTHELIA"; then uninstall_service "Authelia" "$DOCKER_DIR/authelia" "authelia"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "CADDY"; then uninstall_service "Caddy" "$DOCKER_DIR/caddy" "caddy"; fi
                 if echo "$SELECTED_SERVICES" | grep -q "LYRION"; then uninstall_service "Lyrion" "$DOCKER_DIR/lms" "lms"; fi
@@ -4231,625 +4225,6 @@ AB_COMPOSE
         fi  # End AB_RECONFIGURE check
     fi  # End INSTALL_ACTUALBUDGET check
 
-    # ---- KEYCLOAK ----
-    if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_KEYCLOAK" ]; then
-        echo ""
-        echo "┌─────────────────────────────────────────────────────────────────┐"
-        echo "│ KEYCLOAK - Identity and Access Management (IAM)                │"
-        echo "│ SSO, OAuth2, SAML, User Management, MFA                        │"
-        echo "│ Port: 8180 (HTTP) - Use reverse proxy for HTTPS                │"
-        echo "└─────────────────────────────────────────────────────────────────┘"
-        prompt_yn "Install Keycloak? (y/n):" "n" INSTALL_KEYCLOAK
-    fi
-
-    if [ "$INSTALL_KEYCLOAK" = "y" ] || [ "$INSTALL_KEYCLOAK" = "Y" ]; then
-        KC_DIR="$DOCKER_DIR/keycloak"
-
-        if [ "$DRY_RUN" = true ]; then
-            echo "[DRY-RUN] Would create $KC_DIR"
-        else
-            echo "Installing Keycloak..."
-            echo ""
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "PASSWORD REQUIREMENTS:"
-            echo "  • Minimum 12 characters (16+ recommended)"
-            echo "  • Letters and numbers ONLY (no special characters)"
-            echo "  • Press ENTER for secure auto-generated password"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo ""
-
-            # Prompt for admin password with validation
-            KC_ADMIN_PASS=""
-            while true; do
-                read -s -p "Enter Keycloak admin password [auto-generate]: " KC_ADMIN_PASS
-                echo ""
-
-                # Generate secure password if user pressed Enter
-                if [ -z "$KC_ADMIN_PASS" ]; then
-                    KC_ADMIN_PASS=$(generate_password 20)
-                    echo "  ✓ Generated secure admin password (saved in .env)"
-                    break
-                fi
-
-                # Validate password
-                if validate_password "$KC_ADMIN_PASS" 12; then
-                    echo "  ✓ Admin password accepted"
-                    break
-                fi
-                echo "  Please try again."
-            done
-
-            # Prompt for database password with validation
-            KC_DB_PASS=""
-            while true; do
-                read -s -p "Enter database password [auto-generate]: " KC_DB_PASS
-                echo ""
-
-                # Generate secure password if user pressed Enter
-                if [ -z "$KC_DB_PASS" ]; then
-                    KC_DB_PASS=$(generate_password 32)
-                    echo "  ✓ Generated secure database password (saved in .env)"
-                    break
-                fi
-
-                # Validate password
-                if validate_password "$KC_DB_PASS" 12; then
-                    echo "  ✓ Database password accepted"
-                    break
-                fi
-                echo "  Please try again."
-            done
-            echo ""
-
-            # Ask about production vs development mode
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "DEPLOYMENT MODE:"
-            echo "  • Production: Requires HTTPS via Caddy2 (recommended)"
-            echo "  • Development: HTTP only, relaxed security (testing only)"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            prompt_yn "Use production mode? (requires Caddy2 reverse proxy) (y/n):" "y" KC_PRODUCTION
-
-            KC_HOSTNAME=""
-            KC_START_CMD="start-dev"
-            KC_HOSTNAME_STRICT="false"
-
-            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
-                KC_START_CMD="start"
-                KC_HOSTNAME_STRICT="false"
-
-                echo ""
-                echo "Enter your Keycloak hostname (e.g., auth.yourdomain.com)"
-                echo "This should match your Caddy2 configuration."
-                read -p "Hostname: " KC_HOSTNAME
-
-                if [ -n "$KC_HOSTNAME" ]; then
-                    echo "  ✓ Production mode enabled with hostname: $KC_HOSTNAME"
-                    echo "  ⚠ Make sure Caddy2 is configured for this domain!"
-                else
-                    echo "  ⚠ No hostname provided - using relaxed mode"
-                    KC_HOSTNAME=""
-                fi
-            fi
-
-            mkdir -p "$KC_DIR/data" "$KC_DIR/postgres-data"
-            ensure_docker_dir_ownership "$KC_DIR"
-            cd "$KC_DIR"
-
-            # Create .env file for sensitive credentials
-            cat > .env << KC_ENV
-# Keycloak Environment Variables
-# ⚠ KEEP THIS FILE SECURE - Contains sensitive passwords
-
-# Admin Credentials
-KEYCLOAK_ADMIN=admin
-KEYCLOAK_ADMIN_PASSWORD=$KC_ADMIN_PASS
-
-# Database Credentials
-POSTGRES_DB=keycloak
-POSTGRES_USER=keycloak
-POSTGRES_PASSWORD=$KC_DB_PASS
-KC_DB=postgres
-KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-KC_DB_USERNAME=keycloak
-KC_DB_PASSWORD=$KC_DB_PASS
-
-# Keycloak Configuration
-# Proxy settings (v2) - Trust X-Forwarded-* headers from Caddy2
-KC_PROXY_HEADERS=xforwarded
-KC_HTTP_ENABLED=true
-KC_HOSTNAME_STRICT=$KC_HOSTNAME_STRICT
-KC_LOG_LEVEL=INFO
-KC_HEALTH_ENABLED=true
-KC_METRICS_ENABLED=true
-KC_ENV
-
-            # Add hostname to .env if provided
-            if [ -n "$KC_HOSTNAME" ]; then
-                echo "KC_HOSTNAME=$KC_HOSTNAME" >> .env
-            fi
-
-            # Create docker-compose.yml
-            cat > docker-compose.yml << KC_COMPOSE
-name: keycloak
-
-services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: keycloak-db
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U keycloak"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  keycloak:
-    image: quay.io/keycloak/keycloak:latest
-    container_name: keycloak
-    restart: unless-stopped
-    command:
-      - $KC_START_CMD
-    env_file:
-      - .env
-    ports:
-      - "8180:8080"
-    volumes:
-      - ./data:/opt/keycloak/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    labels:
-      - "io.podman.annotations.label/fail2ban.enable=true"
-      - "io.podman.annotations.label/fail2ban.filter=caddy-auth"
-KC_COMPOSE
-
-            echo ""
-            echo "  ✓ Keycloak configured at $KC_DIR"
-            echo "  ✓ Credentials saved in .env file"
-            if [ "$KC_PRODUCTION" = "y" ] || [ "$KC_PRODUCTION" = "Y" ]; then
-                echo "  ✓ Production mode enabled"
-            else
-                echo "  ℹ Development mode (use production mode for internet-facing deployments)"
-            fi
-            echo ""
-
-            # If Caddy is installed/being installed, offer to configure it for Keycloak
-            if [ "$INSTALL_CADDY" = "y" ] || [ "$INSTALL_CADDY" = "Y" ] || [ -d "$DOCKER_DIR/caddy" ]; then
-                echo ""
-                prompt_yn "Configure Caddy reverse proxy for Keycloak? (y/n):" "y" CONFIGURE_CADDY_KC
-
-                if [ "$CONFIGURE_CADDY_KC" = "y" ] || [ "$CONFIGURE_CADDY_KC" = "Y" ]; then
-                    CADDY_DIR="$DOCKER_DIR/caddy"
-
-                    # Ask for domain
-                    prompt_text "  Domain for Keycloak (e.g., auth.yourdomain.com):" "auth.localhost" KC_CADDY_DOMAIN
-
-                    if [ -f "$CADDY_DIR/Caddyfile" ]; then
-                        # Backup existing Caddyfile
-                        mkdir -p "$CADDY_DIR/backups"
-                        cp "$CADDY_DIR/Caddyfile" "$CADDY_DIR/backups/Caddyfile.backup.$(date +%Y%m%d_%H%M%S)"
-                        echo "  ✓ Backed up existing Caddyfile"
-
-                        # Check if Keycloak config already exists
-                        if ! grep -q "$KC_CADDY_DOMAIN" "$CADDY_DIR/Caddyfile"; then
-                            # Add Keycloak configuration
-                            cat >> "$CADDY_DIR/Caddyfile" << EOF
-
-# Keycloak - Identity and Access Management
-$KC_CADDY_DOMAIN {
-    log {
-        output file /var/log/caddy/keycloak-access.log
-        format json
-        level INFO
-    }
-
-    reverse_proxy localhost:8180
-
-    # Security headers
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Frame-Options "SAMEORIGIN"
-        X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-    }
-}
-EOF
-                            echo "  ✓ Added Keycloak configuration to Caddyfile"
-
-                            # Reload Caddy if it's running
-                            if docker ps --format '{{.Names}}' | grep -q "caddy"; then
-                                CADDY_CONTAINER=$(docker ps --format '{{.Names}}' | grep "caddy" | head -1)
-                                echo "  Reloading Caddy configuration..."
-
-                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy fmt --overwrite 2>/dev/null; then
-                                    echo "  ✓ Formatted Caddyfile"
-                                fi
-
-                                if docker exec -w /etc/caddy "$CADDY_CONTAINER" caddy reload 2>/dev/null; then
-                                    echo "  ✓ Caddy reloaded successfully"
-                                    echo ""
-                                    echo "  Keycloak will be available at: https://$KC_CADDY_DOMAIN"
-                                else
-                                    echo "  ⚠ Failed to reload Caddy - check logs"
-                                    echo "  Manual reload: cd $CADDY_DIR && docker exec -w /etc/caddy caddy caddy reload"
-                                fi
-                            else
-                                echo "  ⚠ Caddy container not running - start it to use this configuration"
-                            fi
-                        else
-                            echo "  ℹ Keycloak configuration already exists in Caddyfile"
-                        fi
-                    else
-                        echo "  ⚠ Caddyfile not found at $CADDY_DIR/Caddyfile"
-                        echo "  You can configure Caddy manually later"
-                    fi
-                fi
-            fi
-
-            prompt_yn "Start Keycloak now? (y/n):" "y" START_KC
-            if [ "$START_KC" = "y" ] || [ "$START_KC" = "Y" ]; then
-                echo "  Starting Keycloak (this may take a minute)..."
-                docker compose up -d 2>/dev/null && echo "  ✓ Keycloak started" || echo "  ⚠ Failed to start Keycloak"
-
-                # Automated initial configuration
-                echo ""
-                prompt_yn "Configure Keycloak with initial realm and clients? (y/n):" "y" CONFIGURE_KC
-
-                if [ "$CONFIGURE_KC" = "y" ] || [ "$CONFIGURE_KC" = "Y" ]; then
-                    echo ""
-                    echo "  Configuring Keycloak..."
-                    echo "  This will create a realm and OAuth2 clients for your services."
-                    echo ""
-
-                    # Get realm name
-                    prompt_text "  Realm name (e.g., homelab, services):" "homelab" KC_REALM
-
-                    # Get domain configuration for redirect URIs
-                    echo ""
-                    echo "  ──────────────────────────────────────────────────────────────"
-                    echo "  DOMAIN CONFIGURATION"
-                    echo "  ──────────────────────────────────────────────────────────────"
-                    echo ""
-                    echo "  Keycloak needs to know where your services are hosted."
-                    echo ""
-                    echo "  Options:"
-                    echo "    1. Local only (http://localhost:PORT)"
-                    echo "    2. Public domain (https://yourdomain.com)"
-                    echo "    3. Both local and public"
-                    echo ""
-                    prompt_text "  Enter your setup (1/2/3):" "1" KC_SETUP_TYPE
-
-                    KC_DOMAIN="localhost"
-                    KC_PUBLIC_DOMAIN=""
-                    KC_EXTERNAL_SERVICE=""
-
-                    if [ "$KC_SETUP_TYPE" = "2" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
-                        echo ""
-                        prompt_text "  Your public domain (e.g., example.com):" "" KC_PUBLIC_DOMAIN
-
-                        echo ""
-                        echo "  ⚠  IMPORTANT: For Keycloak to work with external services,"
-                        echo "     it MUST be accessible at https://auth.$KC_PUBLIC_DOMAIN"
-                        echo ""
-                        echo "  This requires:"
-                        echo "    ✓ DNS A record: auth.$KC_PUBLIC_DOMAIN → Your Server IP"
-                        echo "    ✓ Caddy reverse proxy configured"
-                        echo "    ✓ Ports 80/443 open in firewall"
-                        echo ""
-                        prompt_yn "  Is Keycloak accessible at https://auth.$KC_PUBLIC_DOMAIN? (y/n):" "n" KC_DOMAIN_READY
-
-                        if [ "$KC_DOMAIN_READY" != "y" ] && [ "$KC_DOMAIN_READY" != "Y" ]; then
-                            echo ""
-                            echo "  ⚠  WARNING: Keycloak won't work with external services until"
-                            echo "     you configure Caddy and DNS. See KEYCLOAK-SETUP-GUIDE.md"
-                            echo ""
-                            echo "  You can still proceed and configure Caddy later."
-                            echo ""
-                        fi
-
-                        # Ask about external services (like Pikapod)
-                        echo ""
-                        prompt_yn "  Are you using external hosted services (e.g., Pikapod)? (y/n):" "n" KC_HAS_EXTERNAL
-
-                        if [ "$KC_HAS_EXTERNAL" = "y" ] || [ "$KC_HAS_EXTERNAL" = "Y" ]; then
-                            echo ""
-                            echo "  Enter the URL of your external service (e.g., https://actualbudget-abc.pikapod.net)"
-                            prompt_text "  External service URL:" "" KC_EXTERNAL_SERVICE
-                        fi
-                    fi
-
-                    if [ "$KC_SETUP_TYPE" = "1" ] || [ "$KC_SETUP_TYPE" = "3" ]; then
-                        KC_DOMAIN="localhost"
-                    fi
-
-                    # Wait for Keycloak to be fully ready (can take 30-60 seconds)
-                    echo ""
-                    echo "  Waiting for Keycloak to be ready..."
-                    KC_READY=false
-                    for i in {1..60}; do
-                        if docker exec keycloak curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
-                            KC_READY=true
-                            echo "  ✓ Keycloak is ready"
-                            break
-                        fi
-                        echo -n "."
-                        sleep 2
-                    done
-                    echo ""
-
-                    if [ "$KC_READY" = true ]; then
-                        # Login to Keycloak admin CLI
-                        echo "  Logging in to Keycloak admin CLI..."
-                        docker exec keycloak /opt/keycloak/bin/kcadm.sh config credentials \
-                            --server http://localhost:8080 \
-                            --realm master \
-                            --user admin \
-                            --password "$KC_ADMIN_PASS" > /dev/null 2>&1
-
-                        if [ $? -eq 0 ]; then
-                            echo "  ✓ Logged in to Keycloak"
-
-                            # Create realm
-                            echo "  Creating realm '$KC_REALM'..."
-                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create realms \
-                                -s realm="$KC_REALM" \
-                                -s enabled=true \
-                                -s displayName="$KC_REALM" \
-                                -s registrationAllowed=false \
-                                -s resetPasswordAllowed=true \
-                                -s rememberMe=true \
-                                -s loginWithEmailAllowed=true \
-                                -s duplicateEmailsAllowed=false \
-                                -s sslRequired=EXTERNAL > /dev/null 2>&1
-
-                            if [ $? -eq 0 ]; then
-                                echo "  ✓ Created realm '$KC_REALM'"
-                            fi
-
-                            # Create OAuth2 client for ActualBudget
-                            if [ "$INSTALL_ACTUALBUDGET" = "y" ] || [ "$INSTALL_ACTUALBUDGET" = "Y" ]; then
-                                echo "  Creating OAuth2 client for ActualBudget..."
-                                AB_CLIENT_SECRET=$(openssl rand -hex 32)
-
-                                # Build redirect URIs based on configuration
-                                AB_REDIRECT_URIS='["http://localhost:5006/*","http://localhost:5006/callback"'
-
-                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://budget.'$KC_PUBLIC_DOMAIN'/*","https://budget.'$KC_PUBLIC_DOMAIN'/callback"'
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"https://'$KC_PUBLIC_DOMAIN':5006/*","https://'$KC_PUBLIC_DOMAIN':5006/callback"'
-                                fi
-
-                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                    AB_REDIRECT_URIS="$AB_REDIRECT_URIS"',"'$KC_EXTERNAL_SERVICE'/*","'$KC_EXTERNAL_SERVICE'/callback"'
-                                fi
-
-                                AB_REDIRECT_URIS="$AB_REDIRECT_URIS"']'
-
-                                # Build web origins
-                                AB_WEB_ORIGINS='["http://localhost:5006"'
-
-                                if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"https://budget.'$KC_PUBLIC_DOMAIN'","https://'$KC_PUBLIC_DOMAIN':5006"'
-                                fi
-
-                                if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                    AB_WEB_ORIGINS="$AB_WEB_ORIGINS"',"'$KC_EXTERNAL_SERVICE'"'
-                                fi
-
-                                AB_WEB_ORIGINS="$AB_WEB_ORIGINS"']'
-
-                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
-                                    -s clientId=actualbudget \
-                                    -s name="ActualBudget" \
-                                    -s description="Personal Finance Management" \
-                                    -s enabled=true \
-                                    -s clientAuthenticatorType=client-secret \
-                                    -s secret="$AB_CLIENT_SECRET" \
-                                    -s publicClient=false \
-                                    -s standardFlowEnabled=true \
-                                    -s directAccessGrantsEnabled=true \
-                                    -s serviceAccountsEnabled=false \
-                                    -s "redirectUris=$AB_REDIRECT_URIS" \
-                                    -s "webOrigins=$AB_WEB_ORIGINS" \
-                                    -s protocol=openid-connect > /dev/null 2>&1
-
-                                if [ $? -eq 0 ]; then
-                                    echo "  ✓ Created ActualBudget client"
-                                    echo "      Client ID: actualbudget"
-                                    echo "      Client Secret: $AB_CLIENT_SECRET"
-                                    echo ""
-
-                                    # Save to file with appropriate URLs
-                                    KC_AUTH_URL="http://localhost:8180"
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        KC_AUTH_URL="https://auth.$KC_PUBLIC_DOMAIN"
-                                    fi
-
-                                    cat > "$KC_DIR/actualbudget-oauth.txt" << EOF
-ActualBudget OAuth2 Configuration
-==================================
-
-Client ID: actualbudget
-Client Secret: $AB_CLIENT_SECRET
-
-LOCAL DEVELOPMENT:
-Authorization URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
-Token URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
-User Info URL: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
-EOF
-
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-PRODUCTION (with Caddy at https://auth.$KC_PUBLIC_DOMAIN):
-Authorization URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/auth
-Token URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/token
-User Info URL: https://auth.$KC_PUBLIC_DOMAIN/realms/$KC_REALM/protocol/openid-connect/userinfo
-EOF
-                                    fi
-
-                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-EXTERNAL SERVICE ($KC_EXTERNAL_SERVICE):
-- Use PRODUCTION URLs above
-- Keycloak MUST be accessible at: https://auth.$KC_PUBLIC_DOMAIN
-- Redirect URI configured: $KC_EXTERNAL_SERVICE/*
-EOF
-                                    fi
-
-                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-Redirect URIs configured:
-- http://localhost:5006/* (local)
-EOF
-
-                                    if [ -n "$KC_PUBLIC_DOMAIN" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-- https://budget.$KC_PUBLIC_DOMAIN/* (self-hosted)
-EOF
-                                    fi
-
-                                    if [ -n "$KC_EXTERNAL_SERVICE" ]; then
-                                        cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-- $KC_EXTERNAL_SERVICE/* (external)
-EOF
-                                    fi
-
-                                    cat >> "$KC_DIR/actualbudget-oauth.txt" << EOF
-
-To configure ActualBudget:
-1. Go to ActualBudget settings
-2. Enable OpenID/OAuth authentication
-3. Enter the Client ID and Secret above
-4. Use the URLs above based on your setup
-EOF
-                                    echo "  ✓ Saved OAuth config to $KC_DIR/actualbudget-oauth.txt"
-                                fi
-                            fi
-
-                            # Create a generic OAuth2 client template for other services
-                            echo "  Creating generic OAuth2 client for other services..."
-                            GENERIC_CLIENT_SECRET=$(openssl rand -hex 32)
-
-                            docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r "$KC_REALM" \
-                                -s clientId=generic-app \
-                                -s name="Generic Application" \
-                                -s description="Template client for other services" \
-                                -s enabled=true \
-                                -s clientAuthenticatorType=client-secret \
-                                -s secret="$GENERIC_CLIENT_SECRET" \
-                                -s publicClient=false \
-                                -s standardFlowEnabled=true \
-                                -s directAccessGrantsEnabled=true \
-                                -s 'redirectUris=["http://localhost:*/*","https://'$KC_DOMAIN'/*","https://*.'$KC_DOMAIN'/*"]' \
-                                -s 'webOrigins=["*"]' \
-                                -s protocol=openid-connect > /dev/null 2>&1
-
-                            if [ $? -eq 0 ]; then
-                                echo "  ✓ Created generic OAuth2 client template"
-                                cat > "$KC_DIR/generic-oauth.txt" << EOF
-Generic OAuth2 Client Configuration
-====================================
-
-Client ID: generic-app
-Client Secret: $GENERIC_CLIENT_SECRET
-
-Use this as a template for other services. You can clone this client
-in the Keycloak admin console and modify the redirect URIs.
-
-Base URLs:
-- Authorization: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/auth
-- Token: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/token
-- User Info: http://localhost:8180/realms/$KC_REALM/protocol/openid-connect/userinfo
-
-For production: Replace localhost:8180 with https://auth.$KC_DOMAIN
-EOF
-                                echo "  ✓ Saved config to $KC_DIR/generic-oauth.txt"
-                            fi
-
-                            # Optionally create initial user
-                            echo ""
-                            prompt_yn "Create an initial user in realm '$KC_REALM'? (y/n):" "y" CREATE_USER
-
-                            if [ "$CREATE_USER" = "y" ] || [ "$CREATE_USER" = "Y" ]; then
-                                prompt_text "  Username:" "$ACTUAL_USER" KC_USERNAME
-                                prompt_text "  Email:" "${KC_USERNAME}@${KC_DOMAIN}" KC_EMAIL
-                                prompt_text "  First name:" "" KC_FIRSTNAME
-                                prompt_text "  Last name:" "" KC_LASTNAME
-
-                                echo "  Password for $KC_USERNAME:"
-                                read -s KC_USER_PASS
-                                echo ""
-
-                                docker exec keycloak /opt/keycloak/bin/kcadm.sh create users -r "$KC_REALM" \
-                                    -s username="$KC_USERNAME" \
-                                    -s email="$KC_EMAIL" \
-                                    -s firstName="$KC_FIRSTNAME" \
-                                    -s lastName="$KC_LASTNAME" \
-                                    -s enabled=true \
-                                    -s emailVerified=true > /dev/null 2>&1
-
-                                if [ $? -eq 0 ]; then
-                                    # Set password
-                                    KC_USER_ID=$(docker exec keycloak /opt/keycloak/bin/kcadm.sh get users -r "$KC_REALM" -q username="$KC_USERNAME" 2>/dev/null | grep -o '"id" : "[^"]*"' | cut -d'"' -f4)
-
-                                    docker exec keycloak /opt/keycloak/bin/kcadm.sh set-password -r "$KC_REALM" \
-                                        --username "$KC_USERNAME" \
-                                        --new-password "$KC_USER_PASS" > /dev/null 2>&1
-
-                                    echo "  ✓ Created user: $KC_USERNAME"
-                                    echo "  ✓ Password set"
-                                    echo ""
-                                    echo "  This user can now log in to ActualBudget and other services!"
-                                fi
-                            fi
-
-                            echo ""
-                            echo "  ✓ Keycloak configuration complete!"
-                            echo ""
-                            echo "  Next steps:"
-                            echo "    1. Go to http://localhost:8180/admin"
-                            echo "    2. Login with admin / $KC_ADMIN_PASS"
-                            echo "    3. Switch to realm '$KC_REALM' (top-left dropdown)"
-                            echo "    4. Manage users in Users menu"
-                            echo "    5. OAuth configs saved to $KC_DIR/*.txt"
-                            echo ""
-
-                        else
-                            echo "  ⚠ Failed to login to Keycloak admin CLI"
-                            echo "  You can configure Keycloak manually via the web UI"
-                        fi
-                    else
-                        echo "  ⚠ Keycloak did not become ready in time"
-                        echo "  You can configure it manually after it starts"
-                    fi
-                fi
-            fi
-
-            echo ""
-            echo "  Admin console:  http://localhost:8180/admin"
-            echo "  Username:       admin"
-            echo "  Password:       $KC_ADMIN_PASS"
-            echo "  Database:       PostgreSQL (./postgres-data)"
-            if [ -n "$KC_REALM" ]; then
-                echo "  Realm:          $KC_REALM"
-                echo "  Config files:   $KC_DIR/*.txt"
-            fi
-            echo ""
-            echo "  ⚠  For production:"
-            echo "     - Use HTTPS via reverse proxy (Caddy)"
-            echo "     - Change command to 'start' instead of 'start-dev'"
-            echo "     - Set KC_HOSTNAME to your domain"
-            echo ""
-        fi
-    fi
-
     # ---- CADDY WEB SERVER ----
     if [ "$WHIPTAIL_USED" != true ] && [ -z "$INSTALL_CADDY" ]; then
         echo ""
@@ -4937,23 +4312,6 @@ CADDY_COMPOSE
 #         level INFO
 #     }
 #     reverse_proxy localhost:5006
-#     header {
-#         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-#         X-Frame-Options "SAMEORIGIN"
-#         X-Content-Type-Options "nosniff"
-#         X-XSS-Protection "1; mode=block"
-#         Referrer-Policy "strict-origin-when-cross-origin"
-#     }
-# }
-
-# Keycloak
-# auth.yourdomain.com {
-#     log {
-#         output file /var/log/caddy/keycloak-access.log
-#         format json
-#         level INFO
-#     }
-#     reverse_proxy localhost:8180
 #     header {
 #         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 #         X-Frame-Options "SAMEORIGIN"

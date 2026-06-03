@@ -51,7 +51,7 @@
 │                                                         │
 │ === DOCKER SERVICES ===                                │
 │  [ ] ACTUALBUDGET     Personal finance                 │
-│  [ ] AUTHELIA         SSO + 2FA auth portal            │
+│  [ ] KEYCLOAK         Identity management              │
 │  [ ] CADDY            Reverse proxy                    │
 │  [ ] FAIL2BAN_CADDY   Protect Caddy services           │
 │  [ ] JELLYFIN         Media server                     │
@@ -75,7 +75,7 @@
 
 **Dependency-aware installation order:**
 1. Install Caddy first (if selected)
-2. Install services that depend on Caddy (Authelia, etc.)
+2. Install services that depend on Caddy (Keycloak, etc.)
 3. Install fail2ban for Caddy (if selected + Caddy installed)
 4. Install independent services in parallel where possible
 

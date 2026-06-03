@@ -61,17 +61,17 @@ budget.yourdomain.com {
 }
 ```
 
-#### Authelia (SSO + 2FA auth portal)
+#### Keycloak (Identity & Access Management)
 
 ```caddy
 auth.yourdomain.com {
     log {
-        output file /var/log/caddy/authelia-access.log
+        output file /var/log/caddy/keycloak-access.log
         format json
         level INFO
     }
 
-    reverse_proxy localhost:9091
+    reverse_proxy localhost:8180
 
     # Security headers
     header {
@@ -315,22 +315,14 @@ logpath = /var/log/caddy/actualbudget-access.log
 maxretry = 3
 bantime = 7200
 
-[caddy-authelia]
+[caddy-keycloak]
 enabled = true
 port = http,https
 filter = caddy-auth
-logpath = /var/log/caddy/authelia-access.log
+logpath = /var/log/caddy/keycloak-access.log
 maxretry = 5
 bantime = 3600
 ```
-
-> **Note:** Authelia already performs its own failed-login *regulation*
-> (per-account lockout after repeated failures). This jail is complementary
-> defense-in-depth that bans the offending IP at the firewall level, and also
-> covers services that don't sit behind Authelia. Neither Authelia nor
-> fail2ban provides **geo-blocking** — for country-level blocking or IP
-> reputation feeds, consider [CrowdSec](https://www.crowdsec.net/) (a modern
-> fail2ban alternative with a Caddy bouncer) or a Caddy GeoIP module.
 
 ## Best Practices
 
@@ -367,7 +359,7 @@ cp ~/docker/caddy/Caddyfile ~/docker/caddy/Caddyfile.backup
 ### Service Ports
 
 - **ActualBudget**: 5006
-- **Authelia**: 9091
+- **Keycloak**: 8180
 - **Caddy**: 80 (HTTP), 443 (HTTPS)
 
 ## Support
@@ -376,4 +368,4 @@ For issues:
 - Caddy documentation: https://caddyserver.com/docs/
 - Fail2ban manual: https://www.fail2ban.org/wiki/index.php/MANUAL_0_8
 - ActualBudget docs: https://actualbudget.org/docs/
-- Authelia docs: https://www.authelia.com/
+- Keycloak docs: https://www.keycloak.org/documentation

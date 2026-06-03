@@ -31,7 +31,7 @@ This script is divided into TWO main phases:
 │   • Skip services you don't want                                │
 │                                                                 │
 │ Services include:                                               │
-│   • Self-hosted apps (ActualBudget, Authelia, Jellyfin, etc.)  │
+│   • Self-hosted apps (ActualBudget, Keycloak, Jellyfin, etc.)  │
 │   • Network services (Samba, VPNs, fail2ban)                    │
 │   • Monitoring tools (Uptime Kuma, Portainer, Watchtower)      │
 │   • And many more...                                            │
