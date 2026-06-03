@@ -1,8 +1,18 @@
 # Changelog
 
 All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
-The project is pre-1.0 while the modular system reaches parity with the
-monolithic `ubuntu-post-install-*.sh` scripts.
+
+## [0.9.5] - 2026-06-03
+
+### Changed
+- VERSION reset from 1.0.0 to 0.9.5 — versioning now tracks `setup_v<X.Y.Z>.sh`
+  snapshot files. Each release creates a new numbered file (old files stay). The
+  current `setup.sh` is always the live version; `setup_v0.9.5.sh` is the first
+  named snapshot.
+
+### Added
+- `setup_v0.9.5.sh` — first versioned snapshot of `setup.sh`. Future changes
+  produce `setup_v0.9.6.sh`, etc. Previous snapshots are never removed.
 
 ## [1.0.0] - 2026-06-03
 
