@@ -17,7 +17,10 @@ complete, standalone script).
 > historical snapshots. For example, **Home Assistant** (home-automation hub,
 > port 8123) is available in the `-crowdsec` variants. It ships with a
 > `trusted_proxies` config pre-seeded so it works behind the Caddy reverse
-> proxy out of the box.
+> proxy out of the box, and the installer asks whether to use **bridge**
+> networking (port 8123 published — proxy-friendly, isolated) or **host**
+> networking (needed for LAN device auto-discovery: Chromecast, HomeKit,
+> mDNS, some Zigbee/Z-Wave/Bluetooth).
 
 ## Which one?
 

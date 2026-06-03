@@ -4974,6 +4974,25 @@ MEALIE_COMPOSE
             ensure_docker_dir_ownership "$HOMEASSISTANT_DIR"
             cd "$HOMEASSISTANT_DIR"
 
+            # Networking mode: bridge (published port) vs host networking.
+            echo ""
+            echo "  Home Assistant networking mode:"
+            echo "    1) Bridge  - container gets its own network; port 8123 is published"
+            echo "                 to the host. Works behind the Caddy reverse proxy and"
+            echo "                 keeps HA isolated. Recommended for most setups."
+            echo "    2) Host    - HA shares the host's network directly. Needed for"
+            echo "                 auto-discovery of devices on your LAN (Chromecast/Cast,"
+            echo "                 HomeKit, mDNS/Zeroconf, some Zigbee/Z-Wave & Bluetooth)."
+            prompt_text "  Choose networking mode [1]:" "1" HA_NETMODE
+            if [ "$HA_NETMODE" = "2" ]; then
+                HA_NET_LINES="    network_mode: host"
+                echo "  → Host networking selected (best device discovery)."
+            else
+                HA_NET_LINES="    ports:
+      - \"8123:8123\""
+                echo "  → Bridge networking selected (port 8123 published)."
+            fi
+
             cat > docker-compose.yml << HOMEASSISTANT_COMPOSE
 name: homeassistant
 
@@ -4989,10 +5008,7 @@ services:
     volumes:
       - ./config:/config
       - /run/dbus:/run/dbus:ro
-    ports:
-      - "8123:8123"
-    # For full device/mDNS auto-discovery (Zigbee/Z-Wave/Bluetooth/Cast),
-    # remove the 'ports:' block above and add:  network_mode: host
+${HA_NET_LINES}
 HOMEASSISTANT_COMPOSE
 
             mkdir -p config
