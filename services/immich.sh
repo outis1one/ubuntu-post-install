@@ -112,7 +112,7 @@ install_immich() {
     # ── Generate DB password ────────────────────────────────────────────────
     local DB_PASS TZ_VAL
     DB_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-    TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # ── Write docker-compose.yml ────────────────────────────────────────────
     if [ -n "$EXTERNAL_LIBRARY" ]; then

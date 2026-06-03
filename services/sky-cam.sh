@@ -72,7 +72,7 @@ install_sky-cam() {
     local LATITUDE="" LONGITUDE="" TIMEZONE="" BASE_DIR="" CAMERAS_LIST="" SUNRISE_CAM=""
     prompt_text "  Latitude (decimal degrees) [0.0000]:" "0.0000" LATITUDE
     prompt_text "  Longitude (decimal degrees) [0.0000]:" "0.0000" LONGITUDE
-    prompt_text "  Timezone [America/New_York]:" "America/New_York" TIMEZONE
+    prompt_text "  Timezone [${SITE_TZ:-America/New_York}]:" "${SITE_TZ:-America/New_York}" TIMEZONE
 
     echo ""
     echo "  Camera names are short identifiers, e.g.:  east north south west"

@@ -47,6 +47,55 @@ register_service() {
     SERVICE_ORDER+=("$name")
 }
 
+# ── Site-wide defaults ────────────────────────────────────────────────────────
+# Stored in $DOCKER_DIR/.config (key=value, one per line).
+# Service modules read these as prompt defaults so the user only types
+# timezone, domain, and Caddy network once.  Run: sudo ./setup.sh configure
+SITE_TZ=""
+SITE_DOMAIN=""
+SITE_CADDY_NET="caddy_net"
+SITE_PUID=""
+SITE_PGID=""
+
+load_site_config() {
+    local cfg="$DOCKER_DIR/.config"
+    [ -f "$cfg" ] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${key// }" ]] && continue
+        case "$key" in
+            SITE_TZ)        SITE_TZ="$val"                              ;;
+            SITE_DOMAIN)    SITE_DOMAIN="$val"                          ;;
+            SITE_CADDY_NET) SITE_CADDY_NET="$val"                       ;;
+            SITE_PUID)      SITE_PUID="$val"                            ;;
+            SITE_PGID)      SITE_PGID="$val"                            ;;
+            BASE_DOMAIN)    [ -z "$SITE_DOMAIN" ] && SITE_DOMAIN="$val" ;;
+        esac
+    done < "$cfg"
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID
+}
+
+save_site_config() {
+    local cfg="$DOCKER_DIR/.config"
+    mkdir -p "$(dirname "$cfg")"
+    {
+        echo "# ubuntu-post-install site defaults"
+        echo "# Re-run wizard:  sudo ./setup.sh configure"
+        [ -n "$SITE_TZ" ]        && echo "SITE_TZ=$SITE_TZ"
+        [ -n "$SITE_DOMAIN" ]    && echo "SITE_DOMAIN=$SITE_DOMAIN"
+        [ -n "$SITE_CADDY_NET" ] && echo "SITE_CADDY_NET=$SITE_CADDY_NET"
+        [ -n "$SITE_PUID" ]      && echo "SITE_PUID=$SITE_PUID"
+        [ -n "$SITE_PGID" ]      && echo "SITE_PGID=$SITE_PGID"
+        # Backward-compat alias for services that still read BASE_DOMAIN directly
+        [ -n "$SITE_DOMAIN" ]    && echo "BASE_DOMAIN=$SITE_DOMAIN"
+    } > "$cfg"
+    chmod 600 "$cfg"
+}
+
+# Load immediately so all service modules inherit the values when sourced
+load_site_config
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 require_root() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then

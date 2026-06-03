@@ -98,8 +98,7 @@ install_frigate-audio() {
 
     # ── Frigate public URL ─────────────────────────────────────────────────────
     echo ""
-    local BASE_DOMAIN=""
-    [ -f "$DOCKER_DIR/.config" ] && BASE_DOMAIN=$(grep '^BASE_DOMAIN=' "$DOCKER_DIR/.config" 2>/dev/null | cut -d= -f2-)
+    local BASE_DOMAIN="${SITE_DOMAIN:-}"
     local FRIGATE_PUBLIC_URL=""
     if [ -n "$BASE_DOMAIN" ]; then
         local _PFX=""

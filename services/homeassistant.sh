@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
     privileged: true
     environment:
-      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+      - TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
     volumes:
       - ./config:/config
       - /run/dbus:/run/dbus:ro

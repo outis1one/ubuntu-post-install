@@ -33,7 +33,7 @@ install_magicmirror() {
     mkdir -p "$MM_BASE"
     chown "$ACTUAL_USER:$ACTUAL_USER" "$MM_BASE"
 
-    local TZ_VAL; TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     local i MM_PORT MM_DIR
 
     for i in $(seq 1 "$MM_COUNT"); do

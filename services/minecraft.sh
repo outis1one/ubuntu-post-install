@@ -953,8 +953,7 @@ except: pass
     esac
 
     local MC_DOMAIN=""
-    local BASE_DOMAIN=""
-    [ -f "$DOCKER_DIR/.config" ] && BASE_DOMAIN=$(grep '^BASE_DOMAIN=' "$DOCKER_DIR/.config" 2>/dev/null | cut -d= -f2-)
+    local BASE_DOMAIN="${SITE_DOMAIN:-}"
     if [ "$USE_PLAYIT" = true ] || [ "$USE_PORTFORWARD" = true ]; then
         if [ -n "$BASE_DOMAIN" ]; then
             local _PREFIX=""

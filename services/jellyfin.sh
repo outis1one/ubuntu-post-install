@@ -33,7 +33,7 @@ install_jellyfin() {
     ensure_docker_dir_ownership "$JELLYFIN_DIR"
     cd "$JELLYFIN_DIR" || return 1
 
-    local TZ_VAL; TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # Hardware acceleration: only wire /dev/dri through if a render node exists,
     # otherwise the container would fail to start on a GPU-less host.

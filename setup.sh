@@ -106,8 +106,41 @@ list_services() {
     echo ""
 }
 
+# ── Site defaults wizard ──────────────────────────────────────────────────────
+# Prompts for timezone, base domain, and Caddy network name; saves to .config.
+# Run directly:  sudo ./setup.sh configure
+run_site_configure() {
+    local _sys_tz; _sys_tz=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Site defaults  ·  pre-filled into every service prompt     ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  These become the default answer each time a service asks for"
+    echo "  timezone, domain, etc.  Press Enter to keep the shown value."
+    echo ""
+    local _cur_tz="${SITE_TZ:-$_sys_tz}"
+    local _cur_dom="${SITE_DOMAIN:-}"
+    local _cur_net="${SITE_CADDY_NET:-caddy_net}"
+    prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
+    prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
+    prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET
+    mkdir -p "$DOCKER_DIR"
+    save_site_config
+    log_success "Saved to $DOCKER_DIR/.config"
+    echo ""
+}
+
 # ── --list ───────────────────────────────────────────────────────────────────
 if [ "$DO_LIST" = true ]; then list_services; exit 0; fi
+
+# ── configure: show/update site-wide defaults ────────────────────────────────
+if [ "${REQUESTED[*]:-}" = "configure" ]; then
+    require_root
+    run_site_configure
+    exit 0
+fi
 
 # ── Direct install: ./setup.sh caddy homeassistant ──────────────────────────
 if [ "${#REQUESTED[@]}" -gt 0 ]; then
@@ -146,7 +179,17 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "  Install with:  curl -fsSL https://get.docker.com | sh"
 fi
 
-# 3) Offer Caddy first (most services proxy through it).
+# 3) Offer site defaults wizard if .config has no SITE_TZ yet (first run).
+if ! grep -q '^SITE_TZ=' "$DOCKER_DIR/.config" 2>/dev/null; then
+    echo ""
+    echo "  No site defaults found. Setting them now pre-fills timezone, domain,"
+    echo "  and Caddy network for every service — you type them once, not every time."
+    OFFER_CONFIG=""
+    prompt_yn "Configure site defaults now? (y/n):" "y" OFFER_CONFIG
+    [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ] && run_site_configure
+fi
+
+# 4) Offer Caddy first (most services proxy through it).
 if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
     echo ""
     OFFER_CADDY=""
@@ -154,7 +197,7 @@ if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
     [ "$OFFER_CADDY" = "y" ] || [ "$OFFER_CADDY" = "Y" ] && run_service caddy
 fi
 
-# 4) Category menu loop: pick a category → checklist → install → back to menu.
+# 5) Category menu loop: pick a category → checklist → install → back to menu.
 have_whiptail=false
 command -v whiptail >/dev/null 2>&1 && have_whiptail=true
 

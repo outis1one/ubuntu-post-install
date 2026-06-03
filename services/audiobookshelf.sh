@@ -30,7 +30,7 @@ install_audiobookshelf() {
     ensure_docker_dir_ownership "$ABS_DIR"
     cd "$ABS_DIR" || return 1
 
-    local TZ_VAL; TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     cat > docker-compose.yml << ABS_COMPOSE
 name: audiobookshelf
