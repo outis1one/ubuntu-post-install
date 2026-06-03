@@ -82,6 +82,7 @@ is_installed() {
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         linux-to-sync) [ -d "$ACTUAL_HOME/linux-to-sync/.git" ] ;;
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
+        sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }

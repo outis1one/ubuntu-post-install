@@ -95,7 +95,7 @@ is retained as a frozen evolution record.
 | `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant` |
 | `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `magicmirror`, `mealie`, `meshcentral`, `ntfy`, `portainer`, `traccar`, `uptimekuma`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
-| `cameras` | `frigate`, `frigate-notify` |
+| `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `linux-to-sync`, `silent-send`, `sync-cc` |
 | `backup` | `backup` |
