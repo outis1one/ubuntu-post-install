@@ -1741,6 +1741,23 @@ run_cmd apt install -y \
     unzip \
     rclone || echo "Warning: Some utilities failed to install, continuing..."
 
+# Install glow (terminal markdown reader) from the Charm apt repo
+echo ""
+echo "Installing glow (terminal markdown reader)..."
+if command -v glow >/dev/null 2>&1; then
+    echo "  ✓ glow already installed"
+elif [ "$DRY_RUN" = true ]; then
+    echo "[DRY-RUN] Would add repo.charm.sh apt repo and install glow"
+else
+    sudo mkdir -p /etc/apt/keyrings
+    if curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/charm.gpg; then
+        echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list >/dev/null
+        sudo apt update -y && sudo apt install -y glow && echo "  ✓ glow installed" || echo "  ⚠ glow install failed"
+    else
+        echo "  ⚠ Could not fetch Charm signing key - skipping glow"
+    fi
+fi
+
 # Install OpenSSH Server
 echo ""
 echo "Installing OpenSSH Server..."
