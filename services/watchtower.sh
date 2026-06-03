@@ -2,7 +2,7 @@
 # services/watchtower.sh — Watchtower automatic container update monitoring.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service watchtower homelab "Automatic container updates (Watchtower)"
+register_service watchtower utilities "Automatic container updates (Watchtower)"
 
 install_watchtower() {
     require_docker || return 1

@@ -2,7 +2,7 @@
 # services/uptimekuma.sh — Uptime Kuma uptime/status monitoring.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service uptimekuma homelab "Uptime/status monitoring (Uptime Kuma)" 3001
+register_service uptimekuma utilities "Uptime/status monitoring (Uptime Kuma)" 3001
 
 install_uptimekuma() {
     require_docker || return 1

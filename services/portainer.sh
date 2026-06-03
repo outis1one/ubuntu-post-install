@@ -2,7 +2,7 @@
 # services/portainer.sh — Portainer Docker management web UI.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service portainer homelab "Docker management UI (Portainer)" 9443
+register_service portainer utilities "Docker management UI (Portainer)" 9443
 
 install_portainer() {
     require_docker || return 1

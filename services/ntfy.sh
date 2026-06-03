@@ -2,7 +2,7 @@
 # services/ntfy.sh — ntfy self-hosted push notification server.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service ntfy homelab "Self-hosted push notifications (ntfy)" 8090
+register_service ntfy utilities "Self-hosted push notifications (ntfy)" 8090
 
 install_ntfy() {
     require_docker || return 1

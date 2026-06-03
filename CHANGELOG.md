@@ -4,6 +4,28 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.7] - 2026-06-03
+
+### Added
+- `services/caddy.sh` *(homelab)* — Caddy reverse proxy + automatic HTTPS, own
+  `~/docker/caddy/` folder (compose + starter Caddyfile + README). Services add
+  their site blocks to its Caddyfile.
+- `services/crowdsec.sh` *(homelab)* — system-level intrusion prevention
+  (agent + firewall bouncer + Caddy log acquisition + optional ntfy ban alerts);
+  README in `~/docker/crowdsec/`.
+- **Guided menu redesign** in `setup.sh`:
+  - Prints the **required** set (essential packages incl. glow + a Docker check)
+    up front and lets you **cancel** before anything changes.
+  - Offers **Caddy first** (most services depend on it).
+  - **Category menu loop**: pick a category → checklist (already-installed shown
+    as `[installed]`) → install → back to the menu for the next category, until
+    you choose Done. whiptail UI with a plain-text fallback.
+
+### Changed
+- **Categories** reorganized: `base · homelab · utilities · media · cameras ·
+  gaming · backup`. Moved ntfy, filebrowser, portainer, uptimekuma, watchtower
+  to `utilities`. Within `homelab`, Caddy → CrowdSec → Authelia sort first.
+
 ## [0.9.6] - 2026-06-03
 
 ### Added

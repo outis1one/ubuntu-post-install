@@ -2,7 +2,7 @@
 # services/filebrowser.sh — FileBrowser web-based file manager.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service filebrowser homelab "Web file manager (FileBrowser)" 8085
+register_service filebrowser utilities "Web file manager (FileBrowser)" 8085
 
 install_filebrowser() {
     require_docker || return 1
