@@ -152,31 +152,44 @@ fi
 # ── Guided interactive flow ──────────────────────────────────────────────────
 require_root
 
-# 1) Show the REQUIRED set and let the user cancel before anything happens.
-echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  Ubuntu Post-Install  ·  v$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
-echo "╚══════════════════════════════════════════════════════════════╝"
-echo ""
-echo "REQUIRED (installed/verified first):"
-echo "  • Essential CLI packages: net-tools, git, curl, wget, htop, tree,"
-echo "    ncdu, zip/unzip, jq, rsync, and glow (markdown reader)"
-echo "  • Docker presence check (needed by all containerized services)"
-echo ""
-echo "Then you'll get a category menu to pick optional services."
-echo ""
-PROCEED=""
-prompt_yn "Proceed with the required setup? (y/n):" "y" PROCEED
-if [ "$PROCEED" != "y" ] && [ "$PROCEED" != "Y" ]; then
-    echo "Cancelled. Nothing was changed."
-    exit 0
-fi
+_VER="$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
 
-# 2) Run required.
-run_service base
-if ! command -v docker >/dev/null 2>&1; then
-    log_warning "Docker is not installed. Containerized services need it."
-    echo "  Install with:  curl -fsSL https://get.docker.com | sh"
+if is_installed base; then
+    # ── Re-run: base already present — skip required step ────────────────────
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Ubuntu Post-Install  ·  v${_VER}"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  Base packages already installed — skipping required setup."
+    echo "  Use 'sudo ./setup.sh base' to force a reinstall."
+    echo ""
+else
+    # ── First run: show required banner, confirm, install ────────────────────
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Ubuntu Post-Install  ·  v${_VER}"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "REQUIRED (installed/verified first):"
+    echo "  • Essential CLI packages: net-tools, git, curl, wget, htop, tree,"
+    echo "    ncdu, zip/unzip, jq, rsync, and glow (markdown reader)"
+    echo "  • Docker presence check (needed by all containerized services)"
+    echo ""
+    echo "Then you'll get a category menu to pick optional services."
+    echo ""
+    PROCEED=""
+    prompt_yn "Proceed with the required setup? (y/n):" "y" PROCEED
+    if [ "$PROCEED" != "y" ] && [ "$PROCEED" != "Y" ]; then
+        echo "Cancelled. Nothing was changed."
+        exit 0
+    fi
+
+    run_service base
+    if ! command -v docker >/dev/null 2>&1; then
+        log_warning "Docker is not installed. Containerized services need it."
+        echo "  Install with:  curl -fsSL https://get.docker.com | sh"
+    fi
 fi
 
 # 3) Offer site defaults wizard if .config has no SITE_TZ yet (first run).
