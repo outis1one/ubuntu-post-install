@@ -4,6 +4,21 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.9] - 2026-06-03
+
+### Added
+- **New `extras` category** for non-Docker add-ons sourced from other repos —
+  things that build/install on the host instead of running as a container.
+  Inserted into `CATEGORY_ORDER` between `gaming` and `backup`.
+- `services/silent-send.sh` *(extras)* — installs the **Silent Send** browser
+  extension (redacts PII before it's sent to AI chatbots). Installs the build
+  toolchain (git, Node.js ≥18 via NodeSource, npm), clones
+  `outis1one/silent-send` to `~/silent-send`, runs `npm install` so the Firefox
+  build/sign tooling (`web-ext`) is ready, optionally builds a signed Firefox
+  `.xpi` (with Mozilla API creds), and prints load-unpacked / build instructions
+  per browser. README written to the checkout. No server/container.
+- `is_installed` marker for `silent-send` (checks `~/silent-send/.git`).
+
 ## [0.9.8] - 2026-06-03
 
 ### Added

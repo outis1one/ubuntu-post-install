@@ -72,7 +72,10 @@ single shared compose file.
 
 ## Groups
 
-`base` · `homelab` · `utilities` · `media` · `cameras` · `gaming` · `backup`.
+`base` · `homelab` · `utilities` · `media` · `cameras` · `gaming` · `extras` ·
+`backup`. `extras` holds non-Docker add-ons pulled from other repos (e.g. the
+`silent-send` browser extension) — things that install/build on the host rather
+than running as a container, so this script stays a single entry point for them.
 The guided menu (`sudo ./setup.sh`) shows the **required** packages first with a
 cancel option, then offers **Caddy** (most services proxy through it), then a
 **category menu you loop through** — pick a category, tick services (already
