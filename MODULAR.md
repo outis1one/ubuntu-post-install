@@ -97,5 +97,5 @@ is retained as a frozen evolution record.
 | `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-notify` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
-| `extras` | `linux-to-sync`, `silent-send` |
+| `extras` | `linux-to-sync`, `silent-send`, `sync-cc` |
 | `backup` | `backup` |

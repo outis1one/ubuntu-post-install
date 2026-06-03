@@ -81,6 +81,7 @@ is_installed() {
         crowdsec) command -v cscli >/dev/null 2>&1 ;;
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         linux-to-sync) [ -d "$ACTUAL_HOME/linux-to-sync/.git" ] ;;
+        sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
