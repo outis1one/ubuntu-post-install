@@ -4,6 +4,33 @@ All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`.
 The project is pre-1.0 while the modular system reaches parity with the
 monolithic `ubuntu-post-install-*.sh` scripts.
 
+## [0.9.10] - 2026-06-03
+
+### Added
+- **Media batch** — 6 service modules migrated from the monolith:
+  - `services/jellyfin.sh` *(media)* — Free media server (movies, TV, music). Auto-detects
+    `/dev/dri/renderD128` and enables VAAPI hardware transcoding with the render GID when
+    present; falls back to CPU transcoding otherwise. Ports 8096, 1900/udp (DLNA),
+    7359/udp (discovery).
+  - `services/emby.sh` *(media)* — Emby media server. UID/GID baked from the install-time
+    user; HW transcoding block left commented (uncomment `/dev/dri` once GPU confirmed).
+    Ports 8096 (web) and 8920 (HTTPS).
+  - `services/audiobookshelf.sh` *(media)* — Audiobook & podcast server. Separate audiobooks
+    and podcasts paths; podcasts folder defaults to `./podcasts` inside the service dir.
+    Port 13378.
+  - `services/arm.sh` *(media)* — Automatic Ripping Machine for DVDs, Blu-rays, CDs.
+    Detects optical drives at install time (`/dev/sr*`); runs with `privileged: true`.
+    Ripped output split into movies/ and music/. Port 8080.
+  - `services/lyrion.sh` *(media)* — Lyrion Music Server (formerly LMS) for Squeezebox
+    devices, the Squeezer app, and Chromecast. Uses `network_mode: host` so UDP discovery
+    works without manual port mapping. Port 9000.
+  - `services/immich.sh` *(media)* — Self-hosted photo & video backup (like Google Photos).
+    Full multi-container stack (immich-server, immich-machine-learning, valkey/redis,
+    postgres). Two library strategies: (1) unified — all photos in one place with an
+    auto-generated `import-photos.sh` helper that handles admin account creation, API key
+    generation, storage template config, and CLI upload; (2) external — existing photos
+    indexed read-only, new uploads separate. Port 2283.
+
 ## [0.9.9] - 2026-06-03
 
 ### Added
