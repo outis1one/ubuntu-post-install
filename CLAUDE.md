@@ -1,0 +1,236 @@
+# CLAUDE.md — ubuntu-post-install contributor guide
+
+Context for adding or modifying services. Read this before touching any
+service file so the result matches what's already here.
+
+## How the system works
+
+`setup.sh` sources `lib/common.sh` then globs every `services/*.sh` file.
+Each service file self-registers and defines its install function. Nothing
+in `setup.sh` needs to change when you add a service — just add the file.
+
+The wizard groups services by category (from `register_service`), shows a
+checklist per group, and calls `install_<name>()` for each selected item.
+`--list`, `--dry-run`, and `--unattended` all work automatically.
+
+## Adding a service — the three-step rule
+
+1. Create `services/<name>.sh` (kebab-case filename)
+2. Call `register_service` at the top of the file
+3. Define `install_<name>()` (hyphens → underscores in function name)
+
+That's it. The menu picks it up on the next run.
+
+## Minimal Docker service template
+
+```bash
+#!/bin/bash
+# services/my-tool.sh — One-line description.
+# Part of the modular post-install system (sourced by setup.sh).
+
+register_service my-tool utilities "What it does (My Tool)" 8080
+
+install_my_tool() {
+    require_docker || return 1
+
+    local DIR="$DOCKER_DIR/my-tool"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
+        return 0
+    fi
+
+    mkdir -p "$DIR"
+    ensure_docker_dir_ownership "$DIR"
+    cd "$DIR" || return 1
+
+    cat > docker-compose.yml << 'EOF'
+name: my-tool
+services:
+  my-tool:
+    image: vendor/my-tool:latest
+    container_name: my-tool
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+EOF
+
+    configure_caddy_for_service "My Tool" "8080" "my-tool"
+
+    write_readme "$DIR" << 'MD'
+# My Tool
+Brief description.
+
+## Manage
+```bash
+docker compose up -d
+docker compose down
+docker compose logs -f
+docker compose pull && docker compose up -d
+```
+MD
+
+    local START=""
+    prompt_yn "Start My Tool now? (y/n):" "y" START
+    if [ "$START" = "y" ] || [ "$START" = "Y" ]; then
+        docker compose up -d \
+            && log_success "My Tool started" \
+            || log_warning "Start failed — check: docker compose logs"
+    fi
+}
+```
+
+## register_service signature
+
+```bash
+register_service <name> <group> "<description>" [port]
+```
+
+- `name` — kebab-case, matches the filename and the `install_` function
+- `group` — one of the categories below; determines which menu it appears in
+- `description` — shown in `--list` and the menu checklist
+- `port` — optional; informational only (not used by the framework)
+
+## Available globals
+
+| Variable | Value |
+|----------|-------|
+| `DOCKER_DIR` | `~/docker` — parent for all Docker service directories |
+| `ACTUAL_USER` | The non-root user that invoked sudo |
+| `ACTUAL_HOME` | Home directory of `ACTUAL_USER` |
+| `SITE_TZ` | Timezone from site config, e.g. `America/New_York` |
+| `SITE_DOMAIN` | Base domain from site config, e.g. `example.com` |
+| `SITE_CADDY_NET` | Docker network name for Caddy (default: `caddy_net`) |
+| `DRY_RUN` | `true`/`false` — set by `--dry-run` flag |
+| `UNATTENDED` | `true`/`false` — set by `--unattended` flag |
+
+## Available helpers (lib/common.sh)
+
+### Logging
+
+```bash
+log_info    "message"   # blue   [INFO]
+log_success "message"   # green  [OK]
+log_warning "message"   # yellow [WARN]
+log_error   "message"   # red    [ERROR]
+```
+
+### Prompts — honor `UNATTENDED` automatically
+
+```bash
+prompt_yn   "Question? (y/n):" "default_y_or_n" VARNAME
+prompt_text "Question? [default]:" "default" VARNAME
+```
+
+When `UNATTENDED=true` both functions skip the prompt and use the default.
+
+### Pre-flight
+
+```bash
+require_root    # exits with an error if not running as root
+require_docker  # installs Docker CE + Compose plugin if missing, then returns
+```
+
+### Execution and ownership
+
+```bash
+run_cmd COMMAND [args...]           # no-ops in DRY_RUN, executes otherwise
+ensure_docker_dir_ownership DIR...  # chown -R ACTUAL_USER:ACTUAL_USER (skips in DRY_RUN)
+generate_password [length]          # alphanumeric random string, default 32 chars
+pip_user_install PACKAGE...         # pip3 --user with --break-system-packages on 24.04+
+```
+
+### Caddy reverse proxy
+
+```bash
+configure_caddy_for_service "Display Name" "PORT" "default-subdomain" ["extra-block"]
+```
+
+Prompts the user for a domain, appends a site block to the Caddyfile, and
+reloads Caddy. No-ops silently if Caddy isn't installed. The fourth argument
+is an optional string inserted verbatim inside the Caddy site block (use it
+for `import authelia` or custom matchers).
+
+### README generation
+
+```bash
+write_readme "$DIR" << 'MD'
+# Title
+Content
+MD
+```
+
+Writes `$DIR/README.md` (creates the directory if needed). No-ops in DRY_RUN.
+Every Docker service should call this so `~/docker/<name>/README.md` is
+self-documenting on the deployed box.
+
+## Categories
+
+| Group | Purpose |
+|-------|---------|
+| `base` | CLI packages installed on every box |
+| `homelab` | Core infrastructure — reverse proxy, auth, intrusion prevention |
+| `utilities` | Self-hosted web apps — budget, DNS, files, monitoring, VPN, etc. |
+| `media` | Media servers, photo backup, disc ripping |
+| `cameras` | NVR and camera tooling (Frigate) |
+| `gaming` | Game servers, cloud gaming (Wolf), emulation |
+| `extras` | Non-Docker tools and scripts |
+| `backup` | Backup solutions |
+
+## Non-Docker services
+
+Not everything is a container. For apt-based or git-clone–based services,
+skip `require_docker` and the Docker helpers. See `services/base.sh` (apt
+packages + Charm repo) and `services/crowdsec.sh` (official apt repo) as
+reference patterns.
+
+For non-Docker services the default `is_installed` check in `setup.sh`
+looks for `$DOCKER_DIR/$name`, which won't exist. Add a case to the
+`is_installed()` function in `setup.sh` so the `[installed]` marker appears
+correctly in the menu:
+
+```bash
+# In setup.sh → is_installed()
+my-tool) command -v my-tool >/dev/null 2>&1 ;;
+```
+
+Docker services use the default case and don't need an entry.
+
+## DRY_RUN convention
+
+Every `install_*` function must check `$DRY_RUN` before touching the
+filesystem, installing packages, or starting containers. The pattern is:
+
+```bash
+if [ "$DRY_RUN" = true ]; then
+    echo "[DRY-RUN] Would do X"
+    echo "[DRY-RUN] Would do Y"
+    return 0
+fi
+```
+
+Put the check early — after any pure-display output (banners, info text)
+but before the first write.
+
+## .env files and secrets
+
+Generate passwords with `generate_password` (never hardcode them).
+Write secrets to `.env` files in the service directory, owned by
+`ACTUAL_USER`, permissions 600. Document every variable with a comment
+in the `.env` heredoc so the user knows what to change later.
+
+## Caddy network wiring
+
+Services that need to reach Caddy (or each other) over Docker networking
+should join the `$SITE_CADDY_NET` network. Add to `docker-compose.yml`:
+
+```yaml
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
+```
+
+And read the network name from `.env` using `CADDY_NET=$SITE_CADDY_NET`.
