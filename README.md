@@ -88,10 +88,13 @@ No git required. Works for anyone with a browser.
 
 ### 1 — Put the repo on the USB
 
-On GitHub: **Code → Download ZIP** → unzip → copy the
-`ubuntu-post-install-main` folder to your USB drive.
+1. On GitHub: click **Code → Download ZIP**
+2. Open your Downloads folder — right-click the ZIP → **Extract Here**
+3. Drag the `ubuntu-post-install-main` folder onto the USB drive in the
+   file manager sidebar
 
-To update it later, just download the ZIP again and replace the folder.
+To update later: download the ZIP again, extract, drag the new folder to the
+USB and replace the old one.
 
 ### 2 — Run on the target machine
 
