@@ -82,6 +82,18 @@ rc=0
 declare -a FAILED_LABELS=()
 _ERR="$(mktemp)"
 trap 'rm -f "$_ERR"' EXIT
+START_TS="$(date +%s)"
+BACKUP_COUNT=0
+
+if [ -n "${KOPIA_REPO:-}" ] && [[ "${KOPIA_REPO:-}" != *@*:* ]] && [[ "${KOPIA_REPO:-}" != ssh://* ]]; then
+    _pf_dir="$([ -d "$KOPIA_REPO" ] && echo "$KOPIA_REPO" || dirname "$KOPIA_REPO")"
+    _pf_avail="$(df -m "$_pf_dir" 2>/dev/null | awk 'NR==2{print $4}')"
+    if [ -n "$_pf_avail" ] && [ "$_pf_avail" -lt 512 ]; then
+        log "WARNING: Low disk space — ${_pf_avail}MB free at $KOPIA_REPO"
+        FAILED_LABELS+=("repo: low disk (${_pf_avail}MB free)")
+        rc=1
+    fi
+fi
 
 snap() {
     local label="$1" path="$2"
@@ -89,7 +101,9 @@ snap() {
         log "skip $label — not found: ${path:-<unset>}"; return
     fi
     log "Snapshotting $label: $path"
-    if ! k snapshot create --description="gaming: $label" "$path" 2>"$_ERR"; then
+    if k snapshot create --description="gaming: $label" "$path" 2>"$_ERR"; then
+        BACKUP_COUNT=$((BACKUP_COUNT+1))
+    else
         _reason="$(categorize_error "$(cat "$_ERR")")"
         log "WARNING: snapshot failed for $label — $_reason"
         FAILED_LABELS+=("$label: $_reason")
@@ -121,13 +135,17 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     fi
 fi
 
+DURATION=$(( $(date +%s) - START_TS ))
+DURATION_STR="$((DURATION/60))m $((DURATION%60))s"
+
 if [ "$rc" -eq 0 ]; then
-    log "===== Gaming backup complete ====="
-    ntfy_send "✓ Gaming backup complete" "$HOST: all saves backed up successfully" \
+    log "===== Gaming backup complete — $BACKUP_COUNT snapshot(s) in $DURATION_STR ====="
+    ntfy_send "✓ Gaming backup complete" \
+        "$HOST: $BACKUP_COUNT snapshot(s) saved in $DURATION_STR" \
         "low" "white_check_mark"
 else
-    log "===== Gaming backup finished WITH WARNINGS ====="
-    _ntfy_msg="$HOST: gaming backup failures:"
+    log "===== Gaming backup finished WITH WARNINGS — $BACKUP_COUNT/$((BACKUP_COUNT+${#FAILED_LABELS[@]})) succeeded in $DURATION_STR ====="
+    _ntfy_msg="$HOST: gaming backup failures (${#FAILED_LABELS[@]}):"
     for _s in "${FAILED_LABELS[@]}"; do _ntfy_msg+=$'\n'"• $_s"; done
     ntfy_send "✗ Gaming backup FAILED" "$_ntfy_msg" "urgent" "rotating_light"
 fi

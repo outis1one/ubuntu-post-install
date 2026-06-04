@@ -308,16 +308,64 @@ install_borg_backup() {
         log_warning "Copy it manually: cp extras/restore_borg.sh $RESTORE"
     fi
 
-    # ── 11. Install test script ──────────────────────────────────────────────
-    local TEST_SCRIPT="$DIR/test_backup.sh"
-    local TEST_SRC="${HERE:-}/extras/test_backup.sh"
+    # ── 11. Install test scripts ─────────────────────────────────────────────
+    local TEST_SCRIPT="$DIR/test_backup_borg.sh"
+    local TEST_SRC="${HERE:-}/extras/test_backup_borg.sh"
     if [ -f "$TEST_SRC" ]; then
         cp "$TEST_SRC" "$TEST_SCRIPT"
         chmod +x "$TEST_SCRIPT"
         chown root:root "$TEST_SCRIPT" 2>/dev/null || true
-        log_success "test_backup.sh installed"
+        log_success "test_backup_borg.sh installed"
     else
-        log_warning "extras/test_backup.sh not found — test script not installed"
+        log_warning "extras/test_backup_borg.sh not found — test script not installed"
+    fi
+
+    local TEST_UNIFIED="$DIR/test_backup.sh"
+    local TEST_UNIFIED_SRC="${HERE:-}/extras/test_backup.sh"
+    if [ -f "$TEST_UNIFIED_SRC" ]; then
+        cp "$TEST_UNIFIED_SRC" "$TEST_UNIFIED"
+        chmod +x "$TEST_UNIFIED"
+        chown root:root "$TEST_UNIFIED" 2>/dev/null || true
+        log_success "test_backup.sh installed"
+    fi
+
+    # ── 11b. Weekly backup test timer ────────────────────────────────────────
+    local TEST_SVC_NAME="post-install-borg-backup-test"
+    local _add_test=""
+    prompt_yn "  Schedule a weekly automated backup test? (y/N):" "n" _add_test
+    if [[ "$_add_test" =~ ^[Yy]$ ]]; then
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            tee "/etc/systemd/system/${TEST_SVC_NAME}.service" >/dev/null << SVCEOF
+[Unit]
+Description=Weekly restore test for Borg backup
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $TEST_SCRIPT
+SVCEOF
+
+            tee "/etc/systemd/system/${TEST_SVC_NAME}.timer" >/dev/null << SVCEOF
+[Unit]
+Description=Weekly Borg backup restore test (Saturday 03:00)
+
+[Timer]
+OnCalendar=Sat *-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
+SVCEOF
+
+            systemctl daemon-reload
+            systemctl enable --now "${TEST_SVC_NAME}.timer"
+            log_success "Weekly test timer enabled (Saturday 03:00)"
+        else
+            echo "0 3 * * 6 root /bin/bash $TEST_SCRIPT >> /var/log/${TEST_SVC_NAME}.log 2>&1" \
+                > "/etc/cron.d/${TEST_SVC_NAME}"
+            log_success "Weekly test cron installed (Saturday 03:00)"
+        fi
     fi
 
     # ── 12. Systemd timer ─────────────────────────────────────────────────────
@@ -403,9 +451,9 @@ SVCEOF
     echo "    sudo $RESTORE --list"
     echo ""
     echo "  Backup test (stop/restore/compare/restore-back):"
-    echo "    sudo $TEST_SCRIPT                test most recent backup"
+    echo "    sudo $TEST_SCRIPT                test most recent backup (all services)"
     echo "    sudo $TEST_SCRIPT --list         list testable services"
-    echo "    sudo $TEST_SCRIPT <service>      test a specific service"
+    echo "    sudo $TEST_SCRIPT --service <n>  test a specific service"
     [ -n "${NTFY_URL:-}" ] && echo "" && echo "  Notifications: $NTFY_URL"
     echo ""
     log_warning "IMPORTANT — back up your Borg key and passphrase now."
