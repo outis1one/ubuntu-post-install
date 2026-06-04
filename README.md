@@ -72,7 +72,7 @@ Update them any time with `sudo ./setup.sh configure`.
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `silent-send`, `sync-cc` |
-| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
+| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
 
 Run `./setup.sh --list` to see descriptions.
 

@@ -1,13 +1,14 @@
 #!/bin/bash
-# extras/restore_kopia_backup.sh — interactive restore from a Kopia snapshot.
-# Installed to ~/docker/backup/ by the backup service installer.
+# extras/restore_kopia.sh — interactive restore from a Kopia snapshot.
+# Installed to ~/docker/backup/ and ~/docker/gaming-backup/ by their installers.
 #
 # Run as root:
-#   sudo ./restore_kopia_backup.sh          interactive
-#   sudo ./restore_kopia_backup.sh --list   list all snapshot sources and exit
+#   sudo ./restore_kopia.sh          interactive
+#   sudo ./restore_kopia.sh --list   list all snapshot sources and exit
 #
-# Reads backup.conf from the same directory. The repository password is stored
-# there (chmod 600, root-only) — no password prompt needed.
+# Reads backup.conf from the same directory (chmod 600, root-only).
+# Supports both multi-destination (backup service) and single-destination
+# (gaming-backup service) conf formats.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,29 +23,61 @@ die()  { err "$*"; exit 1; }
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 [ "${EUID:-$(id -u)}" -eq 0 ] || die "Run as root: sudo $0"
-[ -f "$CONF" ]                 || die "backup.conf not found: $CONF  (run: sudo setup.sh backup)"
+[ -f "$CONF" ]                 || die "backup.conf not found: $CONF"
 command -v jq >/dev/null 2>&1  || die "jq is required — install it: sudo apt install jq"
 
 # shellcheck source=/dev/null
 source "$CONF"
-export KOPIA_PASSWORD
+
+# ── Normalise conf format ─────────────────────────────────────────────────────
+# gaming-backup uses KOPIA_CONFIG/KOPIA_PASSWORD directly (single dest).
+# backup service uses DEST_NAMES + DEST_<n>_CONFIG/PASSWORD (multi-dest).
+# Normalise both to the multi-dest interface so the rest of the script is uniform.
+if [ -z "${DEST_NAMES:-}" ]; then
+    DEST_NAMES="default"
+    DEST_default_CONFIG="${KOPIA_CONFIG:-}"
+    DEST_default_PASSWORD="${KOPIA_PASSWORD:-}"
+fi
 
 command -v "$KOPIA" >/dev/null 2>&1 || die "Kopia not found: $KOPIA"
-k() { "$KOPIA" --config-file="$KOPIA_CONFIG" "$@"; }
-k repository status >/dev/null 2>&1 || die "Cannot connect to Kopia repository. Check backup.conf."
 
-# ── Derive Docker dir (mirrors lib/common.sh logic) ───────────────────────────
 ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$ACTUAL_USER")"
 DOCKER_BASE="$ACTUAL_HOME/docker"
 
-# ── Snapshot helpers ──────────────────────────────────────────────────────────
-all_snapshots_json() {
-    k snapshot list --all --json 2>/dev/null
-}
+# ── Destination picker (skipped when only one dest) ───────────────────────────
+read -ra _DEST_ARR <<< "$DEST_NAMES"
 
-# Given a source path like ~/docker/minecraft/data, return "service_name /path/to/compose.yml"
-# or empty string if not a Docker service.
+if [ "${#_DEST_ARR[@]}" -gt 1 ]; then
+    echo ""
+    echo "Select backup destination:"
+    echo ""
+    for i in "${!_DEST_ARR[@]}"; do
+        _cfg_var="DEST_${_DEST_ARR[$i]}_CONFIG"
+        printf "  %d)  %s  (%s)\n" "$((i+1))" "${_DEST_ARR[$i]}" "${!_cfg_var:-unknown}"
+    done
+    echo ""
+    read -rp "Destination [1-${#_DEST_ARR[@]}]: " _DEST_SEL
+    [[ "$_DEST_SEL" =~ ^[0-9]+$ ]] && [ "$_DEST_SEL" -ge 1 ] && [ "$_DEST_SEL" -le "${#_DEST_ARR[@]}" ] \
+        || die "Invalid selection"
+    ACTIVE_DEST="${_DEST_ARR[$((_DEST_SEL-1))]}"
+else
+    ACTIVE_DEST="${_DEST_ARR[0]}"
+fi
+
+_CFG_VAR="DEST_${ACTIVE_DEST}_CONFIG"
+_PW_VAR="DEST_${ACTIVE_DEST}_PASSWORD"
+KOPIA_CONFIG="${!_CFG_VAR:-}"
+KOPIA_PASSWORD="${!_PW_VAR:-}"
+[ -n "$KOPIA_CONFIG" ] || die "No KOPIA_CONFIG found for destination '$ACTIVE_DEST'"
+
+export KOPIA_PASSWORD
+k() { "$KOPIA" --config-file="$KOPIA_CONFIG" "$@"; }
+k repository status >/dev/null 2>&1 || die "Cannot connect to Kopia repository '$ACTIVE_DEST'. Check backup.conf."
+
+# ── Snapshot helpers ──────────────────────────────────────────────────────────
+all_snapshots_json() { k snapshot list --all --json 2>/dev/null; }
+
 docker_info_for_path() {
     local path="$1"
     [[ "$path" == "$DOCKER_BASE"/* ]] || return 0
@@ -57,12 +90,9 @@ docker_info_for_path() {
 # ── --list ────────────────────────────────────────────────────────────────────
 if [ "${1:-}" = "--list" ]; then
     echo ""
-    info "Loading snapshots..."
-    JSON=$(all_snapshots_json)
+    info "Loading snapshots (dest: $ACTIVE_DEST)..."
     echo ""
-    echo "Backup sources:"
-    echo ""
-    echo "$JSON" | jq -r '
+    all_snapshots_json | jq -r '
         group_by(.source.path)[] |
         (.[0].source.path) as $p |
         (.[0].description // "-") as $d |
@@ -76,22 +106,20 @@ fi
 # ── Interactive restore ───────────────────────────────────────────────────────
 echo ""
 echo "╔═══════════════════════════════════════════════════════╗"
-echo "║   Kopia Backup Restore                                ║"
+echo "║   Kopia Restore                                       ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
+[ "${#_DEST_ARR[@]}" -gt 1 ] && info "Using destination: $ACTIVE_DEST"
 
 info "Loading snapshot index..."
 SNAP_JSON=$(all_snapshots_json)
-
 [ -z "$SNAP_JSON" ] || [ "$SNAP_JSON" = "[]" ] || [ "$SNAP_JSON" = "null" ] \
-    && die "No snapshots found. Run a backup first: sudo $HERE/backup.sh"
+    && die "No snapshots found. Run a backup first: sudo $HERE/backup_kopia.sh"
 
-# Build source arrays (newest-first per source)
 mapfile -t SRC_PATHS  < <(echo "$SNAP_JSON" | jq -r 'group_by(.source.path)[] | .[0].source.path')
 mapfile -t SRC_DESCS  < <(echo "$SNAP_JSON" | jq -r 'group_by(.source.path)[] | .[0].description // "-"')
 mapfile -t SRC_LATEST < <(echo "$SNAP_JSON" | jq -r 'group_by(.source.path)[] | .[0].startTime | split("T") | "\(.[0]) \(.[1][:8])"')
 mapfile -t SRC_COUNTS < <(echo "$SNAP_JSON" | jq -r 'group_by(.source.path)[] | length')
-
 [ "${#SRC_PATHS[@]}" -eq 0 ] && die "No snapshot sources found."
 
 echo "What do you want to restore?"
@@ -121,7 +149,6 @@ mapfile -t SNAP_IDS   < <(echo "$SNAP_JSON" | jq -r --arg p "$SOURCE_PATH" '
 mapfile -t SNAP_TIMES < <(echo "$SNAP_JSON" | jq -r --arg p "$SOURCE_PATH" '
     [.[] | select(.source.path == $p)] | sort_by(.startTime) | reverse | .[0:15] |
     .[].startTime | split("T") | "\(.[0]) \(.[1][:8]) UTC"')
-
 [ "${#SNAP_IDS[@]}" -eq 0 ] && die "No snapshots found for that source."
 
 for i in "${!SNAP_IDS[@]}"; do
@@ -153,8 +180,6 @@ read -rp "Select [1/2] or q to quit: " MODE
 [[ "$MODE" =~ ^[qQ]$ ]] && echo "Cancelled." && exit 0
 
 case "$MODE" in
-
-# ── Inspect: restore to /tmp, nothing touched ─────────────────────────────────
 1)
     TEMP_DIR="/tmp/kopia-inspect-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$TEMP_DIR"
@@ -174,15 +199,12 @@ case "$MODE" in
     fi
     ;;
 
-# ── Restore in place: move aside, restore, offer rollback instructions ─────────
 2)
     SINFO=$(docker_info_for_path "$SOURCE_PATH")
     SVC_NAME="${SINFO%% *}"
     COMPOSE_FILE="${SINFO##* }"
-    # If no match, both vars will be empty or equal
     [ "$SVC_NAME" = "$COMPOSE_FILE" ] && SVC_NAME="" && COMPOSE_FILE=""
 
-    # Stop associated Docker service if running
     STOPPED=false
     if [ -n "$SVC_NAME" ] && [ -n "$COMPOSE_FILE" ] \
        && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$SVC_NAME"; then
@@ -201,7 +223,6 @@ case "$MODE" in
         fi
     fi
 
-    # Move current data aside
     ASIDE="${SOURCE_PATH}.pre-restore-$(date +%Y%m%d-%H%M%S)"
     echo ""
     if [ -e "$SOURCE_PATH" ]; then
@@ -212,7 +233,6 @@ case "$MODE" in
         warn "Source path doesn't exist yet: $SOURCE_PATH — restoring fresh."
     fi
 
-    # Restore snapshot
     mkdir -p "$SOURCE_PATH"
     info "Restoring $SNAPSHOT_TIME → $SOURCE_PATH ..."
     if k restore "$SNAPSHOT_ID" "$SOURCE_PATH"; then
@@ -230,7 +250,6 @@ case "$MODE" in
         exit 1
     fi
 
-    # Restart container
     if [ "$STOPPED" = true ] && [ -n "$COMPOSE_FILE" ]; then
         echo ""
         read -rp "  Start '$SVC_NAME' now? (Y/n): " START_YN
@@ -251,17 +270,15 @@ case "$MODE" in
     echo "  Restored to   : $SOURCE_PATH"
     [ -e "$ASIDE" ] && echo "  Previous data  : $ASIDE"
     echo ""
-    echo "  Verify your data, then:"
-    echo ""
     if [ -e "$ASIDE" ]; then
-        echo "    Keep the restore (delete aside copy when satisfied):"
-        echo "      rm -rf \"$ASIDE\""
+        echo "  Keep the restore (delete aside copy when satisfied):"
+        echo "    rm -rf \"$ASIDE\""
         echo ""
-        echo "    Roll back to previous data:"
-        [ -n "$COMPOSE_FILE" ] && echo "      docker compose -f $COMPOSE_FILE down"
-        echo "      rm -rf \"$SOURCE_PATH\""
-        echo "      mv \"$ASIDE\" \"$SOURCE_PATH\""
-        [ -n "$COMPOSE_FILE" ] && echo "      docker compose -f $COMPOSE_FILE up -d"
+        echo "  Roll back to previous data:"
+        [ -n "$COMPOSE_FILE" ] && echo "    docker compose -f $COMPOSE_FILE down"
+        echo "    rm -rf \"$SOURCE_PATH\""
+        echo "    mv \"$ASIDE\" \"$SOURCE_PATH\""
+        [ -n "$COMPOSE_FILE" ] && echo "    docker compose -f $COMPOSE_FILE up -d"
     fi
     echo ""
     ;;
