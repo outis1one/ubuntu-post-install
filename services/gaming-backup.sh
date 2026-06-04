@@ -282,7 +282,7 @@ CONFEOF
 
     # ── Copy the interactive restore script ───────────────────────────────────
     local RESTORE_SRC="${HERE:-}/extras/restore_kopia.sh"
-    local RESTORE_DEST="$BACKUP_DIR/restore_kopia.sh"
+    local RESTORE_DEST="$BACKUP_DIR/restore_gaming.sh"
     if [ -f "$RESTORE_SRC" ]; then
         cp "$RESTORE_SRC" "$RESTORE_DEST"
         chmod +x "$RESTORE_DEST"
