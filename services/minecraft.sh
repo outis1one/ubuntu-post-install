@@ -1286,6 +1286,38 @@ PREGENEOF
         chmod +x "$MC_DIR/data/pregen-startup.sh"
         chown 1000:1000 "$MC_DIR/data/pregen-startup.sh" 2>/dev/null || true
         log_success "pregen-startup.sh written to ${MC_NAME}/data/"
+
+        local _BORDER_STATUS
+        [ "$USE_BORDER" = true ] && _BORDER_STATUS="enabled" || _BORDER_STATUS="disabled"
+        cat > "$MC_DIR/PREGEN_INSTRUCTIONS.md" << PREGENINFOEOF
+# Chunk Pre-Generation
+
+Pre-gen radius: ${PREGEN_RADIUS} blocks
+World border:   ${BORDER_SIZE} blocks (${_BORDER_STATUS})
+
+Pre-generation ran automatically when the server started. It uses Chunky
+to generate all chunks within the radius before players explore.
+
+## Monitor progress
+
+\`\`\`bash
+docker exec ${MC_NAME} mc-send-to-console 'chunky progress'
+\`\`\`
+
+## Re-run manually (if server was started without pre-gen)
+
+\`\`\`bash
+docker exec -e PREGEN=1 -u 1000 ${MC_NAME} bash /data/pregen-startup.sh
+\`\`\`
+
+## Cancel pre-gen
+
+\`\`\`bash
+docker exec ${MC_NAME} mc-send-to-console 'chunky cancel'
+\`\`\`
+PREGENINFOEOF
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR/PREGEN_INSTRUCTIONS.md" 2>/dev/null || true
+        log_success "PREGEN_INSTRUCTIONS.md written"
     fi
 
     # ── Standalone docker-compose.yml (per-service folder) ──────────────────────
@@ -2272,6 +2304,8 @@ NETEOF
     echo "  docker-compose.yml                         Standalone compose (build itzg image)"
     echo "  CLIENT_MODS.md                             What players install on their client"
     echo "  MINECRAFT_NETWORKING.md                    DNS and port forward instructions"
+    [[ " ${SELECTED_MODS[*]} " =~ " chunky " ]] && \
+        echo "  PREGEN_INSTRUCTIONS.md                     How to monitor and re-run pre-gen"
     [ "$USE_PLAYIT" = true ] && echo "  .env.playit                                Add playit.gg secret here"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
