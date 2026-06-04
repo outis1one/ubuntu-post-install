@@ -86,6 +86,21 @@ TS="$(date +%Y-%m-%dT%H-%M-%S)"
 declare -a FAILED_SVCS=()
 _ERR="$(mktemp)"
 trap 'rm -f "$_ERR"' EXIT
+START_TS="$(date +%s)"
+BACKUP_COUNT=0
+
+for _pf_dest in ${DEST_NAMES:-default}; do
+    _pf_var="DEST_${_pf_dest}_REPO"; _pf_repo="${!_pf_var:-}"
+    if [ -n "$_pf_repo" ] && [[ "$_pf_repo" != *@*:* ]] && [[ "$_pf_repo" != ssh://* ]]; then
+        _pf_dir="$([ -d "$_pf_repo" ] && echo "$_pf_repo" || dirname "$_pf_repo")"
+        _pf_avail="$(df -m "$_pf_dir" 2>/dev/null | awk 'NR==2{print $4}')"
+        if [ -n "$_pf_avail" ] && [ "$_pf_avail" -lt 512 ]; then
+            log "WARNING: Low disk for '$_pf_dest' — ${_pf_avail}MB free at $_pf_repo"
+            FAILED_SVCS+=("$_pf_dest: low disk (${_pf_avail}MB free)")
+            rc=1
+        fi
+    fi
+done
 
 for svc_dir in "$DOCKER_DIR"/*/; do
     [ -f "${svc_dir}docker-compose.yml" ] || continue
@@ -110,6 +125,7 @@ for svc_dir in "$DOCKER_DIR"/*/; do
             --compression=zstd,6 --exclude-caches --stats \
             "::$ARCHIVE" "$svc_dir" 2>"$_ERR" | while IFS= read -r line; do log "  $line"; done; then
             log "OK $svc (Minecraft, no downtime)"
+            BACKUP_COUNT=$((BACKUP_COUNT+1))
         else
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: archive failed for $svc — $_reason"
@@ -131,6 +147,7 @@ for svc_dir in "$DOCKER_DIR"/*/; do
             --compression=zstd,6 --exclude-caches --stats \
             "::$ARCHIVE" "$svc_dir" 2>"$_ERR" | while IFS= read -r line; do log "  $line"; done; then
             log "OK $svc"
+            BACKUP_COUNT=$((BACKUP_COUNT+1))
         else
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: archive failed for $svc — $_reason"
@@ -162,13 +179,17 @@ for dest in ${DEST_NAMES:-default}; do
     b_for "$dest" compact 2>/dev/null || true
 done
 
+DURATION=$(( $(date +%s) - START_TS ))
+DURATION_STR="$((DURATION/60))m $((DURATION%60))s"
+
 if [ "$rc" -eq 0 ]; then
-    log "===== Borg backup complete ====="
-    ntfy_send "✓ Borg backup complete" "$HOST: all services archived successfully" \
+    log "===== Borg backup complete — $BACKUP_COUNT service(s) in $DURATION_STR ====="
+    ntfy_send "✓ Borg backup complete" \
+        "$HOST: $BACKUP_COUNT service(s) archived in $DURATION_STR" \
         "low" "white_check_mark"
 else
-    log "===== Borg backup finished WITH WARNINGS (see above) ====="
-    _ntfy_msg="$HOST: Borg backup failures:"
+    log "===== Borg backup finished WITH WARNINGS — $BACKUP_COUNT/$((BACKUP_COUNT+${#FAILED_SVCS[@]})) succeeded in $DURATION_STR ====="
+    _ntfy_msg="$HOST: Borg backup failures (${#FAILED_SVCS[@]}):"
     for _s in "${FAILED_SVCS[@]}"; do _ntfy_msg+=$'\n'"• $_s"; done
     ntfy_send "✗ Borg backup FAILED" "$_ntfy_msg" "urgent" "rotating_light"
 fi
