@@ -49,8 +49,8 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 ## What the wizard does
 
 **First run:**
-1. Installs essential CLI packages (`git`, `curl`, `htop`, `ncdu`, `jq`, `glow`, …)
-2. Installs Docker CE and the Compose plugin automatically if not already present
+1. Installs essential CLI packages (see [Base packages](#base-packages) below)
+2. Checks for Docker CE + Compose plugin; prompts to install if missing
 3. Offers to set **site defaults** — timezone, base domain, Caddy Docker network —
    so every service picks them up automatically instead of asking each time
 4. Offers to install Caddy (the reverse proxy most services use)
@@ -60,6 +60,28 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 
 **Site defaults** are saved to `~/docker/.config` and pre-fill every service prompt.
 Update them any time with `sudo ./setup.sh configure`.
+
+## Base packages
+
+The `base` service installs the following on every box:
+
+| Package | Purpose |
+|---------|---------|
+| `net-tools` | Classic network tools — `ifconfig`, `netstat`, `arp` |
+| `ncdu` | Interactive ncurses disk-usage viewer |
+| `git` | Version control |
+| `curl` | URL data transfer |
+| `wget` | File downloader |
+| `htop` | Interactive process viewer |
+| `tree` | Directory tree display |
+| `zip` / `unzip` | Archive packing / unpacking |
+| `ca-certificates` | Up-to-date SSL certificate bundle |
+| `gnupg` | GPG — used to verify apt signing keys |
+| `jq` | Command-line JSON processor |
+| `rsync` | Fast file sync / remote copy |
+| `glow` | Terminal markdown reader (from [Charm's apt repo](https://github.com/charmbracelet/glow)) |
+
+`glow` is also installable on its own: `sudo ./setup.sh glow`
 
 ## Services
 
@@ -75,6 +97,177 @@ Update them any time with `sudo ./setup.sh configure`.
 | `backup` | `backup` |
 
 Run `./setup.sh --list` to see descriptions.
+
+## Backup
+
+The `backup` service (under the `backup` group) sets up **Kopia** — but you are
+not limited to it. Below is a guide to every backup strategy in this repo,
+with advice on when to reach for each one.
+
+---
+
+### Kopia — the built-in `backup` service
+
+**What it does:** block-level deduplication + zstd compression + AES-256
+encryption, scheduled automatically via a systemd timer (cron fallback).
+Each run snapshots configured paths and retains versions according to a
+policy (latest N, daily, weekly, monthly). An optional `sync-to` step
+mirrors the whole encrypted repository to another computer or a cloud
+bucket (SFTP, Backblaze B2, S3, rclone).
+
+**Install:** `sudo ./setup.sh backup`
+
+**When to use:** files that change *constantly* — Minecraft region files,
+game saves, Steam Proton prefixes, Docker config volumes. Every changed
+block is stored once; identical blocks across snapshots share storage.
+Kopia is the right default for homelab data that changes on every write.
+
+---
+
+### Borg Backup
+
+**What it is:** `borgbackup` — chunk-based deduplication + lz4/zstd/zlib
+compression + AES-CTR encryption. Mature, battle-tested, wide ecosystem
+(Borgmatic for YAML-driven automation, Vorta for a GUI).
+
+```bash
+sudo apt install borgbackup
+
+# initialise a repo
+borg init --encryption=repokey /backups/borg-repo
+
+# take a snapshot
+borg create --stats --progress /backups/borg-repo::'{hostname}-{now}' ~/docker
+
+# list snapshots
+borg list /backups/borg-repo
+
+# restore
+borg extract /backups/borg-repo::snapshot-name
+```
+
+**When to use:** same class of problem as Kopia — frequently-changing files
+where deduplication pays off. Choose Borg over Kopia if you prefer its
+mature ecosystem, Borgmatic config files, or need to share a repo across
+multiple machines. Both are excellent; pick the one whose tooling you
+prefer.
+
+---
+
+### rsync — plain mirror (no versioning)
+
+**What it is:** `rsync -av --delete SOURCE/ DEST/` — fast one-way mirror.
+`--delete` removes files in `DEST` that no longer exist in `SOURCE`.
+The destination is a plain readable copy of the source; no special tool
+needed to browse or restore.
+
+```bash
+rsync -av --delete /source/media/ /backups/media/
+```
+
+**When to use:** files that rarely or never change — media libraries,
+ROM collections, game installs you could re-download but prefer to keep
+locally. You just need *a copy*, not versioning. rsync is lightweight,
+transparent, and the destination needs no special format.
+
+**Not suitable for:** files that change often, because one bad `--delete`
+run (source corruption, accidental deletion) immediately destroys the
+only copy in the destination.
+
+---
+
+### rsync `--link-dest` — versioned snapshots with original structure
+
+**What it is:** each backup run creates a new dated directory. Unchanged
+files are **hard-linked** from the previous backup rather than copied, so
+unchanged files cost no extra disk space. Every dated directory looks like
+a complete independent snapshot of the source — original folder structure
+preserved, no rsnapshot-style naming convention.
+
+```bash
+#!/bin/bash
+DEST=/backups/snapshots
+PREV="$DEST/$(ls -1 "$DEST" | tail -1)"  # most recent snapshot
+TODAY="$DEST/$(date +%F)"
+
+rsync -av --delete --link-dest="$PREV" /source/ "$TODAY/"
+```
+
+Run this daily (via cron or a systemd timer) and you get:
+
+```
+/backups/snapshots/
+  2024-01-13/    ← full copy (first run)
+  2024-01-14/    ← only changed files stored; rest are hard links
+  2024-01-15/    ← same
+```
+
+If yesterday's run with `--delete` removed everything from the source
+(accidental wipe, filesystem corruption), today's snapshot will also be
+empty — but `2024-01-14/` and `2024-01-13/` are untouched and fully
+restorable with a plain `cp -al` or `rsync`.
+
+**When to use:** general files where you want versioned point-in-time
+backups **and** need the original folder structure preserved. No extra
+tool required to restore — every dated folder is browsable with `ls` and
+copyable with standard Unix tools. Simpler than Borg/Kopia; no encryption
+or deduplication across snapshot boundaries.
+
+**Compared to rsnapshot:** rsync `--link-dest` keeps your own naming and
+structure; rsnapshot imposes `daily.0/`, `daily.1/`, etc. and manages
+rotation automatically. `--link-dest` gives you more control; rsnapshot
+gives you easier automation.
+
+---
+
+### rsnapshot — automated versioned snapshots
+
+**What it is:** a wrapper around rsync that manages hard-link snapshots
+automatically using a retention scheme (`hourly.0`, `daily.0`, `weekly.0`,
+…). Configure sources and retention in `/etc/rsnapshot.conf`, then run on
+a schedule.
+
+```bash
+sudo apt install rsnapshot
+# edit /etc/rsnapshot.conf — set snapshot_root, backup sources, retain counts
+rsnapshot daily     # run manually or via cron
+rsnapshot -t daily  # dry-run / test config
+```
+
+The resulting layout looks like:
+
+```
+/backups/rsnapshot/
+  daily.0/  ← most recent
+  daily.1/
+  daily.2/
+  weekly.0/
+```
+
+Each interval directory contains a full view of the source, hard-linked
+where files are unchanged.
+
+**When to use:** you want automated versioned backups without writing your
+own `--link-dest` rotation script, and you don't mind that the destination
+uses rsnapshot's own directory naming rather than your original structure.
+Good for simple setups (home directories, config files) where the rotation
+automation saves time.
+
+**Not ideal for:** frequently-changing large files (game saves, databases)
+— use Kopia or Borg instead for efficient deduplication across many
+changed blocks.
+
+---
+
+### Choosing the right tool
+
+| Scenario | Recommended tool |
+|----------|-----------------|
+| Minecraft worlds, game saves, Steam prefixes — change on every write | **Kopia** (built-in) or **Borg** |
+| Media library, ROMs — rarely change, just need a copy | **rsync plain** |
+| General files — want versioning, want original folder structure | **rsync `--link-dest`** |
+| Want automated rotation without scripting `--link-dest` yourself | **rsnapshot** |
+| Multi-machine deduplicated repo, YAML-driven config (Borgmatic) | **Borg** |
 
 ## Layout
 
