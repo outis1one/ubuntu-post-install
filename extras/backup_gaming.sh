@@ -17,11 +17,42 @@ CONF="${BACKUP_CONF:-$HERE/backup.conf}"
 source "$CONF"
 
 export KOPIA_PASSWORD
+HOST="$(hostname -s 2>/dev/null || hostname)"
 log() { echo "[$(date '+%F %T')] $*"; }
 k()   { "$KOPIA" --config-file="$KOPIA_CONFIG" "$@"; }
 
+ntfy_send() {
+    local title="$1" msg="$2" priority="${3:-default}" tags="${4:-}"
+    [ -z "${NTFY_URL:-}" ] && return 0
+    local -a _args=(-fsS -o /dev/null)
+    _args+=(-H "Title: $title" -H "Priority: $priority")
+    [ -n "$tags" ]           && _args+=(-H "Tags: $tags")
+    [ -n "${NTFY_TOKEN:-}" ] && _args+=(-H "Authorization: Bearer $NTFY_TOKEN")
+    curl "${_args[@]}" -d "$msg" "$NTFY_URL" 2>/dev/null || true
+}
+
+categorize_error() {
+    local txt="$1"
+    if   echo "$txt" | grep -qi "no space left\|disk quota exceeded"; then
+        echo "disk full — backup destination is out of space"
+    elif echo "$txt" | grep -qi "connection refused\|network unreachable\|no route to host\|ssh.*connect\|timed out\|host unreachable"; then
+        echo "remote unreachable — check network / destination host"
+    elif echo "$txt" | grep -qi "repository.*not.*exist\|not a valid kopia\|not connected"; then
+        echo "repository not found — re-run the gaming-backup installer"
+    elif echo "$txt" | grep -qi "passphrase\|wrong key\|cannot decrypt"; then
+        echo "wrong passphrase — check backup.conf"
+    elif echo "$txt" | grep -qi "permission denied\|access denied"; then
+        echo "permission denied — check file permissions"
+    else
+        echo "error — see system logs on $HOST"
+    fi
+}
+
 if ! k repository status >/dev/null 2>&1; then
     log "ERROR: not connected to a repository — re-run the gaming-backup service"
+    ntfy_send "✗ Gaming backup FAILED" \
+        "$HOST: cannot connect to Kopia repository — re-run gaming-backup installer" \
+        "urgent" "rotating_light"
     exit 1
 fi
 
@@ -48,14 +79,21 @@ if [ -n "${MC_BASE_DIR:-}" ] && command -v docker >/dev/null 2>&1; then
 fi
 
 rc=0
+declare -a FAILED_LABELS=()
+_ERR="$(mktemp)"
+trap 'rm -f "$_ERR"' EXIT
+
 snap() {
     local label="$1" path="$2"
     if [ -z "$path" ] || [ ! -e "$path" ]; then
         log "skip $label — not found: ${path:-<unset>}"; return
     fi
     log "Snapshotting $label: $path"
-    if ! k snapshot create --description="gaming: $label" "$path"; then
-        log "WARNING: snapshot failed for $label"; rc=1
+    if ! k snapshot create --description="gaming: $label" "$path" 2>"$_ERR"; then
+        _reason="$(categorize_error "$(cat "$_ERR")")"
+        log "WARNING: snapshot failed for $label — $_reason"
+        FAILED_LABELS+=("$label: $_reason")
+        rc=1
     fi
 }
 
@@ -75,14 +113,22 @@ fi
 if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     log "Mirroring repository to remote ($REMOTE_TYPE)..."
     # shellcheck disable=SC2086
-    if ! k repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS; then
-        log "WARNING: remote mirror failed"; rc=1
+    if ! k repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS 2>"$_ERR"; then
+        _reason="$(categorize_error "$(cat "$_ERR")")"
+        log "WARNING: remote mirror failed — $_reason"
+        FAILED_LABELS+=("mirror: $_reason")
+        rc=1
     fi
 fi
 
 if [ "$rc" -eq 0 ]; then
     log "===== Gaming backup complete ====="
+    ntfy_send "✓ Gaming backup complete" "$HOST: all saves backed up successfully" \
+        "low" "white_check_mark"
 else
     log "===== Gaming backup finished WITH WARNINGS ====="
+    _ntfy_msg="$HOST: gaming backup failures:"
+    for _s in "${FAILED_LABELS[@]}"; do _ntfy_msg+=$'\n'"• $_s"; done
+    ntfy_send "✗ Gaming backup FAILED" "$_ntfy_msg" "urgent" "rotating_light"
 fi
 exit "$rc"

@@ -192,6 +192,21 @@ install_gaming_backup() {
     prompt_text "  How many recent snapshots to keep (latest)? [24]:" "24" KEEP_LATEST
     local KEEP_DAILY=7 KEEP_WEEKLY=4 KEEP_MONTHLY=6
 
+    # ── Notifications (ntfy) ─────────────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  NOTIFICATIONS (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Receive a push notification after every backup (and on failures)."
+    echo "  Uses ntfy — free and self-hostable. Create a topic at https://ntfy.sh"
+    echo ""
+    local NTFY_URL="" NTFY_TOKEN=""
+    prompt_text "  ntfy topic URL (blank to skip):" "" NTFY_URL
+    if [ -n "$NTFY_URL" ]; then
+        prompt_text "  ntfy access token (blank if public/no auth):" "" NTFY_TOKEN
+    fi
+
     # ── 5. Write backup.conf ──────────────────────────────────────────────────
     log_info "Writing $CONF_FILE ..."
     tee "$CONF_FILE" >/dev/null << CONFEOF
@@ -226,6 +241,12 @@ BACKUP_WOLF="$BACKUP_WOLF"     # /etc/wolf — config + profile_data
 #
 REMOTE_TYPE="none"
 REMOTE_ARGS=""
+
+# ── Notifications (ntfy) ─────────────────────────────────────────────────────
+# Set NTFY_URL to receive backup success/failure alerts.
+# Leave blank to disable. NTFY_TOKEN is optional (for private topics).
+NTFY_URL="$NTFY_URL"
+NTFY_TOKEN="$NTFY_TOKEN"
 CONFEOF
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
@@ -290,6 +311,18 @@ CONFEOF
         log_success "restore_kopia.sh installed"
     else
         log_warning "extras/restore_kopia.sh not found — restore script not installed"
+    fi
+
+    # ── Install test script ───────────────────────────────────────────────────
+    local TEST_SCRIPT="$BACKUP_DIR/test_backup.sh"
+    local TEST_SRC="${HERE:-}/extras/test_backup.sh"
+    if [ -f "$TEST_SRC" ]; then
+        cp "$TEST_SRC" "$TEST_SCRIPT"
+        chmod +x "$TEST_SCRIPT"
+        chown root:root "$TEST_SCRIPT" 2>/dev/null || true
+        log_success "test_backup.sh installed"
+    else
+        log_warning "extras/test_backup.sh not found — test script not installed"
     fi
 
     # ── 8. Install systemd timer (fallback: cron) ────────────────────────────
@@ -369,6 +402,13 @@ UNITEOF
     echo "    sudo $WORKER snapshots               list snapshots"
     echo "    sudo $RESTORE_DEST                  interactive restore"
     echo "    sudo $RESTORE_DEST --list           list all snapshot sources"
+    echo ""
+    echo "  Backup test (restore latest, compare, restore-back):"
+    echo "    sudo $TEST_SCRIPT                test most recent backup"
+    echo "    sudo $TEST_SCRIPT --list         list testable sources"
+    echo "    sudo $TEST_SCRIPT <source>       test a specific source"
+    [ -n "${NTFY_URL:-}" ] && echo "" && echo "  Notifications: $NTFY_URL"
+    echo ""
     echo "    $AUTORUN"
     echo ""
     echo "  Tip: also install the 'backup' service for nightly full-service recovery."
