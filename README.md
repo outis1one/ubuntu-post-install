@@ -1,7 +1,7 @@
 # ubuntu-post-install
 
 Modular post-install system for Ubuntu servers. One repo, one entry point,
-install exactly what you need — interactively or by name.
+install only what you need — interactively or by name.
 
 ## Quick start on a fresh box
 
@@ -65,14 +65,14 @@ Update them any time with `sudo ./setup.sh configure`.
 
 | Group | Services |
 |-------|---------|
-| `base` | `base` — `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
+| `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
 | `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant` |
 | `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `magicmirror`, `mealie`, `meshcentral`, `ntfy`, `portainer`, `traccar`, `uptimekuma`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
-| `extras` | `linux-to-sync`, `silent-send`, `sync-cc` |
-| `backup` | `backup` — Kopia (encrypted, dedup, scheduled) |
+| `extras` | `silent-send`, `sync-cc` |
+| `backup` | 'Kopia, Borg (encrypted, dedup, scheduled)', rsync (plain or with --link-dest)' rsnapshot |
 
 Run `./setup.sh --list` to see descriptions.
 
