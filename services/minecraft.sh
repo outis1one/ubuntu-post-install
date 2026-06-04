@@ -1263,8 +1263,6 @@ MCEOF
         [ "$USE_BORDER" = true ] && BORDER_LINE="mc-send-to-console \"worldborder set ${BORDER_SIZE}\""
         cat > "$MC_DIR/data/pregen-startup.sh" << PREGENEOF
 #!/bin/bash
-# Chunky pre-generation — run manually after the server has started:
-#   docker exec -e PREGEN=1 -u 1000 ${MC_NAME} bash /data/pregen-startup.sh
 [ "\${PREGEN:-0}" = "1" ] || exit 0
 _PIPE=/tmp/minecraft-console-in
 echo "Waiting for server to be ready (may take 1-2 minutes)..."
