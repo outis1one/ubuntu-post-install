@@ -84,60 +84,37 @@ docker compose down         # stop
 
 ## Installing from a USB thumb drive
 
-Carry the repo on a USB stick and run setup on any fresh Ubuntu machine —
-no internet needed for the repo itself.
+No git required. Works for anyone with a browser.
 
-### 1 — Put the repo on the USB (on your main machine)
+### 1 — Put the repo on the USB
 
-Open a terminal in the repo and clone onto the USB from there. The file
-manager shows the USB in the sidebar — right-click it → **Open in Terminal**,
-then:
+On GitHub: **Code → Download ZIP** → unzip → copy the
+`ubuntu-post-install-main` folder to your USB drive.
 
-```bash
-git clone https://github.com/outis1one/ubuntu-post-install.git .
-```
+To update it later, just download the ZIP again and replace the folder.
 
-Or copy an existing clone:
-```bash
-cp -r ~/ubuntu-post-install /path/to/usb/ubuntu-post-install
-```
+### 2 — Run on the target machine
 
-Keep it up to date before each use:
-```bash
-git pull
-```
-
-### 2 — Run on the target machine (two ways)
-
-**Option A — Right-click → Open in Terminal** (quickest)
-
-In the Files app, navigate to the USB → right-click the
-`ubuntu-post-install` folder → **Open in Terminal**, then:
+Plug in the USB, then find the drive name:
 
 ```bash
-sudo ./setup.sh
+ls /media/$(whoami)/
 ```
 
-If "Open in Terminal" isn't in the menu, install it once:
+Run setup:
+
 ```bash
-sudo apt install nautilus-extension-gnome-terminal && nautilus -q
+sudo bash /media/$(whoami)/DRIVENAME/ubuntu-post-install-main/bootstrap.sh
 ```
 
-**Option B — Double-click `bootstrap.sh`**
-
-Right-click `bootstrap.sh` → **Properties** → turn on **Executable as Program**.
-After that, double-clicking it asks *"Run in Terminal?"* — click that, and it
-prompts for your sudo password and starts the wizard automatically.
-(The script re-elevates itself with sudo so you don't need to type anything
-extra in the terminal.)
+Replace `DRIVENAME` with what appeared in the `ls` output.
 
 ### Notes
 
 - Everything the wizard installs goes to `~/docker/` on the **target machine's
   disk** — only the setup scripts live on the USB.
-- **exFAT vs ext4:** exFAT works on macOS and Windows too (handy for updating
-  the repo from any machine). ext4 is Linux-only but preserves the executable
-  bit on `bootstrap.sh` so the Properties step above is only needed once.
+- **exFAT** is the best filesystem for the USB — readable on Windows and macOS
+  for easy ZIP extraction, and works fine on Linux.
 
 ## Compatibility
 
