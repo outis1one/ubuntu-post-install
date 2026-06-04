@@ -85,52 +85,59 @@ docker compose down         # stop
 ## Installing from a USB thumb drive
 
 Carry the repo on a USB stick and run setup on any fresh Ubuntu machine —
-no internet needed for the repo itself. The USB includes a double-click launcher
-so you don't need to open a terminal at all.
+no internet needed for the repo itself.
 
-### 1 — Clone the repo onto the USB (on your main machine)
+### 1 — Put the repo on the USB (on your main machine)
 
-Plug in the USB, then run:
+Open a terminal in the repo and clone onto the USB from there. The file
+manager shows the USB in the sidebar — right-click it → **Open in Terminal**,
+then:
 
 ```bash
-# Find where Ubuntu mounted the USB
-USB=$(lsblk -o MOUNTPOINT,RM --noheadings | awk '$2=="1" && $1!="" {print $1}' | head -1)
-echo "USB mounted at: $USB"
-
-# Clone directly onto it
-git clone https://github.com/outis1one/ubuntu-post-install.git \
-    "$USB/ubuntu-post-install"
+git clone https://github.com/outis1one/ubuntu-post-install.git .
 ```
 
-Or if you already have a local clone, copy it across:
+Or copy an existing clone:
 ```bash
-cp -r ~/ubuntu-post-install "$USB/ubuntu-post-install"
+cp -r ~/ubuntu-post-install /path/to/usb/ubuntu-post-install
 ```
 
 Keep it up to date before each use:
 ```bash
-git -C "$USB/ubuntu-post-install" pull
+git pull
 ```
 
-### 2 — Enable right-click "Open in Terminal" (once per machine)
+### 2 — Run on the target machine (two ways)
 
-On a fresh Ubuntu Desktop install the Nautilus terminal extension so you can
-right-click any folder on the USB and open a terminal there:
+**Option A — Right-click → Open in Terminal** (quickest)
+
+In the Files app, navigate to the USB → right-click the
+`ubuntu-post-install` folder → **Open in Terminal**, then:
 
 ```bash
-sudo apt install nautilus-extension-gnome-terminal
-nautilus -q   # restart Files to pick it up
+sudo ./setup.sh
 ```
 
-On Ubuntu 24.04+ this is often already present — right-click a folder to check.
+If "Open in Terminal" isn't in the menu, install it once:
+```bash
+sudo apt install nautilus-extension-gnome-terminal && nautilus -q
+```
+
+**Option B — Double-click `bootstrap.sh`**
+
+Right-click `bootstrap.sh` → **Properties** → turn on **Executable as Program**.
+After that, double-clicking it asks *"Run in Terminal?"* — click that, and it
+prompts for your sudo password and starts the wizard automatically.
+(The script re-elevates itself with sudo so you don't need to type anything
+extra in the terminal.)
 
 ### Notes
 
-- Everything the wizard installs (Docker containers, service configs) goes to
-  `~/docker/` on the **target machine** — only the scripts live on the USB.
+- Everything the wizard installs goes to `~/docker/` on the **target machine's
+  disk** — only the setup scripts live on the USB.
 - **exFAT vs ext4:** exFAT works on macOS and Windows too (handy for updating
-  the repo from any machine). ext4 is Linux-only but preserves execute
-  permissions so you never need the `chmod` step above.
+  the repo from any machine). ext4 is Linux-only but preserves the executable
+  bit on `bootstrap.sh` so the Properties step above is only needed once.
 
 ## Compatibility
 

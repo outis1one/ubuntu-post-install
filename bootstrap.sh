@@ -4,11 +4,19 @@
 # One command to paste into a new Ubuntu box:
 #   curl -fsSL https://raw.githubusercontent.com/outis1one/ubuntu-post-install/main/bootstrap.sh | sudo bash
 #
+# Or double-click it in the file manager ("Run in Terminal") — it will
+# prompt for your sudo password automatically.
+#
 # What it does:
 #   1. Installs git if missing (the only hard dependency)
 #   2. Clones (or updates) the repo to ~/ubuntu-post-install
 #   3. Launches the interactive setup wizard
 set -euo pipefail
+
+# Self-elevate: if not root, re-exec under sudo so a plain double-click works.
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    exec sudo bash "$0" "$@"
+fi
 
 REPO_URL="https://github.com/outis1one/ubuntu-post-install.git"
 DEST="${HOME:-/root}/ubuntu-post-install"
