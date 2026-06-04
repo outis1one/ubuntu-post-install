@@ -38,6 +38,37 @@ install_minecraft() {
     echo "╚═══════════════════════════════════════════════════════╝"
     echo ""
 
+    # ── Vanilla Tweaks pre-packaged ZIPs detection ──────────────────────────────
+    local VT_DATAPACK_ZIP="" VT_CRAFTING_ZIP="" VT_DP_VER="" VT_CT_VER=""
+    local USE_VT_ZIPS=false
+    local _VT_EXTRAS_DIR="${HERE}/extras/datapacks"
+    if [ -d "$_VT_EXTRAS_DIR" ]; then
+        local _dp_zips _ct_zips
+        shopt -s nullglob nocaseglob
+        _dp_zips=("$_VT_EXTRAS_DIR"/*datapack*.zip)
+        _ct_zips=("$_VT_EXTRAS_DIR"/*craft*.zip)
+        shopt -u nullglob nocaseglob
+        if [ ${#_dp_zips[@]} -gt 0 ]; then
+            VT_DATAPACK_ZIP="${_dp_zips[0]}"
+            VT_DP_VER=$(basename "$VT_DATAPACK_ZIP" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+        fi
+        if [ ${#_ct_zips[@]} -gt 0 ]; then
+            VT_CRAFTING_ZIP="${_ct_zips[0]}"
+            VT_CT_VER=$(basename "$VT_CRAFTING_ZIP" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+        fi
+    fi
+    if [ -n "$VT_DATAPACK_ZIP" ] || [ -n "$VT_CRAFTING_ZIP" ]; then
+        log_info "Vanilla Tweaks pre-packaged files found in extras/datapacks/:"
+        [ -n "$VT_DATAPACK_ZIP" ] && echo "    Datapacks:       $(basename "$VT_DATAPACK_ZIP")${VT_DP_VER:+  (v${VT_DP_VER})}"
+        [ -n "$VT_CRAFTING_ZIP" ] && echo "    Crafting tweaks: $(basename "$VT_CRAFTING_ZIP")${VT_CT_VER:+  (v${VT_CT_VER})}"
+        echo "  These will be offered for auto-install in the datapacks step."
+    else
+        echo "  Tip: place Vanilla Tweaks ZIPs in extras/datapacks/ before running"
+        echo "  for automatic install. Names should contain 'datapack' or 'craft'."
+        echo "  Example: datapacks_1.21.zip  crafting_tweaks_1.21.zip"
+    fi
+    echo ""
+
     # ── Minecraft version ──────────────────────────────────────────────────────
     log_info "Fetching recent Minecraft versions..."
     local _MC_JSON
@@ -578,8 +609,38 @@ PYEOF
         # ── Vanilla Tweaks datapacks ───────────────────────────────────────────
         echo ""
         log_info "Vanilla Tweaks Datapacks"
-        echo "Toggle datapacks. Recommended defaults are pre-selected."
         echo ""
+
+        if [ -n "$VT_DATAPACK_ZIP" ] || [ -n "$VT_CRAFTING_ZIP" ]; then
+            local _MC_VT_MAJOR; _MC_VT_MAJOR=$(echo "$MC_VERSION" | grep -oE '^[0-9]+\.[0-9]+')
+            [ -n "$VT_DATAPACK_ZIP" ] && echo "    Datapacks ZIP:       $(basename "$VT_DATAPACK_ZIP")${VT_DP_VER:+  (v${VT_DP_VER})}"
+            [ -n "$VT_CRAFTING_ZIP" ] && echo "    Crafting tweaks ZIP: $(basename "$VT_CRAFTING_ZIP")${VT_CT_VER:+  (v${VT_CT_VER})}"
+            echo ""
+            if [ -n "$VT_DP_VER" ]; then
+                local _dp_major; _dp_major=$(echo "$VT_DP_VER" | grep -oE '^[0-9]+\.[0-9]+')
+                if [ "$_dp_major" != "$_MC_VT_MAJOR" ]; then
+                    log_warning "Datapack v${VT_DP_VER} vs MC ${MC_VERSION} — major versions differ, verify compatibility."
+                else
+                    log_success "Datapack v${VT_DP_VER} matches MC ${MC_VERSION}."
+                fi
+            fi
+            if [ -n "$VT_CT_VER" ]; then
+                local _ct_major; _ct_major=$(echo "$VT_CT_VER" | grep -oE '^[0-9]+\.[0-9]+')
+                if [ "$_ct_major" != "$_MC_VT_MAJOR" ]; then
+                    log_warning "Crafting tweaks v${VT_CT_VER} vs MC ${MC_VERSION} — major versions differ, verify compatibility."
+                else
+                    log_success "Crafting tweaks v${VT_CT_VER} matches MC ${MC_VERSION}."
+                fi
+            fi
+            echo ""
+            local _use_pkgs=""
+            prompt_yn "  Use pre-packaged VT files from extras/datapacks/? (y/n):" "y" _use_pkgs
+            [[ "$_use_pkgs" =~ ^[Yy]$ ]] && USE_VT_ZIPS=true
+        fi
+
+        if [ "$USE_VT_ZIPS" = false ]; then
+            echo "Toggle datapacks. Recommended defaults are pre-selected."
+            echo ""
 
         declare -A DPACKS
         declare -A DPACK_DESC
@@ -978,6 +1039,7 @@ PYEOF
                 log_warning "Invalid selection"
             fi
         done
+        fi  # end USE_VT_ZIPS=false datapack picker
     fi
 
     # Vanilla/Paper/Forge: still need a concrete version (no picker ran above).
@@ -1164,47 +1226,70 @@ for v in versions:
         done
     fi
 
-    # ── Vanilla Tweaks datapacks — manual download required ──────────────────────
-    if [ "$SUPPORTS_FABRIC_MODS" = true ] && [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; then
-        local VT_VERSION
-        VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{print $1"."$2}')
-
-        echo ""
-        log_info "Vanilla Tweaks — download your selected packs manually:"
-        echo ""
-        echo "  ┌─ Pre-configured selections (opens VT with everything pre-selected) ┐"
-        echo "  │  Datapacks (22):      https://vanillatweaks.net/share#B3QqSd       │"
-        echo "  │  Crafting tweaks (10): https://vanillatweaks.net/share#SqzGkO      │"
-        echo "  └───────────────────────────────────────────────────────────────────-┘"
-        echo ""
-        echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
-        echo "  and select version ${VT_VERSION}, then enable your chosen packs:"
-        echo ""
-        local _LAST_CAT="" _cat dp
-        for dp in "${DPACK_ORDER[@]}"; do
-            [[ " ${SELECTED_DATAPACKS[*]} " =~ " ${dp} " ]] || continue
-            _cat="${DPACK_CAT[$dp]}"
-            if [ "$_cat" != "$_LAST_CAT" ]; then
-                echo "       ── ${_cat}"
-                _LAST_CAT="$_cat"
+    # ── Vanilla Tweaks datapacks — auto-install or manual instructions ───────────
+    if [ "$SUPPORTS_FABRIC_MODS" = true ] && { [ "$USE_VT_ZIPS" = true ] || [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; }; then
+        if [ "$USE_VT_ZIPS" = true ]; then
+            echo ""
+            log_info "Installing pre-packaged Vanilla Tweaks files..."
+            if [ -n "$VT_DATAPACK_ZIP" ]; then
+                log_info "  Unzipping datapacks: $(basename "$VT_DATAPACK_ZIP")"
+                if unzip -o "$VT_DATAPACK_ZIP" -d "$MC_DIR/datapacks-download/"; then
+                    log_success "  Datapacks extracted to datapacks-download/"
+                else
+                    log_warning "  unzip failed — copy files manually to $MC_DIR/datapacks-download/"
+                fi
             fi
-            echo "         • ${DPACKS[$dp]}"
-        done
-        echo ""
-        echo "  ── How to install ────────────────────────────────────────────────────"
-        echo "  1. Download the ZIP from vanillatweaks.net (use share link or pick)"
-        echo "  2. SCP it to this server (run on your local machine):"
-        echo "       scp ~/Downloads/VanillaTweaks*.zip ${ACTUAL_USER}@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
-        echo "  3. On this server:"
-        echo "       cd ${MC_DIR}/datapacks-download"
-        echo "       unzip 'VanillaTweaks*.zip' && rm VanillaTweaks*.zip"
-        echo "  4. Rebuild:  cd ${MC_DIR} && docker compose build"
-        echo "  5. Restart:  cd ${MC_DIR} && docker compose up -d"
-        echo "  ──────────────────────────────────────────────────────────────────────"
-        echo "  The itzg image extracts .zip files from /datapacks/ on startup."
-        echo "  Datapacks land in ${MC_NAME}/data/datapacks/ and persist across restarts."
-        echo ""
-        read -p "  Press Enter when datapacks are in datapacks-download/ (or Enter to skip): "
+            if [ -n "$VT_CRAFTING_ZIP" ]; then
+                log_info "  Copying crafting tweaks: $(basename "$VT_CRAFTING_ZIP")"
+                if cp "$VT_CRAFTING_ZIP" "$MC_DIR/datapacks-download/"; then
+                    log_success "  Crafting tweaks ZIP copied to datapacks-download/"
+                else
+                    log_warning "  Copy failed — copy $(basename "$VT_CRAFTING_ZIP") manually to $MC_DIR/datapacks-download/"
+                fi
+            fi
+            ensure_docker_dir_ownership "$MC_DIR/datapacks-download"
+        else
+            local VT_VERSION
+            VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{print $1"."$2}')
+
+            echo ""
+            log_info "Vanilla Tweaks — download your selected packs manually:"
+            echo ""
+            echo "  ┌─ Pre-configured selections (open in a browser on this machine) ──────┐"
+            echo "  │  Datapacks (22):       https://vanillatweaks.net/share#B3QqSd        │"
+            echo "  │  Crafting tweaks (10): https://vanillatweaks.net/share#SqzGkO        │"
+            echo "  └────────────────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
+            echo "  Select version ${VT_VERSION}, then enable your chosen packs:"
+            echo ""
+            local _LAST_CAT="" _cat dp
+            for dp in "${DPACK_ORDER[@]}"; do
+                [[ " ${SELECTED_DATAPACKS[*]} " =~ " ${dp} " ]] || continue
+                _cat="${DPACK_CAT[$dp]}"
+                if [ "$_cat" != "$_LAST_CAT" ]; then
+                    echo "       ── ${_cat}"
+                    _LAST_CAT="$_cat"
+                fi
+                echo "         • ${DPACKS[$dp]}"
+            done
+            echo ""
+            echo "  ── How to install ────────────────────────────────────────────────────"
+            echo "  1. Download the ZIP from vanillatweaks.net"
+            echo "  2. For next time: rename to include 'datapack' + version"
+            echo "     (e.g. datapacks_${VT_VERSION}.zip) and place in extras/datapacks/"
+            echo "  3. SCP directly to this server (run on your local machine):"
+            echo "       scp ~/Downloads/VanillaTweaks*.zip ${ACTUAL_USER}@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
+            echo "  4. On this server:"
+            echo "       cd ${MC_DIR}/datapacks-download"
+            echo "       unzip 'VanillaTweaks*.zip' && rm VanillaTweaks*.zip"
+            echo "  5. Restart:  cd ${MC_DIR} && docker compose up -d"
+            echo "  ──────────────────────────────────────────────────────────────────────"
+            echo "  The itzg image auto-installs .zip files from /datapacks/ on startup."
+            echo "  Datapacks land in ${MC_NAME}/data/datapacks/ and persist across restarts."
+            echo ""
+            read -p "  Press Enter when datapacks are in datapacks-download/ (or Enter to skip): "
+        fi
     fi
 
     # ── LuckPerms bootstrap script ──────────────────────────────────────────────
@@ -2300,7 +2385,11 @@ NETEOF
     fi
     echo ""
     echo "  Mods:        ${#SELECTED_MODS[@]} selected"
-    if [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; then
+    if [ "$USE_VT_ZIPS" = true ]; then
+        echo "  Datapacks:   Auto-installed from pre-packaged ZIPs in extras/datapacks/"
+        [ -n "$VT_DP_VER" ] && echo "               Datapacks v${VT_DP_VER}  ($(basename "$VT_DATAPACK_ZIP"))"
+        [ -n "$VT_CT_VER" ] && echo "               Crafting tweaks v${VT_CT_VER}  ($(basename "$VT_CRAFTING_ZIP"))"
+    elif [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; then
         echo "  Datapacks:   Download from vanillatweaks.net/picker/datapacks/ → MC $MC_VERSION"
         echo "               Place .zip in ${MC_NAME}/datapacks-download/ then rebuild"
     else
