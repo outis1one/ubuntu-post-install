@@ -124,9 +124,12 @@ ubuntu_version_ge() {
 }
 
 # pip install --user as actual user.
-# Centralised so any future version-specific pip flags land in one place.
+# --break-system-packages (pip 22.3+) is required on Ubuntu 24.04+ where PEP 668
+# marks the system Python as externally managed; --user alone is not always enough.
 pip_user_install() {
-    sudo -u "$ACTUAL_USER" pip3 install --user --quiet "$@"
+    local flags="--user --quiet"
+    ubuntu_version_ge "24.04" && flags="$flags --break-system-packages"
+    sudo -u "$ACTUAL_USER" pip3 install $flags "$@"
 }
 
 detect_os
