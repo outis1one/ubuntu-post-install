@@ -246,7 +246,21 @@ install_backup() {
     prompt_text "  Snapshots to keep (latest)? [7]:" "7" KEEP_LATEST
     KEEP_LATEST="${KEEP_LATEST:-7}"
 
-    # ── 7. Create dirs + init Kopia repos ────────────────────────────────────
+    # ── Notifications (ntfy) ─────────────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  NOTIFICATIONS (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Receive a push notification after every backup (and on failures)."
+    echo "  Uses ntfy — free and self-hostable. Create a topic at https://ntfy.sh"
+    echo "  Example URL: https://ntfy.sh/my-backup-alerts"
+    echo ""
+    local NTFY_URL="" NTFY_TOKEN=""
+    prompt_text "  ntfy topic URL (blank to skip):" "" NTFY_URL
+    if [ -n "$NTFY_URL" ]; then
+        prompt_text "  ntfy access token (blank if public/no auth):" "" NTFY_TOKEN
+    fi
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
 
@@ -320,6 +334,12 @@ install_backup() {
         echo "# Example SFTP: REMOTE_TYPE=sftp  REMOTE_ARGS=\"--host H --username U --path /srv/...\""
         echo "REMOTE_TYPE=\"none\""
         echo "REMOTE_ARGS=\"\""
+        echo ""
+        echo "# ── Notifications (ntfy) ─────────────────────────────────────────────────────"
+        echo "# Set NTFY_URL to receive backup success/failure alerts."
+        echo "# Leave blank to disable. NTFY_TOKEN is optional (for private topics)."
+        printf "NTFY_URL='%s'\n" "${NTFY_URL:-}"
+        printf "NTFY_TOKEN='%s'\n" "${NTFY_TOKEN:-}"
     } > "$CONF_FILE"
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
@@ -344,7 +364,19 @@ install_backup() {
         log_warning "Copy it manually: cp extras/restore_kopia.sh $RESTORE"
     fi
 
-    # ── 11. Systemd timer ────────────────────────────────────────────────────
+    # ── 11. Install test script ──────────────────────────────────────────────
+    local TEST_SCRIPT="$DIR/test_backup.sh"
+    local TEST_SRC="${HERE:-}/extras/test_backup.sh"
+    if [ -f "$TEST_SRC" ]; then
+        cp "$TEST_SRC" "$TEST_SCRIPT"
+        chmod +x "$TEST_SCRIPT"
+        chown root:root "$TEST_SCRIPT" 2>/dev/null || true
+        log_success "test_backup.sh installed"
+    else
+        log_warning "extras/test_backup.sh not found — test script not installed"
+    fi
+
+    # ── 12. Systemd timer ────────────────────────────────────────────────────
     log_info "Installing systemd timer ($SCHED_LABEL)..."
     local AUTORUN=""
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -426,6 +458,12 @@ SVCEOF
     echo "  Restore:"
     echo "    sudo $RESTORE"
     echo "    sudo $RESTORE --list"
+    echo ""
+    echo "  Backup test (stop/restore/compare/restore-back):"
+    echo "    sudo $TEST_SCRIPT                test most recent backup"
+    echo "    sudo $TEST_SCRIPT --list         list testable services"
+    echo "    sudo $TEST_SCRIPT <service>      test a specific service"
+    [ -n "${NTFY_URL:-}" ] && echo "" && echo "  Notifications: $NTFY_URL"
     echo ""
     [ -n "$AUTORUN" ] && echo "  $AUTORUN" && echo ""
     log_warning "Save your passwords (in backup.conf) somewhere safe —"

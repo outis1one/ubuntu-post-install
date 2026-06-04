@@ -20,8 +20,36 @@ source "$CONF"
 ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$ACTUAL_USER")"
 DOCKER_DIR="$ACTUAL_HOME/docker"
+HOST="$(hostname -s 2>/dev/null || hostname)"
 
 log() { echo "[$(date '+%F %T')] $*"; }
+
+ntfy_send() {
+    local title="$1" msg="$2" priority="${3:-default}" tags="${4:-}"
+    [ -z "${NTFY_URL:-}" ] && return 0
+    local -a _args=(-fsS -o /dev/null)
+    _args+=(-H "Title: $title" -H "Priority: $priority")
+    [ -n "$tags" ]           && _args+=(-H "Tags: $tags")
+    [ -n "${NTFY_TOKEN:-}" ] && _args+=(-H "Authorization: Bearer $NTFY_TOKEN")
+    curl "${_args[@]}" -d "$msg" "$NTFY_URL" 2>/dev/null || true
+}
+
+categorize_error() {
+    local txt="$1"
+    if   echo "$txt" | grep -qi "no space left\|disk quota exceeded"; then
+        echo "disk full — backup destination is out of space"
+    elif echo "$txt" | grep -qi "connection refused\|network unreachable\|no route to host\|ssh.*connect\|timed out\|host unreachable"; then
+        echo "remote unreachable — check network / destination host"
+    elif echo "$txt" | grep -qi "repository.*not.*exist\|not a valid kopia\|not connected"; then
+        echo "repository not found — re-run the backup installer"
+    elif echo "$txt" | grep -qi "passphrase\|wrong key\|cannot decrypt"; then
+        echo "wrong passphrase — check backup.conf"
+    elif echo "$txt" | grep -qi "permission denied\|access denied"; then
+        echo "permission denied — check file permissions"
+    else
+        echo "error — see system logs on $HOST"
+    fi
+}
 
 kp_for() {
     local dest="$1"; shift
@@ -55,6 +83,9 @@ esac
 
 log "===== Backup starting ====="
 rc=0
+declare -a FAILED_SVCS=()
+_ERR="$(mktemp)"
+trap 'rm -f "$_ERR"' EXIT
 
 for svc_dir in "$DOCKER_DIR"/*/; do
     [ -f "${svc_dir}docker-compose.yml" ] || continue
@@ -73,10 +104,13 @@ for svc_dir in "$DOCKER_DIR"/*/; do
             sleep 5
         fi
         log "Snapshotting $svc (dest: $dest)..."
-        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir"; then
+        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir" 2>"$_ERR"; then
             log "OK $svc (Minecraft, no downtime)"
         else
-            log "WARNING: snapshot failed for $svc"; rc=1
+            _reason="$(categorize_error "$(cat "$_ERR")")"
+            log "WARNING: snapshot failed for $svc — $_reason"
+            FAILED_SVCS+=("$svc: $_reason")
+            rc=1
         fi
     else
         STOPPED=false
@@ -89,10 +123,13 @@ for svc_dir in "$DOCKER_DIR"/*/; do
         fi
 
         log "Snapshotting $svc (dest: $dest)..."
-        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir"; then
+        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir" 2>"$_ERR"; then
             log "OK $svc"
         else
-            log "WARNING: snapshot failed for $svc"; rc=1
+            _reason="$(categorize_error "$(cat "$_ERR")")"
+            log "WARNING: snapshot failed for $svc — $_reason"
+            FAILED_SVCS+=("$svc: $_reason")
+            rc=1
         fi
 
         if [ "$STOPPED" = true ]; then
@@ -107,14 +144,23 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     for dest in ${DEST_NAMES:-default}; do
         log "Mirroring '$dest' offsite ($REMOTE_TYPE)..."
         # shellcheck disable=SC2086
-        kp_for "$dest" repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS \
-            || { log "WARNING: mirror failed for '$dest'"; rc=1; }
+        if ! kp_for "$dest" repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS 2>"$_ERR"; then
+            _reason="$(categorize_error "$(cat "$_ERR")")"
+            log "WARNING: mirror failed for '$dest' — $_reason"
+            FAILED_SVCS+=("mirror[$dest]: $_reason")
+            rc=1
+        fi
     done
 fi
 
 if [ "$rc" -eq 0 ]; then
     log "===== Backup complete ====="
+    ntfy_send "✓ Backup complete" "$HOST: all services backed up successfully" \
+        "low" "white_check_mark"
 else
     log "===== Backup finished WITH WARNINGS (see above) ====="
+    _ntfy_msg="$HOST: backup failures:"
+    for _s in "${FAILED_SVCS[@]}"; do _ntfy_msg+=$'\n'"• $_s"; done
+    ntfy_send "✗ Backup FAILED" "$_ntfy_msg" "urgent" "rotating_light"
 fi
 exit "$rc"

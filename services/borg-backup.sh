@@ -191,6 +191,22 @@ install_borg_backup() {
     KEEP_WEEKLY="${KEEP_WEEKLY:-4}"
     KEEP_MONTHLY="${KEEP_MONTHLY:-3}"
 
+    # ── Notifications (ntfy) ─────────────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  NOTIFICATIONS (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Receive a push notification after every backup (and on failures)."
+    echo "  Uses ntfy — free and self-hostable. Create a topic at https://ntfy.sh"
+    echo "  Example URL: https://ntfy.sh/my-backup-alerts"
+    echo ""
+    local NTFY_URL="" NTFY_TOKEN=""
+    prompt_text "  ntfy topic URL (blank to skip):" "" NTFY_URL
+    if [ -n "$NTFY_URL" ]; then
+        prompt_text "  ntfy access token (blank if public/no auth):" "" NTFY_TOKEN
+    fi
+
     # ── 7. Create dirs + init Borg repos ─────────────────────────────────────
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
@@ -262,6 +278,12 @@ install_borg_backup() {
                 echo "# SVC_${svc_var}=\"default\""
             fi
         done
+        echo ""
+        echo "# ── Notifications (ntfy) ─────────────────────────────────────────────────────"
+        echo "# Set NTFY_URL to receive backup success/failure alerts."
+        echo "# Leave blank to disable. NTFY_TOKEN is optional (for private topics)."
+        printf "NTFY_URL='%s'\n" "${NTFY_URL:-}"
+        printf "NTFY_TOKEN='%s'\n" "${NTFY_TOKEN:-}"
     } > "$CONF_FILE"
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
@@ -286,7 +308,19 @@ install_borg_backup() {
         log_warning "Copy it manually: cp extras/restore_borg.sh $RESTORE"
     fi
 
-    # ── 11. Systemd timer ─────────────────────────────────────────────────────
+    # ── 11. Install test script ──────────────────────────────────────────────
+    local TEST_SCRIPT="$DIR/test_backup.sh"
+    local TEST_SRC="${HERE:-}/extras/test_backup.sh"
+    if [ -f "$TEST_SRC" ]; then
+        cp "$TEST_SRC" "$TEST_SCRIPT"
+        chmod +x "$TEST_SCRIPT"
+        chown root:root "$TEST_SCRIPT" 2>/dev/null || true
+        log_success "test_backup.sh installed"
+    else
+        log_warning "extras/test_backup.sh not found — test script not installed"
+    fi
+
+    # ── 12. Systemd timer ─────────────────────────────────────────────────────
     log_info "Installing systemd timer ($SCHED_LABEL)..."
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         tee "/etc/systemd/system/${SVC_NAME}.service" >/dev/null << SVCEOF
@@ -367,6 +401,12 @@ SVCEOF
     echo "  Restore:"
     echo "    sudo $RESTORE"
     echo "    sudo $RESTORE --list"
+    echo ""
+    echo "  Backup test (stop/restore/compare/restore-back):"
+    echo "    sudo $TEST_SCRIPT                test most recent backup"
+    echo "    sudo $TEST_SCRIPT --list         list testable services"
+    echo "    sudo $TEST_SCRIPT <service>      test a specific service"
+    [ -n "${NTFY_URL:-}" ] && echo "" && echo "  Notifications: $NTFY_URL"
     echo ""
     log_warning "IMPORTANT — back up your Borg key and passphrase now."
     echo "  The key is stored in the repo itself (repokey-blake2 encryption)."
