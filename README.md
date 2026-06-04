@@ -61,40 +61,18 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 **Site defaults** are saved to `~/docker/.config` and pre-fill every service prompt.
 Update them any time with `sudo ./setup.sh configure`.
 
-## Base packages
-
-The `base` service installs the following on every box:
-
-| Package | Purpose |
-|---------|---------|
-| `net-tools` | Classic network tools — `ifconfig`, `netstat`, `arp` |
-| `ncdu` | Interactive ncurses disk-usage viewer |
-| `git` | Version control |
-| `curl` | URL data transfer |
-| `wget` | File downloader |
-| `htop` | Interactive process viewer |
-| `tree` | Directory tree display |
-| `zip` / `unzip` | Archive packing / unpacking |
-| `ca-certificates` | Up-to-date SSL certificate bundle |
-| `gnupg` | GPG — used to verify apt signing keys |
-| `jq` | Command-line JSON processor |
-| `rsync` | Fast file sync / remote copy |
-| `glow` | Terminal markdown reader (from [Charm's apt repo](https://github.com/charmbracelet/glow)) |
-
-`glow` is also installable on its own: `sudo ./setup.sh glow`
-
 ## Services
 
 | Group | Services |
 |-------|---------|
-| `base` | `base`, `glow` |
+| `base` | `base` — `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
 | `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant` |
 | `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `magicmirror`, `mealie`, `meshcentral`, `ntfy`, `portainer`, `traccar`, `uptimekuma`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `linux-to-sync`, `silent-send`, `sync-cc` |
-| `backup` | `backup` |
+| `backup` | `backup` — Kopia (encrypted, dedup, scheduled) |
 
 Run `./setup.sh --list` to see descriptions.
 
