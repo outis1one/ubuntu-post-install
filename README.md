@@ -5,20 +5,35 @@ install exactly what you need — interactively or by name.
 
 ## Quick start on a fresh box
 
+**Public repo — paste on any new box:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/outis1one/ubuntu-post-install/main/bootstrap.sh | sudo bash
 ```
 
-That installs git (if missing), clones the repo to `~/ubuntu-post-install`,
-and drops you into the interactive wizard.
+**USB thumb drive — works for public or private repos:**
 
-If you already have git:
+Prepare the USB once on any machine (no git required):
+1. Go to the repo on GitHub → green **Code** button → **Download ZIP**
+2. Unzip it — you'll get a folder called `ubuntu-post-install-main`
+3. Copy that folder to your USB drive
 
+On every new box:
+1. Plug in the USB — it opens in the file manager
+2. Navigate into the `ubuntu-post-install-main` folder
+3. **Either:**
+   - Right-click inside the folder → **Open in Terminal** → type `bash bootstrap.sh`
+   - **Or** double-click `bootstrap.sh` → if prompted, choose **Run in Terminal**
+
+The script asks for your password if needed. It detects it is running from
+inside the repo, copies everything to `~/ubuntu-post-install`, then launches
+the wizard — the USB can be unplugged once setup starts.
+
+**Private repo — PAT (alternative):**
 ```bash
-git clone https://github.com/outis1one/ubuntu-post-install.git
-cd ubuntu-post-install
-sudo ./setup.sh
+sudo bash bootstrap.sh --pat ghp_xxxxxxxxxxxxxxxxxxxx
 ```
+Use a fine-grained read-only PAT scoped to just this repo (Contents: Read).
+The PAT is stripped from the stored remote URL after cloning.
 
 ## Usage
 
