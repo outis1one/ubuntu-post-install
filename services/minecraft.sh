@@ -988,8 +988,8 @@ PYEOF
         BORDER_SIZE=$(( PREGEN_RADIUS * 2 ))
         echo ""
         local _border=""
-        prompt_yn "Set world border at ${BORDER_SIZE} blocks (2× radius)? (y/n) [y]:" "y" _border
-        [[ ${_border:-y} =~ ^[Yy]$ ]] && USE_BORDER=true || USE_BORDER=false
+        prompt_yn "Set world border at ${BORDER_SIZE} blocks (2× radius)? (y/n) [n]:" "n" _border
+        [[ ${_border:-n} =~ ^[Yy]$ ]] && USE_BORDER=true || USE_BORDER=false
     fi
 
     # ── Networking ──────────────────────────────────────────────────────────────
@@ -1156,14 +1156,14 @@ for v in versions:
     # ── Vanilla Tweaks datapacks — manual download required ──────────────────────
     if [ "$SUPPORTS_FABRIC_MODS" = true ] && [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; then
         local VT_VERSION
-        VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{if ($1=="1") print $0; else print $1"."$2}')
+        VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{print $1"."$2}')
 
         echo ""
         log_info "Vanilla Tweaks — download your selected packs manually:"
         echo ""
-        echo "  ┌─ Quick start: pre-configured share links (opens VT pre-selected) ─┐"
-        echo "  │  Datapacks:       https://vanillatweaks.net/share#B3QqSd           │"
-        echo "  │  Crafting tweaks: https://vanillatweaks.net/share#SqzGkO           │"
+        echo "  ┌─ Pre-configured selections (opens VT with everything pre-selected) ┐"
+        echo "  │  Datapacks (22):      https://vanillatweaks.net/share#B3QqSd       │"
+        echo "  │  Crafting tweaks (10): https://vanillatweaks.net/share#SqzGkO      │"
         echo "  └───────────────────────────────────────────────────────────────────-┘"
         echo ""
         echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
@@ -1183,7 +1183,7 @@ for v in versions:
         echo "  ── How to install ────────────────────────────────────────────────────"
         echo "  1. Download the ZIP from vanillatweaks.net (use share link or pick)"
         echo "  2. SCP it to this server (run on your local machine):"
-        echo "       scp ~/Downloads/VanillaTweaks*.zip $(whoami)@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
+        echo "       scp ~/Downloads/VanillaTweaks*.zip ${ACTUAL_USER}@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
         echo "  3. On this server:"
         echo "       cd ${MC_DIR}/datapacks-download"
         echo "       unzip 'VanillaTweaks*.zip' && rm VanillaTweaks*.zip"
@@ -1263,8 +1263,6 @@ MCEOF
         [ "$USE_BORDER" = true ] && BORDER_LINE="mc-send-to-console \"worldborder set ${BORDER_SIZE}\""
         cat > "$MC_DIR/data/pregen-startup.sh" << PREGENEOF
 #!/bin/bash
-# Chunky pre-generation — run manually after the server has started:
-#   docker exec -e PREGEN=1 -u 1000 ${MC_NAME} bash /data/pregen-startup.sh
 [ "\${PREGEN:-0}" = "1" ] || exit 0
 _PIPE=/tmp/minecraft-console-in
 echo "Waiting for server to be ready (may take 1-2 minutes)..."
@@ -1288,6 +1286,38 @@ PREGENEOF
         chmod +x "$MC_DIR/data/pregen-startup.sh"
         chown 1000:1000 "$MC_DIR/data/pregen-startup.sh" 2>/dev/null || true
         log_success "pregen-startup.sh written to ${MC_NAME}/data/"
+
+        local _BORDER_STATUS
+        [ "$USE_BORDER" = true ] && _BORDER_STATUS="enabled" || _BORDER_STATUS="disabled"
+        cat > "$MC_DIR/PREGEN_INSTRUCTIONS.md" << PREGENINFOEOF
+# Chunk Pre-Generation
+
+Pre-gen radius: ${PREGEN_RADIUS} blocks
+World border:   ${BORDER_SIZE} blocks (${_BORDER_STATUS})
+
+Pre-generation ran automatically when the server started. It uses Chunky
+to generate all chunks within the radius before players explore.
+
+## Monitor progress
+
+\`\`\`bash
+docker exec ${MC_NAME} mc-send-to-console 'chunky progress'
+\`\`\`
+
+## Re-run manually (if server was started without pre-gen)
+
+\`\`\`bash
+docker exec -e PREGEN=1 -u 1000 ${MC_NAME} bash /data/pregen-startup.sh
+\`\`\`
+
+## Cancel pre-gen
+
+\`\`\`bash
+docker exec ${MC_NAME} mc-send-to-console 'chunky cancel'
+\`\`\`
+PREGENINFOEOF
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR/PREGEN_INSTRUCTIONS.md" 2>/dev/null || true
+        log_success "PREGEN_INSTRUCTIONS.md written"
     fi
 
     # ── Standalone docker-compose.yml (per-service folder) ──────────────────────
@@ -2274,6 +2304,8 @@ NETEOF
     echo "  docker-compose.yml                         Standalone compose (build itzg image)"
     echo "  CLIENT_MODS.md                             What players install on their client"
     echo "  MINECRAFT_NETWORKING.md                    DNS and port forward instructions"
+    [[ " ${SELECTED_MODS[*]} " =~ " chunky " ]] && \
+        echo "  PREGEN_INSTRUCTIONS.md                     How to monitor and re-run pre-gen"
     [ "$USE_PLAYIT" = true ] && echo "  .env.playit                                Add playit.gg secret here"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
