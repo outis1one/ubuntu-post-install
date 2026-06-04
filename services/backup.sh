@@ -1,45 +1,46 @@
 #!/bin/bash
-# services/backup.sh — automatic encrypted backups with Kopia.
+# services/backup.sh — Full Docker-service backup via Kopia.
 # Part of the modular post-install system (sourced by setup.sh).
 #
-# Backs up the things you can't re-download — progress, saved games, user data:
-#   • Minecraft worlds / player data  (every <id>/data instance under $DOCKER_DIR)
-#   • Emulator saves & save states    ($GAME_STORAGE_DIR/saves)      [gaming box]
-#   • ES-DE scraped artwork           ($GAME_STORAGE_DIR/media)      [gaming box]
-#   • Steam user data & game saves    ($GAME_STORAGE_DIR/steam)      [gaming box]
-#   • Wolf state                      (/etc/wolf — config + profile_data) [gaming box]
+# Backs up each entire ~/docker/<service>/ directory (compose file, config, data,
+# databases — everything needed to restore from nothing). Per-service behaviour:
+#   Minecraft instances — flush world to disk (save-all), snapshot, no downtime
+#   All other services  — stop, snapshot, restart (seconds of downtime each)
 #
-# It does NOT back up ROMs or Steam game installs — those are re-downloadable.
+# Different services can be routed to different Kopia repos / drives.
+# New services are auto-discovered on every run — no reconfiguration needed.
 #
-# Engine: Kopia — block-level dedup + zstd compression + encryption, so the
-# constantly-rewritten Minecraft region files and Steam Proton prefixes only
-# store their changed blocks. Backups run automatically on a systemd timer
-# (cron fallback). An optional "sync-to" step mirrors the whole repository to
-# another computer or a cloud bucket (REMOTE_* lines in backup.conf).
-#
-# Safe to re-run: it reconnects to an existing repository and refreshes the
-# config, policies, worker script and timer.
+# Creates: ~/docker/backup/
+#   backup.conf      settings + per-service destination map (chmod 600)
+#   backup.sh        worker (run directly or via systemd timer)
+#   restore/<dest>/  restore_kopia_backup.sh + backup.conf per destination
 
-register_service backup backup "Automatic encrypted backups (Kopia)"
+register_service backup backup "Encrypted backup of all Docker services (full restore)"
 
 install_backup() {
-    log_info "Setting up automatic encrypted backups (Kopia)..."
+    require_docker || return 1
+
+    local DIR="$DOCKER_DIR/backup"
+    local CONF_FILE="$DIR/backup.conf"
+    local WORKER="$DIR/backup.sh"
+    local RESTORE_DIR="$DIR/restore"
+    local RESTORE_SRC="${HERE:-}/extras/restore_kopia_backup.sh"
+    local SVC_NAME="post-install-backup"
 
     echo ""
     echo "╔═══════════════════════════════════════════════════════════════════╗"
     echo "║   BACKUP STRATEGIES — choose the right tool for your data        ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "  This installer sets up Kopia (the recommended default), but here"
-    echo "  is a quick guide to all available options so you can pick the"
-    echo "  right tool for each type of data."
+    echo "  This installer sets up Kopia for full service backup, but here is"
+    echo "  a quick reference to all available options."
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────┐"
     echo "  │ KOPIA (installed here) — block-level dedup + zstd + encryption  │"
     echo "  │   Use for: files that change constantly — Minecraft worlds,     │"
-    echo "  │   game saves, Steam prefixes, Docker config volumes.            │"
-    echo "  │   Changed blocks are stored once; old blocks are shared.        │"
-    echo "  │   Restores via: kopia snapshot list / kopia restore             │"
+    echo "  │   databases, configs, entire Docker service directories.        │"
+    echo "  │   Changed blocks stored once; unchanged blocks share space.     │"
+    echo "  │   Restores via: restore_kopia_backup.sh (interactive)           │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
     echo ""
     echo "  ┌─────────────────────────────────────────────────────────────────┐"
@@ -61,10 +62,7 @@ install_backup() {
     echo "  │ RSYNC --link-dest  versioned snapshots, original folder layout  │"
     echo "  │   Creates dated dirs (2024-01-15/, 2024-01-16/, …).            │"
     echo "  │   Unchanged files are hard-linked — cost no extra disk space.  │"
-    echo "  │   Each dated dir is a complete, browsable snapshot of the       │"
-    echo "  │   source. Original folder structure preserved (unlike           │"
-    echo "  │   rsnapshot). If today's --delete wiped something, yesterday's  │"
-    echo "  │   dated dir is untouched.                                       │"
+    echo "  │   Each dated dir is a complete, browsable snapshot.             │"
     echo "  │   Use for: general files where you want versioning + readable   │"
     echo "  │   snapshot dirs without a special restore tool.                 │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
@@ -72,14 +70,13 @@ install_backup() {
     echo "  ┌─────────────────────────────────────────────────────────────────┐"
     echo "  │ RSNAPSHOT (sudo apt install rsnapshot) — automated rotation     │"
     echo "  │   Wraps rsync with a retention scheme (daily.0, weekly.0, …).  │"
-    echo "  │   Hard-links unchanged files like --link-dest, but dirs are     │"
-    echo "  │   named by rsnapshot (not your original structure).             │"
-    echo "  │   Use for: automated versioning without scripting --link-dest,  │"
-    echo "  │   when the rsnapshot naming convention doesn't bother you.      │"
+    echo "  │   Hard-links unchanged files; dirs named by rsnapshot.          │"
+    echo "  │   Use for: automated versioning without scripting --link-dest.  │"
     echo "  └─────────────────────────────────────────────────────────────────┘"
     echo ""
     echo "  Quick reference:"
-    echo "    Constantly-changing data (saves, worlds, configs) → Kopia or Borg"
+    echo "    Full service recovery, databases, configs → Kopia (this installer)"
+    echo "    Frequently changing saves without downtime → gaming-backup service"
     echo "    Media / ROMs (rarely changes, just need a copy)   → rsync plain"
     echo "    Versioned snapshots, keep original folder layout  → rsync --link-dest"
     echo "    Versioned snapshots, want auto rotation scripted  → rsnapshot"
@@ -87,395 +84,418 @@ install_backup() {
     echo "  Continuing with Kopia setup..."
     echo ""
 
-    # ── Repo-conventional paths ──────────────────────────────────────────────
-    local BACKUP_DIR="$DOCKER_DIR/backup"
-    local CONF_FILE="$BACKUP_DIR/backup.conf"     # editable settings
-    local WORKER="$BACKUP_DIR/backup.sh"          # generated worker
-    local KOPIA_CONFIG="/etc/post-install-backup/repository.config"
-    local CACHE_DIR="/var/cache/post-install-backup"
-    local SVC_NAME="post-install-backup"
-    local DEFAULT_REPO="$ACTUAL_HOME/backups/post-install-kopia"
-
-    echo ""
     echo "╔═══════════════════════════════════════════════════════╗"
-    echo "║   Automatic Backup Setup  ·  Kopia                    ║"
-    echo "║   Minecraft world · game saves · user data            ║"
+    echo "║   Backup Setup  ·  Kopia                              ║"
+    echo "║   Full ~/docker/<service>/ snapshots                  ║"
     echo "╚═══════════════════════════════════════════════════════╝"
     echo ""
-    echo "  Backs up progress / saves / user data — NOT ROMs or game installs."
-    echo "  Dedup + compression + encryption, scheduled automatically."
-    echo "  Optional mirror to another computer or cloud (configurable later)."
+    echo "  Backs up each entire service directory — compose file, config, data,"
+    echo "  databases, everything needed to restore a service from scratch."
+    echo ""
+    echo "  Minecraft: world flushed to disk (save-all), snapshot, NO downtime."
+    echo "  Everything else: stopped briefly, snapshotted, restarted."
+    echo ""
+    echo "  Different services can go to different drives / Kopia repos."
+    echo "  New services are auto-detected on every run — no reconfiguration needed."
     echo ""
 
-    # ── DRY-RUN: describe the plan and bail before touching anything real ────
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would install Kopia from its official apt repository"
-        echo "[DRY-RUN] Would create $BACKUP_DIR (owned by $ACTUAL_USER)"
-        echo "[DRY-RUN] Would create/connect a Kopia repository at $DEFAULT_REPO"
-        echo "[DRY-RUN] Would write config $CONF_FILE and worker $WORKER"
-        echo "[DRY-RUN] Would install systemd service+timer $SVC_NAME (cron fallback)"
-        echo "[DRY-RUN] Would optionally run the first backup"
+        echo "[DRY-RUN] Would discover services under $DOCKER_DIR"
+        echo "[DRY-RUN] Would create $DIR with conf, worker, and restore scripts"
+        echo "[DRY-RUN] Would create Kopia repo(s) at user-specified paths"
+        echo "[DRY-RUN] Would install systemd timer"
         return 0
     fi
 
-    # ── 1. Ensure Kopia is installed ─────────────────────────────────────────
+    # ── 1. Kopia ─────────────────────────────────────────────────────────────
     if ! command -v kopia >/dev/null 2>&1; then
-        log_info "Kopia not found — installing from the official apt repository..."
+        log_info "Installing Kopia..."
         if command -v apt-get >/dev/null 2>&1; then
             install -d -m 0755 /etc/apt/keyrings
-            if curl -fsSL https://kopia.io/signing-key \
-                | gpg --dearmor --yes -o /etc/apt/keyrings/kopia-keyring.gpg; then
-                echo "deb [signed-by=/etc/apt/keyrings/kopia-keyring.gpg] http://packages.kopia.io/apt/ stable main" \
-                    > /etc/apt/sources.list.d/kopia.list
-                apt-get update -y && apt-get install -y kopia
-            fi
+            curl -fsSL https://kopia.io/signing-key \
+                | gpg --dearmor --yes -o /etc/apt/keyrings/kopia-keyring.gpg \
+            && echo "deb [signed-by=/etc/apt/keyrings/kopia-keyring.gpg] http://packages.kopia.io/apt/ stable main" \
+                > /etc/apt/sources.list.d/kopia.list \
+            && apt-get update -y && apt-get install -y kopia
         fi
     fi
-    if ! command -v kopia >/dev/null 2>&1; then
-        log_error "Kopia is still not installed."
-        echo "  Install it manually, then re-run this service:"
-        echo "    https://kopia.io/docs/installation/"
-        echo "  Or grab the linux-amd64 binary from:"
-        echo "    https://github.com/kopia/kopia/releases/latest"
-        return 1
-    fi
+    command -v kopia >/dev/null 2>&1 \
+        || { log_error "Kopia not installed. See https://kopia.io/docs/installation/"; return 1; }
     local KOPIA_BIN; KOPIA_BIN="$(command -v kopia)"
     log_success "Kopia: $("$KOPIA_BIN" --version 2>/dev/null | head -1)"
 
-    # Generated config/worker live under the repo-conventional backup folder.
-    mkdir -p "$BACKUP_DIR" || return 1
-    ensure_docker_dir_ownership "$BACKUP_DIR"
+    # ── 2. Discover installed services ───────────────────────────────────────
+    local -a ALL_SVCS=()
+    local d svc
+    for d in "$DOCKER_DIR"/*/; do
+        [ -f "${d}docker-compose.yml" ] || continue
+        svc="$(basename "$d")"
+        [[ "$svc" == "backup" || "$svc" == "gaming-backup" ]] && continue
+        ALL_SVCS+=("$svc")
+    done
 
-    # ── 2. What to back up ───────────────────────────────────────────────────
-    echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "  WHAT TO BACK UP"
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
-
-    # Minecraft instances auto-detect under $DOCKER_DIR (~/docker/minecraft,
-    # ~/docker/minecraft-* etc.) — any folder with an itzg Dockerfile + data/.
-    local DEFAULT_MCBASE="$DOCKER_DIR"
-    echo "  Each Minecraft instance's world is backed up from its <id>/data folder;"
-    echo "  all instances under this folder are detected automatically."
-    echo "  (type 'none' to exclude Minecraft)"
-    local MC_BASE_DIR=""
-    prompt_text "  Folder containing Minecraft instance(s) [${DEFAULT_MCBASE}]:" "$DEFAULT_MCBASE" MC_BASE_DIR
-    if [ "$MC_BASE_DIR" = none ]; then
-        MC_BASE_DIR=""
+    if [ "${#ALL_SVCS[@]}" -eq 0 ]; then
+        log_warning "No services found under $DOCKER_DIR — auto-detected on each backup run."
     else
-        MC_BASE_DIR="${MC_BASE_DIR/#\~/$ACTUAL_HOME}"; MC_BASE_DIR="${MC_BASE_DIR%/}"
-        local _found=() d
-        for d in "$MC_BASE_DIR"/*/; do
-            [ -f "${d}Dockerfile" ] && grep -qs itzg "${d}Dockerfile" && [ -d "${d}data" ] \
-                && _found+=("$(basename "$d")")
+        log_info "Services found: ${ALL_SVCS[*]}"
+    fi
+
+    # ── 3. Destinations ───────────────────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  BACKUP DESTINATIONS"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Each destination is a Kopia repository directory."
+    echo "  For best resilience: use a different drive or mount point from your data."
+    echo "  Destination names must be letters, numbers, and underscores only."
+    echo ""
+
+    local DEFAULT_DEST="$ACTUAL_HOME/backups/kopia-backup"
+    local _repo=""
+    prompt_text "  Default repository path [${DEFAULT_DEST}]:" "$DEFAULT_DEST" _repo
+    _repo="${_repo/#\~/$ACTUAL_HOME}"; _repo="${_repo%/}"
+
+    local -a DEST_NAMES_ARR=("default")
+    local -A DEST_REPOS=() DEST_PASSWORDS=() DEST_CONFIGS=()
+    DEST_REPOS["default"]="$_repo"
+    DEST_CONFIGS["default"]="/etc/kopia-backup/default.config"
+
+    local _extra=""
+    prompt_yn "  Add more destinations (for services on different drives)? (y/N):" "n" _extra
+    if [[ "$_extra" =~ ^[Yy]$ ]]; then
+        echo ""
+        local _dn _dr
+        while true; do
+            prompt_text "    Destination name (blank to finish):" "" _dn
+            [ -z "$_dn" ] && break
+            _dn="${_dn//[^a-zA-Z0-9_]/_}"
+            [ "$_dn" = "default" ] && { log_warning "  'default' is reserved — use another name."; continue; }
+            prompt_text "    Path for '$_dn' repository:" "" _dr
+            [ -z "$_dr" ] && continue
+            _dr="${_dr/#\~/$ACTUAL_HOME}"; _dr="${_dr%/}"
+            DEST_REPOS["$_dn"]="$_dr"
+            DEST_CONFIGS["$_dn"]="/etc/kopia-backup/${_dn}.config"
+            DEST_NAMES_ARR+=("$_dn")
+            log_success "    Destination '$_dn' → $_dr"
         done
-        if [ "${#_found[@]}" -gt 0 ]; then
-            log_success "  Detected Minecraft instance(s): ${_found[*]}"
+    fi
+
+    # ── 4. Service → destination assignment ──────────────────────────────────
+    local -A SVC_DEST_MAP=()
+    if [ "${#ALL_SVCS[@]}" -gt 0 ] && [ "${#DEST_NAMES_ARR[@]}" -gt 1 ]; then
+        echo ""
+        echo "═══════════════════════════════════════════════════════"
+        echo "  ASSIGN SERVICES TO DESTINATIONS"
+        echo "═══════════════════════════════════════════════════════"
+        echo ""
+        echo "  Destinations:"
+        local dn
+        for dn in "${DEST_NAMES_ARR[@]}"; do
+            printf "    %-16s %s\n" "$dn" "${DEST_REPOS[$dn]}"
+        done
+        echo ""
+        echo "  Press Enter to accept the default for each service."
+        echo ""
+        local _d
+        for svc in "${ALL_SVCS[@]}"; do
+            prompt_text "    $svc [default]:" "default" _d
+            if [ -n "$_d" ] && [ "$_d" != "default" ] && [ -n "${DEST_REPOS[$_d]:-}" ]; then
+                SVC_DEST_MAP["$svc"]="$_d"
+            fi
+        done
+    fi
+
+    # ── 5. Passwords ─────────────────────────────────────────────────────────
+    echo ""
+    log_info "Setting repository passwords (stored in backup.conf, chmod 600)..."
+    for dn in "${DEST_NAMES_ARR[@]}"; do
+        local pw=""
+        if [ "$UNATTENDED" = true ]; then
+            pw="$(generate_password 32)"
         else
-            log_warning "  No instances detected yet under $MC_BASE_DIR — picked up once created."
+            read -rsp "  Password for '$dn' [Enter = auto-generate]: " pw; echo
         fi
-    fi
+        [ -z "$pw" ] && pw="$(generate_password 32)" && log_info "  Auto-generated password for '$dn'."
+        DEST_PASSWORDS["$dn"]="$pw"
+    done
 
-    # ── Optional gaming-box sources (only matter on a Wolf gaming machine) ────
-    echo ""
-    echo "  The following are only relevant on a gaming box (Wolf + emulators +"
-    echo "  Steam). On a plain homelab server you can leave them disabled."
-    local DEFAULT_STORAGE="$ACTUAL_HOME/drives/games"
-    local GAME_STORAGE_DIR=""
-    prompt_text "  Game storage dir (ROMs/Steam/saves live here) [${DEFAULT_STORAGE}]:" "$DEFAULT_STORAGE" GAME_STORAGE_DIR
-    GAME_STORAGE_DIR="${GAME_STORAGE_DIR/#\~/$ACTUAL_HOME}"
-    GAME_STORAGE_DIR="${GAME_STORAGE_DIR%/}"
-
-    echo ""
-    local _a=""
-    prompt_yn "  Back up emulator saves ($GAME_STORAGE_DIR/saves)? (y/N):" "n" _a
-    local BACKUP_SAVES; BACKUP_SAVES=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
-    prompt_yn "  Back up Steam user data/saves (game installs excluded)? (y/N):" "n" _a
-    local BACKUP_STEAM; BACKUP_STEAM=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
-    prompt_yn "  Back up ES-DE scraped artwork ($GAME_STORAGE_DIR/media)? (y/N):" "n" _a
-    local BACKUP_MEDIA; BACKUP_MEDIA=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
-    # /etc/wolf holds Wolf's config AND profile_data/ — which is where Wolf persists
-    # every app's whole /home/retro (ES-DE settings, gamelists, controller configs,
-    # RetroArch configs + saves + save states, standalone-emulator saves, etc.).
-    echo ""
-    echo "  /etc/wolf includes pairing/config AND profile_data — where Wolf stores"
-    echo "  every app's home dir (ES-DE settings, controller mappings, RetroArch"
-    echo "  saves & save states, standalone-emulator saves)."
-    prompt_yn "  Back up Wolf state (/etc/wolf)? (y/N):" "n" _a
-    local BACKUP_WOLF; BACKUP_WOLF=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
-    local WOLF_STATE_DIR="/etc/wolf"
-
-    # ── 3. Repository location (local now; remote mirror later) ──────────────
-    echo ""
-    echo "═══════════════════════════════════════════════════════"
-    echo "  BACKUP REPOSITORY (local)"
-    echo "═══════════════════════════════════════════════════════"
-    echo ""
-    echo "  Backups are stored in a local Kopia repository. You can mirror it to"
-    echo "  another computer or the cloud later (see backup.conf, REMOTE_* lines)."
-    echo "  Put it on a DIFFERENT drive from your data if you can."
-    echo ""
-    local REPO_DIR=""
-    prompt_text "  Repository path [${DEFAULT_REPO}]:" "$DEFAULT_REPO" REPO_DIR
-    REPO_DIR="${REPO_DIR/#\~/$ACTUAL_HOME}"
-    REPO_DIR="${REPO_DIR%/}"
-
-    # Repository password — generate a strong one unless the user supplies their own.
-    echo ""
-    echo "  The repository is encrypted. A strong password is generated and stored"
-    echo "  in backup.conf (root-only). KEEP A COPY — without it backups cannot be"
-    echo "  restored, even by you."
-    echo ""
-    local KOPIA_PASSWORD=""
-    if [ "$UNATTENDED" = true ]; then
-        echo "  [auto] Generating a random repository password."
-    else
-        read -rsp "  Repository password [Enter = auto-generate]: " KOPIA_PASSWORD; echo
-    fi
-    if [ -z "$KOPIA_PASSWORD" ]; then
-        KOPIA_PASSWORD="$(generate_password 32)"
-        log_info "  Generated a random repository password (saved in backup.conf)."
-    fi
-
-    # ── 4. Retention + schedule ──────────────────────────────────────────────
+    # ── 6. Schedule ───────────────────────────────────────────────────────────
     echo ""
     echo "═══════════════════════════════════════════════════════"
     echo "  SCHEDULE & RETENTION"
     echo "═══════════════════════════════════════════════════════"
     echo ""
-    echo "    1) Daily at 03:00         (recommended)"
-    echo "    2) Every 6 hours"
-    echo "    3) Hourly"
+    echo "  Minecraft runs uninterrupted; other services stop briefly (seconds each)."
+    echo "  Schedule for off-peak hours."
+    echo ""
+    echo "    1) Daily at 02:00         (recommended)"
+    echo "    2) Every 12 hours"
+    echo "    3) Weekly (Sunday 02:00)"
     echo "    4) Custom (systemd OnCalendar)"
     echo ""
     local _sch=""
     prompt_text "  How often? [1]:" "1" _sch
     local ONCALENDAR SCHED_LABEL
     case "${_sch:-1}" in
-        2) ONCALENDAR="*-*-* 00,06,12,18:00:00"; SCHED_LABEL="every 6 hours" ;;
-        3) ONCALENDAR="hourly";                  SCHED_LABEL="hourly" ;;
-        4) prompt_text "  OnCalendar expression:" "*-*-* 03:00:00" ONCALENDAR; SCHED_LABEL="$ONCALENDAR" ;;
-        *) ONCALENDAR="*-*-* 03:00:00";          SCHED_LABEL="daily at 03:00" ;;
+        2) ONCALENDAR="*-*-* 02,14:00:00"; SCHED_LABEL="every 12 hours"       ;;
+        3) ONCALENDAR="Sun *-*-* 02:00:00"; SCHED_LABEL="weekly Sunday 02:00" ;;
+        4) prompt_text "  OnCalendar expression:" "*-*-* 02:00:00" ONCALENDAR; SCHED_LABEL="$ONCALENDAR" ;;
+        *) ONCALENDAR="*-*-* 02:00:00";     SCHED_LABEL="daily at 02:00"      ;;
     esac
-
-    echo ""
     local KEEP_LATEST=""
-    prompt_text "  How many recent snapshots to keep (latest)? [10]:" "10" KEEP_LATEST
-    local KEEP_DAILY=7 KEEP_WEEKLY=4 KEEP_MONTHLY=6
+    prompt_text "  Snapshots to keep (latest)? [7]:" "7" KEEP_LATEST
+    KEEP_LATEST="${KEEP_LATEST:-7}"
 
-    # ── 5. Write backup.conf ─────────────────────────────────────────────────
+    # ── 7. Create dirs + init Kopia repos ────────────────────────────────────
+    mkdir -p "$DIR" "$RESTORE_DIR"
+    ensure_docker_dir_ownership "$DIR"
+
+    local repo pw cfg
+    for dn in "${DEST_NAMES_ARR[@]}"; do
+        repo="${DEST_REPOS[$dn]}"
+        pw="${DEST_PASSWORDS[$dn]}"
+        cfg="${DEST_CONFIGS[$dn]}"
+        mkdir -p "$repo" "$(dirname "$cfg")" /var/cache/kopia-backup
+
+        kp_d() { env KOPIA_PASSWORD="$pw" "$KOPIA_BIN" --config-file="$cfg" "$@"; }
+
+        if kp_d repository status >/dev/null 2>&1; then
+            log_success "Connected to existing repo '$dn'."
+        elif test -e "$repo/kopia.repository.f"; then
+            log_info "Connecting to existing repo '$dn' at $repo ..."
+            kp_d repository connect filesystem --path="$repo" \
+                --cache-directory=/var/cache/kopia-backup \
+                || { log_error "Failed to connect to '$dn' repo."; return 1; }
+        else
+            log_info "Creating repo '$dn' at $repo ..."
+            kp_d repository create filesystem --path="$repo" \
+                --cache-directory=/var/cache/kopia-backup \
+                || { log_error "Failed to create '$dn' repo."; return 1; }
+        fi
+
+        kp_d policy set --global --compression=zstd \
+            --keep-latest="$KEEP_LATEST" \
+            --keep-daily=7 --keep-weekly=4 --keep-monthly=3 \
+            --keep-annual=0 --keep-hourly=0 >/dev/null
+        log_success "Repo '$dn' ready at $repo"
+    done
+    unset -f kp_d
+
+    # ── 8. Write backup.conf ─────────────────────────────────────────────────
     log_info "Writing $CONF_FILE ..."
-    tee "$CONF_FILE" >/dev/null << CONFEOF
-# ── post-install backup config (read by backup.sh) ───────────────────────────
-# Generated on $(date '+%F %T'). Safe to hand-edit.
-
-KOPIA="$KOPIA_BIN"
-KOPIA_CONFIG="$KOPIA_CONFIG"
-KOPIA_CACHE_DIR="$CACHE_DIR"
-# Repository encryption password — KEEP A COPY somewhere safe.
-KOPIA_PASSWORD='$KOPIA_PASSWORD'
-
-# ── Sources (progress / saves / user data only) ──────────────────────────────
-# MC_BASE_DIR holds Minecraft instances; every <id>/data with an itzg Dockerfile
-# is snapshotted automatically (covers multi-server setups).
-MC_BASE_DIR="$MC_BASE_DIR"
-GAME_STORAGE_DIR="$GAME_STORAGE_DIR"
-WOLF_STATE_DIR="$WOLF_STATE_DIR"
-BACKUP_SAVES="$BACKUP_SAVES"   # \$GAME_STORAGE_DIR/saves
-BACKUP_STEAM="$BACKUP_STEAM"   # \$GAME_STORAGE_DIR/steam (game installs excluded by policy)
-BACKUP_MEDIA="$BACKUP_MEDIA"   # \$GAME_STORAGE_DIR/media (ES-DE scraped artwork)
-BACKUP_WOLF="$BACKUP_WOLF"     # /etc/wolf — config + profile_data (ES-DE/RetroArch/controllers/saves)
-
-# ── Optional offsite mirror ──────────────────────────────────────────────────
-# Mirror the WHOLE repository to another computer or the cloud after each run.
-# Leave REMOTE_TYPE=none to stay local-only. When ready, set the type and args:
-#
-#   Another computer (SFTP):
-#     REMOTE_TYPE="sftp"
-#     REMOTE_ARGS="--host BACKUP_HOST --username USER --path /srv/backups/pi-kopia --keyfile /root/.ssh/id_ed25519 --known-hosts /root/.ssh/known_hosts"
-#
-#   Backblaze B2:
-#     REMOTE_TYPE="b2"
-#     REMOTE_ARGS="--bucket MY_BUCKET --key-id KEY_ID --key APP_KEY"
-#
-#   S3-compatible:
-#     REMOTE_TYPE="s3"
-#     REMOTE_ARGS="--bucket MY_BUCKET --endpoint s3.us-west-002.example.com --access-key AK --secret-access-key SK"
-#
-#   Any rclone remote (run 'rclone config' first):
-#     REMOTE_TYPE="rclone"
-#     REMOTE_ARGS="--remote-path myremote:pi-kopia"
-#
-# Full list: https://kopia.io/docs/reference/command-line/common/repository-sync-to/
-REMOTE_TYPE="none"
-REMOTE_ARGS=""
-CONFEOF
+    {
+        echo "# ── backup.conf ────────────────────────────────────────────────────────────"
+        echo "# Generated $(date '+%F %T'). Safe to hand-edit."
+        echo "# Worker : sudo $WORKER"
+        echo "# Restore: sudo $RESTORE_DIR/<dest>/restore_kopia_backup.sh"
+        echo ""
+        echo "KOPIA=\"$KOPIA_BIN\""
+        echo ""
+        echo "# Space-separated list of destination names (defines iteration order)."
+        echo "DEST_NAMES=\"${DEST_NAMES_ARR[*]}\""
+        echo "DEST_DEFAULT=\"default\""
+        echo ""
+        for dn in "${DEST_NAMES_ARR[@]}"; do
+            echo "# ── destination: $dn"
+            echo "DEST_${dn}_REPO=\"${DEST_REPOS[$dn]}\""
+            echo "DEST_${dn}_CONFIG=\"${DEST_CONFIGS[$dn]}\""
+            printf "DEST_%s_PASSWORD='%s'\n" "$dn" "${DEST_PASSWORDS[$dn]}"
+            echo ""
+        done
+        echo "# ── Service → destination map ───────────────────────────────────────────────"
+        echo "# Format: SVC_<name>=<dest_name>  (hyphens in service names become underscores)"
+        echo "# Omit a service (or comment it out) to use DEST_DEFAULT."
+        for svc in "${ALL_SVCS[@]}"; do
+            local svc_var="${svc//-/_}"
+            local dest_val="${SVC_DEST_MAP[$svc]:-}"
+            if [ -n "$dest_val" ]; then
+                echo "SVC_${svc_var}=\"${dest_val}\""
+            else
+                echo "# SVC_${svc_var}=\"default\""
+            fi
+        done
+        echo ""
+        echo "# ── Optional offsite mirror ─────────────────────────────────────────────────"
+        echo "# Mirror ALL repos offsite after each run (see kopia repository sync-to --help)."
+        echo "# Example SFTP: REMOTE_TYPE=sftp  REMOTE_ARGS=\"--host H --username U --path /srv/...\""
+        echo "REMOTE_TYPE=\"none\""
+        echo "REMOTE_ARGS=\"\""
+    } > "$CONF_FILE"
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
-    log_success "backup.conf written (chmod 600 — contains the repo password)"
+    log_success "backup.conf written (chmod 600)"
 
-    # ── 6. Create / connect the repository, set policies ─────────────────────
-    log_info "Preparing repository at $REPO_DIR ..."
-    mkdir -p "$REPO_DIR" "$CACHE_DIR" "$(dirname "$KOPIA_CONFIG")"
-
-    kp() { env KOPIA_PASSWORD="$KOPIA_PASSWORD" "$KOPIA_BIN" --config-file="$KOPIA_CONFIG" "$@"; }
-
-    if kp repository status >/dev/null 2>&1; then
-        log_success "Already connected to a repository."
-    elif test -e "$REPO_DIR/kopia.repository.f"; then
-        log_info "Existing repository found — connecting..."
-        kp repository connect filesystem --path="$REPO_DIR" --cache-directory="$CACHE_DIR" \
-            || { log_error "Failed to connect to existing repository."; return 1; }
-        log_success "Connected to existing repository."
-    else
-        log_info "Creating new repository..."
-        kp repository create filesystem --path="$REPO_DIR" --cache-directory="$CACHE_DIR" \
-            || { log_error "Failed to create repository."; return 1; }
-        log_success "Repository created."
-    fi
-
-    log_info "Applying global policy (zstd compression + retention)..."
-    kp policy set --global --compression=zstd >/dev/null
-    kp policy set --global \
-        --keep-latest="$KEEP_LATEST" \
-        --keep-daily="$KEEP_DAILY" \
-        --keep-weekly="$KEEP_WEEKLY" \
-        --keep-monthly="$KEEP_MONTHLY" \
-        --keep-annual=0 --keep-hourly=0 >/dev/null
-    log_success "Retention: keep latest $KEEP_LATEST, $KEEP_DAILY daily, $KEEP_WEEKLY weekly, $KEEP_MONTHLY monthly"
-
-    # Exclude Steam game installs (re-downloadable) while keeping saves/userdata.
-    if [ "$BACKUP_STEAM" = yes ]; then
-        log_info "Setting Steam ignore rules (excluding game installs, keeping saves)..."
-        kp policy set "$GAME_STORAGE_DIR/steam" \
-            --add-ignore='**/steamapps/common' \
-            --add-ignore='**/steamapps/downloading' \
-            --add-ignore='**/steamapps/shadercache' \
-            --add-ignore='**/steamapps/temp' \
-            --add-ignore='**/steamapps/workshop' \
-            --add-ignore='**/depotcache' >/dev/null 2>&1 \
-            || log_warning "Could not pre-set Steam ignore policy (will still apply on first snapshot if the path exists)."
-    fi
-
-    # ── 7. Generate the worker script ────────────────────────────────────────
+    # ── 9. Generate worker script ─────────────────────────────────────────────
     log_info "Writing worker $WORKER ..."
     cat > "$WORKER" << 'WORKEREOF'
 #!/bin/bash
-# Generated by the post-install backup service — runs one backup cycle with Kopia.
+# Generated by the backup installer.
+# Backs up full ~/docker/<service>/ directories via Kopia.
+#   Minecraft instances: flush to disk (save-all) then snapshot — no downtime.
+#   All other services:  stop → snapshot → restart for consistency.
 #
-#   sudo ./backup.sh            run a backup now
-#   sudo ./backup.sh snapshots  list snapshots
-#   sudo ./backup.sh policy      show retention/ignore policy
-#   sudo ./backup.sh restore     how to restore / browse snapshots
+#   sudo ./backup.sh             run a full backup cycle
+#   sudo ./backup.sh snapshots   list all snapshots (all repos)
+#   sudo ./backup.sh policy      show retention policies
 #
-# Reads settings from backup.conf next to this script.
+# Reads backup.conf from the same directory.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="${BACKUP_CONF:-$HERE/backup.conf}"
-[ -f "$CONF" ] || { echo "Config not found: $CONF (re-run the backup service)"; exit 1; }
+[ -f "$CONF" ] || { echo "Config not found: $CONF  (re-run the backup service)"; exit 1; }
 # shellcheck source=/dev/null
 source "$CONF"
 
-export KOPIA_PASSWORD
-log() { echo "[$(date '+%F %T')] $*"; }
-k()   { "$KOPIA" --config-file="$KOPIA_CONFIG" "$@"; }
+ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$ACTUAL_USER")"
+DOCKER_DIR="$ACTUAL_HOME/docker"
 
-if ! k repository status >/dev/null 2>&1; then
-    log "ERROR: not connected to a repository — re-run the backup service"
-    exit 1
-fi
+log() { echo "[$(date '+%F %T')] $*"; }
+
+kp_for() {
+    local dest="$1"; shift
+    local cfg_var="DEST_${dest}_CONFIG" pw_var="DEST_${dest}_PASSWORD"
+    local cfg="${!cfg_var:-}" pw="${!pw_var:-}"
+    [ -n "$cfg" ] || { log "Unknown destination: $dest"; return 1; }
+    env KOPIA_PASSWORD="$pw" "$KOPIA" --config-file="$cfg" "$@"
+}
+
+dest_for_svc() {
+    local var="SVC_${1//-/_}"
+    echo "${!var:-${DEST_DEFAULT:-default}}"
+}
+
+# Detect itzg Minecraft instances by their Dockerfile signature.
+is_minecraft() { [ -f "${1}Dockerfile" ] && grep -qs itzg "${1}Dockerfile"; }
 
 case "${1:-run}" in
-    snapshots) k snapshot list; exit 0 ;;
-    policy)    k policy show --global; exit 0 ;;
-    restore)
-        echo "List snapshots, then restore one to a target directory:"
-        echo "  sudo ./backup.sh snapshots"
-        echo "  sudo $KOPIA --config-file=$KOPIA_CONFIG restore <SNAPSHOT_ID> /path/to/restore-here"
-        echo ""
-        echo "Or browse every snapshot as a read-only filesystem:"
-        echo "  sudo mkdir -p /mnt/kopia"
-        echo "  sudo $KOPIA --config-file=$KOPIA_CONFIG mount all /mnt/kopia"
+    snapshots)
+        for dest in ${DEST_NAMES:-default}; do
+            echo ""; echo "── dest: $dest ──"
+            kp_for "$dest" snapshot list 2>/dev/null || true
+        done
+        exit 0 ;;
+    policy)
+        for dest in ${DEST_NAMES:-default}; do
+            echo ""; echo "── dest: $dest ──"
+            kp_for "$dest" policy show --global 2>/dev/null || true
+        done
         exit 0 ;;
 esac
 
 log "===== Backup starting ====="
-
-# Flush each running Minecraft world to disk first so snapshots are consistent.
-if [ -n "${MC_BASE_DIR:-}" ] && command -v docker >/dev/null 2>&1; then
-    _flushed=0
-    for d in "$MC_BASE_DIR"/*/; do
-        [ -f "${d}Dockerfile" ] && grep -qs itzg "${d}Dockerfile" || continue
-        name="$(basename "$d")"
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$name"; then
-            log "Flushing Minecraft world '$name' (save-all)..."
-            docker exec "$name" mc-send-to-console save-all flush 2>/dev/null \
-                || docker exec "$name" rcon-cli save-all 2>/dev/null || true
-            _flushed=1
-        fi
-    done
-    [ "$_flushed" = 1 ] && sleep 5
-fi
-
 rc=0
-snap() {
-    local label="$1" path="$2"
-    if [ -z "$path" ] || [ ! -e "$path" ]; then
-        log "skip $label — not found: ${path:-<unset>}"; return
-    fi
-    log "Snapshotting $label: $path"
-    if ! k snapshot create --description="post-install: $label" "$path"; then
-        log "WARNING: snapshot failed for $label"; rc=1
-    fi
-}
 
-if [ -n "${MC_BASE_DIR:-}" ]; then
-    for d in "$MC_BASE_DIR"/*/; do
-        [ -f "${d}Dockerfile" ] && grep -qs itzg "${d}Dockerfile" && [ -d "${d}data" ] || continue
-        nm="$(basename "$d")"
-        case "$nm" in minecraft*) lbl="$nm" ;; *) lbl="minecraft-$nm" ;; esac
-        snap "$lbl" "${d}data"
+for svc_dir in "$DOCKER_DIR"/*/; do
+    [ -f "${svc_dir}docker-compose.yml" ] || continue
+    svc="$(basename "$svc_dir")"
+    [[ "$svc" == "backup" || "$svc" == "gaming-backup" ]] && continue
+
+    dest="$(dest_for_svc "$svc")"
+    _repo_var="DEST_${dest}_REPO"
+    [ -n "${!_repo_var:-}" ] || { log "SKIP $svc — dest '$dest' not configured in conf"; continue; }
+
+    if is_minecraft "$svc_dir"; then
+        # ── Minecraft: flush world to disk, snapshot without stopping ────────
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc"; then
+            log "Flushing Minecraft world '$svc' (save-all, no downtime)..."
+            docker exec "$svc" mc-send-to-console save-all flush 2>/dev/null \
+                || docker exec "$svc" rcon-cli save-all 2>/dev/null || true
+            sleep 5
+        fi
+        log "Snapshotting $svc (dest: $dest)..."
+        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir"; then
+            log "OK $svc (Minecraft, no downtime)"
+        else
+            log "WARNING: snapshot failed for $svc"; rc=1
+        fi
+    else
+        # ── All other services: stop → snapshot → restart ─────────────────
+        STOPPED=false
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$svc"; then
+            log "Stopping $svc..."
+            docker compose -f "${svc_dir}docker-compose.yml" down 2>/dev/null \
+                || docker stop "$svc" 2>/dev/null \
+                || log "WARNING: could not stop $svc — snapshotting live (consistency not guaranteed)"
+            STOPPED=true
+        fi
+
+        log "Snapshotting $svc (dest: $dest)..."
+        if kp_for "$dest" snapshot create --description="backup: $svc" "$svc_dir"; then
+            log "OK $svc"
+        else
+            log "WARNING: snapshot failed for $svc"; rc=1
+        fi
+
+        if [ "$STOPPED" = true ]; then
+            log "Starting $svc..."
+            docker compose -f "${svc_dir}docker-compose.yml" up -d 2>/dev/null \
+                || log "WARNING: could not restart $svc — run: docker compose -f ${svc_dir}docker-compose.yml up -d"
+        fi
+    fi
+done
+
+if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
+    for dest in ${DEST_NAMES:-default}; do
+        log "Mirroring '$dest' offsite ($REMOTE_TYPE)..."
+        # shellcheck disable=SC2086
+        kp_for "$dest" repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS \
+            || { log "WARNING: mirror failed for '$dest'"; rc=1; }
     done
 fi
-[ "${BACKUP_SAVES:-no}" = yes ]    && snap "emulator-saves"  "$GAME_STORAGE_DIR/saves"
-[ "${BACKUP_STEAM:-no}" = yes ]    && snap "steam-userdata"  "$GAME_STORAGE_DIR/steam"
-[ "${BACKUP_MEDIA:-no}" = yes ]    && snap "es-de-media"     "$GAME_STORAGE_DIR/media"
-[ "${BACKUP_WOLF:-no}"  = yes ]    && snap "wolf-state"      "$WOLF_STATE_DIR"
 
-# Optional: mirror the whole repository offsite (another computer / cloud).
-if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
-    log "Mirroring repository to remote ($REMOTE_TYPE)..."
-    # shellcheck disable=SC2086
-    if ! k repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS; then
-        log "WARNING: remote mirror failed"; rc=1
-    fi
+if [ "$rc" -eq 0 ]; then
+    log "===== Backup complete ====="
+else
+    log "===== Backup finished WITH WARNINGS (see above) ====="
 fi
-
-if [ "$rc" -eq 0 ]; then log "===== Backup complete ====="; else log "===== Backup finished WITH WARNINGS ====="; fi
 exit "$rc"
 WORKEREOF
     chmod +x "$WORKER"
     chown root:root "$WORKER" 2>/dev/null || true
     log_success "backup.sh written"
 
-    # ── 8. Install systemd timer (fallback: cron) ────────────────────────────
+    # ── 10. Restore scripts (one per destination) ────────────────────────────
+    if [ -f "$RESTORE_SRC" ]; then
+        for dn in "${DEST_NAMES_ARR[@]}"; do
+            local dest_rdir="$RESTORE_DIR/$dn"
+            mkdir -p "$dest_rdir"
+            cp "$RESTORE_SRC" "$dest_rdir/restore_kopia_backup.sh"
+            chmod +x "$dest_rdir/restore_kopia_backup.sh"
+            {
+                echo "# backup.conf for backup destination '$dn'"
+                echo "# Read by restore_kopia_backup.sh in this directory."
+                echo "KOPIA=\"$KOPIA_BIN\""
+                echo "KOPIA_CONFIG=\"${DEST_CONFIGS[$dn]}\""
+                printf "KOPIA_PASSWORD='%s'\n" "${DEST_PASSWORDS[$dn]}"
+            } > "$dest_rdir/backup.conf"
+            chown root:root "$dest_rdir/backup.conf" 2>/dev/null || true
+            chmod 600 "$dest_rdir/backup.conf"
+            log_success "restore/$dn/ ready"
+        done
+    else
+        log_warning "extras/restore_kopia_backup.sh not found — restore scripts not installed"
+        log_warning "Copy it manually: cp extras/restore_kopia_backup.sh $RESTORE_DIR/<dest>/"
+    fi
+
+    # ── 11. Systemd timer ────────────────────────────────────────────────────
+    log_info "Installing systemd timer ($SCHED_LABEL)..."
     local AUTORUN=""
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
-        log_info "Installing systemd service + timer ($SCHED_LABEL)..."
-        tee "/etc/systemd/system/${SVC_NAME}.service" >/dev/null << UNITEOF
+        tee "/etc/systemd/system/${SVC_NAME}.service" >/dev/null << SVCEOF
 [Unit]
-Description=Post-install backup (Minecraft world + game saves via Kopia)
+Description=Post-install backup (full Docker service directories via Kopia)
 After=docker.service network-online.target
 Wants=docker.service
 
 [Service]
 Type=oneshot
 ExecStart=/bin/bash $WORKER run
-UNITEOF
+SVCEOF
 
-        tee "/etc/systemd/system/${SVC_NAME}.timer" >/dev/null << UNITEOF
+        tee "/etc/systemd/system/${SVC_NAME}.timer" >/dev/null << SVCEOF
 [Unit]
 Description=Schedule post-install backup ($SCHED_LABEL)
 
@@ -486,19 +506,19 @@ RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target
-UNITEOF
+SVCEOF
 
         systemctl daemon-reload
         systemctl enable --now "${SVC_NAME}.timer"
         log_success "Timer enabled: $SCHED_LABEL"
         AUTORUN="systemctl list-timers ${SVC_NAME}.timer"
     else
-        log_warning "systemd not detected — installing a cron job instead."
+        log_warning "systemd not detected — installing cron fallback."
         local CRON
         case "${_sch:-1}" in
-            2) CRON="0 0,6,12,18 * * *" ;;
-            3) CRON="0 * * * *" ;;
-            *) CRON="0 3 * * *" ;;
+            2) CRON="0 2,14 * * *" ;;
+            3) CRON="0 2 * * 0"   ;;
+            *) CRON="0 2 * * *"   ;;
         esac
         echo "$CRON root /bin/bash $WORKER run >> /var/log/${SVC_NAME}.log 2>&1" \
             > "/etc/cron.d/${SVC_NAME}"
@@ -506,43 +526,48 @@ UNITEOF
         AUTORUN="cat /etc/cron.d/${SVC_NAME}"
     fi
 
-    # ── 9. First backup now? ─────────────────────────────────────────────────
+    # ── 12. Optional first run ────────────────────────────────────────────────
     echo ""
     local _now=""
-    prompt_yn "  Run the first backup now? (Y/n):" "y" _now
-    if [[ ! "$_now" =~ ^[Nn]$ ]]; then
-        /bin/bash "$WORKER" run || log_warning "First backup reported warnings — check the output above."
+    prompt_yn "  Run the first backup now? (y/N):" "n" _now
+    if [[ "$_now" =~ ^[Yy]$ ]]; then
+        /bin/bash "$WORKER" run || log_warning "First backup reported warnings — check output above."
     fi
 
-    # ── Summary ──────────────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────────
     echo ""
     echo "═══════════════════════════════════════════════════════"
-    echo "          BACKUPS CONFIGURED"
+    echo "  BACKUP CONFIGURED"
     echo "═══════════════════════════════════════════════════════"
     echo ""
-    echo "  Repository : $REPO_DIR  (encrypted, dedup + zstd)"
-    echo "  Schedule   : $SCHED_LABEL"
-    echo "  Config     : $CONF_FILE"
-    echo "  Worker     : $WORKER"
-    echo "  Backing up :"
-    [ -n "$MC_BASE_DIR" ]        && echo "    • Minecraft worlds     $MC_BASE_DIR/*/data  (all instances)"
-    [ "$BACKUP_SAVES" = yes ]    && echo "    • Emulator saves       $GAME_STORAGE_DIR/saves"
-    [ "$BACKUP_STEAM" = yes ]    && echo "    • Steam user data      $GAME_STORAGE_DIR/steam  (game installs excluded)"
-    [ "$BACKUP_MEDIA" = yes ]    && echo "    • ES-DE scraped art    $GAME_STORAGE_DIR/media"
-    [ "$BACKUP_WOLF"  = yes ]    && echo "    • Wolf state           $WOLF_STATE_DIR  (config + profile_data)"
-    echo "  NOT backed up: ROMs, Steam game installs (re-downloadable)."
+    echo "  Config   : $CONF_FILE"
+    echo "  Worker   : $WORKER"
+    echo "  Schedule : $SCHED_LABEL"
+    echo ""
+    echo "  Destinations:"
+    for dn in "${DEST_NAMES_ARR[@]}"; do
+        printf "    %-16s %s\n" "$dn" "${DEST_REPOS[$dn]}"
+    done
+    echo ""
+    if [ "${#ALL_SVCS[@]}" -gt 0 ]; then
+        echo "  Services backed up: ${ALL_SVCS[*]}"
+    else
+        echo "  Services: none yet — auto-discovered on each run"
+    fi
     echo ""
     echo "  Commands:"
-    echo "    sudo $WORKER             back up now"
-    echo "    sudo $WORKER snapshots   list snapshots"
-    echo "    sudo $WORKER restore     restore / browse"
-    echo "    $AUTORUN"
+    echo "    sudo $WORKER                     back up now"
+    echo "    sudo $WORKER snapshots           list all snapshots"
     echo ""
-    echo "  Offsite mirror (another computer / cloud): set REMOTE_TYPE + REMOTE_ARGS"
-    echo "  in backup.conf — examples are in the file."
+    echo "  Restore (per destination):"
+    for dn in "${DEST_NAMES_ARR[@]}"; do
+        echo "    sudo $RESTORE_DIR/$dn/restore_kopia_backup.sh"
+        echo "    sudo $RESTORE_DIR/$dn/restore_kopia_backup.sh --list"
+    done
     echo ""
-    log_warning "Save your repository password (in backup.conf) somewhere safe —"
-    log_warning "without it the encrypted backups cannot be restored."
+    [ -n "$AUTORUN" ] && echo "  $AUTORUN" && echo ""
+    log_warning "Save your passwords (in backup.conf) somewhere safe —"
+    log_warning "without them the encrypted repos cannot be restored."
     echo ""
-    log_success "Backups configured."
+    log_success "Backup configured."
 }
