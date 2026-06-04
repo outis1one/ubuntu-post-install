@@ -1255,7 +1255,12 @@ for v in versions:
             echo ""
             log_info "Vanilla Tweaks — download your selected packs manually:"
             echo ""
-            echo "  Go to https://vanillatweaks.net/picker/datapacks/"
+            echo "  ┌─ Pre-configured selections (open in a browser on this machine) ──────┐"
+            echo "  │  Datapacks (22):       https://vanillatweaks.net/share#B3QqSd        │"
+            echo "  │  Crafting tweaks (10): https://vanillatweaks.net/share#SqzGkO        │"
+            echo "  └────────────────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
             echo "  Select version ${VT_VERSION}, then enable your chosen packs:"
             echo ""
             local _LAST_CAT="" _cat dp
