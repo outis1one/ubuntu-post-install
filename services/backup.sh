@@ -460,6 +460,18 @@ WORKEREOF
     chown root:root "$WORKER" 2>/dev/null || true
     log_success "backup.sh written"
 
+    # ── Copy the interactive restore script from the repo ────────────────────
+    local RESTORE_SRC="${HERE:-}/extras/restore_kopia_backup.sh"
+    local RESTORE_DEST="$BACKUP_DIR/restore_kopia_backup.sh"
+    if [ -f "$RESTORE_SRC" ]; then
+        cp "$RESTORE_SRC" "$RESTORE_DEST"
+        chmod +x "$RESTORE_DEST"
+        chown root:root "$RESTORE_DEST" 2>/dev/null || true
+        log_success "restore_kopia_backup.sh installed"
+    else
+        log_warning "extras/restore_kopia_backup.sh not found — restore script not installed"
+    fi
+
     # ── 8. Install systemd timer (fallback: cron) ────────────────────────────
     local AUTORUN=""
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -533,9 +545,10 @@ UNITEOF
     echo "  NOT backed up: ROMs, Steam game installs (re-downloadable)."
     echo ""
     echo "  Commands:"
-    echo "    sudo $WORKER             back up now"
-    echo "    sudo $WORKER snapshots   list snapshots"
-    echo "    sudo $WORKER restore     restore / browse"
+    echo "    sudo $WORKER                         back up now"
+    echo "    sudo $WORKER snapshots               list snapshots"
+    echo "    sudo $RESTORE_DEST                   interactive restore"
+    echo "    sudo $RESTORE_DEST --list            list all snapshot sources"
     echo "    $AUTORUN"
     echo ""
     echo "  Offsite mirror (another computer / cloud): set REMOTE_TYPE + REMOTE_ARGS"

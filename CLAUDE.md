@@ -21,6 +21,9 @@ checklist per group, and calls `install_<name>()` for each selected item.
 
 That's it. The menu picks it up on the next run.
 
+Also update the **Services table in `README.md`** — add the service name to the
+appropriate group row so the README stays current.
+
 ## Minimal Docker service template
 
 ```bash
@@ -178,6 +181,51 @@ self-documenting on the deployed box.
 | `gaming` | Game servers, cloud gaming (Wolf), emulation |
 | `extras` | Non-Docker tools and scripts |
 | `backup` | Backup solutions |
+
+## Authelia SSO — which services need it
+
+Some services have their own login screens; others have none and need Caddy to
+gate them via Authelia.
+
+**Has built-in auth — no Authelia needed:**
+`emby`, `jellyfin`, `audiobookshelf`, `immich`, `mealie`, `actualbudget`,
+`homeassistant`, `portainer`, `meshcentral`, `traccar`, `uptimekuma`,
+`filebrowser`, `wg-easy`, `ntfy` (configurable)
+
+**No built-in auth — should be protected:**
+`magicmirror`, `wolf-pair`, `js99er`, `sky-cam`
+
+For services without built-in auth, prompt the user before calling
+`configure_caddy_for_service` and pass `import authelia` as the extra block
+if Authelia is installed and the user wants SSO protection:
+
+```bash
+local EXTRA_BLOCK=""
+if [ -d "$DOCKER_DIR/authelia" ]; then
+    local _use_auth=""
+    prompt_yn "Protect MagicMirror with Authelia SSO? (y/n):" "y" _use_auth
+    [[ "$_use_auth" =~ ^[Yy]$ ]] && EXTRA_BLOCK="    import authelia"
+fi
+configure_caddy_for_service "MagicMirror" "8081" "mirror" "$EXTRA_BLOCK"
+```
+
+**Authelia "stay logged in" / kiosk mode:**
+Edit `~/docker/authelia/config/configuration.yml` and set a long
+`remember_me_duration`. Users then check "Remember me" once on login and
+the session persists through reboots (Redis stores the session in a volume):
+
+```yaml
+session:
+  secret: 'your-existing-secret'
+  remember_me_duration: 1y     # add or update this line
+  expiration: 1h
+  inactivity: 5m
+  cookies:
+    - domain: 'example.com'
+      authelia_url: 'https://auth.example.com'
+```
+
+After editing: `docker compose -f ~/docker/authelia/docker-compose.yml restart`
 
 ## Non-Docker services
 
