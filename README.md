@@ -10,18 +10,24 @@ install exactly what you need — interactively or by name.
 curl -fsSL https://raw.githubusercontent.com/outis1one/ubuntu-post-install/main/bootstrap.sh | sudo bash
 ```
 
-**Private repo — USB thumb drive (recommended):**
-```bash
-# Once, on any connected machine:
-git clone https://github.com/outis1one/ubuntu-post-install.git
-cp -r ubuntu-post-install /media/user/DRIVE/
+**USB thumb drive — works for public or private repos:**
 
-# On every new box — plug in USB, run:
-sudo bash /media/$(whoami)/DRIVE/ubuntu-post-install/bootstrap.sh
+Prepare the USB once on any machine (no git required):
+1. Go to the repo on GitHub → green **Code** button → **Download ZIP**
+2. Unzip it — you'll get a folder called `ubuntu-post-install-main`
+3. Copy that folder to your USB drive
+
+On every new box — plug in USB, open a terminal, run:
+```bash
+sudo bash /media/$(whoami)/DRIVENAME/ubuntu-post-install-main/bootstrap.sh
 ```
-No auth, no internet needed for the scripts. The bootstrap detects it is
-running from the repo and copies it to `~/ubuntu-post-install` before
-launching the wizard, so the USB can be unplugged once setup starts.
+`bootstrap.sh` detects it is running from inside the repo, copies everything
+to `~/ubuntu-post-install`, then launches the wizard — so the USB can be
+unplugged once setup starts. No auth, no internet needed for the scripts
+themselves (services still pull packages and Docker images over the network).
+
+> **Finding your drive name:** Ubuntu mounts USB drives at `/media/USERNAME/DRIVENAME`.
+> Run `ls /media/$(whoami)/` right after plugging in to see it.
 
 **Private repo — PAT (alternative):**
 ```bash
