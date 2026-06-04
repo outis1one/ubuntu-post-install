@@ -1,10 +1,10 @@
 #!/bin/bash
-# extras/restore_borg_backup.sh — interactive restore from a Borg archive.
-# Installed to ~/docker/borg-backup/restore/<dest>/ by the borg-backup installer.
+# extras/restore_borg.sh — interactive restore from a Borg archive.
+# Installed to ~/docker/borg-backup/restore_borg.sh by the borg-backup installer.
 #
 # Run as root:
-#   sudo ./restore_borg_backup.sh          interactive
-#   sudo ./restore_borg_backup.sh --list   list all archives and exit
+#   sudo ./restore_borg.sh          interactive
+#   sudo ./restore_borg.sh --list   list all archives and exit
 #
 # Reads backup.conf from the same directory (chmod 600, root-only).
 set -uo pipefail
@@ -21,30 +21,50 @@ die()  { err "$*"; exit 1; }
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
 [ "${EUID:-$(id -u)}" -eq 0 ] || die "Run as root: sudo $0"
-[ -f "$CONF" ]                 || die "backup.conf not found: $CONF  (run: sudo setup.sh borg-backup)"
+[ -f "$CONF" ]                 || die "backup.conf not found: $CONF"
 command -v borg >/dev/null 2>&1 || die "borg not found — install: sudo apt install borgbackup"
 
 # shellcheck source=/dev/null
 source "$CONF"
-export BORG_PASSPHRASE BORG_REPO
-b() { borg "$@"; }
-
-b info 2>/dev/null | grep -q "Repository" \
-    || die "Cannot connect to Borg repository at $BORG_REPO — check backup.conf."
 
 ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$ACTUAL_USER")"
 DOCKER_BASE="$ACTUAL_HOME/docker"
 
-# ── List all archives ──────────────────────────────────────────────────────────
-list_archives() {
-    b list --format '{archive}{NL}' 2>/dev/null
-}
+# ── Destination picker (skipped when only one dest) ───────────────────────────
+read -ra _DEST_ARR <<< "${DEST_NAMES:-default}"
+
+if [ "${#_DEST_ARR[@]}" -gt 1 ]; then
+    echo ""
+    echo "Select backup destination:"
+    echo ""
+    for i in "${!_DEST_ARR[@]}"; do
+        _repo_var="DEST_${_DEST_ARR[$i]}_REPO"
+        printf "  %d)  %s  (%s)\n" "$((i+1))" "${_DEST_ARR[$i]}" "${!_repo_var:-unknown}"
+    done
+    echo ""
+    read -rp "Destination [1-${#_DEST_ARR[@]}]: " _DEST_SEL
+    [[ "$_DEST_SEL" =~ ^[0-9]+$ ]] && [ "$_DEST_SEL" -ge 1 ] && [ "$_DEST_SEL" -le "${#_DEST_ARR[@]}" ] \
+        || die "Invalid selection"
+    ACTIVE_DEST="${_DEST_ARR[$((_DEST_SEL-1))]}"
+else
+    ACTIVE_DEST="${_DEST_ARR[0]}"
+fi
+
+_REPO_VAR="DEST_${ACTIVE_DEST}_REPO"
+_PASS_VAR="DEST_${ACTIVE_DEST}_PASSPHRASE"
+export BORG_REPO="${!_REPO_VAR:-}"
+export BORG_PASSPHRASE="${!_PASS_VAR:-}"
+[ -n "$BORG_REPO" ] || die "No BORG_REPO found for destination '$ACTIVE_DEST'"
+
+b() { borg "$@"; }
+b info 2>/dev/null | grep -q "Repository" \
+    || die "Cannot connect to Borg repository at $BORG_REPO — check backup.conf."
 
 # ── --list ────────────────────────────────────────────────────────────────────
 if [ "${1:-}" = "--list" ]; then
     echo ""
-    info "Archives in $BORG_REPO:"
+    info "Archives in $BORG_REPO (dest: $ACTIVE_DEST):"
     echo ""
     b list 2>/dev/null | sort -t- -k2 -r
     echo ""
@@ -54,17 +74,16 @@ fi
 # ── Interactive restore ───────────────────────────────────────────────────────
 echo ""
 echo "╔═══════════════════════════════════════════════════════╗"
-echo "║   Borg Backup Restore                                 ║"
+echo "║   Borg Restore                                        ║"
 echo "╚═══════════════════════════════════════════════════════╝"
 echo ""
+[ "${#_DEST_ARR[@]}" -gt 1 ] && info "Using destination: $ACTIVE_DEST  ($BORG_REPO)"
 
-info "Loading archive list from $BORG_REPO ..."
-ARCHIVE_LIST=$(list_archives)
-[ -z "$ARCHIVE_LIST" ] && die "No archives found. Run a backup first: sudo ~/docker/borg-backup/borg-backup.sh"
+info "Loading archive list..."
+ARCHIVE_LIST=$(b list --format '{archive}{NL}' 2>/dev/null)
+[ -z "$ARCHIVE_LIST" ] && die "No archives found. Run a backup first: sudo $HERE/backup_borg.sh"
 
-# ── Group archives by service prefix (everything before the first timestamp) ──
-# Archive names: <service>-YYYY-MM-DDTHH-MM-SS
-# Extract unique service prefixes.
+# Group archives by service prefix (everything before the timestamp)
 mapfile -t SERVICES < <(echo "$ARCHIVE_LIST" | sed 's/-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T.*//' | sort -u)
 
 echo "Backed-up services:"
@@ -86,17 +105,15 @@ read -rp "Select service [1-${#SERVICES[@]}] or q to quit: " SEL
 SELECTED_SVC="${SERVICES[$((SEL-1))]}"
 ok "Service: $SELECTED_SVC"
 
-# ── Pick an archive for that service ─────────────────────────────────────────
+# ── Pick an archive ───────────────────────────────────────────────────────────
 echo ""
 echo "Available archives (most recent first):"
 echo ""
-
 mapfile -t ARCHIVES < <(echo "$ARCHIVE_LIST" | grep "^${SELECTED_SVC}-" | sort -r | head -20)
 [ "${#ARCHIVES[@]}" -eq 0 ] && die "No archives found for $SELECTED_SVC."
 
 for i in "${!ARCHIVES[@]}"; do
     note=""; [ "$i" -eq 0 ] && note="  ← latest"
-    # Parse timestamp from archive name: svc-YYYY-MM-DDTHH-MM-SS
     ts="${ARCHIVES[$i]#${SELECTED_SVC}-}"
     printf "  %2d)  %s%s\n" "$((i+1))" "$ts" "$note"
 done
@@ -110,10 +127,8 @@ ARCH_SEL="${ARCH_SEL:-1}"
 SELECTED_ARCHIVE="${ARCHIVES[$((ARCH_SEL-1))]}"
 ok "Archive: $SELECTED_ARCHIVE"
 
-# ── Determine the Docker service directory ────────────────────────────────────
-# Archive contains the full absolute path: home/user/docker/svc/ (without leading /)
-# Derive expected restore target.
 TARGET_DIR="$DOCKER_BASE/$SELECTED_SVC"
+COMPOSE_FILE="$TARGET_DIR/docker-compose.yml"
 
 # ── Choose restore mode ───────────────────────────────────────────────────────
 echo ""
@@ -127,21 +142,17 @@ read -rp "Select [1/2] or q to quit: " MODE
 [[ "$MODE" =~ ^[qQ]$ ]] && echo "Cancelled." && exit 0
 
 case "$MODE" in
-
-# ── Inspect: extract to /tmp ──────────────────────────────────────────────────
 1)
     TEMP_DIR="/tmp/borg-inspect-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$TEMP_DIR"
     echo ""
     info "Extracting $SELECTED_ARCHIVE to $TEMP_DIR (nothing live is changed)..."
-    # borg extract strips leading / — run from TEMP_DIR
     if ( cd "$TEMP_DIR" && b extract --progress "$BORG_REPO::$SELECTED_ARCHIVE" ); then
         echo ""
         ok "Done. Browse the extracted files:"
         echo ""
         echo "    ls -la $TEMP_DIR"
-        echo ""
-        echo "  The service directory will be under: $TEMP_DIR${TARGET_DIR}"
+        echo "  Service directory: $TEMP_DIR${TARGET_DIR}"
         echo ""
         echo "  When finished:"
         echo "    rm -rf $TEMP_DIR"
@@ -151,10 +162,7 @@ case "$MODE" in
     fi
     ;;
 
-# ── Restore in place ──────────────────────────────────────────────────────────
 2)
-    COMPOSE_FILE="$TARGET_DIR/docker-compose.yml"
-
     STOPPED=false
     if [ -f "$COMPOSE_FILE" ] \
        && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$SELECTED_SVC"; then
@@ -173,7 +181,6 @@ case "$MODE" in
         fi
     fi
 
-    # Move current data aside
     ASIDE="${TARGET_DIR}.pre-restore-$(date +%Y%m%d-%H%M%S)"
     echo ""
     if [ -e "$TARGET_DIR" ]; then
@@ -184,11 +191,9 @@ case "$MODE" in
         warn "$TARGET_DIR does not exist — restoring fresh."
     fi
 
-    # borg extract strips leading /: run from / to restore to original absolute path
     mkdir -p "$TARGET_DIR"
     info "Restoring $SELECTED_ARCHIVE → $TARGET_DIR ..."
-    # Extract only the service subdirectory to keep things scoped
-    EXTRACT_PATH="${TARGET_DIR#/}"   # strip leading / for borg
+    EXTRACT_PATH="${TARGET_DIR#/}"
     if ( cd / && b extract --progress "$BORG_REPO::$SELECTED_ARCHIVE" "$EXTRACT_PATH" ); then
         ok "Restore complete."
     else
@@ -204,7 +209,6 @@ case "$MODE" in
         exit 1
     fi
 
-    # Restart container
     if [ "$STOPPED" = true ] && [ -f "$COMPOSE_FILE" ]; then
         echo ""
         read -rp "  Start '$SELECTED_SVC' now? (Y/n): " START_YN
@@ -225,17 +229,15 @@ case "$MODE" in
     echo "  Restored to   : $TARGET_DIR"
     [ -e "$ASIDE" ] && echo "  Previous data  : $ASIDE"
     echo ""
-    echo "  Verify your data, then:"
-    echo ""
     if [ -e "$ASIDE" ]; then
-        echo "    Keep the restore (delete aside copy when satisfied):"
-        echo "      rm -rf \"$ASIDE\""
+        echo "  Keep the restore (delete aside copy when satisfied):"
+        echo "    rm -rf \"$ASIDE\""
         echo ""
-        echo "    Roll back to previous data:"
-        [ -f "$COMPOSE_FILE" ] && echo "      docker compose -f $COMPOSE_FILE down"
-        echo "      rm -rf \"$TARGET_DIR\""
-        echo "      mv \"$ASIDE\" \"$TARGET_DIR\""
-        [ -f "$COMPOSE_FILE" ] && echo "      docker compose -f $COMPOSE_FILE up -d"
+        echo "  Roll back to previous data:"
+        [ -f "$COMPOSE_FILE" ] && echo "    docker compose -f $COMPOSE_FILE down"
+        echo "    rm -rf \"$TARGET_DIR\""
+        echo "    mv \"$ASIDE\" \"$TARGET_DIR\""
+        [ -f "$COMPOSE_FILE" ] && echo "    docker compose -f $COMPOSE_FILE up -d"
     fi
     echo ""
     ;;
