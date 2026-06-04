@@ -492,9 +492,9 @@ fi
 
 if [ "$NODE_OK" = false ]; then
     echo "  Immich CLI requires Node.js >= 20 (found: $(node -v 2>/dev/null || echo 'none'))."
-    read -r -p "  Install Node.js 22 LTS now? (y/n): " INSTALL_NODE_YN
+    read -r -p "  Install Node.js 24 LTS now? (y/n): " INSTALL_NODE_YN
     if [ "$INSTALL_NODE_YN" = "y" ] || [ "$INSTALL_NODE_YN" = "Y" ]; then
-        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - 2>/dev/null
+        curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - 2>/dev/null
         sudo apt-get install -y -qq nodejs 2>/dev/null
         NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
         if [ "$NODE_MAJOR" -ge 20 ] 2>/dev/null; then
