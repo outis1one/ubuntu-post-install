@@ -139,6 +139,17 @@ print(snaps[0] if snaps else '')
     local GAMEMODE=""
     prompt_text "Game mode (survival/creative/adventure) [survival]:" "survival" GAMEMODE
 
+    local MC_SEED=""
+    if [ -d "$MC_DIR/data/world" ]; then
+        log_info "Existing world detected at $MC_DIR/data/world — seed ignored (applies to new worlds only)."
+    else
+        echo ""
+        echo "  World seed — controls terrain generation. Leave blank for a random seed."
+        echo "  Examples:  8675309   -3965137388347648926   minecraft"
+        prompt_text "  World seed [random]:" "" MC_SEED
+        [ -n "$MC_SEED" ] && log_info "  Seed set: $MC_SEED"
+    fi
+
     local WHITELIST=""
     prompt_yn "Enable whitelist? (y/n) [n]:" "n" WHITELIST
     local WHITELIST_ENABLED=false
@@ -1336,6 +1347,7 @@ PREGENINFOEOF
     MC_ENV+="      - ENABLE_RCON=false"$'\n'
     MC_ENV+="      - MOTD=${SERVER_NAME}"$'\n'
     MC_ENV+="      - CREATE_CONSOLE_IN_PIPE=true"$'\n'
+    [ -n "$MC_SEED" ] && MC_ENV+="      - SEED=${MC_SEED}"$'\n'
     if [ "$SUPPORTS_FABRIC_MODS" = true ]; then
         MC_ENV+="      - MODS_DIR=/mods"$'\n'
     fi
