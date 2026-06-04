@@ -145,61 +145,130 @@ print(snaps[0] if snaps else '')
     [[ $WHITELIST =~ ^[Yy]$ ]] && WHITELIST_ENABLED=true || WHITELIST_ENABLED=false
 
     local WHITELIST_PLAYERS=()
-    declare -A WHITELIST_PRELOADED   # name → uuid, already resolved from existing file
+    declare -A WHITELIST_PRELOADED   # name → uuid, already resolved from existing files
     if [ "$WHITELIST_ENABLED" = true ] && [ "$UNATTENDED" != true ]; then
         echo ""
         log_info "Whitelist Players"
 
-        # Import from existing whitelist.json when re-running against an existing instance
-        local _EXISTING_WL="$MC_DIR/data/whitelist.json"
-        if [ -f "$_EXISTING_WL" ]; then
-            local -a _EX_NAMES _EX_UUIDS
-            mapfile -t _EX_NAMES < <(python3 -c "
+        # Collect whitelist sources: live instance data + any saved backup files
+        local -a _WL_SRC_FILES _WL_SRC_LABELS _WL_SRC_LETTERS
+        local _WL_LETTERS=(a b c d e f g h i j k l m n o p q r s t u v w x y z)
+
+        if [ -f "$MC_DIR/data/whitelist.json" ]; then
+            _WL_SRC_FILES+=("$MC_DIR/data/whitelist.json")
+            _WL_SRC_LABELS+=("${MC_NAME} (current)")
+        fi
+        local _BACKUP_WL="$DOCKER_DIR/whitelist-${MC_NAME}.json"
+        if [ -f "$_BACKUP_WL" ]; then
+            _WL_SRC_FILES+=("$_BACKUP_WL")
+            _WL_SRC_LABELS+=("${MC_NAME}-backup")
+        fi
+        # Also pick up whitelist backups from other instances
+        local _wlf
+        while IFS= read -r _wlf; do
+            [ "$_wlf" = "$_BACKUP_WL" ] && continue
+            _WL_SRC_FILES+=("$_wlf")
+            _WL_SRC_LABELS+=("$(basename "$_wlf" .json | sed 's/^whitelist-//')")
+        done < <(compgen -G "$DOCKER_DIR/whitelist-*.json" 2>/dev/null | sort)
+
+        if [ ${#_WL_SRC_FILES[@]} -gt 0 ]; then
+            local _i
+            for _i in "${!_WL_SRC_FILES[@]}"; do
+                _WL_SRC_LETTERS+=("${_WL_LETTERS[$_i]}")
+            done
+
+            # Read all sources, dedup by lowercase name
+            local -a _WL_ROWS
+            mapfile -t _WL_ROWS < <(python3 - "${_WL_SRC_LETTERS[@]}" "---" "${_WL_SRC_FILES[@]}" << 'PYEOF'
 import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    for p in data:
-        if p.get('name'): print(p['name'])
-except: pass
-" "$_EXISTING_WL" 2>/dev/null)
-            mapfile -t _EX_UUIDS < <(python3 -c "
-import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    for p in data:
-        if p.get('uuid'): print(p['uuid'])
-except: pass
-" "$_EXISTING_WL" 2>/dev/null)
-            if [ ${#_EX_NAMES[@]} -gt 0 ]; then
-                echo ""
-                echo "  Existing whitelist found (${#_EX_NAMES[@]} player(s)):"
-                local _i
-                for _i in "${!_EX_NAMES[@]}"; do
-                    printf "    %d) %s\n" "$((_i+1))" "${_EX_NAMES[$_i]}"
+args = sys.argv[1:]
+sep = args.index('---')
+letters, files = args[:sep], args[sep+1:]
+seen = set()
+for letter, path in zip(letters, files):
+    try:
+        for p in json.load(open(path)):
+            n = p.get('name','').strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                print(f"{letter}\t{n}\t{p.get('uuid','')}")
+    except: pass
+PYEOF
+)
+
+            if [ ${#_WL_ROWS[@]} -gt 0 ]; then
+                local -a _EX_NAMES _EX_UUIDS _EX_SRC
+                local _row _s _n _u
+                for _row in "${_WL_ROWS[@]}"; do
+                    IFS=$'\t' read -r _s _n _u <<< "$_row"
+                    _EX_NAMES+=("$_n"); _EX_UUIDS+=("$_u"); _EX_SRC+=("$_s")
                 done
+
                 echo ""
-                echo "  Import from existing? Enter numbers (e.g. 1,3,4), 0=all, Enter=skip:"
+                echo "  Available whitelist players:"
+                local _NUM=1 _LAST_SRC="" _si _SRC_LABEL
+                for _i in "${!_EX_NAMES[@]}"; do
+                    if [ "${_EX_SRC[$_i]}" != "$_LAST_SRC" ]; then
+                        [ -n "$_LAST_SRC" ] && echo ""
+                        for _si in "${!_WL_SRC_LETTERS[@]}"; do
+                            [ "${_WL_SRC_LETTERS[$_si]}" = "${_EX_SRC[$_i]}" ] \
+                                && _SRC_LABEL="${_WL_SRC_LABELS[$_si]}" && break
+                        done
+                        echo -e "  \033[1;33m── [${_EX_SRC[$_i]}] ${_SRC_LABEL}\033[0m"
+                        _LAST_SRC="${_EX_SRC[$_i]}"
+                    fi
+                    printf "    %2d) %s\n" "$_NUM" "${_EX_NAMES[$_i]}"
+                    _NUM=$((_NUM+1))
+                done
+
+                local _EX_FIRST="${_WL_SRC_LETTERS[0]}"
+                local _EX_SECOND="${_WL_SRC_LETTERS[1]:-}"
+                local _EX_STR="$_EX_FIRST"
+                [ -n "$_EX_SECOND" ] && _EX_STR="${_EX_FIRST},3   or   ${_EX_SECOND},1,4   or   ${_EX_FIRST},${_EX_SECOND}"
+
+                echo ""
+                echo "  Letter = all players from that source.  Number = specific player."
+                echo "  Combine freely with commas.  0 = everyone.  Enter = skip."
+                echo "  Example: ${_EX_STR}   or   0"
                 local _WL_IMPORT=""
                 read -p "  Selection: " _WL_IMPORT
                 if [ -n "$_WL_IMPORT" ]; then
-                    if [ "$_WL_IMPORT" = "0" ]; then
-                        for _i in "${!_EX_NAMES[@]}"; do
-                            WHITELIST_PRELOADED["${_EX_NAMES[$_i]}"]="${_EX_UUIDS[$_i]}"
-                        done
-                        log_success "  Imported all ${#_EX_NAMES[@]} existing player(s)"
-                    else
-                        local -a _SEL_NUMS
-                        IFS=',' read -ra _SEL_NUMS <<< "$_WL_IMPORT"
-                        local _n
-                        for _n in "${_SEL_NUMS[@]}"; do
-                            _n="${_n// /}"
-                            if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && \
-                               [ "$_n" -le "${#_EX_NAMES[@]}" ]; then
-                                WHITELIST_PRELOADED["${_EX_NAMES[$((_n-1))]}"]="${_EX_UUIDS[$((_n-1))]}"
-                                log_info "    Imported: ${_EX_NAMES[$((_n-1))]}"
+                    local -a _TOKENS
+                    IFS=',' read -ra _TOKENS <<< "$_WL_IMPORT"
+                    local _tok _idx _matched
+                    for _tok in "${_TOKENS[@]}"; do
+                        _tok="${_tok// /}"
+                        if [ "$_tok" = "0" ]; then
+                            for _i in "${!_EX_NAMES[@]}"; do
+                                WHITELIST_PRELOADED["${_EX_NAMES[$_i]}"]="${_EX_UUIDS[$_i]}"
+                            done
+                            log_success "  Imported all ${#_EX_NAMES[@]} player(s)"; break
+                        elif [[ "$_tok" =~ ^[0-9]+$ ]]; then
+                            _idx=$((_tok-1))
+                            if [ "$_idx" -ge 0 ] && [ "$_idx" -lt "${#_EX_NAMES[@]}" ]; then
+                                WHITELIST_PRELOADED["${_EX_NAMES[$_idx]}"]="${_EX_UUIDS[$_idx]}"
+                                log_info "    Imported: ${_EX_NAMES[$_idx]}"
                             fi
-                        done
-                    fi
+                        elif [[ "$_tok" =~ ^[a-z]$ ]]; then
+                            _matched=false
+                            for _i in "${!_EX_NAMES[@]}"; do
+                                if [ "${_EX_SRC[$_i]}" = "$_tok" ]; then
+                                    WHITELIST_PRELOADED["${_EX_NAMES[$_i]}"]="${_EX_UUIDS[$_i]}"
+                                    _matched=true
+                                fi
+                            done
+                            if [ "$_matched" = true ]; then
+                                for _si in "${!_WL_SRC_LETTERS[@]}"; do
+                                    [ "${_WL_SRC_LETTERS[$_si]}" = "$_tok" ] \
+                                        && log_success "  Imported all from [${_tok}] ${_WL_SRC_LABELS[$_si]}" && break
+                                done
+                            else
+                                log_warning "  [${_tok}] not found in the list above"
+                            fi
+                        else
+                            log_warning "  '${_tok}' not recognised — use a letter or player number"
+                        fi
+                    done
                 fi
             fi
         fi

@@ -153,8 +153,30 @@ require_root() {
 }
 
 require_docker() {
+    if command -v docker &>/dev/null; then
+        return 0
+    fi
+
+    log_info "Docker is not installed — installing now..."
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would install Docker CE and Docker Compose plugin via get.docker.com"
+        return 0
+    fi
+
+    # Official Docker convenience script — installs Docker CE + Compose plugin
+    if curl -fsSL https://get.docker.com | sh; then
+        if [ -n "$ACTUAL_USER" ] && [ "$ACTUAL_USER" != "root" ]; then
+            usermod -aG docker "$ACTUAL_USER" \
+                && log_info "Added $ACTUAL_USER to the docker group (re-login or run 'newgrp docker' to activate)"
+        fi
+        log_success "Docker installed ($(docker --version 2>/dev/null))"
+    else
+        log_error "Docker installation failed. Try manually: curl -fsSL https://get.docker.com | sh"
+        return 1
+    fi
+
     if ! command -v docker &>/dev/null; then
-        log_error "Docker is not installed. Install Docker first (run: $0 docker)."
+        log_error "Docker binary not found after install — something went wrong."
         return 1
     fi
 }

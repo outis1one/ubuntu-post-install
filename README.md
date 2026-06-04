@@ -35,7 +35,7 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 
 **First run:**
 1. Installs essential CLI packages (`git`, `curl`, `htop`, `ncdu`, `jq`, `glow`, …)
-2. Checks Docker is present (tells you how to install it if not)
+2. Installs Docker CE and the Compose plugin automatically if not already present
 3. Offers to set **site defaults** — timezone, base domain, Caddy Docker network —
    so every service picks them up automatically instead of asking each time
 4. Offers to install Caddy (the reverse proxy most services use)
@@ -81,6 +81,76 @@ docker compose logs -f      # logs
 docker compose pull && docker compose up -d   # update
 docker compose down         # stop
 ```
+
+## Using a USB drive for Docker data
+
+Storing Docker volumes and service data on a large USB drive keeps your OS
+disk free and makes migrating to a new machine trivial.
+
+### 1 — Mount the USB drive
+
+Find the device name:
+```bash
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
+```
+
+Format as ext4 if needed (skip if already formatted):
+```bash
+sudo mkfs.ext4 /dev/sdX1   # replace sdX1 with your partition
+```
+
+Create a permanent mount point and mount it:
+```bash
+sudo mkdir -p /mnt/docker-data
+sudo mount /dev/sdX1 /mnt/docker-data
+```
+
+Make it mount automatically on boot by adding to `/etc/fstab`:
+```bash
+# Get the drive's UUID (stable across reboots)
+sudo blkid /dev/sdX1
+# Add a line like this to /etc/fstab:
+UUID=your-uuid-here  /mnt/docker-data  ext4  defaults,nofail  0  2
+```
+
+The `nofail` option means the system still boots normally if the drive is absent.
+
+### 2 — Point this setup at the USB drive
+
+The wizard stores all Docker service folders under `~/docker/` by default.
+To use the USB drive instead, set `DOCKER_DIR` before running setup:
+
+```bash
+export DOCKER_DIR=/mnt/docker-data/docker
+sudo -E ./setup.sh
+```
+
+Or configure it as the permanent default by creating/editing `~/.config/ubuntu-post-install.conf`:
+```bash
+echo 'DOCKER_DIR=/mnt/docker-data/docker' >> ~/.config/ubuntu-post-install.conf
+```
+
+The wizard reads this file on every run, so you only need to set it once.
+
+### 3 — Move existing Docker data (optional)
+
+If you already have data under `~/docker/` and want to move it:
+```bash
+sudo systemctl stop docker
+sudo cp -a ~/docker/. /mnt/docker-data/docker/
+sudo mv ~/docker ~/docker.bak            # keep as backup
+export DOCKER_DIR=/mnt/docker-data/docker
+sudo systemctl start docker
+```
+
+Verify everything works, then delete the backup: `sudo rm -rf ~/docker.bak`
+
+### Tips
+
+- Check free space on the USB drive: `df -h /mnt/docker-data`
+- Check the drive's health: `sudo smartctl -a /dev/sdX` (install: `sudo apt install smartmontools`)
+- For Minecraft world data especially, a fast USB 3.0 drive or SSD is recommended
+  — spinning drives can cause I/O lag during chunk generation
 
 ## Compatibility
 
