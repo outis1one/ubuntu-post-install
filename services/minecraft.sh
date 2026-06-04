@@ -988,8 +988,8 @@ PYEOF
         BORDER_SIZE=$(( PREGEN_RADIUS * 2 ))
         echo ""
         local _border=""
-        prompt_yn "Set world border at ${BORDER_SIZE} blocks (2× radius)? (y/n) [y]:" "y" _border
-        [[ ${_border:-y} =~ ^[Yy]$ ]] && USE_BORDER=true || USE_BORDER=false
+        prompt_yn "Set world border at ${BORDER_SIZE} blocks (2× radius)? (y/n) [n]:" "n" _border
+        [[ ${_border:-n} =~ ^[Yy]$ ]] && USE_BORDER=true || USE_BORDER=false
     fi
 
     # ── Networking ──────────────────────────────────────────────────────────────
@@ -1161,9 +1161,9 @@ for v in versions:
         echo ""
         log_info "Vanilla Tweaks — download your selected packs manually:"
         echo ""
-        echo "  ┌─ Quick start: pre-configured share links (opens VT pre-selected) ─┐"
-        echo "  │  Datapacks:       https://vanillatweaks.net/share#B3QqSd           │"
-        echo "  │  Crafting tweaks: https://vanillatweaks.net/share#SqzGkO           │"
+        echo "  ┌─ Pre-configured selections (opens VT with everything pre-selected) ┐"
+        echo "  │  Datapacks (22):      https://vanillatweaks.net/share#B3QqSd       │"
+        echo "  │  Crafting tweaks (10): https://vanillatweaks.net/share#SqzGkO      │"
         echo "  └───────────────────────────────────────────────────────────────────-┘"
         echo ""
         echo "  Or pick manually — go to https://vanillatweaks.net/picker/datapacks/"
