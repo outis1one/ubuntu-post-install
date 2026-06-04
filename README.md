@@ -84,60 +84,67 @@ docker compose down         # stop
 
 ## Installing from a USB thumb drive
 
-You can carry the repo on a USB stick and run setup directly from it on any
-fresh Ubuntu machine — no git, no internet needed for the repo itself.
+Carry the repo on a USB stick and run setup on any fresh Ubuntu machine —
+no internet needed for the repo itself. The USB includes a double-click launcher
+so you don't need to open a terminal at all.
 
-### 1 — Put the repo on the USB drive (on your main machine)
+### 1 — Clone the repo onto the USB (on your main machine)
 
-Format the USB as ext4 or exFAT, then clone directly onto it:
+Plug in the USB, then run:
 
 ```bash
-# Find your USB device
-lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT
+# Find where Ubuntu mounted the USB
+USB=$(lsblk -o MOUNTPOINT,RM --noheadings | awk '$2=="1" && $1!="" {print $1}' | head -1)
+echo "USB mounted at: $USB"
 
-# Clone the repo onto the USB (adjust mount path to match yours)
+# Clone directly onto it
 git clone https://github.com/outis1one/ubuntu-post-install.git \
-    /media/$USER/YOURUSBNAME/ubuntu-post-install
+    "$USB/ubuntu-post-install"
 ```
 
-Or copy an existing clone:
+Or if you already have a local clone, copy it across:
 ```bash
-cp -r ~/ubuntu-post-install /media/$USER/YOURUSBNAME/ubuntu-post-install
+cp -r ~/ubuntu-post-install "$USB/ubuntu-post-install"
 ```
 
-### 2 — Run setup on the target machine
-
-Plug the USB in. Ubuntu auto-mounts it under `/media/<username>/` or
-`/run/media/<username>/`. Find it:
-
+Keep it up to date before each use:
 ```bash
-ls /media/$USER/          # Ubuntu Desktop
-ls /run/media/$USER/      # some distros / servers
-lsblk -o NAME,MOUNTPOINT  # always works
+git -C "$USB/ubuntu-post-install" pull
 ```
 
-Then run setup directly from the USB:
+### 2 — Enable right-click "Open in Terminal" (once per machine)
+
+On a fresh Ubuntu Desktop install the Nautilus terminal extension so you can
+right-click any folder on the USB and open a terminal there:
 
 ```bash
-sudo /media/$USER/YOURUSBNAME/ubuntu-post-install/setup.sh
+sudo apt install nautilus-extension-gnome-terminal
+nautilus -q   # restart Files to pick it up
 ```
 
-Everything the wizard installs (Docker containers, service configs) still goes
-to `~/docker/` on the **target machine's disk** — only the setup scripts live
-on the USB.
+On Ubuntu 24.04+ this is often already present — right-click a folder to check.
 
-### Tips
+### 3 — Double-click to run (no terminal needed)
 
-- **Keep it updated:** `git pull` inside the USB copy before each use to get
-  the latest service scripts.
-- **exFAT vs ext4:** exFAT works on macOS and Windows too (easier to update the
-  repo from any machine). ext4 is Linux-only but preserves file permissions —
-  either works fine for running bash scripts.
-- **Permissions:** If the scripts aren't executable after copying, fix with:
-  ```bash
-  chmod +x /media/$USER/YOURUSBNAME/ubuntu-post-install/setup.sh
-  chmod +x /media/$USER/YOURUSBNAME/ubuntu-post-install/services/*.sh
-  ```
+The repo includes `Run Setup.desktop` — a launcher that opens a terminal and
+runs the wizard with sudo when you double-click it in the Files app.
+
+First time on a new machine: right-click the file → **Properties** →
+**Executable as Program** toggle on (or tick "Allow executing file as program").
+After that, double-clicking it prompts for your sudo password and starts the wizard.
+
+If the toggle isn't there, enable it from the terminal once:
+```bash
+chmod +x /path/to/usb/ubuntu-post-install/Run\ Setup.desktop
+```
+
+### Notes
+
+- Everything the wizard installs (Docker containers, service configs) goes to
+  `~/docker/` on the **target machine** — only the scripts live on the USB.
+- **exFAT vs ext4:** exFAT works on macOS and Windows too (handy for updating
+  the repo from any machine). ext4 is Linux-only but preserves execute
+  permissions so you never need the `chmod` step above.
 
 ## Compatibility
 
