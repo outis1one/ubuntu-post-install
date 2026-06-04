@@ -95,19 +95,16 @@ To update it later, just download the ZIP again and replace the folder.
 
 ### 2 — Run on the target machine
 
-Plug in the USB, then find the drive name:
+Plug in the USB. Open the `ubuntu-post-install-main` folder in the file manager,
+then either:
 
-```bash
-ls /media/$(whoami)/
-```
+- **Right-click inside the folder → Open in Terminal**, then run:
+  ```bash
+  sudo bash bootstrap.sh
+  ```
 
-Run setup:
-
-```bash
-sudo bash /media/$(whoami)/DRIVENAME/ubuntu-post-install-main/bootstrap.sh
-```
-
-Replace `DRIVENAME` with what appeared in the `ls` output.
+- **Double-click `bootstrap.sh`** → click *Run in Terminal* → it prompts for
+  your sudo password and starts the wizard automatically.
 
 ### Notes
 
