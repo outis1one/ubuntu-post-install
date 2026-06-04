@@ -82,75 +82,62 @@ docker compose pull && docker compose up -d   # update
 docker compose down         # stop
 ```
 
-## Using a USB drive for Docker data
+## Installing from a USB thumb drive
 
-Storing Docker volumes and service data on a large USB drive keeps your OS
-disk free and makes migrating to a new machine trivial.
+You can carry the repo on a USB stick and run setup directly from it on any
+fresh Ubuntu machine — no git, no internet needed for the repo itself.
 
-### 1 — Mount the USB drive
+### 1 — Put the repo on the USB drive (on your main machine)
 
-Find the device name:
-```bash
-lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
-```
-
-Format as ext4 if needed (skip if already formatted):
-```bash
-sudo mkfs.ext4 /dev/sdX1   # replace sdX1 with your partition
-```
-
-Create a permanent mount point and mount it:
-```bash
-sudo mkdir -p /mnt/docker-data
-sudo mount /dev/sdX1 /mnt/docker-data
-```
-
-Make it mount automatically on boot by adding to `/etc/fstab`:
-```bash
-# Get the drive's UUID (stable across reboots)
-sudo blkid /dev/sdX1
-# Add a line like this to /etc/fstab:
-UUID=your-uuid-here  /mnt/docker-data  ext4  defaults,nofail  0  2
-```
-
-The `nofail` option means the system still boots normally if the drive is absent.
-
-### 2 — Point this setup at the USB drive
-
-The wizard stores all Docker service folders under `~/docker/` by default.
-To use the USB drive instead, set `DOCKER_DIR` before running setup:
+Format the USB as ext4 or exFAT, then clone directly onto it:
 
 ```bash
-export DOCKER_DIR=/mnt/docker-data/docker
-sudo -E ./setup.sh
+# Find your USB device
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT
+
+# Clone the repo onto the USB (adjust mount path to match yours)
+git clone https://github.com/outis1one/ubuntu-post-install.git \
+    /media/$USER/YOURUSBNAME/ubuntu-post-install
 ```
 
-Or configure it as the permanent default by creating/editing `~/.config/ubuntu-post-install.conf`:
+Or copy an existing clone:
 ```bash
-echo 'DOCKER_DIR=/mnt/docker-data/docker' >> ~/.config/ubuntu-post-install.conf
+cp -r ~/ubuntu-post-install /media/$USER/YOURUSBNAME/ubuntu-post-install
 ```
 
-The wizard reads this file on every run, so you only need to set it once.
+### 2 — Run setup on the target machine
 
-### 3 — Move existing Docker data (optional)
+Plug the USB in. Ubuntu auto-mounts it under `/media/<username>/` or
+`/run/media/<username>/`. Find it:
 
-If you already have data under `~/docker/` and want to move it:
 ```bash
-sudo systemctl stop docker
-sudo cp -a ~/docker/. /mnt/docker-data/docker/
-sudo mv ~/docker ~/docker.bak            # keep as backup
-export DOCKER_DIR=/mnt/docker-data/docker
-sudo systemctl start docker
+ls /media/$USER/          # Ubuntu Desktop
+ls /run/media/$USER/      # some distros / servers
+lsblk -o NAME,MOUNTPOINT  # always works
 ```
 
-Verify everything works, then delete the backup: `sudo rm -rf ~/docker.bak`
+Then run setup directly from the USB:
+
+```bash
+sudo /media/$USER/YOURUSBNAME/ubuntu-post-install/setup.sh
+```
+
+Everything the wizard installs (Docker containers, service configs) still goes
+to `~/docker/` on the **target machine's disk** — only the setup scripts live
+on the USB.
 
 ### Tips
 
-- Check free space on the USB drive: `df -h /mnt/docker-data`
-- Check the drive's health: `sudo smartctl -a /dev/sdX` (install: `sudo apt install smartmontools`)
-- For Minecraft world data especially, a fast USB 3.0 drive or SSD is recommended
-  — spinning drives can cause I/O lag during chunk generation
+- **Keep it updated:** `git pull` inside the USB copy before each use to get
+  the latest service scripts.
+- **exFAT vs ext4:** exFAT works on macOS and Windows too (easier to update the
+  repo from any machine). ext4 is Linux-only but preserves file permissions —
+  either works fine for running bash scripts.
+- **Permissions:** If the scripts aren't executable after copying, fix with:
+  ```bash
+  chmod +x /media/$USER/YOURUSBNAME/ubuntu-post-install/setup.sh
+  chmod +x /media/$USER/YOURUSBNAME/ubuntu-post-install/services/*.sh
+  ```
 
 ## Compatibility
 
