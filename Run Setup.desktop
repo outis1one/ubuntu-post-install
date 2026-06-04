@@ -1,9 +1,0 @@
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Ubuntu Post-Install Setup
-Comment=Run the post-install setup wizard with sudo
-Exec=bash -c 'cd "$(dirname "$1")" && sudo ./setup.sh; echo; read -rp "Done — press Enter to close" _' -- %k
-Terminal=true
-Icon=utilities-terminal
-Categories=System;

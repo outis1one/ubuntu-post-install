@@ -124,20 +124,6 @@ nautilus -q   # restart Files to pick it up
 
 On Ubuntu 24.04+ this is often already present — right-click a folder to check.
 
-### 3 — Double-click to run (no terminal needed)
-
-The repo includes `Run Setup.desktop` — a launcher that opens a terminal and
-runs the wizard with sudo when you double-click it in the Files app.
-
-First time on a new machine: right-click the file → **Properties** →
-**Executable as Program** toggle on (or tick "Allow executing file as program").
-After that, double-clicking it prompts for your sudo password and starts the wizard.
-
-If the toggle isn't there, enable it from the terminal once:
-```bash
-chmod +x /path/to/usb/ubuntu-post-install/Run\ Setup.desktop
-```
-
 ### Notes
 
 - Everything the wizard installs (Docker containers, service configs) goes to
