@@ -124,11 +124,21 @@ ubuntu_version_ge() {
 }
 
 # pip install --user as actual user.
-# --break-system-packages (pip 22.3+) is required on Ubuntu 24.04+ where PEP 668
-# marks the system Python as externally managed; --user alone is not always enough.
+# --break-system-packages overrides PEP 668 ("externally managed environment"),
+# required on Ubuntu 24.04+ — the flag name sounds alarming but with --user the
+# install goes to ~/.local/ which apt never touches; nothing system-level is at risk.
+# The flag was added in pip 22.3; probe once so older pip (Ubuntu 22.04) still works.
+_PIP_HAS_BSP=""
+_pip_probe() {
+    [ -n "$_PIP_HAS_BSP" ] && return
+    pip3 install --help 2>/dev/null | grep -q -- '--break-system-packages' \
+        && _PIP_HAS_BSP=1 || _PIP_HAS_BSP=0
+}
+
 pip_user_install() {
+    _pip_probe
     local flags="--user --quiet"
-    ubuntu_version_ge "24.04" && flags="$flags --break-system-packages"
+    [ "$_PIP_HAS_BSP" = "1" ] && flags="$flags --break-system-packages"
     sudo -u "$ACTUAL_USER" pip3 install $flags "$@"
 }
 
