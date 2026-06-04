@@ -192,6 +192,24 @@ install_gaming_backup() {
     prompt_text "  How many recent snapshots to keep (latest)? [24]:" "24" KEEP_LATEST
     local KEEP_DAILY=7 KEEP_WEEKLY=4 KEEP_MONTHLY=6
 
+    # ── 4.5. ntfy push notifications ─────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  NOTIFICATIONS (ntfy)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Get push notifications for gaming backup success and failure."
+    echo ""
+    local _default_ntfy_url=""; [ -d "$DOCKER_DIR/ntfy" ] && _default_ntfy_url="http://localhost:8090"
+    local NTFY_URL="" NTFY_TOPIC="homeserver-backup" NTFY_TOKEN=""
+    local _use_ntfy=""
+    prompt_yn "  Enable ntfy notifications? (y/N):" "n" _use_ntfy
+    if [[ "$_use_ntfy" =~ ^[Yy]$ ]]; then
+        prompt_text "  ntfy URL [${_default_ntfy_url:-https://ntfy.sh}]:" "${_default_ntfy_url:-https://ntfy.sh}" NTFY_URL
+        prompt_text "  ntfy topic [homeserver-backup]:" "homeserver-backup" NTFY_TOPIC
+        prompt_text "  ntfy auth token (blank if none):" "" NTFY_TOKEN
+    fi
+
     # ── 5. Write backup.conf ──────────────────────────────────────────────────
     log_info "Writing $CONF_FILE ..."
     tee "$CONF_FILE" >/dev/null << CONFEOF
@@ -226,6 +244,12 @@ BACKUP_WOLF="$BACKUP_WOLF"     # /etc/wolf — config + profile_data
 #
 REMOTE_TYPE="none"
 REMOTE_ARGS=""
+
+# ── ntfy notifications ──────────────────────────────────────────────────────
+# Push notify on backup complete / failed. Set NTFY_URL blank to disable.
+NTFY_URL="$NTFY_URL"
+NTFY_TOPIC="$NTFY_TOPIC"
+NTFY_TOKEN="$NTFY_TOKEN"
 CONFEOF
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"

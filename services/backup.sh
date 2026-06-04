@@ -246,6 +246,25 @@ install_backup() {
     prompt_text "  Snapshots to keep (latest)? [7]:" "7" KEEP_LATEST
     KEEP_LATEST="${KEEP_LATEST:-7}"
 
+    # ── 6.5. ntfy push notifications ─────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  NOTIFICATIONS (ntfy)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Get push notifications for backup success, failure, and test results."
+    echo "  Works with a self-hosted ntfy server or https://ntfy.sh."
+    echo ""
+    local _default_ntfy_url=""; [ -d "$DOCKER_DIR/ntfy" ] && _default_ntfy_url="http://localhost:8090"
+    local NTFY_URL="" NTFY_TOPIC="homeserver-backup" NTFY_TOKEN=""
+    local _use_ntfy=""
+    prompt_yn "  Enable ntfy notifications? (y/N):" "n" _use_ntfy
+    if [[ "$_use_ntfy" =~ ^[Yy]$ ]]; then
+        prompt_text "  ntfy URL [${_default_ntfy_url:-https://ntfy.sh}]:" "${_default_ntfy_url:-https://ntfy.sh}" NTFY_URL
+        prompt_text "  ntfy topic [homeserver-backup]:" "homeserver-backup" NTFY_TOPIC
+        prompt_text "  ntfy auth token (blank if none):" "" NTFY_TOKEN
+    fi
+
     # ── 7. Create dirs + init Kopia repos ────────────────────────────────────
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
@@ -320,6 +339,13 @@ install_backup() {
         echo "# Example SFTP: REMOTE_TYPE=sftp  REMOTE_ARGS=\"--host H --username U --path /srv/...\""
         echo "REMOTE_TYPE=\"none\""
         echo "REMOTE_ARGS=\"\""
+        echo ""
+        echo "# ── ntfy notifications ──────────────────────────────────────────────────────"
+        echo "# Push notify on backup complete / failed / test results."
+        echo "# Set NTFY_URL blank to disable."
+        printf 'NTFY_URL="%s"\n'   "${NTFY_URL:-}"
+        printf 'NTFY_TOPIC="%s"\n' "${NTFY_TOPIC:-homeserver-backup}"
+        printf 'NTFY_TOKEN="%s"\n' "${NTFY_TOKEN:-}"
     } > "$CONF_FILE"
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
@@ -342,6 +368,53 @@ install_backup() {
     else
         log_warning "extras/restore_kopia.sh not found — restore script not installed"
         log_warning "Copy it manually: cp extras/restore_kopia.sh $RESTORE"
+    fi
+
+    # ── 10.5. Install backup test script ─────────────────────────────────────
+    local TEST_SCRIPT="$DIR/test_backup_kopia.sh"
+    local TEST_SRC="${HERE:-}/extras/test_backup_kopia.sh"
+    if [ -f "$TEST_SRC" ]; then
+        cp "$TEST_SRC" "$TEST_SCRIPT"
+        chmod +x "$TEST_SCRIPT"
+        chown root:root "$TEST_SCRIPT" 2>/dev/null || true
+        log_success "test_backup_kopia.sh installed"
+
+        local _add_test_timer=""
+        prompt_yn "  Schedule weekly restore tests (Sundays 04:00)? (y/N):" "n" _add_test_timer
+        if [[ "$_add_test_timer" =~ ^[Yy]$ ]]; then
+            local TEST_SVC_NAME="post-install-backup-test"
+            if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+                tee "/etc/systemd/system/${TEST_SVC_NAME}.service" >/dev/null << TSVC
+[Unit]
+Description=Post-install backup restore test (Kopia)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $TEST_SCRIPT
+TSVC
+                tee "/etc/systemd/system/${TEST_SVC_NAME}.timer" >/dev/null << TSVC
+[Unit]
+Description=Weekly backup restore test
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TSVC
+                systemctl daemon-reload
+                systemctl enable --now "${TEST_SVC_NAME}.timer"
+                log_success "Backup test timer enabled (Sundays 04:00)"
+            else
+                echo "0 4 * * 0 root /bin/bash $TEST_SCRIPT >> /var/log/post-install-backup-test.log 2>&1" \
+                    > "/etc/cron.d/${TEST_SVC_NAME}"
+                log_success "Backup test cron installed (Sundays 04:00)"
+            fi
+        fi
+    else
+        log_warning "extras/test_backup_kopia.sh not found — test script not installed"
     fi
 
     # ── 11. Systemd timer ────────────────────────────────────────────────────
@@ -426,6 +499,11 @@ SVCEOF
     echo "  Restore:"
     echo "    sudo $RESTORE"
     echo "    sudo $RESTORE --list"
+    echo ""
+    echo "  Backup test (restore-verify, non-destructive):"
+    echo "    sudo $TEST_SCRIPT                          test all services"
+    echo "    sudo $TEST_SCRIPT --service <name>         test one service"
+    echo "    sudo $TEST_SCRIPT --list                   list services + snapshot counts"
     echo ""
     [ -n "$AUTORUN" ] && echo "  $AUTORUN" && echo ""
     log_warning "Save your passwords (in backup.conf) somewhere safe —"

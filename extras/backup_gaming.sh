@@ -20,6 +20,23 @@ export KOPIA_PASSWORD
 log() { echo "[$(date '+%F %T')] $*"; }
 k()   { "$KOPIA" --config-file="$KOPIA_CONFIG" "$@"; }
 
+ntfy_send() {
+    local title="$1" msg="$2" priority="${3:-default}" tags="${4:-}"
+    [ -z "${NTFY_URL:-}" ] || [ -z "${NTFY_TOPIC:-}" ] && return 0
+    local -a args=(-fsSL -o /dev/null -X POST "${NTFY_URL}/${NTFY_TOPIC}")
+    args+=(-H "Title: ${title}" -H "Priority: ${priority}")
+    [ -n "${tags}" ] && args+=(-H "Tags: ${tags}")
+    [ -n "${NTFY_TOKEN:-}" ] && args+=(-H "Authorization: Bearer ${NTFY_TOKEN}")
+    args+=(-d "${msg}")
+    curl "${args[@]}" 2>/dev/null || true
+}
+
+FAIL_REASONS=()
+START_TS="$(date +%s)"
+BACKUP_COUNT=0
+TRAP_LINE=0; TRAP_CMD=""
+trap 'TRAP_LINE=$LINENO; TRAP_CMD=$BASH_COMMAND' ERR
+
 if ! k repository status >/dev/null 2>&1; then
     log "ERROR: not connected to a repository — re-run the gaming-backup service"
     exit 1
@@ -54,8 +71,11 @@ snap() {
         log "skip $label — not found: ${path:-<unset>}"; return
     fi
     log "Snapshotting $label: $path"
-    if ! k snapshot create --description="gaming: $label" "$path"; then
+    if k snapshot create --description="gaming: $label" "$path"; then
+        BACKUP_COUNT=$((BACKUP_COUNT+1))
+    else
         log "WARNING: snapshot failed for $label"; rc=1
+        FAIL_REASONS+=("$label: snapshot failed")
     fi
 }
 
@@ -80,9 +100,22 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     fi
 fi
 
+DURATION=$(( $(date +%s) - START_TS ))
+MINS=$(( DURATION / 60 )); SECS=$(( DURATION % 60 ))
 if [ "$rc" -eq 0 ]; then
-    log "===== Gaming backup complete ====="
+    log "===== Gaming backup complete (${BACKUP_COUNT} snapshots, ${MINS}m${SECS}s) ====="
+    ntfy_send "Gaming backup complete" \
+        "$(date '+%F %T') — ${BACKUP_COUNT} snapshot(s) saved. Duration: ${MINS}m${SECS}s." \
+        "low" "white_check_mark"
 else
+    if [ "${#FAIL_REASONS[@]}" -gt 0 ]; then
+        fail_msg="$(printf '%s; ' "${FAIL_REASONS[@]}" | sed 's/; $//')"
+    else
+        fail_msg="Script error at line ${TRAP_LINE}: ${TRAP_CMD}"
+    fi
     log "===== Gaming backup finished WITH WARNINGS ====="
+    ntfy_send "Gaming backup FAILED" \
+        "$(date '+%F %T') — ${fail_msg}. Check: journalctl -u post-install-gaming-backup" \
+        "high" "rotating_light"
 fi
 exit "$rc"
