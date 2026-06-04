@@ -24,7 +24,7 @@ install_actualbudget() {
     ensure_docker_dir_ownership "$AB_DIR"
     cd "$AB_DIR" || return 1
 
-    local TZ_VAL; TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     cat > docker-compose.yml << 'AB_COMPOSE'
 name: actualbudget

@@ -33,7 +33,7 @@ install_frigate() {
     ensure_docker_dir_ownership "$FRIGATE_DIR"
     cd "$FRIGATE_DIR" || return 1
 
-    local TZ_VAL; TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # Hardware detection: include /dev/dri only when a render node exists
     local DEVICE_BLOCK=""

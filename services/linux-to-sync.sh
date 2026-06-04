@@ -18,6 +18,21 @@ install_linux-to-sync() {
         return 0
     fi
 
+    # ── Re-run: already cloned → offer pull ──────────────────────────────────
+    if [ -d "$SYNC_DIR/.git" ]; then
+        log_info "linux-to-sync already cloned at $SYNC_DIR"
+        local DO_PULL=""
+        prompt_yn "Pull latest changes? (y/n) [y]:" "y" DO_PULL
+        if [[ ${DO_PULL:-y} =~ ^[Yy]$ ]]; then
+            if sudo -u "$ACTUAL_USER" git -C "$SYNC_DIR" pull; then
+                log_success "linux-to-sync updated"
+            else
+                log_warning "git pull failed — check connectivity and credentials"
+            fi
+        fi
+        return 0
+    fi
+
     echo ""
     echo "  Requires access to github.com/outis1one/linux-to-sync"
     echo "  Authenticate with ONE of:"
@@ -41,31 +56,58 @@ install_linux-to-sync() {
             return 0
         fi
 
-        if git clone "https://$GH_TOKEN@github.com/outis1one/linux-to-sync.git" "$SYNC_DIR" 2>/dev/null; then
-            cd "$SYNC_DIR" || return 1
+        log_info "Cloning via HTTPS + PAT..."
+        if sudo -u "$ACTUAL_USER" \
+               git clone "https://$GH_TOKEN@github.com/outis1one/linux-to-sync.git" "$SYNC_DIR"; then
             # Remove token from remote URL so it isn't stored in plain text
-            git remote set-url origin "https://github.com/outis1one/linux-to-sync.git"
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$SYNC_DIR"
+            sudo -u "$ACTUAL_USER" git -C "$SYNC_DIR" remote set-url origin \
+                "https://github.com/outis1one/linux-to-sync.git"
             log_success "linux-to-sync cloned to $SYNC_DIR"
-            echo "  Note: re-enter your token for future push/pull, or:"
-            echo "        git config credential.helper store"
+            echo "  Token stripped from remote URL. For future pulls use:"
+            echo "    git -C $SYNC_DIR pull   (will prompt for credentials)"
+            echo "  Or set up a credential helper:"
+            echo "    git config --global credential.helper store"
         else
-            log_error "Clone failed — check your token and try again."
+            log_error "Clone failed — check your PAT and network, then retry."
             return 1
         fi
     else
+        # SSH auth — git must run as the actual user to use their SSH keys.
         echo ""
-        echo "  Attempting SSH clone (your SSH key must be added to GitHub)..."
-        if git clone git@github.com:outis1one/linux-to-sync.git "$SYNC_DIR" 2>/dev/null; then
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$SYNC_DIR"
+        echo "  Checking for SSH key in $ACTUAL_HOME/.ssh/ ..."
+        local SSH_KEY_FOUND=false
+        for _k in id_ed25519 id_rsa id_ecdsa; do
+            if [ -f "$ACTUAL_HOME/.ssh/$_k" ]; then
+                log_info "  Found: $ACTUAL_HOME/.ssh/$_k"
+                SSH_KEY_FOUND=true
+                break
+            fi
+        done
+        if [ "$SSH_KEY_FOUND" = false ]; then
+            log_warning "No SSH key found in $ACTUAL_HOME/.ssh/"
+            echo ""
+            echo "  To generate one:"
+            echo "    ssh-keygen -t ed25519 -C 'your@email.com'"
+            echo "    cat $ACTUAL_HOME/.ssh/id_ed25519.pub"
+            echo "    → Add the public key at: github.com/settings/keys"
+            echo ""
+            local CONTINUE=""
+            prompt_yn "Continue anyway (will fail if no key on GitHub)? (y/n) [n]:" "n" CONTINUE
+            [[ ${CONTINUE:-n} =~ ^[Yy]$ ]] || return 0
+        fi
+
+        log_info "Cloning via SSH (running as $ACTUAL_USER)..."
+        if sudo -u "$ACTUAL_USER" \
+               git clone git@github.com:outis1one/linux-to-sync.git "$SYNC_DIR"; then
             log_success "linux-to-sync cloned to $SYNC_DIR"
         else
             log_error "SSH clone failed."
             echo ""
-            echo "  To add your SSH key to GitHub:"
-            echo "    1. cat ~/.ssh/id_rsa.pub  (or id_ed25519.pub)"
-            echo "    2. github.com/settings/keys → New SSH key → paste"
-            echo "  Then retry:  sudo ./setup.sh linux-to-sync"
+            echo "  Common causes:"
+            echo "   • SSH key not added to GitHub — go to github.com/settings/keys"
+            echo "   • Key not accepted by ssh-agent — try: ssh-add $ACTUAL_HOME/.ssh/id_ed25519"
+            echo "   • Test with: sudo -u $ACTUAL_USER ssh -T git@github.com"
+            echo "  Then retry: sudo ./setup.sh linux-to-sync"
             return 1
         fi
     fi

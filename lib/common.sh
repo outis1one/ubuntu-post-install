@@ -47,6 +47,103 @@ register_service() {
     SERVICE_ORDER+=("$name")
 }
 
+# ── Site-wide defaults ────────────────────────────────────────────────────────
+# Stored in $DOCKER_DIR/.config (key=value, one per line).
+# Service modules read these as prompt defaults so the user only types
+# timezone, domain, and Caddy network once.  Run: sudo ./setup.sh configure
+SITE_TZ=""
+SITE_DOMAIN=""
+SITE_CADDY_NET="caddy_net"
+SITE_PUID=""
+SITE_PGID=""
+
+load_site_config() {
+    local cfg="$DOCKER_DIR/.config"
+    [ -f "$cfg" ] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${key// }" ]] && continue
+        case "$key" in
+            SITE_TZ)        SITE_TZ="$val"                              ;;
+            SITE_DOMAIN)    SITE_DOMAIN="$val"                          ;;
+            SITE_CADDY_NET) SITE_CADDY_NET="$val"                       ;;
+            SITE_PUID)      SITE_PUID="$val"                            ;;
+            SITE_PGID)      SITE_PGID="$val"                            ;;
+            BASE_DOMAIN)    [ -z "$SITE_DOMAIN" ] && SITE_DOMAIN="$val" ;;
+        esac
+    done < "$cfg"
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID
+}
+
+save_site_config() {
+    local cfg="$DOCKER_DIR/.config"
+    mkdir -p "$(dirname "$cfg")"
+    {
+        echo "# ubuntu-post-install site defaults"
+        echo "# Re-run wizard:  sudo ./setup.sh configure"
+        [ -n "$SITE_TZ" ]        && echo "SITE_TZ=$SITE_TZ"
+        [ -n "$SITE_DOMAIN" ]    && echo "SITE_DOMAIN=$SITE_DOMAIN"
+        [ -n "$SITE_CADDY_NET" ] && echo "SITE_CADDY_NET=$SITE_CADDY_NET"
+        [ -n "$SITE_PUID" ]      && echo "SITE_PUID=$SITE_PUID"
+        [ -n "$SITE_PGID" ]      && echo "SITE_PGID=$SITE_PGID"
+        # Backward-compat alias for services that still read BASE_DOMAIN directly
+        [ -n "$SITE_DOMAIN" ]    && echo "BASE_DOMAIN=$SITE_DOMAIN"
+    } > "$cfg"
+    chmod 600 "$cfg"
+}
+
+# Load immediately so all service modules inherit the values when sourced
+load_site_config
+
+# ── OS detection ─────────────────────────────────────────────────────────────
+OS_DISTRO="unknown"
+OS_VERSION="unknown"
+OS_CODENAME="unknown"
+
+detect_os() {
+    [ -f /etc/os-release ] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        val="${val//\"/}"
+        case "$key" in
+            ID)              OS_DISTRO="$val"                                       ;;
+            VERSION_ID)      OS_VERSION="$val"                                      ;;
+            VERSION_CODENAME|UBUNTU_CODENAME)
+                [ "$OS_CODENAME" = "unknown" ] && OS_CODENAME="$val"               ;;
+        esac
+    done < /etc/os-release
+    export OS_DISTRO OS_VERSION OS_CODENAME
+}
+
+# Return 0 (true) if the detected Ubuntu version is >= the argument (e.g., "24.04").
+ubuntu_version_ge() {
+    [ "$OS_DISTRO" = "ubuntu" ] || return 1
+    local a="${OS_VERSION//./}" b="${1//./}"
+    [ "${a:-0}" -ge "${b:-0}" ] 2>/dev/null
+}
+
+# pip install --user as actual user.
+# --break-system-packages overrides PEP 668 ("externally managed environment"),
+# required on Ubuntu 24.04+ — the flag name sounds alarming but with --user the
+# install goes to ~/.local/ which apt never touches; nothing system-level is at risk.
+# The flag was added in pip 22.3; probe once so older pip (Ubuntu 22.04) still works.
+_PIP_HAS_BSP=""
+_pip_probe() {
+    [ -n "$_PIP_HAS_BSP" ] && return
+    pip3 install --help 2>/dev/null | grep -q -- '--break-system-packages' \
+        && _PIP_HAS_BSP=1 || _PIP_HAS_BSP=0
+}
+
+pip_user_install() {
+    _pip_probe
+    local flags="--user --quiet"
+    [ "$_PIP_HAS_BSP" = "1" ] && flags="$flags --break-system-packages"
+    sudo -u "$ACTUAL_USER" pip3 install $flags "$@"
+}
+
+detect_os
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 require_root() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then

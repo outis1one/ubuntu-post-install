@@ -38,7 +38,7 @@ services:
 NTFY_COMPOSE
 
     cat > .env << NTFY_ENV
-TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
 NTFY_ENV
 
     mkdir -p cache config

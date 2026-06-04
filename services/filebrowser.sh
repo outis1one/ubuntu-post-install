@@ -33,7 +33,7 @@ services:
     environment:
       - PUID=$(id -u "$ACTUAL_USER")
       - PGID=$(id -g "$ACTUAL_USER")
-      - TZ=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+      - TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
     volumes:
       - ${FB_PATH}:/srv
       - ./database/filebrowser.db:/database/filebrowser.db

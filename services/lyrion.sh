@@ -33,7 +33,7 @@ install_lyrion() {
     cd "$LYRION_DIR" || return 1
 
     local TZ_VAL UID_VAL GID_VAL
-    TZ_VAL=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     UID_VAL=$(id -u "$ACTUAL_USER"); GID_VAL=$(id -g "$ACTUAL_USER")
 
     cat > docker-compose.yml << LYRION_COMPOSE

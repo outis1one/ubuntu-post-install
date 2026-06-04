@@ -65,10 +65,10 @@ EOF
     if ! [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
         log_warning "Node.js >= 18 required for building/signing (found: $(node -v 2>/dev/null || echo none))."
         local INSTALL_NODE=""
-        prompt_yn "  Install Node.js 22 LTS from NodeSource now? (y/n):" "y" INSTALL_NODE
+        prompt_yn "  Install Node.js 24 LTS from NodeSource now? (y/n):" "y" INSTALL_NODE
         if [ "$INSTALL_NODE" = "y" ] || [ "$INSTALL_NODE" = "Y" ]; then
-            log_info "Installing Node.js 22 LTS..."
-            curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
+            log_info "Installing Node.js 24 LTS..."
+            curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1
             apt-get install -y nodejs >/dev/null 2>&1
             NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
         fi

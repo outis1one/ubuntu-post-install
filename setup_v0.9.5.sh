@@ -81,8 +81,6 @@ is_installed() {
         crowdsec) command -v cscli >/dev/null 2>&1 ;;
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         linux-to-sync) [ -d "$ACTUAL_HOME/linux-to-sync/.git" ] ;;
-        sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
-        sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
@@ -106,41 +104,8 @@ list_services() {
     echo ""
 }
 
-# ── Site defaults wizard ──────────────────────────────────────────────────────
-# Prompts for timezone, base domain, and Caddy network name; saves to .config.
-# Run directly:  sudo ./setup.sh configure
-run_site_configure() {
-    local _sys_tz; _sys_tz=$(cat /etc/timezone 2>/dev/null || echo "UTC")
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Site defaults  ·  pre-filled into every service prompt     ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "  These become the default answer each time a service asks for"
-    echo "  timezone, domain, etc.  Press Enter to keep the shown value."
-    echo ""
-    local _cur_tz="${SITE_TZ:-$_sys_tz}"
-    local _cur_dom="${SITE_DOMAIN:-}"
-    local _cur_net="${SITE_CADDY_NET:-caddy_net}"
-    prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
-    prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
-    prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
-    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET
-    mkdir -p "$DOCKER_DIR"
-    save_site_config
-    log_success "Saved to $DOCKER_DIR/.config"
-    echo ""
-}
-
 # ── --list ───────────────────────────────────────────────────────────────────
 if [ "$DO_LIST" = true ]; then list_services; exit 0; fi
-
-# ── configure: show/update site-wide defaults ────────────────────────────────
-if [ "${REQUESTED[*]:-}" = "configure" ]; then
-    require_root
-    run_site_configure
-    exit 0
-fi
 
 # ── Direct install: ./setup.sh caddy homeassistant ──────────────────────────
 if [ "${#REQUESTED[@]}" -gt 0 ]; then
@@ -152,65 +117,34 @@ fi
 # ── Guided interactive flow ──────────────────────────────────────────────────
 require_root
 
-_VER="$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
-_OS_LINE="${OS_DISTRO^} ${OS_VERSION} (${OS_CODENAME})"
-
-if is_installed base; then
-    # ── Re-run: base already present — skip required step ────────────────────
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Ubuntu Post-Install  ·  v${_VER}  ·  ${_OS_LINE}"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "  Base packages already installed — skipping required setup."
-    echo "  Use 'sudo ./setup.sh base' to force a reinstall."
-    echo ""
-else
-    # ── First run: show required banner, confirm, install ────────────────────
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Ubuntu Post-Install  ·  v${_VER}  ·  ${_OS_LINE}"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    if [ "$OS_DISTRO" != "ubuntu" ]; then
-        log_warning "Detected OS: ${_OS_LINE} — this script targets Ubuntu. Proceed with caution."
-        echo ""
-    elif ! ubuntu_version_ge "24.04"; then
-        log_warning "Ubuntu ${OS_VERSION} detected — tested on 24.04+. Some packages may differ."
-        echo ""
-    fi
-    echo "REQUIRED (installed/verified first):"
-    echo "  • Essential CLI packages: net-tools, git, curl, wget, htop, tree,"
-    echo "    ncdu, zip/unzip, jq, rsync, and glow (markdown reader)"
-    echo "  • Docker presence check (needed by all containerized services)"
-    echo ""
-    echo "Then you'll get a category menu to pick optional services."
-    echo ""
-    PROCEED=""
-    prompt_yn "Proceed with the required setup? (y/n):" "y" PROCEED
-    if [ "$PROCEED" != "y" ] && [ "$PROCEED" != "Y" ]; then
-        echo "Cancelled. Nothing was changed."
-        exit 0
-    fi
-
-    run_service base
-    if ! command -v docker >/dev/null 2>&1; then
-        log_warning "Docker is not installed. Containerized services need it."
-        echo "  Install with:  curl -fsSL https://get.docker.com | sh"
-    fi
+# 1) Show the REQUIRED set and let the user cancel before anything happens.
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  Ubuntu Post-Install  ·  v$(cat "$HERE/VERSION" 2>/dev/null || echo '?')"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "REQUIRED (installed/verified first):"
+echo "  • Essential CLI packages: net-tools, git, curl, wget, htop, tree,"
+echo "    ncdu, zip/unzip, jq, rsync, and glow (markdown reader)"
+echo "  • Docker presence check (needed by all containerized services)"
+echo ""
+echo "Then you'll get a category menu to pick optional services."
+echo ""
+PROCEED=""
+prompt_yn "Proceed with the required setup? (y/n):" "y" PROCEED
+if [ "$PROCEED" != "y" ] && [ "$PROCEED" != "Y" ]; then
+    echo "Cancelled. Nothing was changed."
+    exit 0
 fi
 
-# 3) Offer site defaults wizard if .config has no SITE_TZ yet (first run).
-if ! grep -q '^SITE_TZ=' "$DOCKER_DIR/.config" 2>/dev/null; then
-    echo ""
-    echo "  No site defaults found. Setting them now pre-fills timezone, domain,"
-    echo "  and Caddy network for every service — you type them once, not every time."
-    OFFER_CONFIG=""
-    prompt_yn "Configure site defaults now? (y/n):" "y" OFFER_CONFIG
-    [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ] && run_site_configure
+# 2) Run required.
+run_service base
+if ! command -v docker >/dev/null 2>&1; then
+    log_warning "Docker is not installed. Containerized services need it."
+    echo "  Install with:  curl -fsSL https://get.docker.com | sh"
 fi
 
-# 4) Offer Caddy first (most services proxy through it).
+# 3) Offer Caddy first (most services proxy through it).
 if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
     echo ""
     OFFER_CADDY=""
@@ -218,7 +152,7 @@ if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
     [ "$OFFER_CADDY" = "y" ] || [ "$OFFER_CADDY" = "Y" ] && run_service caddy
 fi
 
-# 5) Category menu loop: pick a category → checklist → install → back to menu.
+# 4) Category menu loop: pick a category → checklist → install → back to menu.
 have_whiptail=false
 command -v whiptail >/dev/null 2>&1 && have_whiptail=true
 

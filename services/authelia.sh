@@ -36,9 +36,10 @@ install_authelia() {
     echo ""
     echo "  Authelia needs a few details to configure."
     echo ""
+    local CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
     local AUTHELIA_DOMAIN AUTHELIA_ADMIN_USER AUTHELIA_ADMIN_DISPLAY AUTHELIA_ADMIN_EMAIL
     local AUTHELIA_SMTP_HOST AUTHELIA_SMTP_PORT AUTHELIA_SMTP_USER AUTHELIA_SMTP_PASS AUTHELIA_TZ
-    prompt_text "  Your domain (e.g., example.com):" "example.com" AUTHELIA_DOMAIN
+    prompt_text "  Your domain (e.g., example.com):" "${SITE_DOMAIN:-example.com}" AUTHELIA_DOMAIN
     prompt_text "  Admin username:" "admin" AUTHELIA_ADMIN_USER
     prompt_text "  Admin display name:" "Administrator" AUTHELIA_ADMIN_DISPLAY
     prompt_text "  Admin email:" "admin@${AUTHELIA_DOMAIN}" AUTHELIA_ADMIN_EMAIL
@@ -46,7 +47,7 @@ install_authelia() {
     prompt_text "  SMTP port:" "587" AUTHELIA_SMTP_PORT
     prompt_text "  SMTP username (full email):" "authelia@${AUTHELIA_DOMAIN}" AUTHELIA_SMTP_USER
     prompt_text "  SMTP password:" "" AUTHELIA_SMTP_PASS
-    prompt_text "  Timezone (e.g., America/New_York):" "America/New_York" AUTHELIA_TZ
+    prompt_text "  Timezone (e.g., America/New_York):" "${SITE_TZ:-America/New_York}" AUTHELIA_TZ
 
     # ── Secrets ──────────────────────────────────────────────────────────────
     echo ""
@@ -81,7 +82,7 @@ install_authelia() {
     cat > .env << AUTHELIA_ENV
 MY_DOMAIN=${AUTHELIA_DOMAIN}
 SMTP_USER=${AUTHELIA_SMTP_USER}
-DOCKER_MY_NETWORK=caddy_net
+DOCKER_MY_NETWORK=${CADDY_NET}
 TZ=${AUTHELIA_TZ}
 AUTHELIA_ENV
 
@@ -115,6 +116,7 @@ networks:
   caddy_net:
     external: true
 AUTHELIA_COMPOSE
+    [ "$CADDY_NET" != "caddy_net" ] && sed -i "s/caddy_net/${CADDY_NET}/g" docker-compose.yml
 
     # ── configuration.yml ────────────────────────────────────────────────────
     cat > config/configuration.yml << AUTHELIA_CONFIG
@@ -199,12 +201,12 @@ AUTHELIA_USERS
     chown -R 1000:1000 "$AUTHELIA_DIR/config" "$AUTHELIA_DIR/data"
     log_success "Authelia configured at $AUTHELIA_DIR"
 
-    # ── caddy_net network ────────────────────────────────────────────────────
-    if ! docker network ls --format '{{.Name}}' | grep -q "^caddy_net$"; then
-        docker network create caddy_net >/dev/null 2>&1 && echo "  ✓ Created docker network caddy_net" \
-            || echo "  ⚠ Failed to create caddy_net"
+    # ── Docker network ────────────────────────────────────────────────────────
+    if ! docker network ls --format '{{.Name}}' | grep -q "^${CADDY_NET}$"; then
+        docker network create "$CADDY_NET" >/dev/null 2>&1 && echo "  ✓ Created docker network ${CADDY_NET}" \
+            || echo "  ⚠ Failed to create ${CADDY_NET}"
     else
-        echo "  ✓ Docker network caddy_net already exists"
+        echo "  ✓ Docker network ${CADDY_NET} already exists"
     fi
 
     # ── Caddyfile forward-auth snippet + portal block ────────────────────────
