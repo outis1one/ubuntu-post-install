@@ -17,6 +17,11 @@
 # connected machine, put the directory on a USB drive, done.
 set -euo pipefail
 
+# Self-elevate: if double-clicked or run without sudo, ask for password.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo bash "$0" "$@"
+fi
+
 REPO_URL="https://github.com/outis1one/ubuntu-post-install.git"
 
 # Resolve actual user home when running under sudo

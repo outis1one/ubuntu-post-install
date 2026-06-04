@@ -17,17 +17,16 @@ Prepare the USB once on any machine (no git required):
 2. Unzip it — you'll get a folder called `ubuntu-post-install-main`
 3. Copy that folder to your USB drive
 
-On every new box — plug in USB, open a terminal, run:
-```bash
-sudo bash /media/$(whoami)/DRIVENAME/ubuntu-post-install-main/bootstrap.sh
-```
-`bootstrap.sh` detects it is running from inside the repo, copies everything
-to `~/ubuntu-post-install`, then launches the wizard — so the USB can be
-unplugged once setup starts. No auth, no internet needed for the scripts
-themselves (services still pull packages and Docker images over the network).
+On every new box:
+1. Plug in the USB — it opens in the file manager
+2. Navigate into the `ubuntu-post-install-main` folder
+3. **Either:**
+   - Right-click inside the folder → **Open in Terminal** → type `bash bootstrap.sh`
+   - **Or** double-click `bootstrap.sh` → if prompted, choose **Run in Terminal**
 
-> **Finding your drive name:** Ubuntu mounts USB drives at `/media/USERNAME/DRIVENAME`.
-> Run `ls /media/$(whoami)/` right after plugging in to see it.
+The script asks for your password if needed. It detects it is running from
+inside the repo, copies everything to `~/ubuntu-post-install`, then launches
+the wizard — the USB can be unplugged once setup starts.
 
 **Private repo — PAT (alternative):**
 ```bash
