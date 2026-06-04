@@ -1156,7 +1156,7 @@ for v in versions:
     # ── Vanilla Tweaks datapacks — manual download required ──────────────────────
     if [ "$SUPPORTS_FABRIC_MODS" = true ] && [ ${#SELECTED_DATAPACKS[@]} -gt 0 ]; then
         local VT_VERSION
-        VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{if ($1=="1") print $0; else print $1"."$2}')
+        VT_VERSION=$(echo "$MC_VERSION" | awk -F. '{print $1"."$2}')
 
         echo ""
         log_info "Vanilla Tweaks — download your selected packs manually:"
@@ -1183,7 +1183,7 @@ for v in versions:
         echo "  ── How to install ────────────────────────────────────────────────────"
         echo "  1. Download the ZIP from vanillatweaks.net (use share link or pick)"
         echo "  2. SCP it to this server (run on your local machine):"
-        echo "       scp ~/Downloads/VanillaTweaks*.zip $(whoami)@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
+        echo "       scp ~/Downloads/VanillaTweaks*.zip ${ACTUAL_USER}@$(hostname -I | awk '{print $1}'):${MC_DIR}/datapacks-download/"
         echo "  3. On this server:"
         echo "       cd ${MC_DIR}/datapacks-download"
         echo "       unzip 'VanillaTweaks*.zip' && rm VanillaTweaks*.zip"
