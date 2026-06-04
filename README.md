@@ -72,7 +72,7 @@ Update them any time with `sudo ./setup.sh configure`.
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `silent-send`, `sync-cc` |
-| `backup` | `backup` — Kopia (game saves/world data, no service downtime); `disaster-backup` — full `~/docker/<service>/` dirs (stop/snap/start, databases included) |
+| `backup` | `backup` — Kopia (Minecraft world data + gaming saves, runs without stopping services); `disaster-backup` — complete recovery backup: entire `~/docker/<service>/` for every service (Minecraft: flush+snap, no downtime; all others: stop/snap/start for DB consistency) |
 
 Run `./setup.sh --list` to see descriptions.
 
