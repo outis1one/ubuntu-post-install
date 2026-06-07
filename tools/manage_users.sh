@@ -184,8 +184,18 @@ prompt_add_links() {
     docker exec "$_c" mkdir -p "$_scope_dir" >/dev/null 2>&1 || true
 
     echo
-    echo "  Type folder names as they appear in FileBrowser — blank line when done."
-    echo "  Examples:  music     photos     documents/shared"
+    # Show top-level folders so the user knows what's available
+    local _avail
+    _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 -type d \
+        -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | xargs echo) || true
+    if [[ -n "$_avail" ]]; then
+        echo "  Available folders:  $_avail"
+        echo "  Subdirectories also work, e.g.: documents/shared"
+    else
+        echo "  (No top-level folders found in FileBrowser root)"
+    fi
+    echo
+    echo "  Type a folder name to add — blank line when done."
     echo
 
     while true; do
@@ -340,8 +350,8 @@ cmd_add() {
     echo
     ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
 
-    # Offer to add linked directories inline
-    if command -v docker &>/dev/null; then
+    # Offer linked directories (pointless if scope is already /)
+    if command -v docker &>/dev/null && [[ "$_scope" != "/" ]]; then
         local _do_links=""
         read -r -p "  Add linked directories for '$_username'? [y/N]: " _do_links
         if [[ "${_do_links,,}" == "y" ]]; then
