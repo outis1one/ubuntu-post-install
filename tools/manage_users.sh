@@ -184,24 +184,22 @@ prompt_add_links() {
     docker exec "$_c" mkdir -p "$_scope_dir" >/dev/null 2>&1 || true
 
     echo
-    # Show top-level folders so the user knows what's available
-    local _avail
-    _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 -type d \
-        -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | xargs echo) || true
-    if [[ -n "$_avail" ]]; then
-        echo "  Available folders:  $_avail"
-        echo "  Subdirectories also work, e.g.: documents/shared"
-    else
-        echo "  (No top-level folders found in FileBrowser root)"
-    fi
-    echo
-    echo "  Type a folder name to add — blank line when done."
+    echo "  Type a folder name to add — ? to list available folders, blank when done."
     echo
 
     while true; do
         local _src=""
         read -r -p "  Folder to add [done]: " _src
         [[ -n "$_src" ]] || break
+
+        if [[ "$_src" == "?" ]]; then
+            local _avail
+            _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 -type d \
+                -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | xargs echo) || true
+            echo "  Available:  ${_avail:-(none found)}"
+            echo
+            continue
+        fi
 
         # Normalise: strip surrounding slashes
         _src="${_src#/}"
