@@ -158,16 +158,21 @@ check_container() {
         || { errmsg "Container '$1' is not running. Start it: docker compose up -d"; return 1; }
 }
 
-# Print symlinks inside /srv<scope>, one per line.
+# Print symlinks inside /srv<scope>, one per line. Paths shown as FileBrowser sees them (no /srv).
 list_links() {
     local _c="$1" _scope="$2"
     docker exec "$_c" find "/srv$_scope" -maxdepth 1 -type l \
-        -exec sh -c 'printf "    %-24s→  %s\n" "$(basename "$1")" "$(readlink "$1")"' _ {} \; \
-        2>/dev/null | sort || true
+        -exec sh -c '
+            _name=$(basename "$1")
+            _target=$(readlink "$1")
+            _display="${_target#/srv}"
+            [ -z "$_display" ] && _display="/"
+            printf "    %-24s→  %s\n" "$_name" "$_display"
+        ' _ {} \; 2>/dev/null | sort || true
 }
 
 # ── prompt_add_links SCOPE ────────────────────────────────────────────────────
-# Loop: ask for /srv source paths, create symlinks, blank line to finish.
+# Loop: user types folder names as they appear in FileBrowser — blank to finish.
 # Shared by cmd_add (offered inline) and menu_links (add option).
 prompt_add_links() {
     local _scope="$1"
@@ -179,44 +184,41 @@ prompt_add_links() {
     docker exec "$_c" mkdir -p "$_scope_dir" >/dev/null 2>&1 || true
 
     echo
-    echo "  Link directories into '$_scope_dir'."
-    echo "  Enter a /srv path for each directory to add — blank line when done."
+    echo "  Type folder names as they appear in FileBrowser — blank line when done."
+    echo "  Examples:  music     photos     documents/shared"
     echo
 
     while true; do
         local _src=""
-        read -r -p "  /srv path [done]: /" _src
+        read -r -p "  Folder to add [done]: " _src
         [[ -n "$_src" ]] || break
 
-        _src="/${_src#/}"   # normalise leading slash
-        _src="${_src%/}"    # strip trailing slash
+        # Normalise: strip surrounding slashes
+        _src="${_src#/}"
+        _src="${_src%/}"
+        [[ -n "$_src" ]] || continue
 
-        if ! docker exec "$_c" test -e "/srv$_src" 2>/dev/null; then
-            errmsg "/srv$_src does not exist inside the container. Skipping."
-            continue
-        fi
+        local _target="/srv/$_src"
+        local _link_name
+        _link_name=$(basename "$_src")
 
-        local _default_name
-        _default_name=$(basename "$_src")
-        local _link_name=""
-        read -r -p "  Name in user's folder [$_default_name]: " _link_name
-        _link_name="${_link_name:-$_default_name}"
-
-        if ! [[ "$_link_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-            errmsg "Invalid name. Use letters, numbers, dots, hyphens, underscores."
+        if ! docker exec "$_c" test -e "$_target" 2>/dev/null; then
+            errmsg "'$_src' not found in FileBrowser — check the path and try again."
             continue
         fi
 
         local _link_path="$_scope_dir/$_link_name"
-        local _target="/srv$_src"
-
         if docker exec "$_c" test -e "$_link_path" 2>/dev/null; then
-            errmsg "'$_link_name' already exists at $_link_path — skipping. Use Remove to clear it first."
+            errmsg "'$_link_name' already exists in this user's folder — use Remove to clear it first."
             continue
         fi
 
         docker exec "$_c" ln -s "$_target" "$_link_path"
-        ok "'$_link_name'  →  $_target"
+        if [[ "$_src" == "$_link_name" ]]; then
+            ok "User can now see '$_link_name'"
+        else
+            ok "User can now see '$_link_name'  ${DIM}(from $_src)${R}"
+        fi
     done
 }
 
@@ -229,7 +231,7 @@ menu_links() {
 
     while true; do
         banner "Linked directories  (scope: $_scope)"
-        echo "  ${DIM}Symlinks inside /srv${_scope} — visible as folders in FileBrowser${R}"
+        echo "  Folders this user can see beyond their scope:"
         echo
         local _links
         _links=$(list_links "$_c" "$_scope")
@@ -239,8 +241,8 @@ menu_links() {
             echo "    (none)"
         fi
         echo
-        echo "  1  Add linked directories"
-        echo "  2  Remove a linked directory"
+        echo "  1  Add folders"
+        echo "  2  Remove a folder"
         echo "  0  Back"
         echo
         local _ch=""
@@ -250,11 +252,11 @@ menu_links() {
             2)
                 local _link_name=""
                 echo
-                read -r -p "  Link name to remove: " _link_name
+                read -r -p "  Folder name to remove: " _link_name
                 [[ -n "$_link_name" ]] || continue
                 local _link_path="/srv${_scope}/${_link_name}"
                 if ! docker exec "$_c" test -L "$_link_path" 2>/dev/null; then
-                    errmsg "'$_link_name' is not a symlink — refusing to delete."
+                    errmsg "'$_link_name' is not a linked folder — refusing to delete."
                     continue
                 fi
                 docker exec "$_c" rm "$_link_path"
@@ -305,11 +307,11 @@ cmd_add() {
         echo
         echo "  Scope examples:"
         echo "    /           full access (all of FB_PATH)"
-        echo "    /$_username    user's own private subdir (recommended with linked dirs)"
-        echo "    /music      music subdir only"
+        echo "    $_username     user's own private subdir (pair with linked dirs)"
+        echo "    music       music subdir only"
         echo
-        read -r -p "  Scope for '$_username': /" _scope
-        _scope="/${_scope#/}"
+        read -r -p "  Scope for '$_username': " _scope
+        _scope="/${_scope#/}"   # ensure leading /
     fi
 
     validate_scope "$_scope" || return 1
@@ -417,9 +419,9 @@ cmd_scope() {
     if [[ -z "$_new_scope" ]]; then
         echo
         echo "  Current scope: $_old_scope"
-        echo "  ${DIM}Existing symlinks in the old scope dir are not moved automatically.${R}"
+        echo "  ${DIM}Linked folders in the old scope are not moved automatically.${R}"
         echo
-        read -r -p "  New scope: /" _new_scope
+        read -r -p "  New scope: " _new_scope
         _new_scope="/${_new_scope#/}"
     fi
     validate_scope "$_new_scope" || return 1
