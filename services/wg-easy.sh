@@ -60,18 +60,26 @@ services:
     ports:
       - "51820:51820/udp"
       - "51821:51821/tcp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 WGEASY_COMPOSE
 
     cat > .env << WGEASY_ENV
 WG_HOST=$WG_HOST
 WG_PASSWORD=$WG_PASSWORD
+CADDY_NET=$SITE_CADDY_NET
 WGEASY_ENV
 
     mkdir -p config
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
     log_success "wg-easy configured at $WGEASY_DIR"
 
-    configure_caddy_for_service "wg-easy" "51821" "vpn"
+    configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
 
     write_readme "$WGEASY_DIR" << MD
 # wg-easy

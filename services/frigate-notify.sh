@@ -37,6 +37,13 @@ services:
     restart: unless-stopped
     volumes:
       - ./config.yml:/app/config.yml:ro
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 FN_COMPOSE
 
     # Smart defaults based on what's installed

@@ -32,6 +32,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "3001:3001"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 UPTIME_COMPOSE
 
     mkdir -p data
@@ -68,7 +75,7 @@ docker compose logs -f    # logs
 MD
 
     # Configure Caddy reverse proxy before starting
-    configure_caddy_for_service "Uptime Kuma" "3001" "uptime"
+    configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime"
 
     local START_UPTIME=""
     prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME

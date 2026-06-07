@@ -35,10 +35,18 @@ services:
       - ./config:/etc/ntfy
     ports:
       - "8090:80"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 NTFY_COMPOSE
 
     cat > .env << NTFY_ENV
 TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
+CADDY_NET=$SITE_CADDY_NET
 NTFY_ENV
 
     mkdir -p cache config
@@ -46,6 +54,8 @@ NTFY_ENV
 
     echo ""
     log_success "ntfy configured at $NTFY_DIR"
+
+    configure_caddy_for_service "ntfy" "ntfy:80" "ntfy"
 
     write_readme "$NTFY_DIR" << MD
 # ntfy

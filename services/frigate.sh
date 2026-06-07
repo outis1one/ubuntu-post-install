@@ -71,10 +71,18 @@ $DEVICE_BLOCK
       - "8554:8554"
       - "8555:8555/tcp"
       - "8555:8555/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 FRIGATE_COMPOSE
 
     cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_MEDIA
+CADDY_NET=$SITE_CADDY_NET
 FRIGATE_ENV
 
     mkdir -p config
@@ -120,7 +128,7 @@ FRIGATE_CONFIG
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
     log_success "Frigate configured at $FRIGATE_DIR"
 
-    configure_caddy_for_service "Frigate" "5000" "frigate"
+    configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
 
     write_readme "$FRIGATE_DIR" << MD
 # Frigate NVR

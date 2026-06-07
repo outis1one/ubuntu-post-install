@@ -50,13 +50,20 @@ services:
       - ./data:/app/data
     ports:
       - "9925:9000"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 MEALIE_COMPOSE
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MEALIE_DIR"
     log_success "Mealie configured at $MEALIE_DIR"
 
-    configure_caddy_for_service "Mealie" "9925" "recipes"
+    configure_caddy_for_service "Mealie" "mealie:9000" "recipes"
 
     write_readme "$MEALIE_DIR" << MD
 # Mealie

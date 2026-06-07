@@ -169,6 +169,7 @@ FN_FRIGATE__MQTT__PASSWORD=${MQTT_PASS}
 FN_FRIGATE__SERVER=http://frigate:5000
 FN_FRIGATE__PUBLIC_URL=${FRIGATE_PUBLIC_URL}
 FN_ALERTS__NTFY__SERVER=${NTFY_SERVER}
+CADDY_NET=$SITE_CADDY_NET
 ENVEOF
     chmod 600 "$DIR/.env"
     log_success ".env written"
@@ -225,6 +226,8 @@ COMPOSEEOF
       - "8554:8554"
       - "8555:8555/tcp"
       - "8555:8555/udp"
+    networks:
+      - caddy_net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/api/version"]
       interval: 10s
@@ -257,6 +260,11 @@ COMPOSEEOF
         condition: service_healthy
     volumes:
       - ./frigate-notify/config.yml:/app/config.yml:ro
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 COMPOSEEOF
     log_success "docker-compose.yml written"
 
@@ -506,7 +514,7 @@ FNEOF
     # ── Caddy snippet ──────────────────────────────────────────────────────────
     if [ -n "$FRIGATE_PUBLIC_URL" ] && [ "$FRIGATE_PUBLIC_URL" != "https://cam.yourdomain.com" ]; then
         local _DOM="${FRIGATE_PUBLIC_URL#https://}"
-        configure_caddy_for_service "Frigate" "8971" "frigate-audio" || true
+        configure_caddy_for_service "Frigate" "frigate-audio:8971" "frigate-audio" || true
     fi
 
     ensure_docker_dir_ownership "$DIR"

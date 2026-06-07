@@ -26,13 +26,11 @@ name: filebrowser
 
 services:
   filebrowser:
-    image: filebrowser/filebrowser:s6
+    image: filebrowser/filebrowser:latest
     container_name: filebrowser
     hostname: filebrowser
     restart: unless-stopped
     environment:
-      - PUID=$(id -u "$ACTUAL_USER")
-      - PGID=$(id -g "$ACTUAL_USER")
       - TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
     volumes:
       - ${FB_PATH}:/srv
@@ -40,10 +38,18 @@ services:
       - ./config/settings.json:/config/settings.json
     ports:
       - "8085:80"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 FB_COMPOSE
 
     cat > .env << FB_ENV
 FB_PATH=$FB_PATH
+CADDY_NET=$SITE_CADDY_NET
 FB_ENV
 
     mkdir -p database config
@@ -61,8 +67,20 @@ FB_SETTINGS
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
 
+    # Deploy user-management helper script
+    local _TOOLS_DIR
+    _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tools" 2>/dev/null && pwd)" || true
+    if [ -f "$_TOOLS_DIR/manage_users.sh" ]; then
+        cp "$_TOOLS_DIR/manage_users.sh" "$FB_DIR/manage_users.sh"
+        chmod 750 "$FB_DIR/manage_users.sh"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR/manage_users.sh"
+        log_success "manage_users.sh installed at $FB_DIR/manage_users.sh"
+    fi
+
     echo ""
     log_success "Filebrowser configured at $FB_DIR"
+
+    configure_caddy_for_service "FileBrowser" "filebrowser:80" "files"
 
     write_readme "$FB_DIR" << MD
 # FileBrowser

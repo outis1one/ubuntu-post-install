@@ -50,18 +50,26 @@ services:
       - \${PODCASTS_PATH:-./podcasts}:/podcasts
     ports:
       - "13378:80"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 ABS_COMPOSE
 
     cat > .env << ABS_ENV
 AUDIOBOOKS_PATH=$AUDIOBOOKS_PATH
 PODCASTS_PATH=./podcasts
+CADDY_NET=$SITE_CADDY_NET
 ABS_ENV
 
     mkdir -p config metadata podcasts
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ABS_DIR"
     log_success "Audiobookshelf configured at $ABS_DIR"
 
-    configure_caddy_for_service "AudioBookshelf" "13378" "audiobooks"
+    configure_caddy_for_service "AudioBookshelf" "audiobookshelf:80" "audiobooks"
 
     write_readme "$ABS_DIR" << MD
 # Audiobookshelf

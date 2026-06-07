@@ -42,6 +42,13 @@ services:
       - "8082:8082"
       - "5000-5150:5000-5150"
       - "5000-5150:5000-5150/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 TRACCAR_COMPOSE
 
     mkdir -p logs data config
@@ -63,7 +70,7 @@ TRACCAR_XML
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
     log_success "Traccar configured at $TRACCAR_DIR"
 
-    configure_caddy_for_service "Traccar" "8082" "traccar"
+    configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
 
     write_readme "$TRACCAR_DIR" << MD
 # Traccar

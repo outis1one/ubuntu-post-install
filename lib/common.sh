@@ -261,9 +261,20 @@ write_readme() {
 }
 
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
-# Usage: configure_caddy_for_service "Name" "PORT" "default-subdomain" ["extra"]
+# Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"]
+# UPSTREAM: container:port for caddy_net routing (e.g. "filebrowser:80"),
+#           or plain port number for localhost fallback (e.g. "8085").
 configure_caddy_for_service() {
-    local SERVICE_NAME="$1" SERVICE_PORT="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
+    local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
+
+    # Derive the proxy upstream and a port number for display messages.
+    # Plain number  → localhost:PORT  (host-network or legacy services)
+    # name:port     → used as-is      (preferred: service on shared caddy_net)
+    local _UPSTREAM _DISPLAY_PORT
+    case "$SERVICE_UPSTREAM" in
+        *:*) _UPSTREAM="$SERVICE_UPSTREAM";           _DISPLAY_PORT="${SERVICE_UPSTREAM##*:}" ;;
+        *)   _UPSTREAM="localhost:$SERVICE_UPSTREAM"; _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
+    esac
 
     # Caddy not installed → nothing to do
     [ -d "$DOCKER_DIR/caddy" ] || return 0
@@ -280,7 +291,7 @@ configure_caddy_for_service() {
     prompt_yn "Configure Caddy reverse proxy for $SERVICE_NAME? (y/n):" "n" CONFIGURE_CADDY
     if [ "$CONFIGURE_CADDY" != "y" ] && [ "$CONFIGURE_CADDY" != "Y" ]; then
         echo "  Skipping Caddy configuration."
-        echo "  Access $SERVICE_NAME at: http://localhost:$SERVICE_PORT"
+        echo "  Access $SERVICE_NAME at: http://localhost:$_DISPLAY_PORT"
         return 0
     fi
 
@@ -320,7 +331,7 @@ configure_caddy_for_service() {
 
 # $SERVICE_NAME
 $SERVICE_DOMAIN {
-    reverse_proxy localhost:$SERVICE_PORT
+    reverse_proxy $_UPSTREAM
 
     # Security headers
     header {

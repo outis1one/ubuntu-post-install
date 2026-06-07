@@ -33,6 +33,13 @@ services:
     ports:
       - "9000:9000"
       - "9443:9443"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 PORTAINER_COMPOSE
 
     mkdir -p data
@@ -40,6 +47,8 @@ PORTAINER_COMPOSE
 
     echo ""
     log_success "Portainer configured at $PORTAINER_DIR"
+
+    configure_caddy_for_service "Portainer" "portainer:9000" "portainer"
 
     write_readme "$PORTAINER_DIR" << MD
 # Portainer

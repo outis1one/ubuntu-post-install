@@ -71,6 +71,13 @@ services:
       - WATCHTOWER_DEBUG=false
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 WT_COMPOSE
 
     # Create .env
@@ -99,6 +106,7 @@ MONITOR_ONLY=$MONITOR_ONLY
 #
 # Full list: https://containrrr.dev/shoutrrr/services/overview/
 NOTIFICATION_URL=$NTFY_URL
+CADDY_NET=$SITE_CADDY_NET
 WT_ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WT_DIR" 2>/dev/null || true

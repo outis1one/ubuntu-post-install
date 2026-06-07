@@ -59,17 +59,25 @@ services:
     # Uncomment for hardware transcoding (Intel/AMD):
     # devices:
     #   - /dev/dri:/dev/dri
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 EMBY_COMPOSE
 
     cat > .env << EMBY_ENV
 MEDIA_PATH=$MEDIA_PATH
+CADDY_NET=$SITE_CADDY_NET
 EMBY_ENV
 
     mkdir -p config
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EMBY_DIR"
     log_success "Emby configured at $EMBY_DIR"
 
-    configure_caddy_for_service "Emby" "8096" "emby"
+    configure_caddy_for_service "Emby" "emby:8096" "emby"
 
     write_readme "$EMBY_DIR" << MD
 # Emby

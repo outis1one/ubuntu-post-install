@@ -137,6 +137,8 @@ services:
     restart: always
     healthcheck:
       disable: false
+    networks:
+      - caddy_net
 
   immich-machine-learning:
     container_name: immich_machine_learning
@@ -170,6 +172,11 @@ services:
 
 volumes:
   model-cache:
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 IMMICH_COMPOSE
     else
         cat > docker-compose.yml << 'IMMICH_COMPOSE'
@@ -192,6 +199,8 @@ services:
     restart: always
     healthcheck:
       disable: false
+    networks:
+      - caddy_net
 
   immich-machine-learning:
     container_name: immich_machine_learning
@@ -225,6 +234,11 @@ services:
 
 volumes:
   model-cache:
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 IMMICH_COMPOSE
     fi
 
@@ -254,6 +268,7 @@ DB_PASSWORD=$DB_PASS
 DB_USERNAME=postgres
 DB_DATABASE_NAME=immich
 TZ=$TZ_VAL
+CADDY_NET=$SITE_CADDY_NET
 IMMICH_ENV
     else
         cat > .env << IMMICH_ENV
@@ -271,6 +286,7 @@ DB_PASSWORD=$DB_PASS
 DB_USERNAME=postgres
 DB_DATABASE_NAME=immich
 TZ=$TZ_VAL
+CADDY_NET=$SITE_CADDY_NET
 IMMICH_ENV
     fi
 
@@ -556,7 +572,7 @@ IMPORT_BODY
 
     log_success "Immich configured at $IMMICH_DIR"
 
-    configure_caddy_for_service "Immich" "2283" "immich"
+    configure_caddy_for_service "Immich" "immich-server:2283" "immich"
 
     write_readme "$IMMICH_DIR" << MD
 # Immich

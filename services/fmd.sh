@@ -44,17 +44,25 @@ services:
       - ./data:/fmd/data
     ports:
       - "8084:8080"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 FMD_COMPOSE
 
     cat > .env << FMD_ENV
 FMD_ADMIN_PASSWORD=$FMD_PASS
+CADDY_NET=$SITE_CADDY_NET
 FMD_ENV
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FMD_DIR"
     log_success "FindMyDevice configured at $FMD_DIR"
 
-    configure_caddy_for_service "FindMyDevice" "8084" "fmd"
+    configure_caddy_for_service "FindMyDevice" "fmd:8080" "fmd"
 
     write_readme "$FMD_DIR" << MD
 # FindMyDevice (FMD)

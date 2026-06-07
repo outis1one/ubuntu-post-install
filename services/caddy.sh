@@ -82,6 +82,13 @@ services:
       - ACME_AGREE=true
     labels:
       - "io.podman.annotations.label/crowdsec.enable=true"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    driver: bridge
+    name: caddy_net
 CADDY_COMPOSE
 
     # Create Caddyfile if it doesn't exist
@@ -114,7 +121,7 @@ CADDY_COMPOSE
 # Example:
 # myservice.yourdomain.com {
 #     import authelia
-#     reverse_proxy localhost:PORT
+#     reverse_proxy container_name:port
 # }
 
 # ActualBudget
@@ -124,7 +131,7 @@ CADDY_COMPOSE
 #         format json
 #         level INFO
 #     }
-#     reverse_proxy localhost:5006
+#     reverse_proxy actualbudget:5006
 #     header {
 #         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 #         X-Frame-Options "SAMEORIGIN"
@@ -165,7 +172,7 @@ a web service). You can also edit it by hand:
 
 ```
 myservice.example.com {
-    reverse_proxy localhost:1234
+    reverse_proxy container_name:1234
     log {
         output file /var/log/caddy/myservice.example.com.log
         format json

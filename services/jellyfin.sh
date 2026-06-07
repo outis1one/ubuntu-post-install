@@ -69,17 +69,25 @@ $HWACCEL_BLOCK
       - "8096:8096"
       - "1900:1900/udp"
       - "7359:7359/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 JELLYFIN_COMPOSE
 
     cat > .env << JELLYFIN_ENV
 MEDIA_PATH=$MEDIA_PATH
+CADDY_NET=$SITE_CADDY_NET
 JELLYFIN_ENV
 
     mkdir -p config cache
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$JELLYFIN_DIR"
     log_success "Jellyfin configured at $JELLYFIN_DIR"
 
-    configure_caddy_for_service "Jellyfin" "8096" "jellyfin"
+    configure_caddy_for_service "Jellyfin" "jellyfin:8096" "jellyfin"
 
     write_readme "$JELLYFIN_DIR" << MD
 # Jellyfin
