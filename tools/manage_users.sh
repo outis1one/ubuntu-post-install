@@ -2,379 +2,480 @@
 # manage_users.sh — FileBrowser user management via the REST API.
 #
 # Placed in ~/docker/filebrowser/ by the filebrowser installer.
-# Requires: curl, jq   (apt install curl jq)
+# Requires: curl, jq   (sudo apt install curl jq)
 #
-# Usage:
-#   ./manage_users.sh list
-#   ./manage_users.sh add    <username> <scope> [--admin]
-#   ./manage_users.sh delete <username>
-#   ./manage_users.sh passwd <username>
-#   ./manage_users.sh scope  <username> <new-scope>
-#   ./manage_users.sh info   <username>
+# Run with no arguments for the interactive menu.
+# Pass a command for one-shot use (see --help).
 #
 # ── Username rules ────────────────────────────────────────────────────────────
-#   Letters, numbers, hyphens, underscores only.  No spaces or dots.
+#   Letters, numbers, hyphens, underscores only.  No spaces, dots, or @.
 #   Examples:  alice   bob-smith   data_user2
 #
 # ── Password rules ────────────────────────────────────────────────────────────
 #   Minimum 8 characters.  No maximum.
 #   Must contain at least one letter and one number.
-#   Special characters are allowed.
 #
-# ── Scope rules ───────────────────────────────────────────────────────────────
-#   Scope is a path INSIDE the container, relative to the FileBrowser root (/srv).
-#   The volume in docker-compose.yml mounts your host path (FB_PATH) as /srv.
+# ── Scope (file path) ─────────────────────────────────────────────────────────
+#   FileBrowser supports ONE scope path per user.
+#   Scope is an absolute path inside the container, relative to /srv (= FB_PATH).
 #
-#   If FB_PATH is ~/drives/data1 then:
-#     /          → full access to ~/drives/data1
+#   If FB_PATH=~/drives/data1:
+#     /          → full access (all of ~/drives/data1)
 #     /music     → ~/drives/data1/music only
 #     /docs/bob  → ~/drives/data1/docs/bob only
 #
-#   Admin account created on first login gets scope / by default.
-#
-# ── Examples ─────────────────────────────────────────────────────────────────
-#   Add admin with full access:
-#     ./manage_users.sh add admin /
-#
-#   Add alice with access to just the music directory:
-#     ./manage_users.sh add alice /music
-#
-#   Add bob as an admin with full access:
-#     ./manage_users.sh add bob / --admin
-#
-#   Change alice's password:
-#     ./manage_users.sh passwd alice
-#
-#   Restrict alice to a subdirectory:
-#     ./manage_users.sh scope alice /music/alice
-#
-#   List all users:
-#     ./manage_users.sh list
-#
-#   Delete bob:
-#     ./manage_users.sh delete bob
+#   For access to multiple unrelated directories:
+#     • Set scope to a common parent (e.g. /)
+#     • Create OS-level symlinks inside the scope dir pointing elsewhere
 #
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FB_URL="${FB_URL:-http://localhost:8085}"
+TOKEN=""
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-die()  { echo "ERROR: $*" >&2; exit 1; }
-info() { echo "  $*"; }
+# ── Output helpers ────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then
+    B=$'\e[1m' R=$'\e[0m' GRN=$'\e[32m' RED=$'\e[31m' DIM=$'\e[2m'
+else
+    B="" R="" GRN="" RED="" DIM=""
+fi
 
-require_cmd() {
-    for cmd in "$@"; do
-        command -v "$cmd" &>/dev/null || die "'$cmd' not found. Install it: sudo apt install $cmd"
+die()    { echo "${RED}ERROR:${R} $*" >&2; exit 1; }
+ok()     { echo "  ${GRN}✓${R} $*"; }
+errmsg() { echo "  ${RED}✗${R} $*" >&2; }
+hr()     { printf '  %s\n' "────────────────────────────────────────────"; }
+banner() { echo; hr; printf "  ${B}%-44s${R}\n" "$*"; hr; }
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
+require_cmds() {
+    for _c in "$@"; do
+        command -v "$_c" &>/dev/null || die "'$_c' not found — sudo apt install $_c"
     done
 }
 
+# ── Validation ────────────────────────────────────────────────────────────────
 validate_username() {
-    local u="$1"
-    [[ -n "$u" ]]              || die "Username cannot be empty."
-    [[ "$u" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid username '$u'. Only letters, numbers, hyphens, underscores allowed."
+    [[ -n "$1" ]]                   || { errmsg "Username cannot be empty."; return 1; }
+    [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]] || {
+        errmsg "Invalid username '$1'. Use only letters, numbers, hyphens, underscores."
+        return 1
+    }
 }
 
 validate_password() {
-    local p="$1"
-    [[ ${#p} -ge 8 ]]          || die "Password too short (minimum 8 characters)."
-    [[ "$p" =~ [a-zA-Z] ]]     || die "Password must contain at least one letter."
-    [[ "$p" =~ [0-9] ]]        || die "Password must contain at least one number."
+    [[ ${#1} -ge 8 ]]      || { errmsg "Password too short (minimum 8 characters)."; return 1; }
+    [[ "$1" =~ [a-zA-Z] ]] || { errmsg "Password must contain at least one letter."; return 1; }
+    [[ "$1" =~ [0-9] ]]    || { errmsg "Password must contain at least one number."; return 1; }
 }
 
 validate_scope() {
-    local s="$1"
-    [[ "$s" == /* ]] || die "Scope must be an absolute path starting with / (e.g. /music or /)"
+    [[ "$1" == /* ]] || { errmsg "Scope must start with /  (e.g. / or /music or /docs/bob)"; return 1; }
 }
 
+# prompt_password VARNAME [label]
+# Uses nameref (bash 4.3+) so the caller's local variable is set correctly.
 prompt_password() {
-    local varname="$1" prompt="${2:-Password}"
-    local p1 p2
+    local -n _pp_ref="$1"
+    local _label="${2:-New password}"
+    local _p1 _p2
     while true; do
-        read -r -s -p "$prompt: " p1; echo
-        read -r -s -p "Confirm:  " p2; echo
-        [[ "$p1" == "$p2" ]] || { echo "  Passwords do not match. Try again."; continue; }
-        validate_password "$p1"
-        printf -v "$varname" "%s" "$p1"
+        read -r -s -p "  $_label: " _p1; echo
+        validate_password "$_p1" || continue
+        read -r -s -p "  Confirm:  " _p2; echo
+        [[ "$_p1" == "$_p2" ]] || { errmsg "Passwords do not match. Try again."; continue; }
+        _pp_ref="$_p1"
         break
     done
 }
 
-# ── Authentication ─────────────────────────────────────────────────────────────
-get_token() {
-    local admin_user admin_pass
-    read -r -p "FileBrowser admin username [admin]: " admin_user
-    admin_user="${admin_user:-admin}"
-    read -r -s -p "FileBrowser admin password: " admin_pass; echo
-
-    local resp
-    resp=$(curl -s -o /dev/null -w "%{http_code}:%{stderr}" \
-        -X POST "$FB_URL/api/login" \
+# ── Auth — login once, reuse token ────────────────────────────────────────────
+ensure_token() {
+    [[ -n "$TOKEN" ]] && return 0
+    echo
+    echo "  ${B}FileBrowser login${R}  ${DIM}(${FB_URL})${R}"
+    local _u _p _tok
+    read -r -p "  Admin username [admin]: " _u
+    _u="${_u:-admin}"
+    read -r -s -p "  Admin password: " _p; echo
+    _tok=$(curl -s -X POST "$FB_URL/api/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"$admin_user\",\"password\":\"$admin_pass\"}" 2>/dev/null || true)
-
-    local token
-    token=$(curl -s -X POST "$FB_URL/api/login" \
-        -H "Content-Type: application/json" \
-        -d "{\"username\":\"$admin_user\",\"password\":\"$admin_pass\"}")
-
-    [[ "$token" == *"."*"."* ]] || die "Login failed. Check credentials and that FileBrowser is running."
-    echo "$token"
+        -d "{\"username\":\"$_u\",\"password\":\"$_p\"}")
+    [[ "$_tok" == *"."*"."* ]] \
+        || die "Login failed. Check credentials and that FileBrowser is running at $FB_URL"
+    TOKEN="$_tok"
+    ok "Logged in as $_u"
 }
 
-# ── API helpers ────────────────────────────────────────────────────────────────
-api_get() {
-    local token="$1" path="$2"
-    curl -sf -X GET "$FB_URL$path" -H "X-Auth: $token"
-}
+# ── REST wrappers ─────────────────────────────────────────────────────────────
+api_get()    { curl -sf -X GET    "$FB_URL$1" -H "X-Auth: $TOKEN"; }
+api_post()   { curl -sf -X POST   "$FB_URL$1" -H "X-Auth: $TOKEN" \
+                   -H "Content-Type: application/json" -d "$2"; }
+api_put()    { curl -sf -X PUT    "$FB_URL$1" -H "X-Auth: $TOKEN" \
+                   -H "Content-Type: application/json" -d "$2"; }
+api_delete() { curl -sf -X DELETE "$FB_URL$1" -H "X-Auth: $TOKEN"; }
 
-api_post() {
-    local token="$1" path="$2" body="$3"
-    curl -sf -X POST "$FB_URL$path" \
-        -H "X-Auth: $token" -H "Content-Type: application/json" -d "$body"
-}
-
-api_put() {
-    local token="$1" path="$2" body="$3"
-    curl -sf -X PUT "$FB_URL$path" \
-        -H "X-Auth: $token" -H "Content-Type: application/json" -d "$body"
-}
-
-api_delete() {
-    local token="$1" path="$2"
-    curl -sf -X DELETE "$FB_URL$path" -H "X-Auth: $token"
-}
-
-# Returns user JSON object for the given username, or empty string if not found.
 find_user() {
-    local token="$1" username="$2"
-    api_get "$token" "/api/users" | jq -r --arg u "$username" '.[] | select(.username==$u)'
+    api_get "/api/users" | jq -r --arg u "$1" '.[] | select(.username==$u)'
 }
 
 get_user_id() {
-    local token="$1" username="$2"
-    local user
-    user=$(find_user "$token" "$username")
-    [[ -n "$user" ]] || die "User '$username' not found."
-    echo "$user" | jq -r '.id'
+    local _j
+    _j=$(find_user "$1")
+    [[ -n "$_j" ]] || { errmsg "User '$1' not found."; return 1; }
+    echo "$_j" | jq -r '.id'
 }
 
-# ── Default permissions for new non-admin users ──────────────────────────────
 default_perms() {
-    cat <<'JSON'
-{
-    "admin":    false,
-    "execute":  false,
-    "create":   true,
-    "rename":   true,
-    "modify":   true,
-    "delete":   true,
-    "share":    false,
-    "download": true
-}
-JSON
+    echo '{"admin":false,"execute":false,"create":true,"rename":true,
+           "modify":true,"delete":true,"share":false,"download":true}'
 }
 
-# ── Commands ──────────────────────────────────────────────────────────────────
-
+# ── cmd: list ─────────────────────────────────────────────────────────────────
 cmd_list() {
-    local token
-    token=$(get_token)
+    ensure_token
     echo
-    printf "%-20s  %-5s  %-30s\n" "USERNAME" "ADMIN" "SCOPE"
-    printf "%-20s  %-5s  %-30s\n" "--------" "-----" "-----"
-    api_get "$token" "/api/users" | \
+    printf "  ${B}%-22s  %-5s  %s${R}\n" "USERNAME" "ADMIN" "SCOPE"
+    printf "  %-22s  %-5s  %s\n"         "--------" "-----" "-----"
+    api_get "/api/users" | \
         jq -r '.[] | [.username, (if .perm.admin then "yes" else "no" end), .scope] | @tsv' | \
-        while IFS=$'\t' read -r uname is_admin scope; do
-            printf "%-20s  %-5s  %s\n" "$uname" "$is_admin" "$scope"
+        while IFS=$'\t' read -r _u _a _s; do
+            printf "  %-22s  %-5s  %s\n" "$_u" "$_a" "$_s"
         done
+    echo
 }
 
+# ── cmd: add ─────────────────────────────────────────────────────────────────
 cmd_add() {
-    local username="$1" scope="$2" is_admin="${3:-false}"
-    validate_username "$username"
-    validate_scope "$scope"
+    local _username="${1:-}" _scope="${2:-}" _is_admin="false"
+    [[ "${3:-}" == "--admin" ]] && _is_admin="true"
 
-    local password
-    echo
-    echo "Setting password for new user '$username'."
-    echo "  Min 8 chars, at least one letter and one number."
-    echo
-    prompt_password password "New password for $username"
+    ensure_token
 
-    local token
-    token=$(get_token)
-
-    # Check if user already exists
-    local existing
-    existing=$(find_user "$token" "$username")
-    [[ -z "$existing" ]] || die "User '$username' already exists. Use 'passwd' or 'scope' to modify."
-
-    local perms
-    perms=$(default_perms)
-    if [[ "$is_admin" == "true" ]]; then
-        perms=$(echo "$perms" | jq '.admin = true')
+    if [[ -z "$_username" ]]; then
+        echo
+        echo "  ${B}Username:${R} letters, numbers, hyphens, underscores only. No dots or @."
+        echo "  ${B}Password:${R} min 8 chars, at least 1 letter and 1 number."
+        echo "  ${B}Scope:${R}    FileBrowser supports ONE path per user."
+        echo "             For multi-dir access: use a common parent or OS symlinks."
+        echo
+        read -r -p "  Username: " _username
+        local _adm=""
+        read -r -p "  Admin?    [y/N]: " _adm
+        [[ "${_adm,,}" == "y" ]] && _is_admin="true"
     fi
 
-    local body
-    body=$(jq -n \
-        --arg u "$username" \
-        --arg p "$password" \
-        --arg s "$scope" \
-        --argjson perms "$perms" \
-        '{username: $u, password: $p, scope: $s, locale: "en",
-          viewMode: "list", singleClick: false, sorting: {by: "name", asc: true},
-          perm: $perms, commands: [], lockPassword: false,
-          hideDotfiles: false, dateFormat: false}')
+    validate_username "$_username" || return 1
 
-    api_post "$token" "/api/users" "$body" >/dev/null
+    if [[ -z "$_scope" ]]; then
+        echo
+        echo "  Scope examples:"
+        echo "    /           full access (all of FB_PATH)"
+        echo "    /music      music subdir only"
+        echo "    /docs/bob   docs/bob subdir only"
+        echo
+        read -r -p "  Scope for '$_username': " _scope
+    fi
+
+    validate_scope "$_scope" || return 1
+
+    local _ex
+    _ex=$(find_user "$_username")
+    if [[ -n "$_ex" ]]; then
+        errmsg "User '$_username' already exists. Use Modify to change it."
+        return 1
+    fi
+
     echo
-    info "User '$username' created."
-    info "  Scope:  $scope"
-    info "  Admin:  $is_admin"
+    local password=""
+    prompt_password password "Password for $_username"
+
+    local _perms _body
+    _perms=$(default_perms)
+    [[ "$_is_admin" == "true" ]] && _perms=$(echo "$_perms" | jq '.admin = true')
+    _body=$(jq -n \
+        --arg u "$_username" --arg p "$password" --arg s "$_scope" \
+        --argjson perms "$_perms" \
+        '{username:$u, password:$p, scope:$s, locale:"en", viewMode:"list",
+          singleClick:false, sorting:{by:"name",asc:true}, perm:$perms,
+          commands:[], lockPassword:false, hideDotfiles:false, dateFormat:false}')
+    api_post "/api/users" "$_body" >/dev/null
+    echo
+    ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
 }
 
+# ── cmd: delete ───────────────────────────────────────────────────────────────
 cmd_delete() {
-    local username="$1"
-    validate_username "$username"
+    local _username="${1:-}"
+    ensure_token
 
-    local token
-    token=$(get_token)
+    if [[ -z "$_username" ]]; then
+        cmd_list
+        read -r -p "  Username to delete: " _username
+    fi
+    validate_username "$_username" || return 1
 
-    local uid
-    uid=$(get_user_id "$token" "$username")
+    local _uid
+    _uid=$(get_user_id "$_username") || return 1
 
-    local confirm
-    read -r -p "Delete user '$username' (id=$uid)? [y/N]: " confirm
-    [[ "${confirm,,}" == "y" ]] || { echo "Aborted."; exit 0; }
-
-    api_delete "$token" "/api/users/$uid" >/dev/null
-    echo
-    info "User '$username' deleted."
+    local _c=""
+    read -r -p "  Delete '$_username' (id $_uid)? [y/N]: " _c
+    [[ "${_c,,}" == "y" ]] || { echo "  Aborted."; return 0; }
+    api_delete "/api/users/$_uid" >/dev/null
+    ok "User '$_username' deleted."
 }
 
+# ── cmd: passwd ───────────────────────────────────────────────────────────────
 cmd_passwd() {
-    local username="$1"
-    validate_username "$username"
+    local _username="${1:-}"
+    ensure_token
 
-    local token
-    token=$(get_token)
+    if [[ -z "$_username" ]]; then
+        cmd_list
+        read -r -p "  Username: " _username
+    fi
+    validate_username "$_username" || return 1
 
-    local uid user
-    uid=$(get_user_id "$token" "$username")
-    user=$(find_user "$token" "$username")
+    local _uid _user
+    _uid=$(get_user_id "$_username") || return 1
+    _user=$(find_user "$_username")
 
     echo
-    echo "Changing password for '$username'."
-    echo "  Min 8 chars, at least one letter and one number."
+    echo "  ${B}Password rules:${R} min 8 chars, at least 1 letter and 1 number."
     echo
+    local password=""
+    prompt_password password "New password for $_username"
 
-    local password
-    prompt_password password "New password for $username"
-
-    local body
-    body=$(echo "$user" | jq --arg p "$password" '. + {password: $p}')
-    api_put "$token" "/api/users/$uid" "$body" >/dev/null
+    local _body
+    _body=$(echo "$_user" | jq --arg p "$password" '. + {password: $p}')
+    api_put "/api/users/$_uid" "$_body" >/dev/null
     echo
-    info "Password updated for '$username'."
+    ok "Password updated for '$_username'."
 }
 
+# ── cmd: scope ────────────────────────────────────────────────────────────────
 cmd_scope() {
-    local username="$1" new_scope="$2"
-    validate_username "$username"
-    validate_scope "$new_scope"
+    local _username="${1:-}" _new_scope="${2:-}"
+    ensure_token
 
-    local token
-    token=$(get_token)
+    if [[ -z "$_username" ]]; then
+        cmd_list
+        read -r -p "  Username: " _username
+    fi
+    validate_username "$_username" || return 1
 
-    local uid user old_scope
-    uid=$(get_user_id "$token" "$username")
-    user=$(find_user "$token" "$username")
-    old_scope=$(echo "$user" | jq -r '.scope')
+    local _uid _user _old_scope
+    _uid=$(get_user_id "$_username") || return 1
+    _user=$(find_user "$_username")
+    _old_scope=$(echo "$_user" | jq -r '.scope')
 
-    local body
-    body=$(echo "$user" | jq --arg s "$new_scope" '. + {scope: $s}')
-    api_put "$token" "/api/users/$uid" "$body" >/dev/null
+    if [[ -z "$_new_scope" ]]; then
+        echo
+        echo "  Current scope: $_old_scope"
+        echo "  Note: FileBrowser supports ONE path per user."
+        echo "  Examples:  /   /music   /docs/bob"
+        echo
+        read -r -p "  New scope: " _new_scope
+    fi
+    validate_scope "$_new_scope" || return 1
+
+    local _body
+    _body=$(echo "$_user" | jq --arg s "$_new_scope" '. + {scope: $s}')
+    api_put "/api/users/$_uid" "$_body" >/dev/null
     echo
-    info "Scope updated for '$username': $old_scope → $new_scope"
+    ok "Scope updated for '$_username': $_old_scope → $_new_scope"
 }
 
+# ── cmd: rename ───────────────────────────────────────────────────────────────
+cmd_rename() {
+    local _username="${1:-}" _new_username="${2:-}"
+    ensure_token
+
+    if [[ -z "$_username" ]]; then
+        cmd_list
+        read -r -p "  Username to rename: " _username
+    fi
+    validate_username "$_username" || return 1
+
+    if [[ -z "$_new_username" ]]; then
+        read -r -p "  New username: " _new_username
+    fi
+    validate_username "$_new_username" || return 1
+
+    local _uid _user _body
+    _uid=$(get_user_id "$_username") || return 1
+    _user=$(find_user "$_username")
+    _body=$(echo "$_user" | jq --arg u "$_new_username" '. + {username: $u}')
+    api_put "/api/users/$_uid" "$_body" >/dev/null
+    ok "Renamed: '$_username' → '$_new_username'"
+}
+
+# ── cmd: info ─────────────────────────────────────────────────────────────────
 cmd_info() {
-    local username="$1"
-    validate_username "$username"
+    local _username="${1:-}"
+    ensure_token
 
-    local token
-    token=$(get_token)
+    if [[ -z "$_username" ]]; then
+        cmd_list
+        read -r -p "  Username: " _username
+    fi
+    validate_username "$_username" || return 1
 
-    local user
-    user=$(find_user "$token" "$username")
-    [[ -n "$user" ]] || die "User '$username' not found."
-
+    local _user
+    _user=$(find_user "$_username")
+    [[ -n "$_user" ]] || { errmsg "User '$_username' not found."; return 1; }
     echo
-    echo "$user" | jq '{
-        username,
-        scope,
+    echo "$_user" | jq '{username, scope,
         admin:    .perm.admin,
         create:   .perm.create,
         modify:   .perm.modify,
         delete:   .perm.delete,
         download: .perm.download,
-        execute:  .perm.execute
-    }'
+        execute:  .perm.execute}'
+    echo
 }
 
+# ── Modify submenu ────────────────────────────────────────────────────────────
+menu_modify() {
+    ensure_token
+    cmd_list
+
+    local _cur=""
+    read -r -p "  Username to modify: " _cur
+    validate_username "$_cur" || return 1
+    get_user_id "$_cur" >/dev/null || return 1
+
+    while true; do
+        local _user _scope _admin
+        _user=$(find_user "$_cur") || { errmsg "User '$_cur' no longer exists."; break; }
+        [[ -n "$_user" ]] || { errmsg "User '$_cur' no longer exists."; break; }
+        _scope=$(echo "$_user" | jq -r '.scope')
+        _admin=$(echo "$_user" | jq -r 'if .perm.admin then "yes" else "no" end')
+
+        banner "Modify: $_cur"
+        echo "  ${B}Scope:${R}  $_scope"
+        echo "  ${B}Admin:${R}  $_admin"
+        echo
+        echo "  1  Change username"
+        echo "  2  Change password"
+        echo "  3  Change scope (file path)"
+        echo "  4  Toggle admin status"
+        echo "  0  Back"
+        echo
+        local _ch=""
+        read -r -p "  Choice: " _ch
+
+        case "$_ch" in
+            1)
+                local _new_u=""
+                echo
+                read -r -p "  New username: " _new_u
+                validate_username "$_new_u" || continue
+                local _uid1 _body1
+                _uid1=$(get_user_id "$_cur") || continue
+                _body1=$(echo "$_user" | jq --arg u "$_new_u" '. + {username: $u}')
+                if api_put "/api/users/$_uid1" "$_body1" >/dev/null; then
+                    ok "Renamed: '$_cur' → '$_new_u'"
+                    _cur="$_new_u"
+                else
+                    errmsg "Rename failed."
+                fi
+                ;;
+            2) cmd_passwd "$_cur" || true ;;
+            3) cmd_scope  "$_cur" || true ;;
+            4)
+                local _uid4
+                _uid4=$(get_user_id "$_cur") || continue
+                local _toggled
+                _toggled=$(echo "$_user" | jq '.perm.admin = (.perm.admin | not)')
+                if api_put "/api/users/$_uid4" "$_toggled" >/dev/null; then
+                    local _new_admin
+                    _new_admin=$(echo "$_toggled" | jq -r 'if .perm.admin then "yes" else "no" end')
+                    ok "Admin for '$_cur' is now: $_new_admin"
+                else
+                    errmsg "Toggle failed."
+                fi
+                ;;
+            0) break ;;
+            *) errmsg "Invalid choice." ;;
+        esac
+    done
+}
+
+# ── usage ─────────────────────────────────────────────────────────────────────
 usage() {
-    cat <<'USAGE'
+    cat <<'EOF'
 FileBrowser user management
 
-Usage:
+  Run with no arguments for the interactive menu.
+
+One-shot usage:
   manage_users.sh list
   manage_users.sh add    <username> <scope> [--admin]
   manage_users.sh delete <username>
   manage_users.sh passwd <username>
   manage_users.sh scope  <username> <new-scope>
+  manage_users.sh rename <username> <new-username>
   manage_users.sh info   <username>
 
-Scope path is relative to /srv inside the container (= FB_PATH on the host).
+Scope is relative to /srv inside the container (= FB_PATH on the host):
   /          full access to everything under FB_PATH
-  /music     only ~/drives/data1/music  (if FB_PATH=~/drives/data1)
-  /docs/bob  only ~/drives/data1/docs/bob
+  /music     ~/drives/data1/music only  (if FB_PATH=~/drives/data1)
+  /docs/bob  ~/drives/data1/docs/bob only
 
-Username: letters, numbers, hyphens, underscores only (no spaces or dots).
+FileBrowser supports ONE scope path per user.
+For multi-directory access: use a common parent, or place OS-level
+symlinks inside the scope dir pointing to other locations.
+
+Username: letters, numbers, hyphens, underscores only. No dots or @.
 Password: min 8 chars, at least one letter and one number.
 
-Examples:
-  ./manage_users.sh add admin /
-  ./manage_users.sh add alice /music
-  ./manage_users.sh add bob / --admin
-  ./manage_users.sh passwd alice
-  ./manage_users.sh scope alice /music/alice
-  ./manage_users.sh list
-  ./manage_users.sh delete bob
-USAGE
+Override URL:  FB_URL=http://localhost:8085 ./manage_users.sh
+EOF
 }
 
-# ── Dispatch ──────────────────────────────────────────────────────────────────
-require_cmd curl jq
+# ── Main interactive menu ─────────────────────────────────────────────────────
+run_interactive() {
+    ensure_token
+    while true; do
+        banner "FileBrowser User Manager"
+        echo "  ${DIM}${FB_URL}${R}"
+        echo
+        echo "  1  List users"
+        echo "  2  Add user"
+        echo "  3  Delete user"
+        echo "  4  Modify user  (username / password / scope / admin)"
+        echo "  5  View user details"
+        echo "  0  Exit"
+        echo
+        local _ch=""
+        read -r -p "  Choice: " _ch
+        case "$_ch" in
+            1) cmd_list    || true ;;
+            2) cmd_add     || true ;;
+            3) cmd_delete  || true ;;
+            4) menu_modify || true ;;
+            5) cmd_info    || true ;;
+            0) echo; echo "  Goodbye."; echo; exit 0 ;;
+            *) errmsg "Invalid choice." ;;
+        esac
+    done
+}
 
-cmd="${1:-help}"
+# ── Entry point ───────────────────────────────────────────────────────────────
+require_cmds curl jq
+
+_cmd="${1:-}"
 shift || true
 
-case "$cmd" in
-    list)   cmd_list ;;
-    add)
-        [[ $# -ge 2 ]] || die "Usage: manage_users.sh add <username> <scope> [--admin]"
-        is_admin="false"
-        [[ "${3:-}" == "--admin" ]] && is_admin="true"
-        cmd_add "$1" "$2" "$is_admin"
-        ;;
-    delete) [[ $# -ge 1 ]] || die "Usage: manage_users.sh delete <username>"; cmd_delete "$1" ;;
-    passwd) [[ $# -ge 1 ]] || die "Usage: manage_users.sh passwd <username>";  cmd_passwd "$1" ;;
-    scope)
-        [[ $# -ge 2 ]] || die "Usage: manage_users.sh scope <username> <new-scope>"
-        cmd_scope "$1" "$2"
-        ;;
-    info)   [[ $# -ge 1 ]] || die "Usage: manage_users.sh info <username>";    cmd_info "$1"  ;;
+case "$_cmd" in
+    "")             run_interactive ;;
+    list)           ensure_token; cmd_list ;;
+    add)            ensure_token; cmd_add "$@" ;;
+    delete|del)     ensure_token; cmd_delete "${1:-}" ;;
+    passwd|pw)      ensure_token; cmd_passwd "${1:-}" ;;
+    scope)          ensure_token; cmd_scope "${1:-}" "${2:-}" ;;
+    rename)         ensure_token; cmd_rename "${1:-}" "${2:-}" ;;
+    info)           ensure_token; cmd_info "${1:-}" ;;
     help|--help|-h) usage ;;
-    *) echo "Unknown command: $cmd"; echo; usage; exit 2 ;;
+    *) errmsg "Unknown command: $_cmd"; echo; usage; exit 2 ;;
 esac
