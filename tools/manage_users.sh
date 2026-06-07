@@ -21,17 +21,19 @@
 #
 #   If FB_PATH=~/drives/data1:
 #     /          → full access (all of ~/drives/data1)
-#     /music     → ~/drives/data1/music only
-#     /docs/bob  → ~/drives/data1/docs/bob only
+#     /alice     → alice's own subdir (pair with linked dirs below)
+#     /music     → music subdir only
 #
-# ── Multi-directory access via symlinks ───────────────────────────────────────
-#   FileBrowser follows symlinks inside a user's scope dir.
-#   Use "Manage linked directories" in the Modify menu to create symlinks
-#   inside the user's scope that point to other directories under /srv.
+# ── Multi-directory access via linked directories ────────────────────────────
+#   FileBrowser follows symlinks inside the scope dir.
+#   Give a user scope=/alice, then link extra folders into /alice:
 #
-#   Example: user alice has scope /alice
-#     link /alice/music  → /srv/music   (alice sees a "music" folder in her root)
-#     link /alice/photos → /srv/photos  (alice sees a "photos" folder too)
+#     /alice/music  → /srv/music    (alice sees "music" in her root)
+#     /alice/photos → /srv/photos   (alice sees "photos" too)
+#
+#   This script creates those symlinks via "docker exec", so they live in
+#   the bind-mount on the host as well (target is /srv/... so it appears
+#   broken from the host, but resolves correctly inside the container).
 #
 set -Eeuo pipefail
 
@@ -75,7 +77,7 @@ validate_password() {
 }
 
 validate_scope() {
-    [[ "$1" == /* ]] || { errmsg "Scope must start with /  (e.g. / or /music or /docs/bob)"; return 1; }
+    [[ "$1" == /* ]] || { errmsg "Scope must start with /  (e.g. / or /alice or /music)"; return 1; }
 }
 
 # prompt_password VARNAME [label]
@@ -136,9 +138,8 @@ default_perms() {
            "modify":true,"delete":true,"share":false,"download":true}'
 }
 
-# ── Docker helpers for symlink management ─────────────────────────────────────
+# ── Docker helpers ─────────────────────────────────────────────────────────────
 
-# Read container name from docker-compose.yml next to this script, or default.
 get_container_name() {
     local _compose="$SCRIPT_DIR/docker-compose.yml"
     if [[ -f "$_compose" ]]; then
@@ -150,135 +151,115 @@ get_container_name() {
 }
 
 check_container() {
-    local _c="$1"
     require_cmds docker
     local _running
-    _running=$(docker inspect --format='{{.State.Running}}' "$_c" 2>/dev/null || echo "false")
+    _running=$(docker inspect --format='{{.State.Running}}' "$1" 2>/dev/null || echo "false")
     [[ "$_running" == "true" ]] \
-        || { errmsg "Container '$_c' is not running. Start it: docker compose up -d"; return 1; }
+        || { errmsg "Container '$1' is not running. Start it: docker compose up -d"; return 1; }
 }
 
-# List symlinks in /srv<scope> inside the container.
-list_scope_symlinks() {
+# Print symlinks inside /srv<scope>, one per line.
+list_links() {
     local _c="$1" _scope="$2"
-    local _dir="/srv$_scope"
-    local _out
-    _out=$(docker exec "$_c" find "$_dir" -maxdepth 1 -type l \
+    docker exec "$_c" find "/srv$_scope" -maxdepth 1 -type l \
         -exec sh -c 'printf "    %-24s→  %s\n" "$(basename "$1")" "$(readlink "$1")"' _ {} \; \
-        2>/dev/null | sort) || true
-    if [[ -n "$_out" ]]; then
-        echo "$_out"
-    else
-        echo "    (none)"
-    fi
+        2>/dev/null | sort || true
 }
 
-# Interactively add a symlink inside a user's scope dir.
-add_scope_symlink() {
-    local _c="$1" _scope="$2"
+# ── prompt_add_links SCOPE ────────────────────────────────────────────────────
+# Loop: ask for /srv source paths, create symlinks, blank line to finish.
+# Shared by cmd_add (offered inline) and menu_links (add option).
+prompt_add_links() {
+    local _scope="$1"
+    local _c
+    _c=$(get_container_name)
+    check_container "$_c" || return 1
+
     local _scope_dir="/srv$_scope"
-
-    echo
-    echo "  Add a directory link inside this user's scope."
-    echo "  Both paths are inside /srv (the FileBrowser root)."
-    echo
-    echo "  Example: source=/music  → user sees a 'music' folder in their root."
-    echo "           source=/shared/reports  name=reports"
-    echo
-
-    local _src=""
-    read -r -p "  Source path in /srv (e.g. /music): " _src
-    _src="/${_src#/}"   # ensure leading /
-    _src="${_src%/}"    # strip trailing /
-    validate_scope "$_src" || return 1
-
-    # Check that target actually exists inside the container
-    if ! docker exec "$_c" test -e "/srv$_src" 2>/dev/null; then
-        errmsg "/srv$_src does not exist inside the container."
-        local _anyway=""
-        read -r -p "  Create the link anyway? (it will appear broken until the dir exists) [y/N]: " _anyway
-        [[ "${_anyway,,}" == "y" ]] || { echo "  Aborted."; return 0; }
-    fi
-
-    local _default_name
-    _default_name=$(basename "$_src")
-    local _link_name=""
-    read -r -p "  Name shown to user in their folder [$_default_name]: " _link_name
-    _link_name="${_link_name:-$_default_name}"
-    [[ "$_link_name" =~ ^[a-zA-Z0-9._-]+$ ]] \
-        || { errmsg "Invalid name '$_link_name'. Use letters, numbers, dots, hyphens, underscores."; return 1; }
-
-    local _link_path="$_scope_dir/$_link_name"
-    local _target="/srv$_src"
-
-    # Ensure the scope dir exists inside the container
     docker exec "$_c" mkdir -p "$_scope_dir" >/dev/null 2>&1 || true
 
-    # Handle existing entry at link path
-    if docker exec "$_c" test -e "$_link_path" 2>/dev/null; then
-        local _ov=""
-        echo
-        errmsg "'$_link_name' already exists in $_scope_dir."
-        read -r -p "  Overwrite? [y/N]: " _ov
-        [[ "${_ov,,}" == "y" ]] || { echo "  Aborted."; return 0; }
-        docker exec "$_c" rm -rf "$_link_path"
-    fi
-
     echo
-    echo "  Creating: $_link_path  →  $_target"
-    docker exec "$_c" ln -s "$_target" "$_link_path"
-    ok "'$_link_name' linked to $_target"
-    echo "  User will see '$_link_name' as a folder inside their scope."
+    echo "  Link directories into '$_scope_dir'."
+    echo "  Enter a /srv path for each directory to add — blank line when done."
+    echo
+
+    while true; do
+        local _src=""
+        read -r -p "  /srv path [done]: /" _src
+        [[ -n "$_src" ]] || break
+
+        _src="/${_src#/}"   # normalise leading slash
+        _src="${_src%/}"    # strip trailing slash
+
+        if ! docker exec "$_c" test -e "/srv$_src" 2>/dev/null; then
+            errmsg "/srv$_src does not exist inside the container. Skipping."
+            continue
+        fi
+
+        local _default_name
+        _default_name=$(basename "$_src")
+        local _link_name=""
+        read -r -p "  Name in user's folder [$_default_name]: " _link_name
+        _link_name="${_link_name:-$_default_name}"
+
+        if ! [[ "$_link_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            errmsg "Invalid name. Use letters, numbers, dots, hyphens, underscores."
+            continue
+        fi
+
+        local _link_path="$_scope_dir/$_link_name"
+        local _target="/srv$_src"
+
+        if docker exec "$_c" test -e "$_link_path" 2>/dev/null; then
+            errmsg "'$_link_name' already exists at $_link_path — skipping. Use Remove to clear it first."
+            continue
+        fi
+
+        docker exec "$_c" ln -s "$_target" "$_link_path"
+        ok "'$_link_name'  →  $_target"
+    done
 }
 
-# Interactively remove a symlink from a user's scope dir.
-remove_scope_symlink() {
-    local _c="$1" _scope="$2"
-    local _scope_dir="/srv$_scope"
-
-    echo
-    echo "  Current links in $_scope_dir:"
-    list_scope_symlinks "$_c" "$_scope"
-    echo
-    local _link_name=""
-    read -r -p "  Link name to remove (Enter to cancel): " _link_name
-    [[ -n "$_link_name" ]] || { echo "  Cancelled."; return 0; }
-
-    local _link_path="$_scope_dir/$_link_name"
-
-    # Only remove symlinks — refuse to delete regular files/dirs
-    if ! docker exec "$_c" test -L "$_link_path" 2>/dev/null; then
-        errmsg "'$_link_name' is not a symlink. Refusing to delete."
-        return 1
-    fi
-
-    docker exec "$_c" rm "$_link_path"
-    ok "Link '$_link_name' removed from $_scope_dir."
-}
-
-# Submenu for managing symlinks for one user.
-menu_symlinks() {
-    local _username="$1" _scope="$2"
+# ── Linked-directory submenu (shown from Modify option 5) ────────────────────
+menu_links() {
+    local _scope="$1"
     local _c
     _c=$(get_container_name)
     check_container "$_c" || return 1
 
     while true; do
-        banner "Linked dirs: $_username  (scope: $_scope)"
-        echo "  Container: ${DIM}$_c${R}   Root: ${DIM}/srv${R}"
+        banner "Linked directories  (scope: $_scope)"
+        echo "  ${DIM}Symlinks inside /srv${_scope} — visible as folders in FileBrowser${R}"
         echo
-        echo "  Symlinks visible to $_username in /srv$_scope:"
-        list_scope_symlinks "$_c" "$_scope"
+        local _links
+        _links=$(list_links "$_c" "$_scope")
+        if [[ -n "$_links" ]]; then
+            echo "$_links"
+        else
+            echo "    (none)"
+        fi
         echo
-        echo "  1  Add a linked directory"
+        echo "  1  Add linked directories"
         echo "  2  Remove a linked directory"
         echo "  0  Back"
         echo
         local _ch=""
         read -r -p "  Choice: " _ch
         case "$_ch" in
-            1) add_scope_symlink  "$_c" "$_scope" || true ;;
-            2) remove_scope_symlink "$_c" "$_scope" || true ;;
+            1) prompt_add_links "$_scope" || true ;;
+            2)
+                local _link_name=""
+                echo
+                read -r -p "  Link name to remove: " _link_name
+                [[ -n "$_link_name" ]] || continue
+                local _link_path="/srv${_scope}/${_link_name}"
+                if ! docker exec "$_c" test -L "$_link_path" 2>/dev/null; then
+                    errmsg "'$_link_name' is not a symlink — refusing to delete."
+                    continue
+                fi
+                docker exec "$_c" rm "$_link_path"
+                ok "'$_link_name' removed."
+                ;;
             0) break ;;
             *) errmsg "Invalid choice." ;;
         esac
@@ -310,8 +291,7 @@ cmd_add() {
         echo
         echo "  ${B}Username:${R} letters, numbers, hyphens, underscores only. No dots or @."
         echo "  ${B}Password:${R} min 8 chars, at least 1 letter and 1 number."
-        echo "  ${B}Scope:${R}    FileBrowser supports ONE path per user."
-        echo "             For multi-dir access use Modify → Linked directories."
+        echo "  ${B}Scope:${R}    one path per user — use linked dirs for multi-folder access."
         echo
         read -r -p "  Username: " _username
         local _adm=""
@@ -325,10 +305,11 @@ cmd_add() {
         echo
         echo "  Scope examples:"
         echo "    /           full access (all of FB_PATH)"
-        echo "    /alice      alice's private subdir"
+        echo "    /$_username    user's own private subdir (recommended with linked dirs)"
         echo "    /music      music subdir only"
         echo
-        read -r -p "  Scope for '$_username': " _scope
+        read -r -p "  Scope for '$_username': /" _scope
+        _scope="/${_scope#/}"
     fi
 
     validate_scope "$_scope" || return 1
@@ -356,7 +337,15 @@ cmd_add() {
     api_post "/api/users" "$_body" >/dev/null
     echo
     ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
-    echo "  Tip: use Modify → Linked directories to give access to more folders."
+
+    # Offer to add linked directories inline
+    if command -v docker &>/dev/null; then
+        local _do_links=""
+        read -r -p "  Add linked directories for '$_username'? [y/N]: " _do_links
+        if [[ "${_do_links,,}" == "y" ]]; then
+            prompt_add_links "$_scope" || true
+        fi
+    fi
 }
 
 # ── cmd: delete ───────────────────────────────────────────────────────────────
@@ -378,7 +367,7 @@ cmd_delete() {
     [[ "${_c,,}" == "y" ]] || { echo "  Aborted."; return 0; }
     api_delete "/api/users/$_uid" >/dev/null
     ok "User '$_username' deleted."
-    echo "  Note: any symlinks created in their scope dir still exist on disk."
+    echo "  ${DIM}Note: symlinks in their scope dir still exist on disk if you want to reuse them.${R}"
 }
 
 # ── cmd: passwd ───────────────────────────────────────────────────────────────
@@ -428,10 +417,10 @@ cmd_scope() {
     if [[ -z "$_new_scope" ]]; then
         echo
         echo "  Current scope: $_old_scope"
-        echo "  Note: existing symlinks in the old scope dir are not moved automatically."
-        echo "  Examples:  /   /music   /docs/bob   /alice"
+        echo "  ${DIM}Existing symlinks in the old scope dir are not moved automatically.${R}"
         echo
-        read -r -p "  New scope: " _new_scope
+        read -r -p "  New scope: /" _new_scope
+        _new_scope="/${_new_scope#/}"
     fi
     validate_scope "$_new_scope" || return 1
 
@@ -440,6 +429,15 @@ cmd_scope() {
     api_put "/api/users/$_uid" "$_body" >/dev/null
     echo
     ok "Scope updated for '$_username': $_old_scope → $_new_scope"
+
+    # Offer to add links into the new scope
+    if command -v docker &>/dev/null && [[ "$_new_scope" != "/" ]]; then
+        local _do_links=""
+        read -r -p "  Add linked directories into '$_new_scope'? [y/N]: " _do_links
+        if [[ "${_do_links,,}" == "y" ]]; then
+            prompt_add_links "$_new_scope" || true
+        fi
+    fi
 }
 
 # ── cmd: rename ───────────────────────────────────────────────────────────────
@@ -516,7 +514,7 @@ menu_modify() {
         echo "  2  Change password"
         echo "  3  Change scope (file path)"
         echo "  4  Toggle admin status"
-        echo "  5  Manage linked directories  ${DIM}(symlinks for multi-dir access)${R}"
+        echo "  5  Linked directories  ${DIM}(add/remove multi-folder symlinks)${R}"
         echo "  0  Back"
         echo
         local _ch=""
@@ -553,7 +551,7 @@ menu_modify() {
                     errmsg "Toggle failed."
                 fi
                 ;;
-            5) menu_symlinks "$_cur" "$_scope" || true ;;
+            5) menu_links "$_scope" || true ;;
             0) break ;;
             *) errmsg "Invalid choice." ;;
         esac
@@ -576,17 +574,12 @@ One-shot usage:
   manage_users.sh rename <username> <new-username>
   manage_users.sh info   <username>
 
-Scope is relative to /srv inside the container (= FB_PATH on the host):
-  /          full access to everything under FB_PATH
-  /alice     alice's own subdir
-  /music     music subdir only
-
+Scope is relative to /srv inside the container (= FB_PATH on the host).
 Username: letters, numbers, hyphens, underscores only. No dots or @.
 Password: min 8 chars, at least one letter and one number.
 
-Multi-directory access: use the interactive menu → Modify → Linked
-directories. This creates symlinks inside the user's scope dir so they
-see multiple folders without scope being set to /.
+Multi-directory access: use the interactive menu — linked directories
+are offered automatically when you add a user or change their scope.
 
 Override URL:  FB_URL=http://localhost:8085 ./manage_users.sh
 EOF
