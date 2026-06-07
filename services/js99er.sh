@@ -275,7 +275,7 @@ COMPOSE
     log_success "js99er configured at $JS99ER_DIR"
 
     # ── 5. Reverse proxy (no-ops if Caddy isn't installed locally) ───────────
-    configure_caddy_for_service "js99er" "$JS99ER_PORT" "js99er"
+    configure_caddy_for_service "js99er" "js99er:80" "js99er"
 
     # ── 6. Build & start ─────────────────────────────────────────────────────
     local START_JS99ER=""

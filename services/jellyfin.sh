@@ -87,7 +87,7 @@ JELLYFIN_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$JELLYFIN_DIR"
     log_success "Jellyfin configured at $JELLYFIN_DIR"
 
-    configure_caddy_for_service "Jellyfin" "8096" "jellyfin"
+    configure_caddy_for_service "Jellyfin" "jellyfin:8096" "jellyfin"
 
     write_readme "$JELLYFIN_DIR" << MD
 # Jellyfin

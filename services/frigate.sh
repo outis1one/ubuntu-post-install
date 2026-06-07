@@ -128,7 +128,7 @@ FRIGATE_CONFIG
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
     log_success "Frigate configured at $FRIGATE_DIR"
 
-    configure_caddy_for_service "Frigate" "5000" "frigate"
+    configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
 
     write_readme "$FRIGATE_DIR" << MD
 # Frigate NVR

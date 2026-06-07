@@ -62,7 +62,7 @@ FMD_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FMD_DIR"
     log_success "FindMyDevice configured at $FMD_DIR"
 
-    configure_caddy_for_service "FindMyDevice" "8084" "fmd"
+    configure_caddy_for_service "FindMyDevice" "fmd:8080" "fmd"
 
     write_readme "$FMD_DIR" << MD
 # FindMyDevice (FMD)

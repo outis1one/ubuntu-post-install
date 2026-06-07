@@ -55,7 +55,7 @@ NTFY_ENV
     echo ""
     log_success "ntfy configured at $NTFY_DIR"
 
-    configure_caddy_for_service "ntfy" "8090" "ntfy"
+    configure_caddy_for_service "ntfy" "ntfy:80" "ntfy"
 
     write_readme "$NTFY_DIR" << MD
 # ntfy

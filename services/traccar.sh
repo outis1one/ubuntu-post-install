@@ -70,7 +70,7 @@ TRACCAR_XML
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
     log_success "Traccar configured at $TRACCAR_DIR"
 
-    configure_caddy_for_service "Traccar" "8082" "traccar"
+    configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
 
     write_readme "$TRACCAR_DIR" << MD
 # Traccar

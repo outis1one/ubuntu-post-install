@@ -91,7 +91,11 @@ HA_CONFIG
     echo ""
     log_success "Home Assistant configured at $HOMEASSISTANT_DIR"
 
-    configure_caddy_for_service "Home Assistant" "8123" "home"
+    if [ "$HA_NETMODE" = "2" ]; then
+        configure_caddy_for_service "Home Assistant" "8123" "home"
+    else
+        configure_caddy_for_service "Home Assistant" "homeassistant:8123" "home"
+    fi
 
     local START_HA=""
     prompt_yn "Start Home Assistant now? (y/n):" "y" START_HA

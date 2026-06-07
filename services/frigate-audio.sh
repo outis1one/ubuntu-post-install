@@ -514,7 +514,7 @@ FNEOF
     # ── Caddy snippet ──────────────────────────────────────────────────────────
     if [ -n "$FRIGATE_PUBLIC_URL" ] && [ "$FRIGATE_PUBLIC_URL" != "https://cam.yourdomain.com" ]; then
         local _DOM="${FRIGATE_PUBLIC_URL#https://}"
-        configure_caddy_for_service "Frigate" "8971" "frigate-audio" || true
+        configure_caddy_for_service "Frigate" "frigate-audio:8971" "frigate-audio" || true
     fi
 
     ensure_docker_dir_ownership "$DIR"

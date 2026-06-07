@@ -63,7 +63,7 @@ MEALIE_COMPOSE
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MEALIE_DIR"
     log_success "Mealie configured at $MEALIE_DIR"
 
-    configure_caddy_for_service "Mealie" "9925" "recipes"
+    configure_caddy_for_service "Mealie" "mealie:9000" "recipes"
 
     write_readme "$MEALIE_DIR" << MD
 # Mealie

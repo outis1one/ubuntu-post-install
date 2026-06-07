@@ -82,8 +82,6 @@ services:
       - ACME_AGREE=true
     labels:
       - "io.podman.annotations.label/crowdsec.enable=true"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     networks:
       - caddy_net
 
@@ -123,7 +121,7 @@ CADDY_COMPOSE
 # Example:
 # myservice.yourdomain.com {
 #     import authelia
-#     reverse_proxy host.docker.internal:PORT
+#     reverse_proxy container_name:port
 # }
 
 # ActualBudget
@@ -133,7 +131,7 @@ CADDY_COMPOSE
 #         format json
 #         level INFO
 #     }
-#     reverse_proxy host.docker.internal:5006
+#     reverse_proxy actualbudget:5006
 #     header {
 #         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 #         X-Frame-Options "SAMEORIGIN"
@@ -174,7 +172,7 @@ a web service). You can also edit it by hand:
 
 ```
 myservice.example.com {
-    reverse_proxy host.docker.internal:1234
+    reverse_proxy container_name:1234
     log {
         output file /var/log/caddy/myservice.example.com.log
         format json

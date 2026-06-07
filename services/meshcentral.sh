@@ -74,7 +74,7 @@ MC_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR"
     log_success "MeshCentral configured at $MC_DIR"
 
-    configure_caddy_for_service "MeshCentral" "4430" "mesh"
+    configure_caddy_for_service "MeshCentral" "meshcentral:443" "mesh"
 
     write_readme "$MC_DIR" << MD
 # MeshCentral

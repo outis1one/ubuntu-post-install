@@ -57,7 +57,7 @@ AB_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$AB_DIR"
     log_success "Actual Budget configured at $AB_DIR"
 
-    configure_caddy_for_service "ActualBudget" "5006" "budget"
+    configure_caddy_for_service "ActualBudget" "actualbudget:5006" "budget"
 
     write_readme "$AB_DIR" << MD
 # Actual Budget

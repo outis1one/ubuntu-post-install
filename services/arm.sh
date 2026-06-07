@@ -93,7 +93,7 @@ ARM_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ARM_OUTPUT"
     log_success "A.R.M. configured at $ARM_DIR"
 
-    configure_caddy_for_service "A.R.M." "8080" "arm"
+    configure_caddy_for_service "A.R.M." "arm:8080" "arm"
 
     write_readme "$ARM_DIR" << MD
 # A.R.M. (Automatic Ripping Machine)

@@ -77,7 +77,7 @@ EMBY_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EMBY_DIR"
     log_success "Emby configured at $EMBY_DIR"
 
-    configure_caddy_for_service "Emby" "8096" "emby"
+    configure_caddy_for_service "Emby" "emby:8096" "emby"
 
     write_readme "$EMBY_DIR" << MD
 # Emby

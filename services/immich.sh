@@ -572,7 +572,7 @@ IMPORT_BODY
 
     log_success "Immich configured at $IMMICH_DIR"
 
-    configure_caddy_for_service "Immich" "2283" "immich"
+    configure_caddy_for_service "Immich" "immich-server:2283" "immich"
 
     write_readme "$IMMICH_DIR" << MD
 # Immich

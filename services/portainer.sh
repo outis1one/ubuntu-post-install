@@ -48,7 +48,7 @@ PORTAINER_COMPOSE
     echo ""
     log_success "Portainer configured at $PORTAINER_DIR"
 
-    configure_caddy_for_service "Portainer" "9000" "portainer"
+    configure_caddy_for_service "Portainer" "portainer:9000" "portainer"
 
     write_readme "$PORTAINER_DIR" << MD
 # Portainer

@@ -75,7 +75,7 @@ docker compose logs -f    # logs
 MD
 
     # Configure Caddy reverse proxy before starting
-    configure_caddy_for_service "Uptime Kuma" "3001" "uptime"
+    configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime"
 
     local START_UPTIME=""
     prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME

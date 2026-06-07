@@ -67,10 +67,20 @@ FB_SETTINGS
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
 
+    # Deploy user-management helper script
+    local _TOOLS_DIR
+    _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tools" 2>/dev/null && pwd)" || true
+    if [ -f "$_TOOLS_DIR/manage_users.sh" ]; then
+        cp "$_TOOLS_DIR/manage_users.sh" "$FB_DIR/manage_users.sh"
+        chmod 750 "$FB_DIR/manage_users.sh"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR/manage_users.sh"
+        log_success "manage_users.sh installed at $FB_DIR/manage_users.sh"
+    fi
+
     echo ""
     log_success "Filebrowser configured at $FB_DIR"
 
-    configure_caddy_for_service "FileBrowser" "8085" "files"
+    configure_caddy_for_service "FileBrowser" "filebrowser:80" "files"
 
     write_readme "$FB_DIR" << MD
 # FileBrowser

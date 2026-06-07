@@ -132,7 +132,7 @@ MM_COMPOSE
         log_success "MagicMirror instance $i configured at $MM_DIR (port $MM_PORT)"
 
         # Offer Caddy only for first instance
-        [ "$i" -eq 1 ] && configure_caddy_for_service "MagicMirror" "$MM_PORT" "mirror"
+        [ "$i" -eq 1 ] && configure_caddy_for_service "MagicMirror" "magicmirror-${MM_PORT}:8080" "mirror"
 
         local START_MM=""
         prompt_yn "Start instance $i now? (y/n):" "y" START_MM

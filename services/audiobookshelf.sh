@@ -69,7 +69,7 @@ ABS_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ABS_DIR"
     log_success "Audiobookshelf configured at $ABS_DIR"
 
-    configure_caddy_for_service "AudioBookshelf" "13378" "audiobooks"
+    configure_caddy_for_service "AudioBookshelf" "audiobookshelf:80" "audiobooks"
 
     write_readme "$ABS_DIR" << MD
 # Audiobookshelf
