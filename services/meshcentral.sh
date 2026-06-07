@@ -54,12 +54,20 @@ services:
     ports:
       - "4430:443"
       - "4433:4433"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 MC_COMPOSE
 
     cat > .env << MC_ENV
 MC_HOSTNAME=$MC_HOSTNAME
 MC_REVERSE_PROXY=false
 MC_TLS_PORT=443
+CADDY_NET=$SITE_CADDY_NET
 MC_ENV
 
     mkdir -p data files backups

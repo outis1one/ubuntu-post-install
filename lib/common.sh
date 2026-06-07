@@ -320,7 +320,7 @@ configure_caddy_for_service() {
 
 # $SERVICE_NAME
 $SERVICE_DOMAIN {
-    reverse_proxy localhost:$SERVICE_PORT
+    reverse_proxy host.docker.internal:$SERVICE_PORT
 
     # Security headers
     header {

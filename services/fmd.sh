@@ -44,10 +44,18 @@ services:
       - ./data:/fmd/data
     ports:
       - "8084:8080"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 FMD_COMPOSE
 
     cat > .env << FMD_ENV
 FMD_ADMIN_PASSWORD=$FMD_PASS
+CADDY_NET=$SITE_CADDY_NET
 FMD_ENV
 
     mkdir -p data

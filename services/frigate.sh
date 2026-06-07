@@ -71,10 +71,18 @@ $DEVICE_BLOCK
       - "8554:8554"
       - "8555:8555/tcp"
       - "8555:8555/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 FRIGATE_COMPOSE
 
     cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_MEDIA
+CADDY_NET=$SITE_CADDY_NET
 FRIGATE_ENV
 
     mkdir -p config

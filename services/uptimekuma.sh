@@ -32,6 +32,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "3001:3001"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 UPTIME_COMPOSE
 
     mkdir -p data

@@ -260,6 +260,13 @@ services:
     ports:
       - "${JS99ER_PORT}:80"
     restart: unless-stopped
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 COMPOSE
     log_success "Created js99er/docker-compose.yml"
 

@@ -63,6 +63,13 @@ services:
       - ./css:/opt/magic_mirror/css
     ports:
       - "$MM_PORT:8080"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 MM_COMPOSE
 
         mkdir -p config modules css

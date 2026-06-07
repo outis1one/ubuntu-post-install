@@ -73,10 +73,18 @@ services:
       # Add more optical drives as needed:
       # - /dev/sr1:/dev/sr1
     privileged: true
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 ARM_COMPOSE
 
     cat > .env << ARM_ENV
 ARM_OUTPUT=$ARM_OUTPUT
+CADDY_NET=$SITE_CADDY_NET
 ARM_ENV
 
     mkdir -p config logs

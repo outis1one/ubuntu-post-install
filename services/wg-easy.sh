@@ -60,11 +60,19 @@ services:
     ports:
       - "51820:51820/udp"
       - "51821:51821/tcp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 WGEASY_COMPOSE
 
     cat > .env << WGEASY_ENV
 WG_HOST=$WG_HOST
 WG_PASSWORD=$WG_PASSWORD
+CADDY_NET=$SITE_CADDY_NET
 WGEASY_ENV
 
     mkdir -p config

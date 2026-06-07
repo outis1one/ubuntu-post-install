@@ -69,10 +69,18 @@ $HWACCEL_BLOCK
       - "8096:8096"
       - "1900:1900/udp"
       - "7359:7359/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 JELLYFIN_COMPOSE
 
     cat > .env << JELLYFIN_ENV
 MEDIA_PATH=$MEDIA_PATH
+CADDY_NET=$SITE_CADDY_NET
 JELLYFIN_ENV
 
     mkdir -p config cache

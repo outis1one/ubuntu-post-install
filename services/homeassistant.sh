@@ -29,13 +29,16 @@ install_homeassistant() {
     echo "                 HomeKit, mDNS/Zeroconf, some Zigbee/Z-Wave & Bluetooth)."
     local HA_NETMODE=""
     prompt_text "  Choose networking mode [1]:" "1" HA_NETMODE
-    local HA_NET_LINES
+    local HA_NET_LINES HA_CADDY_NET_LINES
     if [ "$HA_NETMODE" = "2" ]; then
         HA_NET_LINES="    network_mode: host"
+        HA_CADDY_NET_LINES=""
         echo "  → Host networking selected (best device discovery)."
     else
         HA_NET_LINES="    ports:
       - \"8123:8123\""
+        HA_CADDY_NET_LINES="    networks:
+      - caddy_net"
         echo "  → Bridge networking selected (port 8123 published)."
     fi
 
@@ -55,6 +58,12 @@ services:
       - ./config:/config
       - /run/dbus:/run/dbus:ro
 ${HA_NET_LINES}
+${HA_CADDY_NET_LINES}
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 HOMEASSISTANT_COMPOSE
 
     mkdir -p config

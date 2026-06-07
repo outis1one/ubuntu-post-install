@@ -40,10 +40,18 @@ services:
       - ./data:/data
     env_file:
       - .env
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 AB_COMPOSE
 
     cat > .env << AB_ENV
 TZ=$TZ_VAL
+CADDY_NET=$SITE_CADDY_NET
 AB_ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$AB_DIR"

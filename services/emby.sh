@@ -59,10 +59,18 @@ services:
     # Uncomment for hardware transcoding (Intel/AMD):
     # devices:
     #   - /dev/dri:/dev/dri
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 EMBY_COMPOSE
 
     cat > .env << EMBY_ENV
 MEDIA_PATH=$MEDIA_PATH
+CADDY_NET=$SITE_CADDY_NET
 EMBY_ENV
 
     mkdir -p config

@@ -42,6 +42,13 @@ services:
       - "8082:8082"
       - "5000-5150:5000-5150"
       - "5000-5150:5000-5150/udp"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${CADDY_NET:-caddy_net}
 TRACCAR_COMPOSE
 
     mkdir -p logs data config

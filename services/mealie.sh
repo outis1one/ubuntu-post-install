@@ -50,6 +50,13 @@ services:
       - ./data:/app/data
     ports:
       - "9925:9000"
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 MEALIE_COMPOSE
 
     mkdir -p data

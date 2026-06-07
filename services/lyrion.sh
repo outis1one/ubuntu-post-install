@@ -56,10 +56,16 @@ services:
       - \${MUSIC_PATH}:/music:ro
       - ./playlists:/playlists:rw
       - /etc/localtime:/etc/localtime:ro
+
+networks:
+  caddy_net:
+    external: true
+    name: \${CADDY_NET:-caddy_net}
 LYRION_COMPOSE
 
     cat > .env << LYRION_ENV
 MUSIC_PATH=$MUSIC_PATH
+CADDY_NET=$SITE_CADDY_NET
 LYRION_ENV
 
     mkdir -p config playlists
