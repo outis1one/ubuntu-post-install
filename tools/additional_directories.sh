@@ -255,6 +255,24 @@ do_add() {
             continue
         fi
 
+        # The container path may land inside an existing bind-mount (e.g. /srv/data/...).
+        # Docker needs an empty mount-point directory to already exist on the host at that
+        # location before it can overlay the inner mount on top of the outer one.
+        # Derive the host equivalent: strip /srv/data prefix → prepend FB_PATH.
+        local _mount_point_host=""
+        if [[ "$_container_path" == /srv/data/* ]]; then
+            _mount_point_host="$_fb_path/${_container_path#/srv/data/}"
+        elif [[ "$_container_path" == /srv/* ]]; then
+            # Legacy layout: /srv IS the bind mount
+            _mount_point_host="$_fb_path/${_container_path#/srv/}"
+        fi
+
+        if [[ -n "$_mount_point_host" && ! -d "$_mount_point_host" ]]; then
+            mkdir -p "$_mount_point_host" \
+                && echo "  ${DIM}Created mount point: $_mount_point_host${R}" \
+                || { errmsg "Could not create mount point '$_mount_point_host' — check permissions."; continue; }
+        fi
+
         add_volume_entry "$_host_path" "$_container_path" && _changed=true || true
     done
 
