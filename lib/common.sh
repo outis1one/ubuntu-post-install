@@ -56,6 +56,7 @@ SITE_DOMAIN=""
 SITE_CADDY_NET="caddy_net"
 SITE_PUID=""
 SITE_PGID=""
+CADDY_REMOTE_HOST=""   # LAN IP/hostname of this machine, used when Caddy runs elsewhere
 
 load_site_config() {
     local cfg="$DOCKER_DIR/.config"
@@ -67,13 +68,14 @@ load_site_config() {
         case "$key" in
             SITE_TZ)        SITE_TZ="$val"                              ;;
             SITE_DOMAIN)    SITE_DOMAIN="$val"                          ;;
-            SITE_CADDY_NET) SITE_CADDY_NET="$val"                       ;;
-            SITE_PUID)      SITE_PUID="$val"                            ;;
-            SITE_PGID)      SITE_PGID="$val"                            ;;
-            BASE_DOMAIN)    [ -z "$SITE_DOMAIN" ] && SITE_DOMAIN="$val" ;;
+            SITE_CADDY_NET)    SITE_CADDY_NET="$val"                       ;;
+            SITE_PUID)         SITE_PUID="$val"                            ;;
+            SITE_PGID)         SITE_PGID="$val"                            ;;
+            CADDY_REMOTE_HOST) CADDY_REMOTE_HOST="$val"                    ;;
+            BASE_DOMAIN)       [ -z "$SITE_DOMAIN" ] && SITE_DOMAIN="$val" ;;
         esac
     done < "$cfg"
-    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID CADDY_REMOTE_HOST
 }
 
 save_site_config() {
@@ -85,10 +87,11 @@ save_site_config() {
         [ -n "$SITE_TZ" ]        && echo "SITE_TZ=$SITE_TZ"
         [ -n "$SITE_DOMAIN" ]    && echo "SITE_DOMAIN=$SITE_DOMAIN"
         [ -n "$SITE_CADDY_NET" ] && echo "SITE_CADDY_NET=$SITE_CADDY_NET"
-        [ -n "$SITE_PUID" ]      && echo "SITE_PUID=$SITE_PUID"
-        [ -n "$SITE_PGID" ]      && echo "SITE_PGID=$SITE_PGID"
+        [ -n "$SITE_PUID" ]         && echo "SITE_PUID=$SITE_PUID"
+        [ -n "$SITE_PGID" ]         && echo "SITE_PGID=$SITE_PGID"
+        [ -n "$CADDY_REMOTE_HOST" ] && echo "CADDY_REMOTE_HOST=$CADDY_REMOTE_HOST"
         # Backward-compat alias for services that still read BASE_DOMAIN directly
-        [ -n "$SITE_DOMAIN" ]    && echo "BASE_DOMAIN=$SITE_DOMAIN"
+        [ -n "$SITE_DOMAIN" ]       && echo "BASE_DOMAIN=$SITE_DOMAIN"
     } > "$cfg"
     chmod 600 "$cfg"
 }
@@ -276,15 +279,27 @@ configure_caddy_for_service() {
         *)   _UPSTREAM="localhost:$SERVICE_UPSTREAM"; _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
     esac
 
-    # Caddy not installed → nothing to do
-    [ -d "$DOCKER_DIR/caddy" ] || return 0
+    # ── Determine Caddy mode ──────────────────────────────────────────────────
+    # local:  Caddy container running on this machine → write Caddyfile + reload
+    # remote: Caddy on another machine → generate snippet file to copy over
+    # none:   no Caddy anywhere → silent return
+    local _CADDY_MODE="none"
+    [ -d "$DOCKER_DIR/caddy" ]   && _CADDY_MODE="local"
+    [ -n "$CADDY_REMOTE_HOST" ] && [ "$_CADDY_MODE" != "local" ] && _CADDY_MODE="remote"
+    [ "$_CADDY_MODE" = "none" ] && return 0
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  CADDY REVERSE PROXY CONFIGURATION"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "Caddy is installed. You can configure a reverse proxy for $SERVICE_NAME."
+    if [ "$_CADDY_MODE" = "remote" ]; then
+        echo "  Remote Caddy configured ($CADDY_REMOTE_HOST)."
+        echo "  A snippet file will be saved to ~/docker/caddy-snippets/ for you to"
+        echo "  copy to your Caddy machine."
+    else
+        echo "Caddy is installed. You can configure a reverse proxy for $SERVICE_NAME."
+    fi
     echo ""
 
     local CONFIGURE_CADDY=""
@@ -295,43 +310,35 @@ configure_caddy_for_service() {
         return 0
     fi
 
+    # Domain prompt — pre-fill from SITE_DOMAIN when available
     echo ""
-    echo "Enter the full domain for $SERVICE_NAME:"
-    echo "  Examples: $DEFAULT_SUBDOMAIN.example.com, $DEFAULT_SUBDOMAIN.yourdomain.com"
+    local _default_domain=""
+    if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+        _default_domain="${DEFAULT_SUBDOMAIN}.${SITE_DOMAIN}"
+        echo "  Default: $_default_domain"
+    else
+        echo "  Examples: ${DEFAULT_SUBDOMAIN}.example.com, ${DEFAULT_SUBDOMAIN}.yourdomain.com"
+    fi
     echo ""
     local SERVICE_DOMAIN=""
-    prompt_text "Domain:" "" SERVICE_DOMAIN
+    prompt_text "Domain [${_default_domain:-required}]:" "$_default_domain" SERVICE_DOMAIN
     if [ -z "$SERVICE_DOMAIN" ]; then
         echo "  ⚠ No domain provided, skipping Caddy configuration."; return 0
     fi
 
-    local CADDY_DIR="$DOCKER_DIR/caddy"
-    local CADDYFILE="$CADDY_DIR/Caddyfile"
-    local BACKUP_FILE="$CADDY_DIR/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
-
-    if [ -f "$CADDYFILE" ]; then
-        echo "  Backing up Caddyfile to: $(basename "$BACKUP_FILE")"
-        cp "$CADDYFILE" "$BACKUP_FILE"
-    else
-        echo "  Creating new Caddyfile"; touch "$CADDYFILE"
+    # Build the site block — upstream differs by mode
+    local _BLOCK_UPSTREAM="$_UPSTREAM"
+    if [ "$_CADDY_MODE" = "remote" ]; then
+        # Remote Caddy can't resolve Docker container names — use host IP + published port
+        _BLOCK_UPSTREAM="${CADDY_REMOTE_HOST}:${_DISPLAY_PORT}"
     fi
 
-    if grep -q "^${SERVICE_DOMAIN}" "$CADDYFILE" 2>/dev/null; then
-        echo "  ⚠ $SERVICE_DOMAIN already exists in Caddyfile"
-        local OVERWRITE=""
-        prompt_yn "Overwrite existing configuration? (y/n):" "n" OVERWRITE
-        if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
-            echo "  Keeping existing configuration."; return 0
-        fi
-        sed -i "/^${SERVICE_DOMAIN}/,/^}/d" "$CADDYFILE"
-    fi
-
-    echo "  Adding $SERVICE_NAME configuration to Caddyfile..."
-    cat >> "$CADDYFILE" << CADDY_BLOCK
+    local _SITE_BLOCK
+    _SITE_BLOCK="$(cat << CADDY_BLOCK
 
 # $SERVICE_NAME
-$SERVICE_DOMAIN {
-    reverse_proxy $_UPSTREAM
+${SERVICE_DOMAIN} {
+    reverse_proxy ${_BLOCK_UPSTREAM}
 
     # Security headers
     header {
@@ -346,18 +353,65 @@ $SERVICE_DOMAIN {
         output file /var/log/caddy/${SERVICE_DOMAIN}.log
         format json
     }
-$EXTRA_CONFIG
+${EXTRA_CONFIG}
 }
 CADDY_BLOCK
+)"
 
-    echo "  ✓ Configuration added to Caddyfile"
-    echo "  Reloading Caddy configuration..."
-    docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-    if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
-        echo "  ✓ $SERVICE_NAME is now accessible at: https://$SERVICE_DOMAIN"
+    # ── Local Caddy: write to Caddyfile and reload ────────────────────────────
+    if [ "$_CADDY_MODE" = "local" ]; then
+        local CADDY_DIR="$DOCKER_DIR/caddy"
+        local CADDYFILE="$CADDY_DIR/Caddyfile"
+        local BACKUP_FILE="$CADDY_DIR/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+
+        if [ -f "$CADDYFILE" ]; then
+            echo "  Backing up Caddyfile to: $(basename "$BACKUP_FILE")"
+            cp "$CADDYFILE" "$BACKUP_FILE"
+        else
+            echo "  Creating new Caddyfile"; touch "$CADDYFILE"
+        fi
+
+        if grep -q "^${SERVICE_DOMAIN}" "$CADDYFILE" 2>/dev/null; then
+            echo "  ⚠ $SERVICE_DOMAIN already exists in Caddyfile"
+            local OVERWRITE=""
+            prompt_yn "Overwrite existing configuration? (y/n):" "n" OVERWRITE
+            if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
+                echo "  Keeping existing configuration."; return 0
+            fi
+            sed -i "/^${SERVICE_DOMAIN}/,/^}/d" "$CADDYFILE"
+        fi
+
+        echo "  Adding $SERVICE_NAME configuration to Caddyfile..."
+        printf '%s\n' "$_SITE_BLOCK" >> "$CADDYFILE"
+
+        echo "  ✓ Configuration added to Caddyfile"
+        echo "  Reloading Caddy configuration..."
+        docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+        if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+            echo "  ✓ $SERVICE_NAME is now accessible at: https://$SERVICE_DOMAIN"
+        else
+            echo "  ⚠ Failed to reload Caddy. Check: docker logs caddy"
+            echo "  You can restore from backup: $BACKUP_FILE"
+        fi
+
+    # ── Remote Caddy: write snippet file ─────────────────────────────────────
     else
-        echo "  ⚠ Failed to reload Caddy. Check: docker logs caddy"
-        echo "  You can restore from backup: $BACKUP_FILE"
+        local SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
+        local SNIPPET_FILE="$SNIPPET_DIR/${DEFAULT_SUBDOMAIN}.caddy"
+        mkdir -p "$SNIPPET_DIR"
+        printf '%s\n' "$_SITE_BLOCK" > "$SNIPPET_FILE"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$SNIPPET_FILE" 2>/dev/null || true
+
+        echo "  ✓ Snippet saved: $SNIPPET_FILE"
+        echo ""
+        echo "  Copy to your Caddy machine and append to its Caddyfile:"
+        echo "    scp $SNIPPET_FILE caddy-host:~/caddy-snippets/"
+        echo "    # then on the Caddy machine:"
+        echo "    cat ~/caddy-snippets/${DEFAULT_SUBDOMAIN}.caddy >> /path/to/Caddyfile"
+        echo "    docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+        echo ""
+        echo "  Or rsync all snippets at once:"
+        echo "    rsync -av $SNIPPET_DIR/ caddy-host:~/caddy-snippets/"
     fi
     echo ""
 }
