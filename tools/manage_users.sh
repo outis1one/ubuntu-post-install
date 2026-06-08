@@ -101,17 +101,28 @@ ensure_token() {
     [[ -n "$TOKEN" ]] && return 0
     echo
     echo "  ${B}FileBrowser login${R}  ${DIM}(${FB_URL})${R}"
-    local _u _p _tok
+    local _u _p _payload _tok
     read -r -p "  Admin username [admin]: " _u
     _u="${_u:-admin}"
     read -r -s -p "  Admin password: " _p; echo
+
+    # Build JSON with jq so special characters in passwords don't break the payload
+    _payload=$(jq -n --arg u "$_u" --arg p "$_p" '{username:$u,password:$p}')
+
+    # || true prevents set -e from exiting silently on connection refused
     _tok=$(curl -s -X POST "$FB_URL/api/login" \
         -H "Content-Type: application/json" \
-        -d "{\"username\":\"$_u\",\"password\":\"$_p\"}")
-    [[ "$_tok" == *"."*"."* ]] \
-        || die "Login failed. Check credentials and that FileBrowser is running at $FB_URL"
-    TOKEN="$_tok"
-    ok "Logged in as $_u"
+        -d "$_payload") || true
+
+    if [[ -z "$_tok" ]]; then
+        die "No response from FileBrowser at $FB_URL — is it running? (docker compose up -d)"
+    elif [[ "$_tok" == *"."*"."* ]]; then
+        TOKEN="$_tok"
+        ok "Logged in as $_u"
+    else
+        echo "  FileBrowser responded: $_tok" >&2
+        die "Login failed — wrong credentials, or FileBrowser is not reachable at $FB_URL"
+    fi
 }
 
 # ── REST wrappers ─────────────────────────────────────────────────────────────
