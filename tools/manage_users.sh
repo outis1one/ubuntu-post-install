@@ -360,8 +360,7 @@ cmd_add() {
         --arg u "$_username" --arg p "$password" --arg s "$_scope" \
         --argjson perms "$_perms" \
         '{username:$u, password:$p, scope:$s, locale:"en", viewMode:"list",
-          singleClick:false, sorting:{by:"name",asc:true}, perm:$perms,
-          commands:[], lockPassword:false, hideDotfiles:false, dateFormat:false}')
+          perm:$perms, commands:[], lockPassword:false}')
 
     local _resp _http_code
     _resp=$(curl -s -w '\n%{http_code}' -X POST "$FB_URL/api/users" \
