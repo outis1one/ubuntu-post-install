@@ -222,14 +222,14 @@ FB_SETTINGS
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
 
-    # Deploy user-management helper script
+    # Deploy extra-directory helper script
     local _TOOLS_DIR
     _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tools" 2>/dev/null && pwd)" || true
-    if [ -f "$_TOOLS_DIR/manage_users.sh" ]; then
-        cp "$_TOOLS_DIR/manage_users.sh" "$FB_DIR/manage_users.sh"
-        chmod 750 "$FB_DIR/manage_users.sh"
-        chown "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR/manage_users.sh"
-        log_success "manage_users.sh installed at $FB_DIR/manage_users.sh"
+    if [ -f "$_TOOLS_DIR/additional_directories.sh" ]; then
+        cp "$_TOOLS_DIR/additional_directories.sh" "$FB_DIR/additional_directories.sh"
+        chmod 750 "$FB_DIR/additional_directories.sh"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR/additional_directories.sh"
+        log_success "additional_directories.sh installed at $FB_DIR/additional_directories.sh"
     fi
 
     echo ""
@@ -253,6 +253,13 @@ Web-based file manager. Browse, upload, and download files through a browser.
 - Per-user scope example: /alice
 - Database: ./database/filebrowser.db
 - Settings: ./config/settings.json
+
+## Users
+Create and manage users in the FileBrowser web UI.
+To give a user access to extra folders beyond their root directory:
+\`\`\`
+$FB_DIR/additional_directories.sh
+\`\`\`
 
 ## Manage
 \`\`\`
