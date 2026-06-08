@@ -184,13 +184,17 @@ services:
     environment:
       - TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
     volumes:
-      - ${FB_PATH}:/srv
+      - fb_users:/srv
+      - ${FB_PATH}:/srv/data
       - ./database/filebrowser.db:/database/filebrowser.db
       - ./config/settings.json:/config/settings.json
     ports:
       - "8085:80"
     networks:
       - caddy_net
+
+volumes:
+  fb_users:
 
 networks:
   caddy_net:
@@ -243,7 +247,10 @@ Web-based file manager. Browse, upload, and download files through a browser.
 - Default login: admin / admin (change immediately!)
 
 ## Data
-- Browsed path: $FB_PATH (mounted to /srv)
+- Browsed path: $FB_PATH (mounted to /srv/data inside container)
+- User home dirs: Docker named volume fb_users (no host clutter)
+- Admin full-access scope: /data
+- Per-user scope example: /alice
 - Database: ./database/filebrowser.db
 - Settings: ./config/settings.json
 
