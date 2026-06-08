@@ -3,6 +3,7 @@
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Based on https://github.com/outis1one/easy-asterisk
+# Source files vendored in vendor/easy-asterisk/
 # Personal/home-lab use only. Not for commercial or emergency services.
 #
 # Can also be run standalone on any machine:
@@ -153,46 +154,64 @@ install_asterisk() {
     log_info "Installing Easy Asterisk PBX..."
 
     local EA_DIR="$DOCKER_DIR/asterisk"
-    local EA_REPO="https://github.com/outis1one/easy-asterisk"
-    local EA_SCRIPT_URL="https://raw.githubusercontent.com/outis1one/easy-asterisk/main/easy-asterisk-v0.10.0.sh"
-    local EA_COTURN_URL="https://raw.githubusercontent.com/outis1one/easy-asterisk/main/docker/coturn-entrypoint.sh"
+
+    # Locate vendored source files (works when sourced by setup.sh or run standalone)
+    local _script_dir
+    _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" \
+        || _script_dir="$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")"
+    local VENDOR_DIR="$_script_dir/../vendor/easy-asterisk"
+    VENDOR_DIR="$(cd "$VENDOR_DIR" 2>/dev/null && pwd)" || VENDOR_DIR=""
+
+    if [[ -z "$VENDOR_DIR" || ! -f "$VENDOR_DIR/easy-asterisk-v0.10.0.sh" ]]; then
+        log_warning "Vendored easy-asterisk files not found at $VENDOR_DIR"
+        log_warning "Expected: vendor/easy-asterisk/ alongside services/ directory"
+        log_error "Cannot install — run from the ubuntu-post-install repo root."
+        return 1
+    fi
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $EA_DIR"
-        echo "[DRY-RUN] Would download management script and coturn entrypoint"
-        echo "[DRY-RUN] Would write docker-compose.yml, .env, Dockerfile"
+        echo "[DRY-RUN] Would copy vendored easy-asterisk files (Dockerfile, scripts, entrypoints)"
+        echo "[DRY-RUN] Would write docker-compose.yml, .env"
         echo "[DRY-RUN] Would open UFW ports for SIP/RTP/TURN"
         return 0
     fi
 
-    mkdir -p "$EA_DIR/docker"
+    mkdir -p "$EA_DIR/docker" "$EA_DIR/scripts"
     ensure_docker_dir_ownership "$EA_DIR"
     cd "$EA_DIR" || return 1
 
-    # ── Download management script ────────────────────────────────────────────
-    log_info "Downloading Easy Asterisk management script..."
-    if curl -fsSL "$EA_SCRIPT_URL" -o "$EA_DIR/easy-asterisk.sh"; then
-        chmod 750 "$EA_DIR/easy-asterisk.sh"
-        chown "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR/easy-asterisk.sh"
-        log_success "Management script saved to $EA_DIR/easy-asterisk.sh"
-    else
-        log_warning "Could not download management script — check network or fetch manually from $EA_REPO"
-    fi
+    # ── Copy vendored source files ────────────────────────────────────────────
+    log_info "Copying Easy Asterisk source files from vendor/..."
 
-    # ── Download coturn custom entrypoint ─────────────────────────────────────
-    if curl -fsSL "$EA_COTURN_URL" -o "$EA_DIR/docker/coturn-entrypoint.sh"; then
-        chmod 755 "$EA_DIR/docker/coturn-entrypoint.sh"
-    else
-        log_warning "Could not download coturn-entrypoint.sh — coturn may fail to start"
-    fi
+    cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"        "$EA_DIR/easy-asterisk.sh"
+    cp "$VENDOR_DIR/Dockerfile"                        "$EA_DIR/Dockerfile"
+    cp "$VENDOR_DIR/docker/entrypoint.sh"              "$EA_DIR/docker/entrypoint.sh"
+    cp "$VENDOR_DIR/docker/coturn-entrypoint.sh"       "$EA_DIR/docker/coturn-entrypoint.sh"
+    cp "$VENDOR_DIR/scripts/vpn-diagnostics.sh"        "$EA_DIR/scripts/vpn-diagnostics.sh"
+    cp "$VENDOR_DIR/scripts/dns-whitelist.sh"          "$EA_DIR/scripts/dns-whitelist.sh"
+
+    chmod 750 "$EA_DIR/easy-asterisk.sh"
+    chmod 755 "$EA_DIR/docker/entrypoint.sh" "$EA_DIR/docker/coturn-entrypoint.sh"
+    chmod 755 "$EA_DIR/scripts/vpn-diagnostics.sh" "$EA_DIR/scripts/dns-whitelist.sh"
+
+    log_success "Source files copied"
+
+    # ── The Dockerfile expects these paths inside the build context ───────────
+    # vendor Dockerfile: COPY easy-asterisk-v0.10.0.sh → /usr/local/bin/easy-asterisk
+    # We copy as easy-asterisk.sh locally, so symlink the expected filename for the build
+    ln -sf easy-asterisk.sh "$EA_DIR/easy-asterisk-v0.10.0.sh"
 
     # ── FQDN setup ────────────────────────────────────────────────────────────
     echo ""
-    echo "  Easy Asterisk requires a domain name (FQDN) that points to this"
-    echo "  server's public IP. SIP clients connect to this domain over TLS."
+    echo "  Easy Asterisk can run in two modes:"
     echo ""
-    echo "  For LAN-only use without a domain, leave this blank."
-    echo "  (LAN mode uses UDP — no TLS, no coturn needed.)"
+    echo "  LAN/VPN — UDP transport, no TLS, no TURN."
+    echo "            Simple setup for devices on your local network or WireGuard/Tailscale."
+    echo ""
+    echo "  FQDN    — TLS + SRTP + coturn TURN relay."
+    echo "            Works from anywhere: LAN, cellular, hotel WiFi, Proton VPN."
+    echo "            Requires a domain name pointing to this server's public IP."
     echo ""
 
     local DOMAIN_NAME=""
@@ -206,64 +225,35 @@ install_asterisk() {
         log_info "FQDN mode: $DOMAIN_NAME"
         echo ""
         echo "  Required router port forwards:"
-        echo "    5061/tcp          → SIP TLS signaling"
-        echo "    3478/udp+tcp      → STUN/TURN (NAT traversal)"
-        echo "    10000-20000/udp   → RTP media"
-        echo "    49152-49252/udp   → TURN relay range"
+        printf "    %-22s %s\n" "5061/tcp"        "SIP TLS signaling"
+        printf "    %-22s %s\n" "3478/udp+tcp"    "STUN/TURN (NAT traversal)"
+        printf "    %-22s %s\n" "10000-20000/udp" "RTP media (Asterisk)"
+        printf "    %-22s %s\n" "49152-49252/udp" "TURN relay range (coturn)"
         echo ""
     fi
 
-    # ── Generate passwords ────────────────────────────────────────────────────
+    # ── Generate TURN password ────────────────────────────────────────────────
     local TURN_PASSWORD
-    TURN_PASSWORD="$(openssl rand -base64 18 2>/dev/null || tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
-
-    # ── Dockerfile ────────────────────────────────────────────────────────────
-    cat > Dockerfile << 'DOCKERFILE'
-FROM ubuntu:24.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y \
-    asterisk \
-    asterisk-core-sounds-en-gsm \
-    asterisk-modules \
-    ca-certificates \
-    openssl \
-    curl \
-    wget \
-    tcpdump \
-    sngrep \
-    net-tools \
-    iproute2 \
-    iputils-ping \
-    python3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Management scripts (bind-mounted at runtime from host)
-COPY easy-asterisk.sh /usr/local/bin/easy-asterisk
-RUN chmod +x /usr/local/bin/easy-asterisk
-
-EXPOSE 5060/udp 5060/tcp 5061/tcp
-EXPOSE 8080/tcp 8088/tcp 8089/tcp
-EXPOSE 3478/udp
-EXPOSE 10000-10100/udp
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD asterisk -rx "core show version" 2>/dev/null | grep -q "Asterisk" || exit 1
-DOCKERFILE
+    TURN_PASSWORD="$(openssl rand -base64 18 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 24 \
+        || tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)"
 
     # ── docker-compose.yml ────────────────────────────────────────────────────
-    cat > docker-compose.yml << COMPOSE
-# Easy Asterisk — generated by ubuntu-post-install
+    # Uses the real upstream Dockerfile (FROM ubuntu:24.04 + full Asterisk install)
+    # with host networking for RTP/NAT, and the custom coturn entrypoint.
+    cat > docker-compose.yml << 'COMPOSE_EOF'
+# Easy Asterisk — managed by ubuntu-post-install
 # Manage: docker exec -it easy-asterisk easy-asterisk
-# Source: $EA_REPO
+# Source: https://github.com/outis1one/easy-asterisk
 
 services:
 
   asterisk:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: easy-asterisk
-    # Host networking: required for RTP (10000-20000/udp) and proper NAT detection
+    # Host networking: required for RTP (10000-20000/udp) and proper NAT detection.
+    # SIP clients connect directly to the host IP; Caddy is only used for the web admin.
     network_mode: host
     depends_on:
       coturn:
@@ -274,23 +264,27 @@ services:
       - asterisk-logs:/var/log/asterisk
       - asterisk-spool:/var/spool/asterisk
       - asterisk-lib:/var/lib/asterisk
-      - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
     environment:
-      - DOMAIN_NAME=\${DOMAIN_NAME}
-      - ENABLE_TLS=\${ENABLE_TLS:-y}
-      - PUBLIC_IP=\${PUBLIC_IP:-}
-      - LOCAL_CIDR=\${LOCAL_CIDR:-}
-      - HAS_VLANS=\${HAS_VLANS:-n}
-      - VLAN_SUBNETS=\${VLAN_SUBNETS:-}
-      - TURN_ENABLED=\${TURN_ENABLED:-y}
-      - TURN_SERVER=\${DOMAIN_NAME}:\${TURN_PORT:-3478}
-      - TURN_USERNAME=\${TURN_USERNAME:-easyasterisk}
-      - TURN_PASSWORD=\${TURN_PASSWORD}
-      - RTP_START=\${RTP_START:-10000}
-      - RTP_END=\${RTP_END:-20000}
-      - WEB_ADMIN_PORT=\${WEB_ADMIN_PORT:-8080}
-      - WEB_ADMIN_AUTH_DISABLED=\${WEB_ADMIN_AUTH_DISABLED:-false}
+      - DOMAIN_NAME=${DOMAIN_NAME}
+      - ENABLE_TLS=${ENABLE_TLS:-y}
+      - PUBLIC_IP=${PUBLIC_IP:-}
+      - LOCAL_CIDR=${LOCAL_CIDR:-}
+      - HAS_VLANS=${HAS_VLANS:-n}
+      - VLAN_SUBNETS=${VLAN_SUBNETS:-}
+      - TURN_ENABLED=${TURN_ENABLED:-y}
+      - TURN_SERVER=${DOMAIN_NAME}:${TURN_PORT:-3478}
+      - TURN_USERNAME=${TURN_USERNAME:-easyasterisk}
+      - TURN_PASSWORD=${TURN_PASSWORD}
+      - RTP_START=${RTP_START:-10000}
+      - RTP_END=${RTP_END:-20000}
+      - WEB_ADMIN_PORT=${WEB_ADMIN_PORT:-8080}
+      - WEB_ADMIN_AUTH_DISABLED=${WEB_ADMIN_AUTH_DISABLED:-false}
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   coturn:
     image: coturn/coturn:latest
@@ -301,17 +295,17 @@ services:
     volumes:
       - ./docker/coturn-entrypoint.sh:/coturn-entrypoint.sh:ro
     environment:
-      - PUBLIC_IP=\${PUBLIC_IP:-}
+      - PUBLIC_IP=${PUBLIC_IP:-}
     command:
       - -n
-      - --listening-port=\${TURN_PORT:-3478}
+      - --listening-port=${TURN_PORT:-3478}
       - --listening-ip=0.0.0.0
       - --fingerprint
       - --lt-cred-mech
-      - --user=\${TURN_USERNAME:-easyasterisk}:\${TURN_PASSWORD}
-      - --realm=\${DOMAIN_NAME:-localhost}
-      - --min-port=\${TURN_RELAY_MIN:-49152}
-      - --max-port=\${TURN_RELAY_MAX:-49252}
+      - --user=${TURN_USERNAME:-easyasterisk}:${TURN_PASSWORD}
+      - --realm=${DOMAIN_NAME:-localhost}
+      - --min-port=${TURN_RELAY_MIN:-49152}
+      - --max-port=${TURN_RELAY_MAX:-49252}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -325,7 +319,7 @@ volumes:
   asterisk-logs:
   asterisk-spool:
   asterisk-lib:
-COMPOSE
+COMPOSE_EOF
 
     # ── .env ─────────────────────────────────────────────────────────────────
     cat > .env << ENV
@@ -338,34 +332,33 @@ DOMAIN_NAME=$DOMAIN_NAME
 # Public IP — leave empty to auto-detect
 PUBLIC_IP=
 
-# TLS — set to 'n' for LAN-only mode
+# TLS — always 'y' for remote access, 'n' for LAN-only
 ENABLE_TLS=$( [[ "$LAN_ONLY" == "true" ]] && echo "n" || echo "y" )
 
 # Local network CIDR — auto-detected if empty
 LOCAL_CIDR=
 
-# Additional subnets for site-to-site VPNs (WireGuard, Tailscale mesh)
-# NOT needed for client-side VPNs (Proton, NordVPN) — TURN handles those
+# Additional subnets for site-to-site VPNs (WireGuard/Tailscale mesh, NOT client-side)
 HAS_VLANS=n
 VLAN_SUBNETS=
 
-# TURN/STUN credentials (coturn)
-# Generate new password: openssl rand -base64 18
+# TURN/STUN credentials — must match in both Asterisk and coturn
+# Regenerate: openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c 24
 TURN_USERNAME=easyasterisk
 TURN_PASSWORD=$TURN_PASSWORD
 
-# TURN port (default 3478 — change if conflicting with UniFi controller)
+# TURN port (change to 3479 if 3478 conflicts with UniFi controller or Mattermost)
 TURN_PORT=3478
 
-# TURN relay port range (forward this range on your router)
+# TURN relay port range — forward this range on your router
 TURN_RELAY_MIN=49152
 TURN_RELAY_MAX=49252
 
-# RTP media port range
+# RTP media port range — forward this range on your router
 RTP_START=10000
 RTP_END=20000
 
-# Web admin interface port
+# Web admin interface
 WEB_ADMIN_PORT=8080
 WEB_ADMIN_AUTH_DISABLED=false
 ENV
@@ -376,18 +369,19 @@ ENV
     # ── UFW firewall rules ────────────────────────────────────────────────────
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         log_info "Opening UFW ports for Asterisk..."
-        ufw allow 5060/udp comment "Asterisk SIP UDP"
-        ufw allow 5060/tcp comment "Asterisk SIP TCP"
-        ufw allow 5061/tcp comment "Asterisk SIP TLS"
-        ufw allow 8080/tcp comment "Asterisk web admin"
-        ufw allow 3478/udp comment "coturn STUN/TURN"
-        ufw allow 3478/tcp comment "coturn STUN/TURN TCP"
-        ufw allow 10000:20000/udp comment "Asterisk RTP media"
-        ufw allow 49152:49252/udp comment "coturn TURN relay"
+        ufw allow 5060/udp  comment "Asterisk SIP UDP"    >/dev/null
+        ufw allow 5060/tcp  comment "Asterisk SIP TCP"    >/dev/null
+        ufw allow 5061/tcp  comment "Asterisk SIP TLS"    >/dev/null
+        ufw allow 8080/tcp  comment "Asterisk web admin"  >/dev/null
+        ufw allow 3478/udp  comment "coturn STUN/TURN UDP" >/dev/null
+        ufw allow 3478/tcp  comment "coturn STUN/TURN TCP" >/dev/null
+        ufw allow 10000:20000/udp comment "Asterisk RTP media"  >/dev/null
+        ufw allow 49152:49252/udp comment "coturn TURN relay"   >/dev/null
         log_success "UFW rules added"
     else
         log_info "UFW not active — open these ports manually if needed:"
-        log_info "  5060/udp+tcp, 5061/tcp, 3478/udp+tcp, 10000-20000/udp, 49152-49252/udp"
+        log_info "  5060/udp+tcp, 5061/tcp, 8080/tcp, 3478/udp+tcp"
+        log_info "  10000-20000/udp (RTP), 49152-49252/udp (TURN relay)"
     fi
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR"
@@ -400,28 +394,32 @@ ENV
 # Easy Asterisk PBX
 
 Home intercom / VoIP system built on Asterisk with self-hosted coturn TURN server.
-Personal/home-lab use only. Source: $EA_REPO
+Personal/home-lab use only. Source: https://github.com/outis1one/easy-asterisk
 
 ## Access
 - Web admin:  http://localhost:8080/clients
-- FQDN mode:  $( [[ -n "$DOMAIN_NAME" ]] && echo "$DOMAIN_NAME" || echo "(LAN-only — no domain configured)" )
+- FQDN:       $( [[ -n "$DOMAIN_NAME" ]] && echo "$DOMAIN_NAME" || echo "(LAN-only — no domain)" )
 
-## Quick start
+## Management
 \`\`\`bash
-# Interactive management menu
+# Interactive management menu (add devices, provisioning, diagnostics)
 docker exec -it easy-asterisk easy-asterisk
 
-# Or run the script directly (requires the container to be running)
-sudo bash $EA_DIR/easy-asterisk.sh
+# VPN diagnostics
+docker exec -it easy-asterisk vpn-diagnostics
+
+# DNS whitelist check
+docker exec -it easy-asterisk dns-whitelist
 \`\`\`
 
 ## Adding devices
-Run the management menu and choose "Device Management → Add device".
-Each device gets a SIP extension, password, and setup instructions for Linphone or Baresip.
+Run the management menu → Device Management → Add device.
+Each device gets a SIP extension, password, and setup instructions
+for Linphone (remote provisioning) or Baresip (manual).
 
-## Connection types
-- **LAN/VPN**: UDP, no encryption — for devices on the local network or WireGuard/Tailscale
-- **FQDN**: TLS + SRTP — for devices anywhere on the internet
+## Connection modes
+- **LAN/VPN**: UDP, no encryption — local network or WireGuard/Tailscale
+- **FQDN**: TLS + SRTP + coturn TURN relay — works from anywhere
 
 ## Router port forwards (FQDN mode)
 | Port | Protocol | Service |
@@ -431,18 +429,19 @@ Each device gets a SIP extension, password, and setup instructions for Linphone 
 | 10000-20000 | UDP | RTP media |
 | 49152-49252 | UDP | TURN relay |
 
-## TURN credentials
-Username: easyasterisk
-Password: (see .env)
+## TURN credentials (for SIP clients behind strict NAT)
+- Server:   \${DOMAIN_NAME}:3478
+- Username: easyasterisk
+- Password: (see .env → TURN_PASSWORD)
 
 ## Manage
 \`\`\`bash
 cd $EA_DIR
-docker compose up -d                           # start
-docker compose down                            # stop
-docker compose logs -f                         # logs
-docker compose pull && docker compose up -d    # update coturn image
-docker compose build --pull && docker compose up -d  # rebuild Asterisk image
+docker compose up -d                                      # start
+docker compose down                                       # stop
+docker compose logs -f                                    # logs
+docker compose pull                                       # update coturn image
+docker compose build --pull && docker compose up -d      # rebuild Asterisk image
 \`\`\`
 MD
 
@@ -459,8 +458,7 @@ MD
                 echo "  Web admin:   http://localhost:8080/clients"
                 echo "  Management:  docker exec -it easy-asterisk easy-asterisk"
                 echo ""
-                log_info "Run the management script to add your first device:"
-                log_info "  docker exec -it easy-asterisk easy-asterisk"
+                log_info "Next: add your first device via the management menu."
             else
                 log_warning "Start failed — check: docker compose logs"
             fi
