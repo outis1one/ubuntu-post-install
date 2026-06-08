@@ -197,10 +197,10 @@ install_asterisk() {
 
     log_success "Source files copied"
 
-    # ── The Dockerfile expects these paths inside the build context ───────────
-    # vendor Dockerfile: COPY easy-asterisk-v0.10.0.sh → /usr/local/bin/easy-asterisk
-    # We copy as easy-asterisk.sh locally, so symlink the expected filename for the build
-    ln -sf easy-asterisk.sh "$EA_DIR/easy-asterisk-v0.10.0.sh"
+    # The Dockerfile COPYs easy-asterisk-v0.10.0.sh (the versioned name).
+    # We keep easy-asterisk.sh as the canonical name and make a real copy
+    # with the versioned filename so Docker COPY works reliably (no symlinks).
+    cp "$EA_DIR/easy-asterisk.sh" "$EA_DIR/easy-asterisk-v0.10.0.sh"
 
     # ── FQDN setup ────────────────────────────────────────────────────────────
     echo ""
@@ -264,6 +264,8 @@ services:
       - asterisk-logs:/var/log/asterisk
       - asterisk-spool:/var/spool/asterisk
       - asterisk-lib:/var/lib/asterisk
+      # Bind-mount the management script so updates don't require a rebuild
+      - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
     environment:
       - DOMAIN_NAME=${DOMAIN_NAME}
       - ENABLE_TLS=${ENABLE_TLS:-y}
@@ -272,7 +274,7 @@ services:
       - HAS_VLANS=${HAS_VLANS:-n}
       - VLAN_SUBNETS=${VLAN_SUBNETS:-}
       - TURN_ENABLED=${TURN_ENABLED:-y}
-      - TURN_SERVER=${DOMAIN_NAME}:${TURN_PORT:-3478}
+      - TURN_SERVER=${TURN_SERVER}
       - TURN_USERNAME=${TURN_USERNAME:-easyasterisk}
       - TURN_PASSWORD=${TURN_PASSWORD}
       - RTP_START=${RTP_START:-10000}
@@ -347,6 +349,10 @@ VLAN_SUBNETS=
 TURN_USERNAME=easyasterisk
 TURN_PASSWORD=$TURN_PASSWORD
 
+# TURN server address — auto-set based on FQDN or LAN mode above
+# LAN-only: leave empty (coturn not used). FQDN mode: domain:port
+TURN_SERVER=$( [[ "$LAN_ONLY" == "true" ]] && echo "" || echo "${DOMAIN_NAME}:3478" )
+
 # TURN port (change to 3479 if 3478 conflicts with UniFi controller or Mattermost)
 TURN_PORT=3478
 
@@ -369,18 +375,22 @@ ENV
     # ── UFW firewall rules ────────────────────────────────────────────────────
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
         log_info "Opening UFW ports for Asterisk..."
-        ufw allow 5060/udp  comment "Asterisk SIP UDP"    >/dev/null
-        ufw allow 5060/tcp  comment "Asterisk SIP TCP"    >/dev/null
-        ufw allow 5061/tcp  comment "Asterisk SIP TLS"    >/dev/null
-        ufw allow 8080/tcp  comment "Asterisk web admin"  >/dev/null
-        ufw allow 3478/udp  comment "coturn STUN/TURN UDP" >/dev/null
-        ufw allow 3478/tcp  comment "coturn STUN/TURN TCP" >/dev/null
+        ufw allow 5060/udp  comment "Asterisk SIP UDP"         >/dev/null
+        ufw allow 5060/tcp  comment "Asterisk SIP TCP"         >/dev/null
+        ufw allow 5061/tcp  comment "Asterisk SIP TLS"         >/dev/null
+        ufw allow 8080/tcp  comment "Asterisk web admin"       >/dev/null
+        ufw allow 8088/tcp  comment "Asterisk HTTP provision"  >/dev/null
+        ufw allow 8089/tcp  comment "Asterisk HTTPS provision" >/dev/null
+        ufw allow 3478/udp  comment "coturn STUN/TURN UDP"     >/dev/null
+        ufw allow 3478/tcp  comment "coturn STUN/TURN TCP"     >/dev/null
         ufw allow 10000:20000/udp comment "Asterisk RTP media"  >/dev/null
         ufw allow 49152:49252/udp comment "coturn TURN relay"   >/dev/null
         log_success "UFW rules added"
     else
         log_info "UFW not active — open these ports manually if needed:"
-        log_info "  5060/udp+tcp, 5061/tcp, 8080/tcp, 3478/udp+tcp"
+        log_info "  5060/udp+tcp, 5061/tcp"
+        log_info "  8080/tcp (web admin), 8088/tcp, 8089/tcp (provisioning)"
+        log_info "  3478/udp+tcp (STUN/TURN)"
         log_info "  10000-20000/udp (RTP), 49152-49252/udp (TURN relay)"
     fi
 
@@ -421,6 +431,17 @@ for Linphone (remote provisioning) or Baresip (manual).
 - **LAN/VPN**: UDP, no encryption — local network or WireGuard/Tailscale
 - **FQDN**: TLS + SRTP + coturn TURN relay — works from anywhere
 
+## Caddy and phone calls
+Asterisk uses **host networking** — SIP signaling and RTP media connect
+directly to the server, completely bypassing Caddy. Do NOT put SIP ports
+behind a reverse proxy (Contact header rewriting will break registration).
+
+Caddy only handles the **web admin** (port 8080) for HTTPS browser access.
+
+The **provisioning server** (ports 8088/8089) is Asterisk's built-in HTTP
+server for Linphone XML config delivery. Access it directly by IP/domain,
+not through Caddy — SIP clients fetch it at startup before registering.
+
 ## Router port forwards (FQDN mode)
 | Port | Protocol | Service |
 |------|----------|---------|
@@ -428,6 +449,7 @@ for Linphone (remote provisioning) or Baresip (manual).
 | 3478 | UDP+TCP | STUN/TURN |
 | 10000-20000 | UDP | RTP media |
 | 49152-49252 | UDP | TURN relay |
+| 8088 | TCP | Provisioning (Linphone XML) — optional |
 
 ## TURN credentials (for SIP clients behind strict NAT)
 - Server:   \${DOMAIN_NAME}:3478
