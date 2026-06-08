@@ -220,7 +220,7 @@ cmd_remove() {
     local i=1
     for p in "${paths[@]}"; do
         local name
-        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name" "$config" 2>/dev/null || echo "")
+        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "(unnamed)")
         printf "  %2d)  %-20s  %s\n" "$i" "${name:-?}" "$p"
         (( i++ ))
     done
@@ -256,12 +256,12 @@ cmd_show() {
 
     local count=0
     while IFS= read -r p; do
-        local name enabled readonly
-        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name" "$config" 2>/dev/null || echo "?")
-        enabled=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled" "$config" 2>/dev/null || echo "false")
-        readonly=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.readOnly" "$config" 2>/dev/null || echo "false")
+        local name enabled ro
+        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "?")
+        enabled=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled // false" "$config" 2>/dev/null || echo "false")
+        ro=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.readOnly // false" "$config" 2>/dev/null || echo "false")
         printf "  %-20s  %-35s  defaultEnabled=%-5s  readOnly=%s\n" \
-            "${name}" "${p}" "${enabled}" "${readonly}"
+            "${name}" "${p}" "${enabled}" "${ro}"
         (( count++ ))
     done < <(list_sources "$config")
 
