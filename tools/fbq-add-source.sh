@@ -107,13 +107,16 @@ backup() {
 # ── Check if a source path already exists in config ──────────────────────────
 source_exists() {
     local config="$1" path="$2"
-    yq e '.server.sources[].path' "$config" 2>/dev/null | grep -qxF "$path"
+    sed 's/[[:space:]]*#.*$//' "$config" \
+        | yq e '.server.sources[].path' - 2>/dev/null \
+        | grep -qxF "$path"
 }
 
 # ── List existing sources ─────────────────────────────────────────────────────
 list_sources() {
     local config="$1"
-    yq e '.server.sources[] | .path' "$config" 2>/dev/null
+    # Strip inline comments before parsing — yq can mishandle them mid-array
+    sed 's/[[:space:]]*#.*$//' "$config" | yq e '.server.sources[] | .path' - 2>/dev/null
 }
 
 # ── Restart the container ─────────────────────────────────────────────────────
@@ -179,6 +182,9 @@ cmd_add() {
         [[ "${read_only_bool_raw,,}" == "y" ]] && read_only_bool="true"
 
         backup "$config"
+        # Strip inline comments first so yq edits cleanly
+        local tmp; tmp=$(mktemp)
+        sed 's/[[:space:]]*#.*$//' "$config" > "$tmp" && mv "$tmp" "$config"
         yq e -i ".server.sources += [{
             \"path\": \"${container_path}\",
             \"name\": \"${source_name}\",
