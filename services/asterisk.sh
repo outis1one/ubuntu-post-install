@@ -396,8 +396,20 @@ ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR"
 
-    # ── Caddy for web admin ───────────────────────────────────────────────────
-    configure_caddy_for_service "Asterisk Web Admin" "localhost:8080" "asterisk"
+    # ── Caddy for web admin (with optional Authelia SSO) ──────────────────────
+    # The web admin has no built-in auth; let Authelia gate it if available.
+    local EA_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
+        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
+            EA_EXTRA_BLOCK="    import authelia"
+            # Tell Asterisk's web admin to skip its own auth — Authelia handles it
+            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" "$EA_DIR/.env"
+            log_info "WEB_ADMIN_AUTH_DISABLED=true set (Authelia will handle authentication)"
+        fi
+    fi
+    configure_caddy_for_service "Asterisk Web Admin" "localhost:8080" "asterisk" "$EA_EXTRA_BLOCK"
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << MD

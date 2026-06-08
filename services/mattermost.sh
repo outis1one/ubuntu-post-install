@@ -232,6 +232,7 @@ services:
         condition: service_healthy
     ports:
       - "8065:8065"
+      - "8443:8443/udp"   # Calls plugin RTC server (WebRTC direct path)
     volumes:
       - ./data:/mattermost/data
       - ./logs:/mattermost/logs
@@ -312,16 +313,17 @@ ENV
     echo ""
     log_info "Firewall — Mattermost coturn uses port 3479 (avoiding conflict with Easy Asterisk on 3478)."
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        log_info "Opening UFW ports for Mattermost coturn..."
-        ufw allow 3479/udp  comment "Mattermost coturn STUN/TURN"
-        ufw allow 3479/tcp  comment "Mattermost coturn STUN/TURN TCP"
-        ufw allow 49153:49352/udp comment "Mattermost coturn relay"
+        log_info "Opening UFW ports for Mattermost..."
+        ufw allow 8443/udp  comment "Mattermost Calls RTC server"  >/dev/null
+        ufw allow 3479/udp  comment "Mattermost coturn STUN/TURN"  >/dev/null
+        ufw allow 3479/tcp  comment "Mattermost coturn STUN/TURN"  >/dev/null
+        ufw allow 49153:49352/udp comment "Mattermost coturn relay" >/dev/null
         log_success "UFW rules added"
     else
         log_info "UFW not active — add these rules manually if needed:"
-        echo "    ufw allow 3479/udp  comment \"Mattermost coturn STUN/TURN\""
-        echo "    ufw allow 3479/tcp  comment \"Mattermost coturn STUN/TURN TCP\""
-        echo "    ufw allow 49153:49352/udp comment \"Mattermost coturn relay\""
+        echo "    ufw allow 8443/udp  # Mattermost Calls RTC"
+        echo "    ufw allow 3479/udp && ufw allow 3479/tcp  # coturn STUN/TURN"
+        echo "    ufw allow 49153:49352/udp  # coturn relay"
     fi
 
     # ── Router port-forward instructions ──────────────────────────────────────
@@ -331,15 +333,62 @@ ENV
     echo "  ├──────────────────┬──────────┬──────────────────────────────────┤"
     echo "  │  Port(s)         │ Protocol │ Service                          │"
     echo "  ├──────────────────┼──────────┼──────────────────────────────────┤"
+    echo "  │  8443            │ UDP      │ Calls plugin RTC (direct WebRTC) │"
     echo "  │  3479            │ UDP+TCP  │ coturn STUN/TURN                 │"
     echo "  │  49153–49352     │ UDP      │ coturn relay range               │"
     echo "  └──────────────────┴──────────┴──────────────────────────────────┘"
+    echo ""
+    echo "  ⚠  WebRTC (Calls) requires HTTPS. Calls will not work if Mattermost"
+    echo "     is accessed over plain HTTP. Configure Caddy with a domain below."
     echo ""
 
     ensure_docker_dir_ownership "$DIR"
 
     # ── Caddy reverse proxy ───────────────────────────────────────────────────
-    configure_caddy_for_service "Mattermost" "mattermost:8065" "chat"
+    # Mattermost's SITEURL must match the public URL for WebRTC (Calls) to work.
+    # If the user configures a Caddy domain here, update SITEURL in .env to match.
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        local _mm_domain=""
+        prompt_text "Caddy domain for Mattermost (e.g. chat.${SITE_DOMAIN:-example.com}) [skip]:" "" _mm_domain
+        if [[ -n "$_mm_domain" ]]; then
+            # Update SITEURL before wiring Caddy so the running container gets the right value
+            sed -i "s|^MATTERMOST_SITE_URL=.*|MATTERMOST_SITE_URL=https://$_mm_domain|" "$DIR/.env"
+            log_info "SITEURL updated → https://$_mm_domain (WebRTC requires HTTPS)"
+            # Write Caddyfile block directly (configure_caddy_for_service would prompt again)
+            local _caddyfile="$DOCKER_DIR/caddy/Caddyfile"
+            local _bk="$DOCKER_DIR/caddy/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+            [[ -f "$_caddyfile" ]] && cp "$_caddyfile" "$_bk" && log_info "Backed up Caddyfile"
+            if grep -q "^${_mm_domain}" "$_caddyfile" 2>/dev/null; then
+                log_warning "$_mm_domain already in Caddyfile — skipping block write"
+            else
+                cat >> "$_caddyfile" << MMCADDY
+
+# Mattermost
+$_mm_domain {
+    reverse_proxy mattermost:8065
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${_mm_domain}.log
+        format json
+    }
+}
+MMCADDY
+                docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                    log_success "Mattermost accessible at: https://$_mm_domain"
+                else
+                    log_warning "Caddy reload failed — check: docker logs caddy"
+                fi
+            fi
+        fi
+    fi
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$DIR" << MD
@@ -358,26 +407,29 @@ The first user to sign up becomes the System Admin.
 
 ## Calls plugin (voice/video)
 The Mattermost Calls plugin provides voice/video channels.
+**WebRTC requires HTTPS** — calls will not work over plain HTTP.
 
 ### Enable the plugin
 1. Go to **System Console → Plugins → Plugin Management**
 2. Enable the **Calls** plugin (pre-installed in Team Edition)
 
-### Configure TURN server
+### Configure ICE / TURN server
 1. Go to **System Console → Plugins → Calls**
-2. Set **TURN server URL**: \`turn:<your-server-ip>:3479\`
-3. Set **TURN credentials type**: Static credentials (auth secret)
-4. Set **TURN static auth secret**: (see TURN_SECRET in \`$DIR/.env\`)
-5. Save and test a call
+2. Set **RTC Server Address**: your server's public IP or domain
+3. Set **TURN server URL**: \`turn:<your-server-or-ip>:3479\`
+4. Set **TURN credentials type**: Static credentials (auth secret)
+5. Set **TURN static auth secret**: (see \`TURN_SECRET\` in \`$DIR/.env\`)
+6. Save and test a call in a channel
 
-Clients outside your LAN need the TURN server to relay media. The coturn
-container listens on port 3479 (UDP+TCP) with relay range 49153–49352/UDP.
+Direct WebRTC (port 8443/UDP) is tried first; coturn relay is the fallback
+for clients behind strict NAT (cellular, hotel WiFi, Proton VPN, etc.).
 
 ## Router port-forwards (for external calls)
-| Port(s)      | Protocol | Service            |
-|--------------|----------|--------------------|
-| 3479         | UDP+TCP  | coturn STUN/TURN   |
-| 49153–49352  | UDP      | coturn relay range |
+| Port(s)      | Protocol | Service                         |
+|--------------|-----------|---------------------------------|
+| 8443         | UDP       | Calls plugin RTC (direct path)  |
+| 3479         | UDP+TCP   | coturn STUN/TURN                |
+| 49153–49352  | UDP       | coturn relay range              |
 
 ## Manage
 \`\`\`bash
