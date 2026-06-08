@@ -257,6 +257,12 @@ NEXTCLOUD_ADMIN_USER=admin
 NEXTCLOUD_ADMIN_PASSWORD=$NC_ADMIN_PASS
 NEXTCLOUD_DB_TYPE=mysql
 MYSQL_HOST=db
+
+# ── Reverse proxy trust (required when behind Caddy) ─────────────────────────
+# Without these, share links use http:// and internal redirects may break.
+OVERWRITEPROTOCOL=https
+OVERWRITECLIURL=https://cloud.${SITE_DOMAIN:-example.com}
+TRUSTED_PROXIES=172.16.0.0/12
 NC_ENV
 
     chmod 600 .env

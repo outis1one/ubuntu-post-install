@@ -220,10 +220,8 @@ services:
     env_file: .env
     volumes:
       - ./vaultwarden_data:/data
-    expose:
-      - "80"
     ports:
-      - "3012:3012"    # WebSocket (legacy — not needed for Vaultwarden v1.29+)
+      - "8888:80"
     networks:
       - caddy_net
 
@@ -250,8 +248,6 @@ ADMIN_TOKEN=$ADMIN_TOKEN
 SIGNUPS_ALLOWED=false
 SIGNUPS_VERIFY=false
 
-# WebSocket notifications (v1.29+: built into port 80, no separate port needed)
-WEBSOCKET_ENABLED=true
 
 # ── SMTP (optional — for password-reset and invite emails) ────────────────────
 SMTP_HOST=$SMTP_HOST

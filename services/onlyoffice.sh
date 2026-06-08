@@ -299,7 +299,13 @@ OO_ENV
     chmod 600 .env
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DIR"
 
-    configure_caddy_for_service "OnlyOffice" "onlyoffice:80" "office"
+    # OnlyOffice must be embeddable as an iframe in Nextcloud/FileBrowser.
+    # Override X-Frame-Options to allow same-site embedding (remove SAMEORIGIN restriction).
+    local OO_EXTRA_BLOCK='    header {
+        -X-Frame-Options
+        Content-Security-Policy "frame-ancestors '\''self'\'' *"
+    }'
+    configure_caddy_for_service "OnlyOffice" "onlyoffice:80" "office" "$OO_EXTRA_BLOCK"
 
     local START=""
     prompt_yn "Start OnlyOffice now? (y/n):" "y" START
