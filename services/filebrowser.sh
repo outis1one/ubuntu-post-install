@@ -75,10 +75,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         }
     fi
 
-    # Globals — use existing site config values if present, otherwise sensible defaults
-    DOCKER_DIR="${DOCKER_DIR:-$HOME/docker}"
+    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
+    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
-    ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "$HOME")"
+    ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
+    DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
     DRY_RUN="${DRY_RUN:-false}"
     UNATTENDED="${UNATTENDED:-false}"
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
