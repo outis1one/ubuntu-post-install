@@ -177,10 +177,6 @@ cmd_add() {
         read -r -p "  Enable for all users by default? [y/N]: " yn
         [[ "${yn,,}" == "y" ]] && default_enabled_bool="true"
 
-        local read_only_bool="false"
-        read -r -p "  Read-only? [y/N]: " read_only_bool_raw
-        [[ "${read_only_bool_raw,,}" == "y" ]] && read_only_bool="true"
-
         backup "$config"
         # Strip inline comments first so yq edits cleanly
         local tmp; tmp=$(mktemp)
@@ -189,8 +185,7 @@ cmd_add() {
             \"path\": \"${container_path}\",
             \"name\": \"${source_name}\",
             \"config\": {
-                \"defaultEnabled\": ${default_enabled_bool},
-                \"readOnly\": ${read_only_bool}
+                \"defaultEnabled\": ${default_enabled_bool}
             }
         }]" "$config"
 
@@ -265,9 +260,8 @@ cmd_show() {
         local name enabled ro
         name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "?")
         enabled=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled // false" "$config" 2>/dev/null || echo "false")
-        ro=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.readOnly // false" "$config" 2>/dev/null || echo "false")
-        printf "  %-20s  %-35s  defaultEnabled=%-5s  readOnly=%s\n" \
-            "${name}" "${p}" "${enabled}" "${ro}"
+        printf "  %-20s  %-35s  defaultEnabled=%s\n" \
+            "${name}" "${p}" "${enabled}"
         count=$(( count + 1 ))
     done < <(list_sources "$config")
 
