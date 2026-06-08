@@ -2,7 +2,7 @@
 # services/base.sh — essential CLI packages installed on every box.
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service base base "Essential CLI packages (net-tools, git, htop, glow, …)"
+register_service base base "Essential CLI packages (net-tools, git, htop, btop, glow, …)"
 
 install_base() {
     log_info "Installing essential packages..."
@@ -10,7 +10,7 @@ install_base() {
 
     # Core utilities present on every install.
     run_cmd apt-get install -y \
-        net-tools ncdu git curl wget htop tree zip unzip \
+        net-tools ncdu git curl wget htop btop tree zip unzip \
         ca-certificates gnupg jq rsync || log_warning "Some essential packages failed to install"
 
     # glow — terminal markdown reader (charmbracelet). Not in Ubuntu repos,
