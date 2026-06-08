@@ -181,13 +181,26 @@ install_wg-easy() {
     cd "$WGEASY_DIR" || return 1
 
     # Auto-detect public IP as default for WG_HOST
-    local PUBLIC_IP WG_HOST WG_PASSWORD
+    local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
     PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
     WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
 
-    cat > docker-compose.yml << 'WGEASY_COMPOSE'
+    # wg-easy v14+ requires PASSWORD_HASH (bcrypt). Generate via docker.
+    log_info "Generating bcrypt password hash (requires Docker)..."
+    WG_PASSWORD_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy:latest wgpw "$WG_PASSWORD" 2>/dev/null \
+        | grep -oP '\$2[ab]\$[^\s]+' | head -1)
+    if [[ -z "$WG_PASSWORD_HASH" ]]; then
+        log_warning "Could not generate bcrypt hash — falling back to plaintext PASSWORD env var."
+        log_warning "If wg-easy fails to start, run: docker run --rm ghcr.io/wg-easy/wg-easy wgpw 'yourpassword'"
+        log_warning "Then set PASSWORD_HASH in docker-compose.yml and remove PASSWORD."
+    fi
+
+    # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
+    local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
+
+    cat > docker-compose.yml << WGEASY_COMPOSE
 name: wg-easy
 
 services:
@@ -203,8 +216,8 @@ services:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
     environment:
-      - WG_HOST=${WG_HOST}
-      - PASSWORD=${WG_PASSWORD}
+      - WG_HOST=\${WG_HOST}
+      - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
       - WG_DEFAULT_DNS=1.1.1.1
     volumes:
       - ./config:/etc/wireguard
@@ -217,11 +230,12 @@ services:
 networks:
   caddy_net:
     external: true
-    name: ${CADDY_NET:-caddy_net}
+    name: \${CADDY_NET:-caddy_net}
 WGEASY_COMPOSE
 
     cat > .env << WGEASY_ENV
 WG_HOST=$WG_HOST
+# Plain-text password — used only if PASSWORD_HASH could not be generated above
 WG_PASSWORD=$WG_PASSWORD
 CADDY_NET=$SITE_CADDY_NET
 WGEASY_ENV
@@ -270,6 +284,8 @@ MD
     echo ""
     echo "  Web UI:   http://localhost:51821"
     echo "  Password: $WG_PASSWORD  (saved in .env)"
+    [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
+        || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
     echo "  Router:   forward UDP 51820 → this server for external VPN access"
     echo ""
 }
