@@ -442,7 +442,24 @@ COMPOSE
         fi
     fi
 
-    # ── 7. Access summary ────────────────────────────────────────────────────
+    write_readme "$JS99ER_DIR" << MD
+# js99er — TI-99/4A Emulator
+
+Browser-based TI-99/4A emulator. No built-in auth — protect with Authelia if exposing externally.
+
+## Access
+- URL: http://localhost:${JS99ER_PORT}
+- Online (no install): https://js99er.net
+
+## Manage
+\`\`\`bash
+cd $JS99ER_DIR
+docker compose up -d --build               # start (or rebuild)
+docker compose down                        # stop
+docker compose logs -f                     # logs
+\`\`\`
+MD
+
     echo ""
     echo "  Access at:  http://localhost:${JS99ER_PORT}"
     echo "  If you set a domain above, it is also reachable via that domain (HTTPS)."
