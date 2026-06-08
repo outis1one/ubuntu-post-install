@@ -1,12 +1,15 @@
 #!/bin/bash
-# services/filebrowser.sh — FileBrowser Quantum web-based file manager.
+# services/my-service.sh — One-line description.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
-#   sudo bash filebrowser.sh
+#   sudo bash my-service.sh
 # (Docker must already be installed when run standalone)
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
+# Detected when the script is executed directly rather than sourced by setup.sh.
+# Sets up helpers and globals, then defers execution until after the function
+# definition at the bottom of this file.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 
@@ -14,8 +17,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _COMMON="$_SELF_DIR/../lib/common.sh"
 
     if [[ -f "$_COMMON" ]]; then
+        # Full repo present — use the real helpers (picks up ~/docker/.config too)
+        # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
+        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -38,6 +44,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -74,6 +81,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             read -r -p "  Domain (e.g. ${_subdomain}.${SITE_DOMAIN:-example.com}): " _domain
             [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
 
+            # Back up before touching
             if [[ -f "$_caddyfile" ]]; then
                 local _bk="$_caddy_dir/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
                 cp "$_caddyfile" "$_bk"
@@ -82,6 +90,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 touch "$_caddyfile"
             fi
 
+            # Remove existing block for this domain if present
             if grep -q "^${_domain}" "$_caddyfile" 2>/dev/null; then
                 log_warning "$_domain already in Caddyfile"
                 local _ow=""
@@ -128,6 +137,8 @@ CBLOCK
         }
     fi
 
+    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
+    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
     ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
     DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
@@ -137,147 +148,87 @@ CBLOCK
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
 
-    register_service() { :; }
+    register_service() { :; }   # no-op — no wizard to register into
     _RUN_STANDALONE=1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service filebrowser utilities "Web file manager (FileBrowser Quantum)" 8085
+register_service my-service utilities "What it does (My Service)" 8080
 
-install_filebrowser() {
+install_my_service() {
     require_docker || return 1
-    log_info "Installing FileBrowser Quantum..."
+    log_info "Installing My Service..."
 
-    local FB_DIR="$DOCKER_DIR/filebrowser"
+    local DIR="$DOCKER_DIR/my-service"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $FB_DIR"
-        echo "[DRY-RUN] Would write docker-compose.yml and data/config.yaml"
+        echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
         return 0
     fi
 
-    mkdir -p "$FB_DIR/data"
-    ensure_docker_dir_ownership "$FB_DIR"
-    cd "$FB_DIR" || return 1
+    mkdir -p "$DIR"
+    ensure_docker_dir_ownership "$DIR"
+    cd "$DIR" || return 1
 
-    local FB_PATH=""
-    prompt_text "Primary files directory to browse [default: $ACTUAL_HOME]:" "$ACTUAL_HOME" FB_PATH
-
-    cat > docker-compose.yml << FB_COMPOSE
-name: filebrowser
+    cat > docker-compose.yml << 'EOF'
+name: my-service
 
 services:
-  filebrowser:
-    image: gtstef/filebrowser:stable
-    container_name: filebrowser
-    hostname: filebrowser
+  my-service:
+    image: vendor/my-service:latest
+    container_name: my-service
+    hostname: my-service
     restart: unless-stopped
     environment:
       - TZ=${SITE_TZ:-UTC}
-    volumes:
-      - ./data:/home/filebrowser/data
-      - ${FB_PATH}:/files
     ports:
-      - "8085:80"
+      - "8080:8080"
+    volumes:
+      - ./data:/data
     networks:
       - caddy_net
 
 networks:
   caddy_net:
     external: true
-    name: \${CADDY_NET:-caddy_net}
-FB_COMPOSE
+    name: ${CADDY_NET:-caddy_net}
+EOF
 
-    cat > .env << FB_ENV
+    cat > .env << ENV
 CADDY_NET=$SITE_CADDY_NET
-FB_ENV
+ENV
 
-    # Generate config.yaml — Quantum reads this from /home/filebrowser/data/
-    cat > data/config.yaml << FB_CONFIG
-server:
-  sources:
-    - path: "/files"
-      name: "files"
-      config:
-        defaultEnabled: true
+    configure_caddy_for_service "My Service" "my-service:8080" "my-service"
 
-auth:
-  adminUsername: admin
-  adminPassword: admin
+    write_readme "$DIR" << MD
+# My Service
 
-userDefaults:
-  account:
-    permissions:
-      admin: false
-      modify: false
-      share: true
-      download: true
-      create: false
-      delete: false
-FB_CONFIG
-
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
-
-    # Deploy fbq-add-source.sh helper
-    local _TOOLS_DIR
-    _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tools" 2>/dev/null && pwd)" || true
-    if [ -f "$_TOOLS_DIR/fbq-add-source.sh" ]; then
-        cp "$_TOOLS_DIR/fbq-add-source.sh" "$FB_DIR/fbq-add-source.sh"
-        chmod 750 "$FB_DIR/fbq-add-source.sh"
-        chown "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR/fbq-add-source.sh"
-        log_success "fbq-add-source.sh installed at $FB_DIR/fbq-add-source.sh"
-    fi
-
-    echo ""
-    log_success "FileBrowser Quantum configured at $FB_DIR"
-
-    configure_caddy_for_service "FileBrowser" "filebrowser:80" "files"
-
-    write_readme "$FB_DIR" << MD
-# FileBrowser Quantum
-
-Web-based file manager with multi-source support, office preview, and
-per-user access control.
+Brief description.
 
 ## Access
-- URL: http://localhost:8085
-- Default login: admin / admin (change immediately!)
-
-## Adding sources (extra directories)
-Run the included helper to add directories and wire them into both
-docker-compose.yml and config.yaml:
-\`\`\`
-sudo bash $FB_DIR/fbq-add-source.sh
-\`\`\`
-Then assign the new source to users: Settings → Users → edit user → Add source.
-
-## Data
-- Primary path: $FB_PATH (mounted to /files inside container)
-- Config + database: ./data/
-- Add more mounts via fbq-add-source.sh — no manual YAML editing needed
+- URL: http://localhost:8080
 
 ## Manage
 \`\`\`
-cd $FB_DIR
+cd $DIR
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
-docker compose pull && docker compose down && docker compose up -d  # update
+docker compose pull && docker compose up -d  # update
 \`\`\`
 MD
 
-    local START_FB=""
-    prompt_yn "Start FileBrowser Quantum now? (y/n):" "y" START_FB
-    if [ "$START_FB" = "y" ] || [ "$START_FB" = "Y" ]; then
-        docker compose up -d 2>/dev/null \
-            && log_success "FileBrowser Quantum started" \
-            || log_warning "Failed to start — check: docker compose logs"
+    local START=""
+    prompt_yn "Start My Service now? (y/n):" "y" START
+    if [ "$START" = "y" ] || [ "$START" = "Y" ]; then
+        docker compose up -d \
+            && log_success "My Service started" \
+            || log_warning "Start failed — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:8085"
-    echo "  Default login: admin / admin (change immediately!)"
+    echo "  Access at: http://localhost:8080"
     echo ""
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_filebrowser
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_my_service
