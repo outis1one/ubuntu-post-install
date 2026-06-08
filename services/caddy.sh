@@ -104,6 +104,17 @@ CADDY_COMPOSE
 # Example configuration - edit this for your services
 # Uncomment and modify these examples:
 
+# ── Port reference ────────────────────────────────────────────────────────────
+# Services on caddy_net → use the container name and INTERNAL port:
+#   reverse_proxy myservice:80       (what the container listens on inside Docker)
+#
+# Accessing a service directly from another machine → use the HOST port:
+#   http://server-ip:8085            (the left side of ports: "8085:80" in compose)
+#
+# The ports: mapping is only for direct host access.
+# Caddy bypasses it entirely and talks container-to-container.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Authelia SSO snippet (auto-added by installer if Authelia is installed) ───
 # (authelia) {
 #     forward_auth authelia:9091 {
@@ -179,6 +190,11 @@ myservice.example.com {
     }
 }
 ```
+
+**Port rule:** use the container's *internal* port, not the host-mapped port.
+If a service has `ports: "8085:80"` in its compose file, Caddy uses `:80`
+(container-to-container on `caddy_net`). The `8085` is only for direct
+host access from another machine.
 
 ## Reloading after edits
 
