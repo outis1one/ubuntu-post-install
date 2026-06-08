@@ -228,7 +228,7 @@ cmd_remove() {
         local name
         name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "(unnamed)")
         printf "  %2d)  %-20s  %s\n" "$i" "${name:-?}" "$p"
-        (( i++ ))
+        i=$(( i + 1 ))
     done
     echo ""
 
@@ -268,7 +268,7 @@ cmd_show() {
         ro=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.readOnly // false" "$config" 2>/dev/null || echo "false")
         printf "  %-20s  %-35s  defaultEnabled=%-5s  readOnly=%s\n" \
             "${name}" "${p}" "${enabled}" "${ro}"
-        (( count++ ))
+        count=$(( count + 1 ))
     done < <(list_sources "$config")
 
     [[ "$count" -eq 0 ]] && warn "No sources found."
