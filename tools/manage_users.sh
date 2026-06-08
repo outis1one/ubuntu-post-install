@@ -192,7 +192,10 @@ prompt_add_links() {
     check_container "$_c" || return 1
 
     local _scope_dir="/srv$_scope"
-    docker exec "$_c" mkdir -p "$_scope_dir" >/dev/null 2>&1 || true
+    if ! docker exec "$_c" mkdir -p "$_scope_dir" 2>/dev/null; then
+        errmsg "Could not create scope directory '$_scope_dir' in container (permission denied?)."
+        return 1
+    fi
 
     echo
     echo "  Type a folder name to add — ? to list available folders, blank when done."
@@ -205,9 +208,10 @@ prompt_add_links() {
 
         if [[ "$_src" == "?" ]]; then
             local _avail
-            _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 -type d \
-                -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | xargs echo) || true
-            echo "  Available:  ${_avail:-(none found)}"
+            _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 \
+                \( -type d -o -type l \) \
+                -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | tr '\n' '  ') || true
+            echo "  Available:  ${_avail:-(none — no subdirectories in /srv)}"
             echo
             continue
         fi
@@ -232,7 +236,10 @@ prompt_add_links() {
             continue
         fi
 
-        docker exec "$_c" ln -s "$_target" "$_link_path"
+        if ! docker exec "$_c" ln -s "$_target" "$_link_path" 2>/dev/null; then
+            errmsg "Failed to create symlink inside container (check container logs)."
+            continue
+        fi
         if [[ "$_src" == "$_link_name" ]]; then
             ok "User can now see '$_link_name'"
         else
@@ -355,7 +362,24 @@ cmd_add() {
         '{username:$u, password:$p, scope:$s, locale:"en", viewMode:"list",
           singleClick:false, sorting:{by:"name",asc:true}, perm:$perms,
           commands:[], lockPassword:false, hideDotfiles:false, dateFormat:false}')
-    api_post "/api/users" "$_body" >/dev/null
+
+    local _resp _http_code
+    _resp=$(curl -s -w '\n%{http_code}' -X POST "$FB_URL/api/users" \
+        -H "X-Auth: $TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$_body" 2>&1) || true
+    _http_code=$(printf '%s' "$_resp" | tail -1)
+    _resp=$(printf '%s' "$_resp" | head -n -1)
+
+    if [[ "$_http_code" != "200" && "$_http_code" != "201" ]]; then
+        local _msg
+        _msg=$(printf '%s' "$_resp" | jq -r '.message // .error // empty' 2>/dev/null) || true
+        [[ -z "$_msg" ]] && _msg="$_resp"
+        [[ -z "$_msg" ]] && _msg="HTTP $_http_code"
+        errmsg "Failed to create user '$_username': $_msg"
+        return 1
+    fi
+
     echo
     ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
 
