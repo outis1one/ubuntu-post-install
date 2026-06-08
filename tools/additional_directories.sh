@@ -4,12 +4,21 @@
 # Placed in ~/docker/filebrowser/ by the installer.
 # Requires: curl, jq, docker   (sudo apt install curl jq)
 #
-# FileBrowser only shows each user the one folder set as their root (directory).
-# This script gives a user access to extra folders by adding bind-mount entries
-# to docker-compose.yml so FileBrowser sees them as real subdirectories within
-# the user's root — no symlinks, no scope-boundary issues.
+# FileBrowser gives each user one root directory (scope).  This script lets
+# you mount additional folders into that root so the user sees them alongside
+# their own files.
 #
-# A container restart is required for changes to take effect.
+# IMPORTANT — avoid nested bind-mounts:
+#   If a user's scope lives inside the main data bind-mount (/data/...) adding
+#   extra folders would require nesting one bind-mount inside another, which
+#   Docker does not handle reliably.  This script detects that situation and
+#   migrates the user's scope into the named volume (/srv) instead, where
+#   additional bind-mounts work cleanly.
+#
+#   Old (broken):   scope=/data/users/alice  → inside /srv/data bind-mount
+#   New (correct):  scope=/alice             → inside fb_users named volume
+#     Mounts added: /srv/alice/my-files  → /host/data/users/alice/
+#                   /srv/alice/music     → /host/data/music/
 #
 set -Eeuo pipefail
 
@@ -29,11 +38,11 @@ fi
 die()    { echo "${RED}ERROR:${R} $*" >&2; exit 1; }
 ok()     { echo "  ${GRN}✓${R} $*"; }
 warn()   { echo "  ${YEL}!${R} $*"; }
+info()   { echo "  $*"; }
 errmsg() { echo "  ${RED}✗${R} $*" >&2; }
 hr()     { printf '  %s\n' "────────────────────────────────────────────"; }
 banner() { echo; hr; printf "  ${B}%-44s${R}\n" "$*"; hr; }
 
-# ── Prerequisites ─────────────────────────────────────────────────────────────
 require_cmds() {
     for _c in "$@"; do
         command -v "$_c" &>/dev/null || die "'$_c' not found — sudo apt install $_c"
@@ -42,19 +51,17 @@ require_cmds() {
 
 [[ -f "$COMPOSE_FILE" ]] || die "docker-compose.yml not found at $COMPOSE_FILE"
 
-# ── Read FB_PATH from .env ────────────────────────────────────────────────────
+# ── Read FB_PATH from .env or docker-compose.yml ──────────────────────────────
 get_fb_path() {
     local _p=""
     if [[ -f "$ENV_FILE" ]]; then
         _p=$(grep '^FB_PATH=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
     fi
-    # Fall back to parsing compose file for the bind-mount line
     if [[ -z "$_p" ]]; then
-        # Match:  - /some/path:/srv  or  - /some/path:/srv/data
-        _p=$(grep -oP '^\s+-\s+\K[^$][^:]+(?=:/srv(/data)?(\s|$))' "$COMPOSE_FILE" \
-             2>/dev/null | head -1) || true
+        _p=$(grep -oP '^\s+-\s+\K[^$][^:]+(?=:/srv(/data)?(\s|$))' \
+             "$COMPOSE_FILE" 2>/dev/null | head -1) || true
     fi
-    [[ -n "$_p" ]] || die "Cannot determine FB_PATH — check $ENV_FILE or $COMPOSE_FILE"
+    [[ -n "$_p" ]] || die "Cannot determine FB_PATH — check $ENV_FILE"
     echo "$_p"
 }
 
@@ -83,7 +90,24 @@ ensure_token() {
     fi
 }
 
-api_get() { curl -sf -X GET "$FB_URL$1" -H "X-Auth: $TOKEN"; }
+api_get() { curl -sf -X GET  "$FB_URL$1" -H "X-Auth: $TOKEN"; }
+api_put() { curl -sf -X PUT  "$FB_URL$1" -H "X-Auth: $TOKEN" \
+                -H "Content-Type: application/json" -d "$2"; }
+
+find_user() {
+    api_get "/api/users" | jq -r --arg u "$1" '.[] | select(.username==$u)'
+}
+
+update_user_scope() {
+    local _username="$1" _new_scope="$2"
+    local _user _uid _body
+    _user=$(find_user "$_username") || true
+    [[ -n "$_user" ]] || { errmsg "User '$_username' not found in FileBrowser."; return 1; }
+    _uid=$(echo "$_user" | jq -r '.id')
+    _body=$(echo "$_user" | jq --arg s "$_new_scope" '. + {scope: $s}')
+    api_put "/api/users/$_uid" "$_body" >/dev/null \
+        || { errmsg "API call to update scope failed."; return 1; }
+}
 
 # ── User selection ────────────────────────────────────────────────────────────
 CHOSEN_USER=""
@@ -94,17 +118,14 @@ pick_user() {
     echo
 
     local _raw
-    _raw=$(api_get "/api/users" \
-        | jq -r '.[] | [.username, .scope] | @tsv') || true
+    _raw=$(api_get "/api/users" | jq -r '.[] | [.username, .scope] | @tsv') || true
     [[ -n "$_raw" ]] || die "No users returned from FileBrowser."
 
     local -a _users _dirs
     local _i=0
     while IFS=$'\t' read -r _u _s; do
-        # Normalise: ensure leading slash
         [[ "$_s" == /* ]] || _s="/$_s"
-        _users+=("$_u")
-        _dirs+=("$_s")
+        _users+=("$_u"); _dirs+=("$_s")
         printf "  %2d  %-20s  %s\n" "$((_i+1))" "$_u" "$_s"
         ((_i++)) || true
     done <<< "$_raw"
@@ -114,89 +135,154 @@ pick_user() {
     read -r -p "  Select user (number): " _pick
     [[ "$_pick" =~ ^[0-9]+$ ]] || { errmsg "Enter a number."; return 1; }
     local _idx=$((_pick-1))
-    [[ $_idx -ge 0 && $_idx -lt ${#_users[@]} ]] \
-        || { errmsg "Out of range."; return 1; }
+    [[ $_idx -ge 0 && $_idx -lt ${#_users[@]} ]] || { errmsg "Out of range."; return 1; }
 
     CHOSEN_USER="${_users[$_idx]}"
     CHOSEN_DIR="${_dirs[$_idx]}"
 }
 
-# ── Parse existing extra mounts for a user ────────────────────────────────────
-# Extra mounts are any volume line matching  HOST_PATH:/srv/USER_DIR/...
-# (as opposed to base mounts like fb_users:/srv or ./database/... etc.)
-list_extras_compose() {
-    local _user_dir="$1"   # e.g. /jda
-    # Match lines like:      - /absolute/path:/srv/jda/something
-    grep -oP "^\s+-\s+\K/.+:/srv${_user_dir}/.+" "$COMPOSE_FILE" 2>/dev/null \
-        | sed 's/.*:\(.*\)/\1/' \
-        | sed "s|/srv${_user_dir}/||" \
-        || true
+# ── Scope classification ──────────────────────────────────────────────────────
+# Returns true if the scope lives inside the /data bind-mount path.
+# Extra mounts for such users would be nested — unreliable.
+scope_is_nested() {
+    [[ "$1" == /data/* || "$1" == "/data" ]]
 }
 
-list_extras_compose_full() {
-    local _user_dir="$1"
-    grep -oP "^\s+-\s+\K/.+:/srv${_user_dir}/.+" "$COMPOSE_FILE" 2>/dev/null \
-        || true
+# Suggest a named-volume scope path from the current scope.
+# /data/users/alice → /alice
+suggest_volume_scope() {
+    local _last; _last=$(basename "$1")
+    echo "/$_last"
 }
 
-# ── Add a bind-mount entry to docker-compose.yml ─────────────────────────────
+# ── Compose file helpers ──────────────────────────────────────────────────────
+list_user_mounts() {
+    local _scope="$1"
+    # Match lines:   - /absolute/path:/srv<scope>/something
+    grep -oP "^\s+-\s+\K/.+:/srv${_scope}/.+" "$COMPOSE_FILE" 2>/dev/null \
+        | while IFS=: read -r _host _cont; do
+            printf "    %-30s→  %s\n" "$(basename "$_cont")" "$_host"
+          done || true
+}
+
+list_user_mounts_raw() {
+    local _scope="$1"
+    grep -oP "^\s+-\s+\K/.+:/srv${_scope}/.+" "$COMPOSE_FILE" 2>/dev/null || true
+}
+
 add_volume_entry() {
     local _host_path="$1" _container_path="$2"
 
-    # Check not already present
     if grep -qF "${_host_path}:${_container_path}" "$COMPOSE_FILE" 2>/dev/null; then
-        errmsg "Already in docker-compose.yml."
-        return 1
+        warn "'$(basename "$_container_path")' already in docker-compose.yml."
+        return 0
     fi
 
-    # Back up before editing
     local _bk="$SCRIPT_DIR/docker-compose.yml.bak.$(date +%Y%m%d-%H%M%S)"
     cp "$COMPOSE_FILE" "$_bk"
 
-    # Insert after the settings.json volume line (our known anchor)
-    # Works for both new-layout (fb_users) and legacy compose files
     if grep -q 'settings.json' "$COMPOSE_FILE"; then
-        sed -i "/settings\.json/a\\      - ${_host_path}:${_container_path}" \
-            "$COMPOSE_FILE"
+        sed -i "/settings\.json/a\\      - ${_host_path}:${_container_path}" "$COMPOSE_FILE"
     else
-        # Fallback: insert before the ports: line
-        sed -i "/^\s*ports:/i\\      - ${_host_path}:${_container_path}" \
-            "$COMPOSE_FILE"
+        sed -i "/^\s*ports:/i\\      - ${_host_path}:${_container_path}" "$COMPOSE_FILE"
     fi
 
-    ok "Added to docker-compose.yml: ${_host_path} → ${_container_path}"
-    echo "  ${DIM}Backup saved: $(basename "$_bk")${R}"
+    ok "Mounted: $(basename "$_host_path")  →  $_container_path"
+    echo "  ${DIM}Backup: $(basename "$_bk")${R}"
 }
 
-# ── Remove a bind-mount entry from docker-compose.yml ────────────────────────
 remove_volume_entry() {
     local _container_path="$1"
-
     local _bk="$SCRIPT_DIR/docker-compose.yml.bak.$(date +%Y%m%d-%H%M%S)"
     cp "$COMPOSE_FILE" "$_bk"
-
-    # Escape path for sed pattern
-    local _escaped
-    _escaped=$(printf '%s' "$_container_path" | sed 's|/|\\/|g')
+    local _escaped; _escaped=$(printf '%s' "$_container_path" | sed 's|/|\\/|g')
     sed -i "/[[:space:]]-[[:space:]].*:${_escaped}/d" "$COMPOSE_FILE"
-
-    ok "Removed from docker-compose.yml: ${_container_path}"
-    echo "  ${DIM}Backup saved: $(basename "$_bk")${R}"
+    ok "Removed: $_container_path"
+    echo "  ${DIM}Backup: $(basename "$_bk")${R}"
 }
 
-# ── Restart container ─────────────────────────────────────────────────────────
+# ── Restart ───────────────────────────────────────────────────────────────────
 restart_container() {
     echo
-    warn "A container restart is required for changes to take effect."
+    warn "Container restart required for changes to take effect."
     local _r=""
     read -r -p "  Restart FileBrowser now? [y/N]: " _r
-    [[ "${_r,,}" == "y" ]] || { echo "  Restart later with: docker compose down && docker compose up -d"; return 0; }
-
+    [[ "${_r,,}" == "y" ]] || {
+        echo "  Run later:  docker compose down && docker compose up -d"
+        return 0
+    }
     cd "$SCRIPT_DIR"
     docker compose down
     docker compose up -d
     echo
     ok "FileBrowser restarted."
+}
+
+# ── Migrate scope from /data/... to named volume ──────────────────────────────
+migrate_scope() {
+    local _username="$1" _old_scope="$2" _fb_path="$3"
+    local _c; _c=$(get_container_name)
+
+    echo
+    echo "  ${B}Scope migration required${R}"
+    echo
+    info "  ${CHOSEN_USER}'s scope ($_old_scope) is inside the /srv/data bind-mount."
+    info "  Extra mounts nested inside a bind-mount are unreliable in Docker."
+    info "  We'll move the scope to the named volume so mounts work cleanly."
+    echo
+
+    # Suggest new scope name
+    local _suggested; _suggested=$(suggest_volume_scope "$_old_scope")
+    local _new_scope=""
+    read -r -p "  New scope path [${_suggested}]: " _new_scope
+    _new_scope="${_new_scope:-$_suggested}"
+    [[ "$_new_scope" == /* ]] || _new_scope="/$_new_scope"
+
+    # Refuse if new scope is still inside /data
+    if scope_is_nested "$_new_scope"; then
+        errmsg "New scope '$_new_scope' is still inside /data — choose a path like $_suggested"
+        return 1
+    fi
+
+    # Check not already used as a mount
+    if grep -qF ":/srv${_new_scope}" "$COMPOSE_FILE" 2>/dev/null; then
+        errmsg "'/srv${_new_scope}' is already used in docker-compose.yml"
+        return 1
+    fi
+
+    echo
+    # Create the scope directory in the named volume via docker exec
+    if ! docker exec "$_c" test -d "/srv${_new_scope}" 2>/dev/null; then
+        docker exec "$_c" mkdir -p "/srv${_new_scope}" \
+            || { errmsg "Could not create '/srv${_new_scope}' in container."; return 1; }
+        ok "Created /srv${_new_scope} in named volume"
+    fi
+
+    # Offer to keep personal files accessible as a sub-folder
+    local _personal_host="$_fb_path/${_old_scope#/data/}"
+    if [[ -d "$_personal_host" ]]; then
+        echo
+        info "  Personal files found at: $_personal_host"
+        local _pname=""
+        read -r -p "  Mount them as [my-files]: " _pname
+        _pname="${_pname:-my-files}"
+        add_volume_entry "$_personal_host" "/srv${_new_scope}/${_pname}"
+    fi
+
+    # Update scope in FileBrowser via API
+    update_user_scope "$_username" "$_new_scope" \
+        || { errmsg "Scope update failed — change it manually in the FileBrowser web UI."; }
+    ok "Scope updated in FileBrowser: $_old_scope  →  $_new_scope"
+
+    # Return new scope for caller to use
+    CHOSEN_DIR="$_new_scope"
+}
+
+# ── Container name ────────────────────────────────────────────────────────────
+get_container_name() {
+    local _name
+    _name=$(grep 'container_name:' "$COMPOSE_FILE" | head -1 | awk '{print $2}')
+    echo "${_name:-filebrowser}"
 }
 
 # ── Add flow ──────────────────────────────────────────────────────────────────
@@ -207,35 +293,39 @@ do_add() {
 
     if [[ "$_user_dir" == "/" || "$_user_dir" == "/data" ]]; then
         echo
-        echo "  $CHOSEN_USER has full access — no extra directories needed."
+        info "$CHOSEN_USER has full access — no extras needed."
         return 0
     fi
 
-    local _fb_path
-    _fb_path=$(get_fb_path)
+    local _fb_path; _fb_path=$(get_fb_path)
+
+    # Migrate if scope is nested inside the data bind-mount
+    if scope_is_nested "$_user_dir"; then
+        migrate_scope "$CHOSEN_USER" "$_user_dir" "$_fb_path" || return 1
+        _user_dir="$CHOSEN_DIR"   # updated by migrate_scope
+    fi
 
     banner "Add directory — $CHOSEN_USER  (${_user_dir})"
 
-    # Show what's already added
-    local _cur
-    _cur=$(list_extras_compose "$_user_dir")
+    # Show already-mounted extras
+    local _cur; _cur=$(list_user_mounts "$_user_dir")
     if [[ -n "$_cur" ]]; then
-        echo "  Already added:"
-        echo "$_cur" | while read -r _n; do printf "    - %s\n" "$_n"; done
+        info "Already added:"
+        echo "$_cur"
         echo
     fi
 
     # List available source folders on the host
-    echo "  Available folders in ${_fb_path}:"
+    info "Available folders in ${_fb_path}:"
     local _avail=()
     while IFS= read -r -d '' _d; do
         local _name; _name=$(basename "$_d")
-        [[ "$_name" == .* ]] && continue  # skip hidden
+        [[ "$_name" == .* ]] && continue
         _avail+=("$_name")
         printf "    %s\n" "$_name"
     done < <(find "$_fb_path" -maxdepth 1 -mindepth 1 -type d -print0 2>/dev/null | sort -z)
 
-    [[ ${#_avail[@]} -gt 0 ]] || { echo "    (none found)"; return 0; }
+    [[ ${#_avail[@]} -gt 0 ]] || { info "(none found)"; return 0; }
     echo
 
     local _changed=false
@@ -248,30 +338,18 @@ do_add() {
         [[ -n "$_src" ]] || continue
 
         local _host_path="$_fb_path/$_src"
-        local _container_path="/srv${_user_dir}/$_src"
-
         if [[ ! -d "$_host_path" ]]; then
             errmsg "'$_src' not found in $_fb_path"
             continue
         fi
 
-        # The container path may land inside an existing bind-mount (e.g. /srv/data/...).
-        # Docker needs an empty mount-point directory to already exist on the host at that
-        # location before it can overlay the inner mount on top of the outer one.
-        # Derive the host equivalent: strip /srv/data prefix → prepend FB_PATH.
-        local _mount_point_host=""
-        if [[ "$_container_path" == /srv/data/* ]]; then
-            _mount_point_host="$_fb_path/${_container_path#/srv/data/}"
-        elif [[ "$_container_path" == /srv/* ]]; then
-            # Legacy layout: /srv IS the bind mount
-            _mount_point_host="$_fb_path/${_container_path#/srv/}"
-        fi
+        # Ask what name to show in FileBrowser (default: same as folder)
+        local _display=""
+        read -r -p "  Show as [${_src}]: " _display
+        _display="${_display:-$_src}"
+        _display="${_display#/}"; _display="${_display%/}"
 
-        if [[ -n "$_mount_point_host" && ! -d "$_mount_point_host" ]]; then
-            mkdir -p "$_mount_point_host" \
-                && echo "  ${DIM}Created mount point: $_mount_point_host${R}" \
-                || { errmsg "Could not create mount point '$_mount_point_host' — check permissions."; continue; }
-        fi
+        local _container_path="/srv${_user_dir}/${_display}"
 
         add_volume_entry "$_host_path" "$_container_path" && _changed=true || true
     done
@@ -286,23 +364,18 @@ do_remove() {
     local _user_dir="$CHOSEN_DIR"
     banner "Remove directory — $CHOSEN_USER  (${_user_dir})"
 
-    local _extras
-    _extras=$(list_extras_compose_full "$_user_dir")
+    local _extras; _extras=$(list_user_mounts_raw "$_user_dir")
     if [[ -z "$_extras" ]]; then
-        echo "  No extra directories configured for $CHOSEN_USER."
+        info "No extra directories configured for $CHOSEN_USER."
         return 0
     fi
 
-    echo "  Extra directories for $CHOSEN_USER:"
-    echo
-    local -a _names _container_paths
+    local -a _lines
     local _i=0
     while IFS= read -r _line; do
-        local _cpath; _cpath="${_line##*:}"
-        local _fname; _fname="${_cpath##*/}"
-        _names+=("$_fname")
-        _container_paths+=("$_cpath")
-        printf "  %2d  %s\n" "$((_i+1))" "$_fname"
+        _lines+=("$_line")
+        local _cpath="${_line##*:}"
+        printf "  %2d  %s\n" "$((_i+1))" "$(basename "$_cpath")"
         ((_i++)) || true
     done <<< "$_extras"
     echo
@@ -311,24 +384,22 @@ do_remove() {
     read -r -p "  Select entry to remove (number): " _pick
     [[ "$_pick" =~ ^[0-9]+$ ]] || { errmsg "Enter a number."; return 1; }
     local _idx=$((_pick-1))
-    [[ $_idx -ge 0 && $_idx -lt ${#_names[@]} ]] || { errmsg "Out of range."; return 1; }
+    [[ $_idx -ge 0 && $_idx -lt ${#_lines[@]} ]] || { errmsg "Out of range."; return 1; }
 
-    remove_volume_entry "${_container_paths[$_idx]}"
+    local _cpath="${_lines[$_idx]##*:}"
+    remove_volume_entry "$_cpath"
     restart_container
 }
 
 # ── Show flow ─────────────────────────────────────────────────────────────────
 do_show() {
     pick_user || return 1
-
     banner "Extra directories — $CHOSEN_USER  (${CHOSEN_DIR})"
-
-    local _extras
-    _extras=$(list_extras_compose "$CHOSEN_DIR")
-    if [[ -n "$_extras" ]]; then
-        echo "$_extras" | while read -r _n; do printf "    - %s\n" "$_n"; done
+    local _mounts; _mounts=$(list_user_mounts "$CHOSEN_DIR")
+    if [[ -n "$_mounts" ]]; then
+        echo "$_mounts"
     else
-        echo "    (none configured)"
+        info "(none configured)"
     fi
     echo
 }
@@ -338,12 +409,12 @@ require_cmds curl jq docker
 
 while true; do
     banner "FileBrowser — Extra Directories"
-    echo "  ${DIM}Adds bind-mount entries so users can access extra folders.${R}"
-    echo "  ${DIM}Create/delete users via the FileBrowser web UI.${R}"
+    echo "  ${DIM}Manage extra folder access for users.${R}"
+    echo "  ${DIM}Create/delete users in the FileBrowser web UI.${R}"
     echo
-    echo "  1  Add a directory to a user"
-    echo "  2  Remove a directory from a user"
-    echo "  3  Show a user's extra directories"
+    echo "  1  Add extra folders to a user"
+    echo "  2  Remove an extra folder from a user"
+    echo "  3  Show a user's extra folders"
     echo "  0  Exit"
     echo
     _ch=""
