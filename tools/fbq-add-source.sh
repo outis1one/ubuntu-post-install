@@ -84,14 +84,11 @@ find_install_dir() {
     echo "$dir"
 }
 
-# ── Get the container-side path for the main data mount ──────────────────────
-# Reads docker-compose.yml and returns the container path of the first
-# non-data-dir volume mount (i.e. the user files mount).
-get_data_mount() {
+# ── Get all non-data container mount points ───────────────────────────────────
+get_data_mounts() {
     local compose="$1"
     yq e '.services.filebrowser.volumes[]' "$compose" 2>/dev/null \
         | grep -v '/home/filebrowser/data' \
-        | head -1 \
         | cut -d: -f2 \
         | sed 's|/$||'
 }
@@ -141,23 +138,58 @@ restart_container() {
 
 # ── ADD ───────────────────────────────────────────────────────────────────────
 cmd_add() {
-    local dir="$1" config="$2" data_mount="$3"
+    local dir="$1" config="$2" compose="$3"
+
+    # Build list of available mounts from compose
+    local mounts=()
+    while IFS= read -r m; do mounts+=("$m"); done < <(get_data_mounts "$compose")
 
     echo ""
-    echo "  The data directory is mounted at: ${data_mount:-unknown}"
-    echo "  Enter subdirectory names (relative to that mount) to add as sources."
-    echo "  Example: if your music lives at ${data_mount}/music, enter 'music'"
+    if [[ ${#mounts[@]} -eq 0 ]]; then
+        warn "No volume mounts detected in docker-compose.yml (other than data dir)."
+    elif [[ ${#mounts[@]} -eq 1 ]]; then
+        echo "  Volume mount: ${mounts[0]}"
+    else
+        echo "  Available volume mounts:"
+        local i=1
+        for m in "${mounts[@]}"; do
+            printf "    %d) %s\n" "$i" "$m"
+            i=$(( i + 1 ))
+        done
+    fi
+    echo ""
+    echo "  For each source: pick a mount number, then enter the subdirectory"
+    echo "  (or type a full container path starting with / to skip the picker)."
     echo ""
 
     local added=0
 
     while true; do
-        local subdir=""
-        read -r -p "  Subdirectory to add (or Enter to finish): " subdir
-        [[ -z "$subdir" ]] && break
-        subdir="${subdir#/}"   # strip any leading slash
+        local raw=""
+        read -r -p "  Mount number or full path (Enter to finish): " raw
+        [[ -z "$raw" ]] && break
 
-        local container_path="${data_mount}/${subdir}"
+        local container_path=""
+        if [[ "$raw" == /* ]]; then
+            # Full path entered directly
+            container_path="${raw%/}"
+        elif [[ "$raw" =~ ^[0-9]+$ ]]; then
+            local midx=$(( raw - 1 ))
+            if [[ "$midx" -lt 0 || "$midx" -ge ${#mounts[@]} ]]; then
+                warn "Invalid mount number."; continue
+            fi
+            local base_mount="${mounts[$midx]}"
+            local subdir=""
+            read -r -p "  Subdirectory under ${base_mount} (or Enter for root): " subdir
+            subdir="${subdir#/}"
+            if [[ -z "$subdir" ]]; then
+                container_path="$base_mount"
+            else
+                container_path="${base_mount}/${subdir}"
+            fi
+        else
+            warn "Enter a mount number or a full path starting with /."; continue
+        fi
 
         # Default name = subdir basename, lowercase, hyphenated
         local default_name
@@ -177,10 +209,6 @@ cmd_add() {
         read -r -p "  Enable for all users by default? [y/N]: " yn
         [[ "${yn,,}" == "y" ]] && default_enabled_bool="true"
 
-        local read_only_bool="false"
-        read -r -p "  Read-only? [y/N]: " read_only_bool_raw
-        [[ "${read_only_bool_raw,,}" == "y" ]] && read_only_bool="true"
-
         backup "$config"
         # Strip inline comments first so yq edits cleanly
         local tmp; tmp=$(mktemp)
@@ -189,8 +217,7 @@ cmd_add() {
             \"path\": \"${container_path}\",
             \"name\": \"${source_name}\",
             \"config\": {
-                \"defaultEnabled\": ${default_enabled_bool},
-                \"readOnly\": ${read_only_bool}
+                \"defaultEnabled\": ${default_enabled_bool}
             }
         }]" "$config"
 
@@ -265,9 +292,8 @@ cmd_show() {
         local name enabled ro
         name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "?")
         enabled=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled // false" "$config" 2>/dev/null || echo "false")
-        ro=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.readOnly // false" "$config" 2>/dev/null || echo "false")
-        printf "  %-20s  %-35s  defaultEnabled=%-5s  readOnly=%s\n" \
-            "${name}" "${p}" "${enabled}" "${ro}"
+        printf "  %-20s  %-35s  defaultEnabled=%s\n" \
+            "${name}" "${p}" "${enabled}"
         count=$(( count + 1 ))
     done < <(list_sources "$config")
 
@@ -297,11 +323,8 @@ main() {
     install_dir=$(find_install_dir "$explicit_dir")
     local config="$install_dir/data/config.yaml"
     local compose="$install_dir/docker-compose.yml"
-    local data_mount
-    data_mount=$(get_data_mount "$compose")
 
     info "Install dir : $install_dir"
-    info "Data mount  : ${data_mount:-not detected — enter full container paths}"
     echo ""
 
     while true; do
@@ -316,7 +339,7 @@ main() {
         echo ""
 
         case "$action" in
-            1) cmd_add    "$install_dir" "$config" "$data_mount" ;;
+            1) cmd_add    "$install_dir" "$config" "$compose" ;;
             2) cmd_remove "$install_dir" "$config" ;;
             3) cmd_show   "$config" ;;
             0|q|Q) break ;;
