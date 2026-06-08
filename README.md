@@ -66,8 +66,8 @@ Update them any time with `sudo ./setup.sh configure`.
 | Group | Services |
 |-------|---------|
 | `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
-| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant` |
-| `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `magicmirror`, `mail-archiver`, `mealie`, `meshcentral`, `ntfy`, `portainer`, `rustdesk`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk` |
+| `utilities` | `actualbudget`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `nextcloud`, `ntfy`, `onlyoffice`, `portainer`, `rustdesk`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `js99er`, `minecraft`, `wolf`, `wolf-pair` |
