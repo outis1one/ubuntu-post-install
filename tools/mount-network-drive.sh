@@ -208,6 +208,128 @@ _do_mount() {
     ok "Done. $share is mounted at $mount_point"
 }
 
+# ── Edit a mount ─────────────────────────────────────────────────────────────
+edit_mount() {
+    echo ""
+    local entries=()
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        entries+=("$line")
+    done < <(grep -E '\bcifs\b|\bnfs\b' /etc/fstab 2>/dev/null || true)
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        warn "No network mounts found in /etc/fstab."
+        return 0
+    fi
+
+    echo "  Network mounts in /etc/fstab:"
+    echo ""
+    local i=1
+    for e in "${entries[@]}"; do
+        local mp; mp=$(echo "$e" | awk '{print $2}')
+        local src; src=$(echo "$e" | awk '{print $1}')
+        printf "  %2d)  %-30s  %s\n" "$i" "$src" "$mp"
+        i=$(( i + 1 ))
+    done
+    echo ""
+
+    local choice=""
+    read -r -p "  Edit entry number [cancel]: " choice
+    [[ -z "$choice" || ! "$choice" =~ ^[0-9]+$ ]] && { info "Cancelled."; return 0; }
+
+    local idx=$(( choice - 1 ))
+    [[ "$idx" -lt 0 || "$idx" -ge ${#entries[@]} ]] && { warn "Invalid selection."; return 0; }
+
+    local target_entry="${entries[$idx]}"
+    local target_src;  target_src=$(echo  "$target_entry" | awk '{print $1}')
+    local target_mp;   target_mp=$(echo   "$target_entry" | awk '{print $2}')
+    local target_fs;   target_fs=$(echo   "$target_entry" | awk '{print $3}')
+    local target_opts; target_opts=$(echo "$target_entry" | awk '{print $4}')
+
+    echo ""
+    echo "  Current values:"
+    printf "    Share      : %s\n" "$target_src"
+    printf "    Mount point: %s\n" "$target_mp"
+    printf "    Type       : %s\n" "$target_fs"
+    printf "    Options    : %s\n" "$target_opts"
+    echo ""
+    echo "  Press Enter to keep the current value."
+    echo ""
+
+    # Share path
+    local new_src=""
+    read -r -p "  Share path [$target_src]: " new_src
+    new_src="${new_src:-$target_src}"
+
+    # Mount point
+    local new_mp=""
+    read -r -p "  Mount point [$target_mp]: " new_mp
+    new_mp="${new_mp:-$target_mp}"
+
+    # Options — offer guided or raw edit
+    echo ""
+    echo "  Options — edit raw fstab options string, or press Enter to keep."
+    local new_opts=""
+    read -r -p "  Options [$target_opts]: " new_opts
+    new_opts="${new_opts:-$target_opts}"
+
+    # Credentials update (CIFS only)
+    local creds_file="/etc/samba/credentials.$(echo "$target_src" | sed 's|[^a-zA-Z0-9]|_|g')"
+    if [[ "$target_fs" == "cifs" && -f "$creds_file" ]]; then
+        echo ""
+        local update_creds=""
+        read -r -p "  Update credentials (username/password)? [y/N]: " update_creds
+        if [[ "${update_creds,,}" == "y" ]]; then
+            local smb_user="" smb_pass="" smb_domain=""
+            read -r -p "  Username: " smb_user
+            read -r -s -p "  Password: " smb_pass; echo ""
+            read -r -p "  Domain (leave blank if none): " smb_domain
+            local bk_creds="${creds_file}.backup.$(date +%Y%m%d-%H%M%S)"
+            cp "$creds_file" "$bk_creds"
+            cat > "$creds_file" << CREDS
+username=${smb_user}
+password=${smb_pass}
+${smb_domain:+domain=${smb_domain}}
+CREDS
+            chmod 600 "$creds_file"
+            chown root:root "$creds_file"
+            ok "Credentials updated (old saved to $(basename "$bk_creds"))"
+        fi
+    fi
+
+    # Write changes
+    local bk="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
+    cp /etc/fstab "$bk"
+    info "Backed up /etc/fstab → $bk"
+
+    # Replace the old line with the new one
+    local new_line
+    new_line=$(printf '%-40s %-25s %-6s %s 0 0' "$new_src" "$new_mp" "$target_fs" "$new_opts")
+    # Escape for sed
+    local escaped_old escaped_new
+    escaped_old=$(printf '%s\n' "$target_entry" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    escaped_new=$(printf '%s\n' "$new_line"     | sed 's/[[\.*^$()+?{|]/\\&/g; s|/|\\/|g')
+    sed -i "s|${escaped_old}|${new_line}|" /etc/fstab
+    ok "fstab updated"
+
+    # Remount if mount point changed or options changed
+    if mountpoint -q "$target_mp" 2>/dev/null; then
+        echo ""
+        local remount=""
+        read -r -p "  Remount now to apply changes? [Y/n]: " remount
+        if [[ "${remount,,}" != "n" ]]; then
+            umount "$target_mp" 2>/dev/null || warn "Could not unmount cleanly — may still be in use"
+            [[ "$new_mp" != "$target_mp" ]] && mkdir -p "$new_mp"
+            if mount -t "$target_fs" -o "$new_opts" "$new_src" "$new_mp"; then
+                ok "Remounted at $new_mp"
+            else
+                err "Remount failed — check options and connectivity."
+                info "Manual retry: sudo mount -t $target_fs -o $new_opts $new_src $new_mp"
+            fi
+        fi
+    fi
+}
+
 # ── Remove a mount ────────────────────────────────────────────────────────────
 remove_mount() {
     echo ""
@@ -302,7 +424,8 @@ main() {
         echo "    1) Mount an SMB/CIFS share (Windows, Samba, NAS)"
         echo "    2) Mount an NFS share"
         echo "    3) Show current network mounts"
-        echo "    4) Remove a mount"
+        echo "    4) Edit a mount"
+        echo "    5) Remove a mount"
         echo "    0) Quit"
         echo ""
         read -r -p "  Choice [1]: " action
@@ -313,7 +436,8 @@ main() {
             1) mount_smb ;;
             2) mount_nfs ;;
             3) show_mounts ;;
-            4) remove_mount ;;
+            4) edit_mount ;;
+            5) remove_mount ;;
             0|q|Q) break ;;
             *) warn "Invalid choice." ;;
         esac
