@@ -60,11 +60,73 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         }
 
         configure_caddy_for_service() {
-            if [[ -d "$DOCKER_DIR/caddy" ]]; then
-                log_info "Caddy detected — configure reverse proxy manually (standalone mode)."
-                log_info "  Add to Caddyfile:  reverse_proxy filebrowser:80"
+            local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
+            local _caddy_dir="$DOCKER_DIR/caddy"
+            local _caddyfile="$_caddy_dir/Caddyfile"
+
+            if [[ ! -d "$_caddy_dir" ]]; then
+                log_info "Access $_name directly on port ${_upstream##*:}."
+                return 0
+            fi
+
+            echo ""
+            local _do_caddy=""
+            read -r -p "  Configure Caddy reverse proxy for $_name? [y/N]: " _do_caddy
+            [[ "${_do_caddy,,}" == "y" ]] || {
+                log_info "Skipping — access at: http://localhost:${_upstream##*:}"
+                return 0
+            }
+
+            local _domain=""
+            read -r -p "  Domain (e.g. ${_subdomain}.${SITE_DOMAIN:-example.com}): " _domain
+            [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
+
+            # Back up before touching
+            if [[ -f "$_caddyfile" ]]; then
+                local _bk="$_caddy_dir/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+                cp "$_caddyfile" "$_bk"
+                log_info "Backed up Caddyfile to $(basename "$_bk")"
             else
-                log_info "Access FileBrowser directly on port 8085."
+                touch "$_caddyfile"
+            fi
+
+            # Remove existing block for this domain if present
+            if grep -q "^${_domain}" "$_caddyfile" 2>/dev/null; then
+                log_warning "$_domain already in Caddyfile"
+                local _ow=""
+                read -r -p "  Overwrite? [y/N]: " _ow
+                [[ "${_ow,,}" == "y" ]] || { log_info "Keeping existing entry."; return 0; }
+                sed -i "/^${_domain}/,/^}/d" "$_caddyfile"
+            fi
+
+            cat >> "$_caddyfile" << CBLOCK
+
+# $_name
+$_domain {
+    reverse_proxy $_upstream
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${_domain}.log
+        format json
+    }
+${_extra}
+}
+CBLOCK
+
+            log_success "Added $_domain to Caddyfile"
+            docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+            if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                log_success "$_name accessible at: https://$_domain"
+            else
+                log_warning "Reload failed — check: docker logs caddy"
+                log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
             fi
         }
 
