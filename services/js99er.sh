@@ -420,7 +420,13 @@ COMPOSE
     log_success "js99er configured at $JS99ER_DIR"
 
     # ── 5. Reverse proxy (no-ops if Caddy isn't installed locally) ───────────
-    configure_caddy_for_service "js99er" "js99er:80" "js99er"
+    local JS99ER_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect js99er with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && JS99ER_EXTRA_BLOCK="    import authelia"
+    fi
+    configure_caddy_for_service "js99er" "js99er:80" "js99er" "$JS99ER_EXTRA_BLOCK"
 
     # ── 6. Build & start ─────────────────────────────────────────────────────
     local START_JS99ER=""
