@@ -15,25 +15,24 @@
 #   Minimum 8 characters.  No maximum.
 #   Must contain at least one letter and one number.
 #
-# ── Scope (file path) ─────────────────────────────────────────────────────────
-#   FileBrowser supports ONE scope path per user.
-#   Scope is an absolute path inside the container, relative to /srv (= FB_PATH).
+# ── Directory ─────────────────────────────────────────────────────────────────
+#   Each user has a starting directory — the root they see when they log in.
+#   It is a path inside the container relative to /srv.
 #
-#   If FB_PATH=~/drives/data1:
-#     /          → full access (all of ~/drives/data1)
-#     /alice     → alice's own subdir (pair with linked dirs below)
-#     /music     → music subdir only
+#   New layout (fb_users named volume + /srv/data bind mount):
+#     /data      → full access to all files (FB_PATH on the host)
+#     /alice     → alice's folder (must already exist, or be created separately)
 #
-# ── Multi-directory access via linked directories ────────────────────────────
-#   FileBrowser follows symlinks inside the scope dir.
-#   Give a user scope=/alice, then link extra folders into /alice:
+#   Legacy layout (FB_PATH mounted directly at /srv):
+#     /          → full access
+#     /alice     → alice's subfolder inside FB_PATH on the host
 #
-#     /alice/music  → /srv/music    (alice sees "music" in her root)
-#     /alice/photos → /srv/photos   (alice sees "photos" too)
-#
-#   This script creates those symlinks via "docker exec", so they live in
-#   the bind-mount on the host as well (target is /srv/... so it appears
-#   broken from the host, but resolves correctly inside the container).
+# ── Additional directories ────────────────────────────────────────────────────
+#   Each user has exactly one starting directory, but you can give them access
+#   to more folders by adding shortcuts inside it.
+#   FileBrowser follows symlinks, so a shortcut placed in /alice pointing to
+#   /data/music lets alice browse "music" alongside her own files.
+#   Shortcuts live in the Docker named volume — no clutter on the host.
 #
 set -Eeuo pipefail
 
@@ -77,7 +76,7 @@ validate_password() {
 }
 
 validate_scope() {
-    [[ "$1" == /* ]] || { errmsg "Scope must start with /  (e.g. / or /alice or /music)"; return 1; }
+    [[ "$1" == /* ]] || { errmsg "Directory must start with /  (e.g. / or /alice or /music)"; return 1; }
 }
 
 # prompt_password VARNAME [label]
@@ -169,7 +168,17 @@ check_container() {
         || { errmsg "Container '$1' is not running. Start it: docker compose up -d"; return 1; }
 }
 
-# Print symlinks inside /srv<scope>, one per line. Paths shown as FileBrowser sees them (no /srv).
+# Returns /srv/data if the new named-volume layout is in use, else /srv (legacy).
+get_data_root() {
+    local _c="$1"
+    if docker exec "$_c" test -d /srv/data 2>/dev/null; then
+        echo "/srv/data"
+    else
+        echo "/srv"
+    fi
+}
+
+# Print additional directories inside /srv<scope>, one per line.
 list_links() {
     local _c="$1" _scope="$2"
     docker exec "$_c" find "/srv$_scope" -maxdepth 1 -type l \
@@ -182,19 +191,32 @@ list_links() {
         ' _ {} \; 2>/dev/null | sort || true
 }
 
-# ── prompt_add_links SCOPE ────────────────────────────────────────────────────
+# ── prompt_add_dirs SCOPE ─────────────────────────────────────────────────────
 # Loop: user types folder names as they appear in FileBrowser — blank to finish.
-# Shared by cmd_add (offered inline) and menu_links (add option).
-prompt_add_links() {
+# Shared by cmd_add (offered inline) and menu_add_dirs (add option).
+prompt_add_dirs() {
     local _scope="$1"
-    local _c
+    local _c _data_root
     _c=$(get_container_name)
     check_container "$_c" || return 1
+    _data_root=$(get_data_root "$_c")
 
     local _scope_dir="/srv$_scope"
-    if ! docker exec "$_c" mkdir -p "$_scope_dir" 2>/dev/null; then
-        errmsg "Could not create scope directory '$_scope_dir' in container (permission denied?)."
-        return 1
+    if ! docker exec "$_c" test -d "$_scope_dir" 2>/dev/null; then
+        echo
+        echo "  The directory '$_scope' does not exist in the container yet."
+        local _mk=""
+        read -r -p "  Create it now? [y/N]: " _mk
+        if [[ "${_mk,,}" == "y" ]]; then
+            if ! docker exec "$_c" mkdir -p "$_scope_dir" 2>/dev/null; then
+                errmsg "Could not create '$_scope_dir' in container (permission denied?)."
+                return 1
+            fi
+            ok "Created '$_scope'"
+        else
+            errmsg "Cannot add directories — '$_scope' must exist first."
+            return 1
+        fi
     fi
 
     echo
@@ -203,15 +225,16 @@ prompt_add_links() {
 
     while true; do
         local _src=""
-        read -r -p "  Folder to add [done]: " _src
+        read -r -p "  Directory to add [done]: " _src
         [[ -n "$_src" ]] || break
 
         if [[ "$_src" == "?" ]]; then
             local _avail
-            _avail=$(docker exec "$_c" find /srv -maxdepth 1 -mindepth 1 \
+            _avail=$(docker exec "$_c" find "$_data_root" -maxdepth 1 -mindepth 1 \
                 \( -type d -o -type l \) \
-                -not -name ".*" 2>/dev/null | sed 's|^/srv/||' | sort | tr '\n' '  ') || true
-            echo "  Available:  ${_avail:-(none — no subdirectories in /srv)}"
+                -not -name ".*" 2>/dev/null \
+                | sed "s|^${_data_root}/||" | sort | tr '\n' '  ') || true
+            echo "  Available:  ${_avail:-(none — no subdirectories found)}"
             echo
             continue
         fi
@@ -221,43 +244,43 @@ prompt_add_links() {
         _src="${_src%/}"
         [[ -n "$_src" ]] || continue
 
-        local _target="/srv/$_src"
+        local _target="$_data_root/$_src"
         local _link_name
         _link_name=$(basename "$_src")
 
         if ! docker exec "$_c" test -e "$_target" 2>/dev/null; then
-            errmsg "'$_src' not found in FileBrowser — check the path and try again."
+            errmsg "'$_src' not found — type ? to see available folders."
             continue
         fi
 
         local _link_path="$_scope_dir/$_link_name"
         if docker exec "$_c" test -e "$_link_path" 2>/dev/null; then
-            errmsg "'$_link_name' already exists in this user's folder — use Remove to clear it first."
+            errmsg "'$_link_name' already added — use Remove to clear it first."
             continue
         fi
 
         if ! docker exec "$_c" ln -s "$_target" "$_link_path" 2>/dev/null; then
-            errmsg "Failed to create symlink inside container (check container logs)."
+            errmsg "Failed to add directory (check: docker logs filebrowser)."
             continue
         fi
         if [[ "$_src" == "$_link_name" ]]; then
-            ok "User can now see '$_link_name'"
+            ok "Added '$_link_name' to user's view"
         else
-            ok "User can now see '$_link_name'  ${DIM}(from $_src)${R}"
+            ok "Added '$_link_name'  ${DIM}(from $_src)${R}"
         fi
     done
 }
 
-# ── Linked-directory submenu (shown from Modify option 5) ────────────────────
-menu_links() {
+# ── Additional directories submenu (shown from Modify option 5) ──────────────
+menu_add_dirs() {
     local _scope="$1"
     local _c
     _c=$(get_container_name)
     check_container "$_c" || return 1
 
     while true; do
-        banner "Linked directories  (scope: $_scope)"
-        echo "  Folders this user can see beyond their scope:"
+        banner "Additional directories  ($_scope)"
+        echo "  Extra folders this user can access:"
         echo
         local _links
         _links=$(list_links "$_c" "$_scope")
@@ -267,22 +290,22 @@ menu_links() {
             echo "    (none)"
         fi
         echo
-        echo "  1  Add folders"
-        echo "  2  Remove a folder"
+        echo "  1  Add a directory"
+        echo "  2  Remove a directory"
         echo "  0  Back"
         echo
         local _ch=""
         read -r -p "  Choice: " _ch
         case "$_ch" in
-            1) prompt_add_links "$_scope" || true ;;
+            1) prompt_add_dirs "$_scope" || true ;;
             2)
                 local _link_name=""
                 echo
-                read -r -p "  Folder name to remove: " _link_name
+                read -r -p "  Directory name to remove: " _link_name
                 [[ -n "$_link_name" ]] || continue
                 local _link_path="/srv${_scope}/${_link_name}"
                 if ! docker exec "$_c" test -L "$_link_path" 2>/dev/null; then
-                    errmsg "'$_link_name' is not a linked folder — refusing to delete."
+                    errmsg "'$_link_name' is not an added directory — refusing to delete."
                     continue
                 fi
                 docker exec "$_c" rm "$_link_path"
@@ -298,8 +321,8 @@ menu_links() {
 cmd_list() {
     ensure_token
     echo
-    printf "  ${B}%-22s  %-5s  %s${R}\n" "USERNAME" "ADMIN" "SCOPE"
-    printf "  %-22s  %-5s  %s\n"         "--------" "-----" "-----"
+    printf "  ${B}%-22s  %-5s  %s${R}\n" "USERNAME" "ADMIN" "DIRECTORY"
+    printf "  %-22s  %-5s  %s\n"         "--------" "-----" "---------"
     api_get "/api/users" | \
         jq -r '.[] | [.username, (if .perm.admin then "yes" else "no" end), .scope] | @tsv' | \
         while IFS=$'\t' read -r _u _a _s; do
@@ -319,7 +342,7 @@ cmd_add() {
         echo
         echo "  ${B}Username:${R} letters, numbers, hyphens, underscores only. No dots or @."
         echo "  ${B}Password:${R} min 8 chars, at least 1 letter and 1 number."
-        echo "  ${B}Scope:${R}    one path per user — use linked dirs for multi-folder access."
+        echo "  ${B}Directory:${R} the folder the user sees as their root — add extras after."
         echo
         read -r -p "  Username: " _username
         local _adm=""
@@ -331,12 +354,13 @@ cmd_add() {
 
     if [[ -z "$_scope" ]]; then
         echo
-        echo "  Scope examples:"
-        echo "    /           full access (all of FB_PATH)"
-        echo "    $_username     user's own private subdir (pair with linked dirs)"
-        echo "    music       music subdir only"
+        echo "  Starting directory — what the user sees as their root when they log in:"
+        echo "    /data        full access to all files  (new layout)"
+        echo "    /            full access to all files  (legacy layout)"
+        echo "    /$_username   this user's own folder (must already exist)"
+        echo "    /music       music folder only"
         echo
-        read -r -p "  Scope for '$_username': " _scope
+        read -r -p "  Directory for '$_username': " _scope
         _scope="/${_scope#/}"   # ensure leading /
     fi
 
@@ -360,8 +384,7 @@ cmd_add() {
         --arg u "$_username" --arg p "$password" --arg s "$_scope" \
         --argjson perms "$_perms" \
         '{username:$u, password:$p, scope:$s, locale:"en", viewMode:"list",
-          singleClick:false, sorting:{by:"name",asc:true}, perm:$perms,
-          commands:[], lockPassword:false, hideDotfiles:false, dateFormat:false}')
+          perm:$perms, commands:[], lockPassword:false}')
 
     local _resp _http_code
     _resp=$(curl -s -w '\n%{http_code}' -X POST "$FB_URL/api/users" \
@@ -381,14 +404,14 @@ cmd_add() {
     fi
 
     echo
-    ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
+    ok "User '$_username' created  |  directory: $_scope  |  admin: $_is_admin"
 
-    # Offer linked directories (pointless if scope is already /)
-    if command -v docker &>/dev/null && [[ "$_scope" != "/" ]]; then
-        local _do_links=""
-        read -r -p "  Add linked directories for '$_username'? [y/N]: " _do_links
-        if [[ "${_do_links,,}" == "y" ]]; then
-            prompt_add_links "$_scope" || true
+    # Offer additional directories when user has a private home (not full access)
+    if command -v docker &>/dev/null && [[ "$_scope" != "/" && "$_scope" != "/data" ]]; then
+        local _do_dirs=""
+        read -r -p "  Add additional directories for '$_username'? [y/N]: " _do_dirs
+        if [[ "${_do_dirs,,}" == "y" ]]; then
+            prompt_add_dirs "$_scope" || true
         fi
     fi
 }
@@ -412,7 +435,7 @@ cmd_delete() {
     [[ "${_c,,}" == "y" ]] || { echo "  Aborted."; return 0; }
     api_delete "/api/users/$_uid" >/dev/null
     ok "User '$_username' deleted."
-    echo "  ${DIM}Note: symlinks in their scope dir still exist on disk if you want to reuse them.${R}"
+    echo "  ${DIM}Note: their directory and any added extras still exist in the Docker volume.${R}"
 }
 
 # ── cmd: passwd ───────────────────────────────────────────────────────────────
@@ -461,10 +484,10 @@ cmd_scope() {
 
     if [[ -z "$_new_scope" ]]; then
         echo
-        echo "  Current scope: $_old_scope"
-        echo "  ${DIM}Linked folders in the old scope are not moved automatically.${R}"
+        echo "  Current directory: $_old_scope"
+        echo "  ${DIM}Additional directories from the old location are not moved automatically.${R}"
         echo
-        read -r -p "  New scope: " _new_scope
+        read -r -p "  New directory: " _new_scope
         _new_scope="/${_new_scope#/}"
     fi
     validate_scope "$_new_scope" || return 1
@@ -473,14 +496,14 @@ cmd_scope() {
     _body=$(echo "$_user" | jq --arg s "$_new_scope" '. + {scope: $s}')
     api_put "/api/users/$_uid" "$_body" >/dev/null
     echo
-    ok "Scope updated for '$_username': $_old_scope → $_new_scope"
+    ok "Directory updated for '$_username': $_old_scope → $_new_scope"
 
-    # Offer to add links into the new scope
-    if command -v docker &>/dev/null && [[ "$_new_scope" != "/" ]]; then
-        local _do_links=""
-        read -r -p "  Add linked directories into '$_new_scope'? [y/N]: " _do_links
-        if [[ "${_do_links,,}" == "y" ]]; then
-            prompt_add_links "$_new_scope" || true
+    # Offer to add directories into the new scope
+    if command -v docker &>/dev/null && [[ "$_new_scope" != "/" && "$_new_scope" != "/data" ]]; then
+        local _do_dirs=""
+        read -r -p "  Add additional directories into '$_new_scope'? [y/N]: " _do_dirs
+        if [[ "${_do_dirs,,}" == "y" ]]; then
+            prompt_add_dirs "$_new_scope" || true
         fi
     fi
 }
@@ -552,14 +575,14 @@ menu_modify() {
         _admin=$(echo "$_user" | jq -r 'if .perm.admin then "yes" else "no" end')
 
         banner "Modify: $_cur"
-        echo "  ${B}Scope:${R}  $_scope"
-        echo "  ${B}Admin:${R}  $_admin"
+        echo "  ${B}Directory:${R}  $_scope"
+        echo "  ${B}Admin:${R}      $_admin"
         echo
         echo "  1  Change username"
         echo "  2  Change password"
-        echo "  3  Change scope (file path)"
+        echo "  3  Change directory"
         echo "  4  Toggle admin status"
-        echo "  5  Linked directories  ${DIM}(add/remove multi-folder symlinks)${R}"
+        echo "  5  Additional directories  ${DIM}(add/remove extra folder access)${R}"
         echo "  0  Back"
         echo
         local _ch=""
@@ -596,7 +619,7 @@ menu_modify() {
                     errmsg "Toggle failed."
                 fi
                 ;;
-            5) menu_links "$_scope" || true ;;
+            5) menu_add_dirs "$_scope" || true ;;
             0) break ;;
             *) errmsg "Invalid choice." ;;
         esac
@@ -612,19 +635,21 @@ FileBrowser user management
 
 One-shot usage:
   manage_users.sh list
-  manage_users.sh add    <username> <scope> [--admin]
+  manage_users.sh add    <username> <directory> [--admin]
   manage_users.sh delete <username>
   manage_users.sh passwd <username>
-  manage_users.sh scope  <username> <new-scope>
+  manage_users.sh scope  <username> <new-directory>
   manage_users.sh rename <username> <new-username>
   manage_users.sh info   <username>
 
-Scope is relative to /srv inside the container (= FB_PATH on the host).
+Directory is a path relative to /srv inside the container.
+  New layout: /data = full access, /alice = alice's folder
+  Legacy:     /    = full access, /alice = alice's folder
 Username: letters, numbers, hyphens, underscores only. No dots or @.
 Password: min 8 chars, at least one letter and one number.
 
-Multi-directory access: use the interactive menu — linked directories
-are offered automatically when you add a user or change their scope.
+Additional directories: use the interactive menu — extras
+are offered automatically when you add a user or change their directory.
 
 Override URL:  FB_URL=http://localhost:8085 ./manage_users.sh
 EOF
@@ -640,7 +665,7 @@ run_interactive() {
         echo "  1  List users"
         echo "  2  Add user"
         echo "  3  Delete user"
-        echo "  4  Modify user  (username / password / scope / admin / links)"
+        echo "  4  Modify user  (username / password / directory / admin / extras)"
         echo "  5  View user details"
         echo "  0  Exit"
         echo
