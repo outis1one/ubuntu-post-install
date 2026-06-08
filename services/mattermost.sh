@@ -345,50 +345,9 @@ ENV
     ensure_docker_dir_ownership "$DIR"
 
     # ── Caddy reverse proxy ───────────────────────────────────────────────────
-    # Mattermost's SITEURL must match the public URL for WebRTC (Calls) to work.
-    # If the user configures a Caddy domain here, update SITEURL in .env to match.
-    if [ -d "$DOCKER_DIR/caddy" ]; then
-        local _mm_domain=""
-        prompt_text "Caddy domain for Mattermost (e.g. chat.${SITE_DOMAIN:-example.com}) [skip]:" "" _mm_domain
-        if [[ -n "$_mm_domain" ]]; then
-            # Update SITEURL before wiring Caddy so the running container gets the right value
-            sed -i "s|^MATTERMOST_SITE_URL=.*|MATTERMOST_SITE_URL=https://$_mm_domain|" "$DIR/.env"
-            log_info "SITEURL updated → https://$_mm_domain (WebRTC requires HTTPS)"
-            # Write Caddyfile block directly (configure_caddy_for_service would prompt again)
-            local _caddyfile="$DOCKER_DIR/caddy/Caddyfile"
-            local _bk="$DOCKER_DIR/caddy/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
-            [[ -f "$_caddyfile" ]] && cp "$_caddyfile" "$_bk" && log_info "Backed up Caddyfile"
-            if grep -q "^${_mm_domain}" "$_caddyfile" 2>/dev/null; then
-                log_warning "$_mm_domain already in Caddyfile — skipping block write"
-            else
-                cat >> "$_caddyfile" << MMCADDY
-
-# Mattermost
-$_mm_domain {
-    reverse_proxy mattermost:8065
-
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-    }
-
-    log {
-        output file /var/log/caddy/${_mm_domain}.log
-        format json
-    }
-}
-MMCADDY
-                docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-                if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
-                    log_success "Mattermost accessible at: https://$_mm_domain"
-                else
-                    log_warning "Caddy reload failed — check: docker logs caddy"
-                fi
-            fi
-        fi
-    fi
+    # SITEURL is already set from SITE_DOMAIN above. configure_caddy_for_service
+    # will pre-fill the domain prompt with chat.$SITE_DOMAIN.
+    configure_caddy_for_service "Mattermost" "mattermost:8065" "chat"
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$DIR" << MD

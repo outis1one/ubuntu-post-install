@@ -297,10 +297,16 @@ configure_caddy_for_service() {
 
     echo ""
     echo "Enter the full domain for $SERVICE_NAME:"
-    echo "  Examples: $DEFAULT_SUBDOMAIN.example.com, $DEFAULT_SUBDOMAIN.yourdomain.com"
+    local _default_domain=""
+    if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+        _default_domain="$DEFAULT_SUBDOMAIN.$SITE_DOMAIN"
+        echo "  Default: $_default_domain"
+    else
+        echo "  Examples: $DEFAULT_SUBDOMAIN.example.com, $DEFAULT_SUBDOMAIN.yourdomain.com"
+    fi
     echo ""
     local SERVICE_DOMAIN=""
-    prompt_text "Domain:" "" SERVICE_DOMAIN
+    prompt_text "Domain [${_default_domain:-required}]:" "$_default_domain" SERVICE_DOMAIN
     if [ -z "$SERVICE_DOMAIN" ]; then
         echo "  ⚠ No domain provided, skipping Caddy configuration."; return 0
     fi
