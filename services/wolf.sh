@@ -927,6 +927,61 @@ PYEOF
     echo "  Set up automatic backups with the backup module:"
     echo "       sudo ./setup.sh backup"
     echo ""
+    # Wolf's web UI (pair/manage) has no built-in auth — protect with Authelia if available
+    local WOLF_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect Wolf web UI with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && WOLF_EXTRA_BLOCK="    import authelia"
+    fi
+    configure_caddy_for_service "Wolf" "wolf:47990" "wolf" "$WOLF_EXTRA_BLOCK"
+
+    write_readme "$WOLF_DIR" << MD
+# Wolf — Cloud Gaming (Games-on-Whales)
+
+Stream games to any Moonlight client over your LAN or Tailscale VPN.
+
+## Pair a new client
+1. Open Moonlight on the client device
+2. Add host: this server's IP
+3. Run the pin command on the server:
+\`\`\`bash
+cd $WOLF_DIR && ./manage.sh pin
+\`\`\`
+
+## Manage
+\`\`\`bash
+cd $WOLF_DIR
+./manage.sh start        # start Wolf
+./manage.sh stop         # stop
+./manage.sh restart      # restart
+./manage.sh logs         # live logs
+./manage.sh status       # container status
+./manage.sh update       # pull latest image and restart
+./manage.sh add-apps     # add game launchers
+\`\`\`
+
+## Ports (open on firewall / router)
+| Port(s) | Protocol | Use |
+|---------|----------|-----|
+| 47984–47990 | TCP | Moonlight control |
+| 48010 | TCP | RTSP |
+| 47998–48000 | UDP | RTP video/audio/control |
+
+## Backup
+\`\`\`bash
+sudo ./setup.sh backup   # covers /etc/wolf saves and ES-DE settings
+\`\`\`
+MD
+
+    local START_WOLF=""
+    prompt_yn "Start Wolf now? (y/n):" "y" START_WOLF
+    if [[ "$START_WOLF" =~ ^[Yy]$ ]]; then
+        docker compose up -d \
+            && log_success "Wolf started — pair Moonlight to this server's IP" \
+            || log_warning "Start failed — check: docker compose logs"
+    fi
+
     log_success "Done. Pair Moonlight and play."
 }
 
