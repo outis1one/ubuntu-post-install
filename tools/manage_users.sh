@@ -15,24 +15,24 @@
 #   Minimum 8 characters.  No maximum.
 #   Must contain at least one letter and one number.
 #
-# ── Scope ─────────────────────────────────────────────────────────────────────
-#   Scope is the root folder a user sees when they log in.
+# ── Directory ─────────────────────────────────────────────────────────────────
+#   Each user has a starting directory — the root they see when they log in.
 #   It is a path inside the container relative to /srv.
 #
 #   New layout (fb_users named volume + /srv/data bind mount):
 #     /data      → full access to all files (FB_PATH on the host)
-#     /alice     → alice's private home folder (stored in Docker volume only)
+#     /alice     → alice's folder (must already exist, or be created separately)
 #
 #   Legacy layout (FB_PATH mounted directly at /srv):
 #     /          → full access
-#     /alice     → alice's private subdir inside FB_PATH on the host
+#     /alice     → alice's subfolder inside FB_PATH on the host
 #
 # ── Additional directories ────────────────────────────────────────────────────
-#   Each user has exactly one scope, but you can give them access to more
-#   folders by adding directory shortcuts inside their scope.
-#   FileBrowser follows symlinks, so a link placed in /alice pointing to
+#   Each user has exactly one starting directory, but you can give them access
+#   to more folders by adding shortcuts inside it.
+#   FileBrowser follows symlinks, so a shortcut placed in /alice pointing to
 #   /data/music lets alice browse "music" alongside her own files.
-#   These shortcuts live in the Docker named volume — no clutter on the host.
+#   Shortcuts live in the Docker named volume — no clutter on the host.
 #
 set -Eeuo pipefail
 
@@ -76,7 +76,7 @@ validate_password() {
 }
 
 validate_scope() {
-    [[ "$1" == /* ]] || { errmsg "Scope must start with /  (e.g. / or /alice or /music)"; return 1; }
+    [[ "$1" == /* ]] || { errmsg "Directory must start with /  (e.g. / or /alice or /music)"; return 1; }
 }
 
 # prompt_password VARNAME [label]
@@ -202,9 +202,21 @@ prompt_add_dirs() {
     _data_root=$(get_data_root "$_c")
 
     local _scope_dir="/srv$_scope"
-    if ! docker exec "$_c" mkdir -p "$_scope_dir" 2>/dev/null; then
-        errmsg "Could not create scope directory '$_scope_dir' in container (permission denied?)."
-        return 1
+    if ! docker exec "$_c" test -d "$_scope_dir" 2>/dev/null; then
+        echo
+        echo "  The directory '$_scope' does not exist in the container yet."
+        local _mk=""
+        read -r -p "  Create it now? [y/N]: " _mk
+        if [[ "${_mk,,}" == "y" ]]; then
+            if ! docker exec "$_c" mkdir -p "$_scope_dir" 2>/dev/null; then
+                errmsg "Could not create '$_scope_dir' in container (permission denied?)."
+                return 1
+            fi
+            ok "Created '$_scope'"
+        else
+            errmsg "Cannot add directories — '$_scope' must exist first."
+            return 1
+        fi
     fi
 
     echo
@@ -267,8 +279,8 @@ menu_add_dirs() {
     check_container "$_c" || return 1
 
     while true; do
-        banner "Additional directories  (scope: $_scope)"
-        echo "  Folders this user can access beyond their scope:"
+        banner "Additional directories  ($_scope)"
+        echo "  Extra folders this user can access:"
         echo
         local _links
         _links=$(list_links "$_c" "$_scope")
@@ -309,8 +321,8 @@ menu_add_dirs() {
 cmd_list() {
     ensure_token
     echo
-    printf "  ${B}%-22s  %-5s  %s${R}\n" "USERNAME" "ADMIN" "SCOPE"
-    printf "  %-22s  %-5s  %s\n"         "--------" "-----" "-----"
+    printf "  ${B}%-22s  %-5s  %s${R}\n" "USERNAME" "ADMIN" "DIRECTORY"
+    printf "  %-22s  %-5s  %s\n"         "--------" "-----" "---------"
     api_get "/api/users" | \
         jq -r '.[] | [.username, (if .perm.admin then "yes" else "no" end), .scope] | @tsv' | \
         while IFS=$'\t' read -r _u _a _s; do
@@ -330,7 +342,7 @@ cmd_add() {
         echo
         echo "  ${B}Username:${R} letters, numbers, hyphens, underscores only. No dots or @."
         echo "  ${B}Password:${R} min 8 chars, at least 1 letter and 1 number."
-        echo "  ${B}Scope:${R}    the root folder the user sees — add extra directories after."
+        echo "  ${B}Directory:${R} the folder the user sees as their root — add extras after."
         echo
         read -r -p "  Username: " _username
         local _adm=""
@@ -342,13 +354,13 @@ cmd_add() {
 
     if [[ -z "$_scope" ]]; then
         echo
-        echo "  Scope — what the user sees as their root when they log in:"
+        echo "  Starting directory — what the user sees as their root when they log in:"
         echo "    /data        full access to all files  (new layout)"
         echo "    /            full access to all files  (legacy layout)"
-        echo "    /$_username   private home folder for this user"
-        echo "    /music       music folder only (no home, can't add extras)"
+        echo "    /$_username   this user's own folder (must already exist)"
+        echo "    /music       music folder only"
         echo
-        read -r -p "  Scope for '$_username': " _scope
+        read -r -p "  Directory for '$_username': " _scope
         _scope="/${_scope#/}"   # ensure leading /
     fi
 
@@ -392,7 +404,7 @@ cmd_add() {
     fi
 
     echo
-    ok "User '$_username' created  |  scope: $_scope  |  admin: $_is_admin"
+    ok "User '$_username' created  |  directory: $_scope  |  admin: $_is_admin"
 
     # Offer additional directories when user has a private home (not full access)
     if command -v docker &>/dev/null && [[ "$_scope" != "/" && "$_scope" != "/data" ]]; then
@@ -423,7 +435,7 @@ cmd_delete() {
     [[ "${_c,,}" == "y" ]] || { echo "  Aborted."; return 0; }
     api_delete "/api/users/$_uid" >/dev/null
     ok "User '$_username' deleted."
-    echo "  ${DIM}Note: their scope directory and additional directories still exist in the Docker volume.${R}"
+    echo "  ${DIM}Note: their directory and any added extras still exist in the Docker volume.${R}"
 }
 
 # ── cmd: passwd ───────────────────────────────────────────────────────────────
@@ -472,10 +484,10 @@ cmd_scope() {
 
     if [[ -z "$_new_scope" ]]; then
         echo
-        echo "  Current scope: $_old_scope"
-        echo "  ${DIM}Additional directories in the old scope are not moved automatically.${R}"
+        echo "  Current directory: $_old_scope"
+        echo "  ${DIM}Additional directories from the old location are not moved automatically.${R}"
         echo
-        read -r -p "  New scope: " _new_scope
+        read -r -p "  New directory: " _new_scope
         _new_scope="/${_new_scope#/}"
     fi
     validate_scope "$_new_scope" || return 1
@@ -484,7 +496,7 @@ cmd_scope() {
     _body=$(echo "$_user" | jq --arg s "$_new_scope" '. + {scope: $s}')
     api_put "/api/users/$_uid" "$_body" >/dev/null
     echo
-    ok "Scope updated for '$_username': $_old_scope → $_new_scope"
+    ok "Directory updated for '$_username': $_old_scope → $_new_scope"
 
     # Offer to add directories into the new scope
     if command -v docker &>/dev/null && [[ "$_new_scope" != "/" && "$_new_scope" != "/data" ]]; then
@@ -563,12 +575,12 @@ menu_modify() {
         _admin=$(echo "$_user" | jq -r 'if .perm.admin then "yes" else "no" end')
 
         banner "Modify: $_cur"
-        echo "  ${B}Scope:${R}  $_scope"
-        echo "  ${B}Admin:${R}  $_admin"
+        echo "  ${B}Directory:${R}  $_scope"
+        echo "  ${B}Admin:${R}      $_admin"
         echo
         echo "  1  Change username"
         echo "  2  Change password"
-        echo "  3  Change scope (file path)"
+        echo "  3  Change directory"
         echo "  4  Toggle admin status"
         echo "  5  Additional directories  ${DIM}(add/remove extra folder access)${R}"
         echo "  0  Back"
@@ -623,19 +635,21 @@ FileBrowser user management
 
 One-shot usage:
   manage_users.sh list
-  manage_users.sh add    <username> <scope> [--admin]
+  manage_users.sh add    <username> <directory> [--admin]
   manage_users.sh delete <username>
   manage_users.sh passwd <username>
-  manage_users.sh scope  <username> <new-scope>
+  manage_users.sh scope  <username> <new-directory>
   manage_users.sh rename <username> <new-username>
   manage_users.sh info   <username>
 
-Scope is relative to /srv inside the container (= FB_PATH on the host).
+Directory is a path relative to /srv inside the container.
+  New layout: /data = full access, /alice = alice's folder
+  Legacy:     /    = full access, /alice = alice's folder
 Username: letters, numbers, hyphens, underscores only. No dots or @.
 Password: min 8 chars, at least one letter and one number.
 
-Additional directories: use the interactive menu — extra folders
-are offered automatically when you add a user or change their scope.
+Additional directories: use the interactive menu — extras
+are offered automatically when you add a user or change their directory.
 
 Override URL:  FB_URL=http://localhost:8085 ./manage_users.sh
 EOF
@@ -651,7 +665,7 @@ run_interactive() {
         echo "  1  List users"
         echo "  2  Add user"
         echo "  3  Delete user"
-        echo "  4  Modify user  (username / password / scope / admin / directories)"
+        echo "  4  Modify user  (username / password / directory / admin / extras)"
         echo "  5  View user details"
         echo "  0  Exit"
         echo
