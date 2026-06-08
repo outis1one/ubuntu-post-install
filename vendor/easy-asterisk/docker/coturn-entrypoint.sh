@@ -1,26 +1,24 @@
-#!/bin/sh
-# ================================================================
-# Robust coturn entrypoint
+#!/bin/bash
+# coturn-entrypoint.sh — robust wrapper for the coturn Docker image.
 #
-# The coturn/coturn Docker image's native entrypoint uses:
+# The coturn image's default entrypoint uses:
 #   exec $(eval "echo $@")
-# which is fragile — if DETECT_EXTERNAL_IP's DNS lookup returns empty,
-# the eval produces an empty token → "ERROR: CONFIG: Unknown argument:"
+# which fails when detect-external-ip returns empty — produces a blank token
+# and coturn logs "ERROR: CONFIG: Unknown argument:"
 #
-# This wrapper reuses the image's detect-external-ip script but avoids
-# the eval word-splitting issue. If detection fails, we simply omit
-# --external-ip rather than passing a blank argument.
-# ================================================================
+# This wrapper avoids eval word-splitting and only adds --external-ip when
+# an IP is actually obtained.
 
-# Use explicit PUBLIC_IP if provided, otherwise auto-detect
-if [ -z "$PUBLIC_IP" ]; then
-    PUBLIC_IP=$(detect-external-ip 2>/dev/null || true)
+set -e
+
+# Use explicitly set PUBLIC_IP, or try auto-detection
+ext_ip="${PUBLIC_IP:-}"
+if [[ -z "$ext_ip" ]] && command -v detect-external-ip &>/dev/null; then
+    ext_ip=$(detect-external-ip 2>/dev/null || true)
 fi
 
-# Only add --external-ip if we actually have an IP
-EXTERNAL_IP_ARG=""
-if [ -n "$PUBLIC_IP" ]; then
-    EXTERNAL_IP_ARG="--external-ip=$PUBLIC_IP"
+if [[ -n "$ext_ip" ]]; then
+    exec turnserver "$@" --external-ip="$ext_ip"
+else
+    exec turnserver "$@"
 fi
-
-exec turnserver "$@" $EXTERNAL_IP_ARG

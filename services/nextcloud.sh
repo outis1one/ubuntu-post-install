@@ -2,10 +2,6 @@
 # services/nextcloud.sh — Self-hosted cloud storage with SMB/local file access (Nextcloud).
 # Part of the modular post-install system (sourced by setup.sh).
 #
-# Uses a custom Dockerfile (nextcloud:apache + smbclient) so SMB external storage
-# works without AIO.  All data uses bind mounts under ~/docker/nextcloud/ so that
-# Kopia/Borg backup scripts cover everything automatically.
-#
 # Can also be run standalone on any machine:
 #   sudo bash nextcloud.sh
 # (Docker must already be installed when run standalone)
@@ -25,7 +21,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
-        # One-off copy — inline minimal stubs
+        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -53,6 +49,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$_len"
         }
 
+        write_readme() {
+            local _dir="$1"; shift
+            [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -73,8 +76,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             local _caddy_dir="$DOCKER_DIR/caddy"
             local _caddyfile="$_caddy_dir/Caddyfile"
 
+            # Support remote Caddy host via CADDY_REMOTE_HOST
+            if [[ -n "${CADDY_REMOTE_HOST:-}" ]]; then
+                log_info "Remote Caddy detected at $CADDY_REMOTE_HOST — printing block to add manually."
+                echo ""
+                echo "  Add the following to your Caddyfile on $CADDY_REMOTE_HOST:"
+                echo "  ──────────────────────────────────────────────────────────"
+                echo "  # $_name"
+                echo "  ${_subdomain}.${SITE_DOMAIN:-example.com} {"
+                echo "      reverse_proxy $_upstream"
+                [[ -n "$_extra" ]] && echo "$_extra"
+                echo "  }"
+                echo "  ──────────────────────────────────────────────────────────"
+                return 0
+            fi
+
             if [[ ! -d "$_caddy_dir" ]]; then
-                log_info "Access $_name directly on port 8080."
+                log_info "Access $_name directly on port ${_upstream##*:}."
                 return 0
             fi
 
@@ -82,7 +100,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             local _do_caddy=""
             read -r -p "  Configure Caddy reverse proxy for $_name? [y/N]: " _do_caddy
             [[ "${_do_caddy,,}" == "y" ]] || {
-                log_info "Skipping — access at: http://localhost:8080"
+                log_info "Skipping — access at: http://localhost:${_upstream##*:}"
                 return 0
             }
 
@@ -138,12 +156,6 @@ CBLOCK
                 log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
             fi
         }
-
-        write_readme() {
-            local _dir="$1"; shift
-            mkdir -p "$_dir"
-            cat > "$_dir/README.md"
-        }
     fi
 
     # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
@@ -170,38 +182,32 @@ install_nextcloud() {
     local DIR="$DOCKER_DIR/nextcloud"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $DIR with:"
-        echo "[DRY-RUN]   Dockerfile (nextcloud:apache + smbclient)"
-        echo "[DRY-RUN]   docker-compose.yml (nextcloud + mariadb:10.11)"
-        echo "[DRY-RUN]   .env with generated DB and admin passwords"
-        echo "[DRY-RUN]   Bind-mount directories: html/ db/ config/ custom_apps/"
-        echo "[DRY-RUN] Would expose Nextcloud on port 8080"
-        echo "[DRY-RUN] Would enable files_external app via occ after deploy"
+        echo "[DRY-RUN] Would create $DIR with Dockerfile, docker-compose.yml, .env"
         return 0
     fi
 
-    mkdir -p "$DIR/html" "$DIR/db" "$DIR/config" "$DIR/custom_apps"
+    mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
     cd "$DIR" || return 1
 
-    local DB_PASS NC_ADMIN_PASS TZ_VAL
+    local DB_PASS
     DB_PASS=$(generate_password 32)
-    NC_ADMIN_PASS=$(generate_password 24)
-    TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+    local NC_ADMIN_PASS
+    NC_ADMIN_PASS=$(generate_password 16)
+    local TZ_VAL="${SITE_TZ:-UTC}"
 
-    # ── Dockerfile — adds SMB support to the official apache image ────────────
-    cat > Dockerfile << 'DOCKERFILE'
+    # ── Dockerfile ──────────────────────────────────────────────────────────
+    cat > Dockerfile << 'NCDF'
 FROM nextcloud:apache
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends procps smbclient \
  && rm -rf /var/lib/apt/lists/*
-DOCKERFILE
+NCDF
 
-    # ── docker-compose.yml — single-quoted EOF prevents variable expansion ────
-    cat > docker-compose.yml << 'EOF'
+    # ── docker-compose.yml ──────────────────────────────────────────────────
+    cat > docker-compose.yml << 'NCCOMPOSE'
 name: nextcloud
-
 services:
   nextcloud:
     build: .
@@ -235,132 +241,114 @@ networks:
   caddy_net:
     external: true
     name: ${CADDY_NET:-caddy_net}
-EOF
+NCCOMPOSE
 
-    # ── .env — actual variable values (NOT inside the compose heredoc) ────────
-    cat > .env << NC_ENV
-# ── Timezone & network ────────────────────────────────────────────────────────
+    # ── .env ────────────────────────────────────────────────────────────────
+    cat > .env << NCENV
 TZ=$TZ_VAL
 CADDY_NET=$SITE_CADDY_NET
 
-# ── MariaDB ───────────────────────────────────────────────────────────────────
+# MariaDB
 MYSQL_ROOT_PASSWORD=$DB_PASS
 MYSQL_DATABASE=nextcloud
 MYSQL_USER=nextcloud
 MYSQL_PASSWORD=$DB_PASS
 MARIADB_AUTO_UPGRADE=1
 
-# ── Nextcloud bootstrap ───────────────────────────────────────────────────────
-# These are used only on the very first startup to create the admin account
-# and wire up the database.  They are ignored on subsequent startups.
+# Nextcloud bootstrap (first run only)
 NEXTCLOUD_ADMIN_USER=admin
 NEXTCLOUD_ADMIN_PASSWORD=$NC_ADMIN_PASS
 NEXTCLOUD_DB_TYPE=mysql
 MYSQL_HOST=db
 
-# ── Reverse proxy trust (required when behind Caddy) ─────────────────────────
-# Without these, share links use http:// and internal redirects may break.
+# Reverse proxy (required for correct share links and redirects behind Caddy)
 OVERWRITEPROTOCOL=https
 OVERWRITECLIURL=https://cloud.${SITE_DOMAIN:-example.com}
 TRUSTED_PROXIES=172.16.0.0/12
-NC_ENV
-
+NCENV
     chmod 600 .env
+
+    # ── Subdirectories ──────────────────────────────────────────────────────
+    mkdir -p html config custom_apps db
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DIR"
+
+    echo ""
     log_success "Nextcloud configured at $DIR"
 
     configure_caddy_for_service "Nextcloud" "nextcloud:80" "cloud"
 
-    write_readme "$DIR" << MD
-# Nextcloud
-
-Self-hosted cloud storage — files, contacts, calendar, notes, and more.
-SMB/local external storage is enabled via a custom Docker image (nextcloud:apache + smbclient).
-
-## Access
-- URL: http://localhost:8080
-- Admin user: \`admin\`
-- Admin password: see \`NEXTCLOUD_ADMIN_PASSWORD\` in \`.env\`
-
-## Directory layout (all bind-mounted — covered by Kopia/Borg backups)
-\`\`\`
-$DIR/
-  html/         # Nextcloud web root (PHP app + uploaded files)
-  config/       # config.php and other Nextcloud config files
-  custom_apps/  # manually installed apps not shipped with Nextcloud
-  db/           # MariaDB data directory
-  Dockerfile    # custom image definition (adds smbclient)
-  docker-compose.yml
-  .env          # secrets — chmod 600
-\`\`\`
-
-## External Storage (SMB / local paths)
-The \`files_external\` app is enabled automatically during setup.
-Add mounts in the Nextcloud web UI:
-**Admin → Administration → External Storage**
-
-Supported backends: Local, SMB/CIFS, FTP, S3, WebDAV, and more.
-
-## Manage
-\`\`\`bash
-cd $DIR
-docker compose up -d                                      # start
-docker compose down                                       # stop
-docker compose logs -f                                    # logs
-docker compose build --pull && docker compose up -d      # rebuild image + update
-docker exec --user www-data nextcloud php occ list        # occ CLI
-\`\`\`
-
-## Backup note
-All data lives under \`$DIR/\` as bind mounts.
-Include this directory in your Kopia/Borg backup policy.
-Run \`docker compose down\` before a cold backup of \`db/\` for consistency,
-or use \`mysqldump\` for a hot backup:
-\`\`\`bash
-docker exec nextcloud-db mysqldump -u nextcloud -p\$MYSQL_PASSWORD nextcloud > nextcloud_db.sql
-\`\`\`
-MD
-
+    # ── Prompt to start ─────────────────────────────────────────────────────
     local START_NC=""
     prompt_yn "Start Nextcloud now? (y/n):" "y" START_NC
     if [ "$START_NC" = "y" ] || [ "$START_NC" = "Y" ]; then
-        docker compose up -d \
-            && log_success "Nextcloud started — first boot may take 1-2 minutes" \
+        docker compose up -d --build \
+            && log_success "Nextcloud started" \
             || { log_warning "Start failed — check: docker compose logs"; return 1; }
 
-        # Wait for Nextcloud to finish first-boot initialisation before running occ
-        log_info "Waiting for Nextcloud to finish initialising (up to 90 s)..."
-        local _waited=0
-        until docker exec --user www-data nextcloud php occ status --output=json 2>/dev/null \
-              | grep -q '"installed":true'; do
-            sleep 5
-            _waited=$(( _waited + 5 ))
-            if (( _waited >= 90 )); then
-                log_warning "Nextcloud did not finish initialising within 90 s."
-                log_warning "Run the occ command manually once the container is ready:"
-                log_warning "  docker exec --user www-data nextcloud php occ app:enable files_external"
-                break
-            fi
+        # ── Wait for occ and enable files_external ──────────────────────────
+        log_info "Waiting for Nextcloud to initialize (up to 90s)..."
+        local _wait=0
+        until docker exec nextcloud php occ status 2>/dev/null | grep -q "installed: true"; do
+            sleep 5; _wait=$((_wait+5))
+            [ $_wait -ge 90 ] && { log_warning "Nextcloud not ready after 90s — enable files_external manually"; break; }
         done
-
-        if (( _waited < 90 )); then
-            if docker exec --user www-data nextcloud php occ app:enable files_external; then
-                log_success "External Storage app enabled"
-            else
-                log_warning "Could not enable files_external — run manually:"
-                log_warning "  docker exec --user www-data nextcloud php occ app:enable files_external"
-            fi
+        if docker exec nextcloud php occ app:enable files_external 2>/dev/null; then
+            log_success "files_external app enabled (SMB/local external storage)"
         fi
     fi
 
+    # ── README ───────────────────────────────────────────────────────────────
+    write_readme "$DIR" << NCREADME
+# Nextcloud
+
+Self-hosted cloud storage with SMB/local file access.
+
+## Access
+
+- URL:      https://cloud.${SITE_DOMAIN:-example.com}  (or http://localhost:8080)
+- Admin:    admin
+- Password: see \`NEXTCLOUD_ADMIN_PASSWORD\` in \`$DIR/.env\`
+
+## Manage
+
+\`\`\`bash
+docker compose up -d --build   # start / rebuild
+docker compose down            # stop
+docker compose logs -f         # follow logs
+docker compose pull && docker compose up -d --build   # update
+\`\`\`
+
+## Run occ commands
+
+\`\`\`bash
+docker exec -u www-data nextcloud php occ <command>
+\`\`\`
+
+## Enable external storage (SMB / local)
+
+\`\`\`bash
+docker exec -u www-data nextcloud php occ app:enable files_external
+\`\`\`
+
+Then configure mounts in Nextcloud → Settings → External Storages.
+
+## Backup
+
+Back up these directories:
+- \`$DIR/html\`        — Nextcloud application files
+- \`$DIR/config\`      — configuration
+- \`$DIR/custom_apps\` — third-party apps
+- \`$DIR/db\`          — MariaDB data
+- \`$DIR/.env\`        — credentials (permissions 600)
+NCREADME
+
     echo ""
-    echo "  URL:            http://localhost:8080"
-    echo "  Admin user:     admin"
-    echo "  Admin password: $NC_ADMIN_PASS"
-    echo "  (Credentials also saved to $DIR/.env)"
+    echo "  Access URL:   http://localhost:8080"
+    echo "  Admin user:   admin"
+    echo "  Admin pass:   $NC_ADMIN_PASS"
+    echo "  Config dir:   $DIR"
     echo ""
-    echo "  To add SMB or local external storage:"
-    echo "    Nextcloud → Admin → Administration → External Storage"
+    echo "  Note: First startup may take 1-2 minutes while Nextcloud initialises."
     echo ""
 }
 
