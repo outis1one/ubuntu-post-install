@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # fbq-add-source.sh — Manage file sources for FileBrowser Quantum.
 #
-# Assumes the parent data directory is already mounted in docker-compose.yml.
-# Subdirectories of that mount are already accessible inside the container,
-# so only config.yaml needs editing — no compose changes required.
+# Handles both docker-compose.yml volume mounts and config.yaml source
+# entries together, keeping them in sync.
 #
 # Usage:
 #   bash fbq-add-source.sh [--dir /path/to/compose]
@@ -84,13 +83,20 @@ find_install_dir() {
     echo "$dir"
 }
 
-# ── Get all non-data container mount points ───────────────────────────────────
-get_data_mounts() {
+# ── Get all non-data container mount points from compose ──────────────────────
+get_compose_mounts() {
     local compose="$1"
     yq e '.services.filebrowser.volumes[]' "$compose" 2>/dev/null \
         | grep -v '/home/filebrowser/data' \
-        | cut -d: -f2 \
+        | grep -v '^\./' \
         | sed 's|/$||'
+}
+
+# ── Check if a volume mount already exists in compose ────────────────────────
+volume_exists() {
+    local compose="$1" container_path="$2"
+    yq e '.services.filebrowser.volumes[]' "$compose" 2>/dev/null \
+        | grep -qF ":${container_path}"
 }
 
 # ── Backup a file ─────────────────────────────────────────────────────────────
@@ -112,7 +118,6 @@ source_exists() {
 # ── List existing sources ─────────────────────────────────────────────────────
 list_sources() {
     local config="$1"
-    # Strip inline comments before parsing — yq can mishandle them mid-array
     sed 's/[[:space:]]*#.*$//' "$config" | yq e '.server.sources[] | .path' - 2>/dev/null
 }
 
@@ -125,75 +130,110 @@ restart_container() {
         local yn=""
         read -r -p "  Restart FileBrowser Quantum now to apply changes? [Y/n]: " yn
         [[ "${yn,,}" == "n" ]] && {
-            warn "Remember to restart: cd $dir && docker compose restart"
+            warn "Remember to restart: cd $dir && docker compose down && docker compose up -d"
             return 0
         }
     fi
 
     info "Restarting FileBrowser Quantum..."
-    docker compose -f "$dir/docker-compose.yml" restart \
+    docker compose -f "$dir/docker-compose.yml" down \
+        && docker compose -f "$dir/docker-compose.yml" up -d \
         && ok "FileBrowser Quantum restarted." \
-        || warn "Restart failed — try: cd $dir && docker compose restart"
+        || warn "Restart failed — try: cd $dir && docker compose down && docker compose up -d"
 }
 
 # ── ADD ───────────────────────────────────────────────────────────────────────
 cmd_add() {
     local dir="$1" config="$2" compose="$3"
 
-    # Build list of available mounts from compose
-    local mounts=()
-    while IFS= read -r m; do mounts+=("$m"); done < <(get_data_mounts "$compose")
+    # Build list of existing mounts from compose (host:container pairs)
+    local mount_pairs=()
+    local container_paths=()
+    while IFS= read -r line; do
+        mount_pairs+=("$line")
+        container_paths+=("$(echo "$line" | cut -d: -f2 | sed 's|/$||')")
+    done < <(get_compose_mounts "$compose")
 
     echo ""
-    if [[ ${#mounts[@]} -eq 0 ]]; then
-        warn "No volume mounts detected in docker-compose.yml (other than data dir)."
-    elif [[ ${#mounts[@]} -eq 1 ]]; then
-        echo "  Volume mount: ${mounts[0]}"
-    else
-        echo "  Available volume mounts:"
+    if [[ ${#container_paths[@]} -gt 0 ]]; then
+        echo "  Current volume mounts:"
+        echo ""
         local i=1
-        for m in "${mounts[@]}"; do
-            printf "    %d) %s\n" "$i" "$m"
+        for pair in "${mount_pairs[@]}"; do
+            local h; h=$(echo "$pair" | cut -d: -f1)
+            local c; c=$(echo "$pair" | cut -d: -f2 | sed 's|/$||')
+            printf "    %d)  %-30s  →  %s\n" "$i" "$h" "$c"
             i=$(( i + 1 ))
         done
+    else
+        echo "  No existing volume mounts detected."
     fi
+
     echo ""
-    echo "  For each source: pick a mount number, then enter the subdirectory"
-    echo "  (or type a full container path starting with / to skip the picker)."
+    echo "  Options:"
+    echo "    • Enter a number to add a source under an existing mount"
+    echo "    • Enter a host path (e.g. /mnt/data2) to add a NEW mount + source"
+    echo "    • Enter a full container path (e.g. /data2/music) for an existing mount"
+    echo "    • Enter to finish"
     echo ""
 
     local added=0
+    local compose_changed=0
 
     while true; do
         local raw=""
-        read -r -p "  Mount number or full path (Enter to finish): " raw
+        read -r -p "  Number, host path, container path, or Enter to finish: " raw
         [[ -z "$raw" ]] && break
 
-        local container_path=""
-        if [[ "$raw" == /* ]]; then
-            # Full path entered directly
-            container_path="${raw%/}"
-        elif [[ "$raw" =~ ^[0-9]+$ ]]; then
+        local host_path="" container_path=""
+
+        if [[ "$raw" =~ ^[0-9]+$ ]]; then
+            # Existing mount by number
             local midx=$(( raw - 1 ))
-            if [[ "$midx" -lt 0 || "$midx" -ge ${#mounts[@]} ]]; then
-                warn "Invalid mount number."; continue
+            if [[ "$midx" -lt 0 || "$midx" -ge ${#container_paths[@]} ]]; then
+                warn "Invalid number."; continue
             fi
-            local base_mount="${mounts[$midx]}"
+            local base="${container_paths[$midx]}"
             local subdir=""
-            read -r -p "  Subdirectory under ${base_mount} (or Enter for root): " subdir
+            read -r -p "  Subdirectory under ${base} (or Enter for the mount root): " subdir
             subdir="${subdir#/}"
-            if [[ -z "$subdir" ]]; then
-                container_path="$base_mount"
+            container_path="${base}${subdir:+/$subdir}"
+
+        elif [[ "$raw" == /* ]]; then
+            # Could be a host path or a container path
+            if [[ -d "$raw" ]] && ! volume_exists "$compose" "$raw"; then
+                # Looks like a host path not yet mounted
+                host_path="$raw"
+                local default_cname
+                default_cname="/$(basename "$raw" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')"
+                local cname=""
+                read -r -p "  Container mount point [${default_cname}]: " cname
+                cname="${cname:-$default_cname}"
+                cname="/${cname#/}"
+                container_path="$cname"
             else
-                container_path="${base_mount}/${subdir}"
+                # Treat as full container path
+                container_path="${raw%/}"
             fi
         else
-            warn "Enter a mount number or a full path starting with /."; continue
+            warn "Enter a number, a host path, or a container path starting with /."; continue
         fi
 
-        # Default name = subdir basename, lowercase, hyphenated
+        # If this is a new host mount, add it to docker-compose.yml
+        if [[ -n "$host_path" ]]; then
+            if volume_exists "$compose" "$container_path"; then
+                warn "Volume mount ':${container_path}' already in docker-compose.yml."
+            else
+                backup "$compose"
+                yq e -i ".services.filebrowser.volumes += [\"${host_path}:${container_path}\"]" "$compose"
+                ok "Added volume mount: ${host_path}:${container_path}"
+                compose_changed=1
+            fi
+        fi
+
+        # Default source name from container path basename
         local default_name
-        default_name=$(basename "$subdir" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
+        default_name=$(basename "$container_path" | tr '[:upper:]' '[:lower:]' | tr ' _' '-')
         local source_name=""
         read -r -p "  Display name for this source [${default_name}]: " source_name
         source_name="${source_name:-$default_name}"
@@ -210,7 +250,6 @@ cmd_add() {
         [[ "${yn,,}" == "y" ]] && default_enabled_bool="true"
 
         backup "$config"
-        # Strip inline comments first so yq edits cleanly
         local tmp; tmp=$(mktemp)
         sed 's/[[:space:]]*#.*$//' "$config" > "$tmp" && mv "$tmp" "$config"
         yq e -i ".server.sources += [{
@@ -222,10 +261,13 @@ cmd_add() {
         }]" "$config"
 
         ok "Added source '${source_name}' → ${container_path}"
-        (( added++ ))
+        added=$(( added + 1 ))
     done
 
-    if [[ "$added" -gt 0 ]]; then
+    if [[ "$added" -gt 0 || "$compose_changed" -gt 0 ]]; then
+        if [[ "$compose_changed" -gt 0 ]]; then
+            info "docker-compose.yml was changed — a full down/up is required (not just restart)."
+        fi
         restart_container "$dir"
         echo ""
         ok "$added source(s) added."
@@ -237,7 +279,7 @@ cmd_add() {
 
 # ── REMOVE ────────────────────────────────────────────────────────────────────
 cmd_remove() {
-    local dir="$1" config="$2"
+    local dir="$1" config="$2" compose="$3"
 
     local paths=()
     while IFS= read -r p; do paths+=("$p"); done < <(list_sources "$config")
@@ -253,8 +295,10 @@ cmd_remove() {
     local i=1
     for p in "${paths[@]}"; do
         local name
-        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "(unnamed)")
-        printf "  %2d)  %-20s  %s\n" "$i" "${name:-?}" "$p"
+        name=$(sed 's/[[:space:]]*#.*$//' "$config" \
+            | yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" - 2>/dev/null \
+            || echo "(unnamed)")
+        printf "  %2d)  %-20s  %s\n" "$i" "${name}" "$p"
         i=$(( i + 1 ))
     done
     echo ""
@@ -270,6 +314,15 @@ cmd_remove() {
 
     local target="${paths[$idx]}"
     warn "Will remove source '$target' from config.yaml."
+
+    # Check if there's also a compose volume mount for this exact path
+    local remove_mount=false
+    if volume_exists "$compose" "$target"; then
+        local yn=""
+        read -r -p "  Also remove the volume mount for '$target' from docker-compose.yml? [y/N]: " yn
+        [[ "${yn,,}" == "y" ]] && remove_mount=true
+    fi
+
     local confirm=""
     read -r -p "  Confirm? [y/N]: " confirm
     [[ "${confirm,,}" == "y" ]] || { info "Cancelled."; return 0; }
@@ -277,26 +330,49 @@ cmd_remove() {
     backup "$config"
     yq e -i "del(.server.sources[] | select(.path == \"${target}\"))" "$config"
     ok "Removed source '$target' from config.yaml."
+
+    if [[ "$remove_mount" == true ]]; then
+        backup "$compose"
+        yq e -i "del(.services.filebrowser.volumes[] | select(test(\":${target}$\")))" "$compose"
+        ok "Removed volume mount from docker-compose.yml."
+        info "A full down/up is required to apply compose changes."
+    fi
+
     restart_container "$dir"
 }
 
 # ── SHOW ──────────────────────────────────────────────────────────────────────
 cmd_show() {
-    local config="$1"
+    local config="$1" compose="$2"
+
     echo ""
-    echo "  Sources configured in config.yaml:"
+    echo "  Volume mounts (docker-compose.yml):"
+    echo ""
+    local i=1
+    while IFS= read -r pair; do
+        local h; h=$(echo "$pair" | cut -d: -f1)
+        local c; c=$(echo "$pair" | cut -d: -f2 | sed 's|/$||')
+        printf "  %2d)  %-35s  →  %s\n" "$i" "$h" "$c"
+        i=$(( i + 1 ))
+    done < <(get_compose_mounts "$compose")
+    [[ "$i" -eq 1 ]] && echo "  (none)"
+
+    echo ""
+    echo "  Sources (config.yaml):"
     echo ""
 
     local count=0
     while IFS= read -r p; do
-        local name enabled ro
-        name=$(yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" "$config" 2>/dev/null || echo "?")
-        enabled=$(yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled // false" "$config" 2>/dev/null || echo "false")
-        printf "  %-20s  %-35s  defaultEnabled=%s\n" \
-            "${name}" "${p}" "${enabled}"
+        local name enabled
+        name=$(sed 's/[[:space:]]*#.*$//' "$config" \
+            | yq e ".server.sources[] | select(.path == \"$p\") | .name // \"(unnamed)\"" - 2>/dev/null \
+            || echo "?")
+        enabled=$(sed 's/[[:space:]]*#.*$//' "$config" \
+            | yq e ".server.sources[] | select(.path == \"$p\") | .config.defaultEnabled // false" - 2>/dev/null \
+            || echo "false")
+        printf "  %-20s  %-35s  defaultEnabled=%s\n" "${name}" "${p}" "${enabled}"
         count=$(( count + 1 ))
     done < <(list_sources "$config")
-
     [[ "$count" -eq 0 ]] && warn "No sources found."
     echo ""
 }
@@ -316,7 +392,7 @@ main() {
     echo ""
     echo "┌──────────────────────────────────────────────────────────┐"
     echo "│  FileBrowser Quantum — Source Manager                    │"
-    echo "│  Manages config.yaml and restarts the container          │"
+    echo "│  Manages docker-compose.yml and config.yaml in sync      │"
     echo "└──────────────────────────────────────────────────────────┘"
 
     local install_dir
@@ -331,7 +407,7 @@ main() {
         echo "  What would you like to do?"
         echo "    1) Add source(s)"
         echo "    2) Remove a source"
-        echo "    3) Show current sources"
+        echo "    3) Show current mounts and sources"
         echo "    0) Quit"
         echo ""
         read -r -p "  Choice [1]: " action
@@ -340,8 +416,8 @@ main() {
 
         case "$action" in
             1) cmd_add    "$install_dir" "$config" "$compose" ;;
-            2) cmd_remove "$install_dir" "$config" ;;
-            3) cmd_show   "$config" ;;
+            2) cmd_remove "$install_dir" "$config" "$compose" ;;
+            3) cmd_show   "$config" "$compose" ;;
             0|q|Q) break ;;
             *) warn "Invalid choice." ;;
         esac
