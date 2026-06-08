@@ -83,6 +83,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
     register_service() { :; }   # no-op — no wizard to register into
     _RUN_STANDALONE=1

@@ -122,10 +122,19 @@ run_site_configure() {
     local _cur_tz="${SITE_TZ:-$_sys_tz}"
     local _cur_dom="${SITE_DOMAIN:-}"
     local _cur_net="${SITE_CADDY_NET:-caddy_net}"
+    local _cur_caddy_host="${CADDY_REMOTE_HOST:-}"
+
     prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
     prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
     prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
-    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET
+
+    echo ""
+    echo "  Caddy location: leave blank if Caddy runs on THIS machine (default)."
+    echo "  Set to this machine's LAN IP or hostname if Caddy runs on a DIFFERENT"
+    echo "  machine — service installers will generate snippet files to copy over."
+    prompt_text "  Caddy remote host (LAN IP/hostname) [${_cur_caddy_host:-<this machine>}]:" "$_cur_caddy_host" CADDY_REMOTE_HOST
+
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET CADDY_REMOTE_HOST
     mkdir -p "$DOCKER_DIR"
     save_site_config
     log_success "Saved to $DOCKER_DIR/.config"

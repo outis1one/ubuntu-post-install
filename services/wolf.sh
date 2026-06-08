@@ -54,12 +54,130 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        ensure_docker_dir_ownership() {
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
             read -r -p "  $_q " _r
             eval "$_var='${_r:-$_def}'"
+        }
+
+        prompt_yn() {
+            local _q="$1" _def="$2" _var="$3" _r
+            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
+            read -r -p "  $_q " _r
+            eval "$_var='${_r:-$_def}'"
+        }
+
+        configure_caddy_for_service() {
+            local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
+            local _caddy_dir="$DOCKER_DIR/caddy"
+            local _caddyfile="$_caddy_dir/Caddyfile"
+            local _display_port="${_upstream##*:}"
+
+            local _mode="none"
+            [[ -d "$_caddy_dir" ]] && _mode="local"
+            [[ -n "${CADDY_REMOTE_HOST:-}" ]] && [[ "$_mode" != "local" ]] && _mode="remote"
+            [[ "$_mode" == "none" ]] && {
+                log_info "Access $_name directly on port $_display_port."
+                return 0
+            }
+
+            echo ""
+            local _do_caddy=""
+            if [[ "$_mode" == "remote" ]]; then
+                log_info "Remote Caddy configured (${CADDY_REMOTE_HOST})."
+                log_info "A snippet file will be saved to ~/docker/caddy-snippets/."
+            fi
+            read -r -p "  Configure Caddy reverse proxy for $_name? [y/N]: " _do_caddy
+            [[ "${_do_caddy,,}" == "y" ]] || {
+                log_info "Skipping — access at: http://localhost:$_display_port"
+                return 0
+            }
+
+            local _default_domain=""
+            if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$SITE_DOMAIN" != "example.com" ]]; then
+                _default_domain="${_subdomain}.${SITE_DOMAIN}"
+                log_info "Default: $_default_domain"
+            fi
+            local _domain=""
+            read -r -p "  Domain [${_default_domain:-required}]: " _domain
+            _domain="${_domain:-$_default_domain}"
+            [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
+
+            local _block_upstream="$_upstream"
+            if [[ "$_mode" == "remote" ]]; then
+                _block_upstream="${CADDY_REMOTE_HOST}:${_display_port}"
+            fi
+
+            local _site_block
+            _site_block="$(cat << CBLOCK
+
+# $_name
+${_domain} {
+    reverse_proxy ${_block_upstream}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${_domain}.log
+        format json
+    }
+${_extra}
+}
+CBLOCK
+)"
+
+            if [[ "$_mode" == "local" ]]; then
+                if [[ -f "$_caddyfile" ]]; then
+                    local _bk="$_caddy_dir/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+                    cp "$_caddyfile" "$_bk"
+                    log_info "Backed up Caddyfile to $(basename "$_bk")"
+                else
+                    touch "$_caddyfile"
+                fi
+                if grep -q "^${_domain}" "$_caddyfile" 2>/dev/null; then
+                    log_warning "$_domain already in Caddyfile"
+                    local _ow=""
+                    read -r -p "  Overwrite? [y/N]: " _ow
+                    [[ "${_ow,,}" == "y" ]] || { log_info "Keeping existing entry."; return 0; }
+                    sed -i "/^${_domain}/,/^}/d" "$_caddyfile"
+                fi
+                printf '%s\n' "$_site_block" >> "$_caddyfile"
+                log_success "Added $_domain to Caddyfile"
+                docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                    log_success "$_name accessible at: https://$_domain"
+                else
+                    log_warning "Reload failed — check: docker logs caddy"
+                    log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                fi
+            else
+                local _snippet_dir="$DOCKER_DIR/caddy-snippets"
+                local _snippet_file="$_snippet_dir/${_subdomain}.caddy"
+                mkdir -p "$_snippet_dir"
+                printf '%s\n' "$_site_block" > "$_snippet_file"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$_snippet_file" 2>/dev/null || true
+                log_success "Snippet saved: $_snippet_file"
+                log_info "Copy to Caddy machine:"
+                log_info "  scp $_snippet_file caddy-host:~/caddy-snippets/"
+                log_info "  rsync -av $_snippet_dir/ caddy-host:~/caddy-snippets/  (all at once)"
+            fi
+        }
+
+        write_readme() {
+            local _dir="$1"; shift
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
         }
     fi
 
@@ -73,6 +191,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
     register_service() { :; }   # no-op — no wizard to register into
     _RUN_STANDALONE=1
@@ -967,6 +1086,11 @@ cd $WOLF_DIR
 | 47984–47990 | TCP | Moonlight control |
 | 48010 | TCP | RTSP |
 | 47998–48000 | UDP | RTP video/audio/control |
+
+## Game storage: \`$GAME_STORAGE_DIR\`
+- \`roms/\`   → /ROMs (EmulationStation)
+- \`steam/\`  → Steam data
+- \`saves/\`  → RetroArch saves
 
 ## Backup
 \`\`\`bash
