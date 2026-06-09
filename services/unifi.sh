@@ -202,25 +202,36 @@ UNIFI_ENV
 
     log_success "UniFi configured at $UNIFI_DIR"
 
-    # ── Optional Caddy reverse proxy (HTTPS backend requires special config) ──
-    if [ -d "$DOCKER_DIR/caddy" ]; then
+    # ── Optional Caddy reverse proxy (HTTPS backend requires tls_insecure_skip_verify) ──
+    local _caddy_mode="none"
+    [ -d "$DOCKER_DIR/caddy" ] && _caddy_mode="local"
+    [ -n "${CADDY_REMOTE_HOST:-}" ] && [ "$_caddy_mode" != "local" ] && _caddy_mode="remote"
+
+    if [ "$_caddy_mode" != "none" ]; then
         echo ""
         echo "  UniFi web UI is HTTPS-only (self-signed cert internally)."
-        echo "  Caddy can proxy it, but requires tls_insecure_skip_verify."
+        echo "  Caddy proxies it using tls_insecure_skip_verify."
+        if [ "$_caddy_mode" = "remote" ]; then
+            echo "  Remote Caddy (${CADDY_REMOTE_HOST}) — a snippet file will be saved."
+        fi
         echo ""
         local CADDY_UNIFI=""
         prompt_yn "Configure Caddy reverse proxy for UniFi? (y/n):" "n" CADDY_UNIFI
         if [ "$CADDY_UNIFI" = "y" ] || [ "$CADDY_UNIFI" = "Y" ]; then
             local UNIFI_DOMAIN=""
-            prompt_text "UniFi domain (e.g. unifi.example.com):" "unifi.${SITE_DOMAIN:-example.com}" UNIFI_DOMAIN
+            local _def_domain="unifi.${SITE_DOMAIN:-example.com}"
+            prompt_text "UniFi domain [${_def_domain}]:" "$_def_domain" UNIFI_DOMAIN
             if [ -n "$UNIFI_DOMAIN" ]; then
-                local CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
-                cp "$CADDYFILE" "$CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-                cat >> "$CADDYFILE" << CADDY_BLOCK
+                # UniFi uses HTTPS internally — upstream must use https:// + skip verify
+                local _upstream="https://unifi-app:8443"
+                [ "$_caddy_mode" = "remote" ] && _upstream="https://${CADDY_REMOTE_HOST}:8443"
+
+                local _site_block
+                _site_block="$(cat << CBLOCK
 
 # UniFi Network Application
-$UNIFI_DOMAIN {
-    reverse_proxy https://unifi-app:8443 {
+${UNIFI_DOMAIN} {
+    reverse_proxy ${_upstream} {
         transport http {
             tls_insecure_skip_verify
         }
@@ -234,15 +245,30 @@ $UNIFI_DOMAIN {
     }
 
     log {
-        output file /var/log/caddy/$UNIFI_DOMAIN.log
+        output file /var/log/caddy/${UNIFI_DOMAIN}.log
         format json
     }
 }
-CADDY_BLOCK
-                docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-                docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
-                    && log_success "Caddy configured for $UNIFI_DOMAIN" \
-                    || log_warning "Caddy reload failed — check: docker logs caddy"
+CBLOCK
+)"
+                if [ "$_caddy_mode" = "local" ]; then
+                    local CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
+                    cp "$CADDYFILE" "$CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+                    printf '%s\n' "$_site_block" >> "$CADDYFILE"
+                    docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                    docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
+                        && log_success "Caddy configured for $UNIFI_DOMAIN" \
+                        || log_warning "Caddy reload failed — check: docker logs caddy"
+                else
+                    local _snippet_dir="$DOCKER_DIR/caddy-snippets"
+                    local _snippet_file="$_snippet_dir/unifi.caddy"
+                    mkdir -p "$_snippet_dir"
+                    printf '%s\n' "$_site_block" > "$_snippet_file"
+                    chown "$ACTUAL_USER:$ACTUAL_USER" "$_snippet_file" 2>/dev/null || true
+                    log_success "Snippet saved: $_snippet_file"
+                    log_info "Copy to Caddy machine:"
+                    log_info "  scp $_snippet_file caddy-host:~/caddy-snippets/"
+                fi
             fi
         fi
     fi
