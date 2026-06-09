@@ -206,15 +206,17 @@ services:
     container_name: changedetection
     hostname: changedetection
     restart: unless-stopped
-    env_file: .env
     ports:
       - "5000:5000"
+    environment:
+      - BASE_URL=${BASE_URL}
+      - PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000
     volumes:
       - ./data:/datastore
-    depends_on:
-      - playwright-chrome
     networks:
       - caddy_net
+    depends_on:
+      - playwright-chrome
 
   playwright-chrome:
     image: browserless/chrome:latest
@@ -233,13 +235,13 @@ networks:
 CD_COMPOSE
 
     cat > .env << CD_ENV
-# Changedetection.io configuration
+# Changedetection.io environment — edit before starting if needed
 BASE_URL=https://changes.${SITE_DOMAIN}
-PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000
 CADDY_NET=${SITE_CADDY_NET}
 CD_ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CD_DIR"
+    chmod 600 "$CD_DIR/.env"
 
     echo ""
     log_success "Changedetection.io configured at $CD_DIR"
@@ -249,20 +251,25 @@ CD_ENV
     write_readme "$CD_DIR" << 'MD'
 # Changedetection.io
 
-Monitor web pages for changes and receive notifications. Includes a
-Playwright/Chrome sidecar for JavaScript-rendered pages.
+Monitor web pages for changes and receive notifications via email, Slack,
+Discord, ntfy, and many other channels. Includes a Playwright/Chrome sidecar
+for JavaScript-heavy pages.
 
 ## Access
 - URL: http://localhost:5000
-- Optional password can be set via Settings in the UI
+- Optional password can be set in Settings → General within the UI.
 
 ## Manage
 ```bash
-docker compose up -d
-docker compose down
-docker compose logs -f
-docker compose pull && docker compose down && docker compose up -d
+docker compose up -d      # start
+docker compose down       # stop
+docker compose logs -f    # logs
+docker compose pull && docker compose down && docker compose up -d  # update
 ```
+
+## Environment
+Edit `.env` to change `BASE_URL` (used for notification links),
+then restart: `docker compose down && docker compose up -d`
 MD
 
     local START_CD=""
