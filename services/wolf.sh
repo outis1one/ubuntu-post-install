@@ -1056,6 +1056,10 @@ PYEOF
     configure_caddy_for_service "Wolf" "wolf:47990" "wolf" "$WOLF_EXTRA_BLOCK"
 
     write_readme "$WOLF_DIR" << MD
+# Wolf — Cloud Gaming
+
+Cloud gaming via Moonlight. Stream any Moonlight-compatible game or app from
+this server to any device on your network.
 # Wolf — Cloud Gaming (Games-on-Whales)
 
 Stream games to any Moonlight client over your LAN or Tailscale VPN.
