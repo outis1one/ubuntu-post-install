@@ -206,9 +206,16 @@ services:
     container_name: n8n
     hostname: n8n
     restart: unless-stopped
-    env_file: .env
     ports:
       - "5678:5678"
+    env_file:
+      - .env
+    environment:
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
+      - N8N_HOST=${N8N_HOST:-n8n}
+      - WEBHOOK_URL=${WEBHOOK_URL}
     volumes:
       - ./data:/home/node/.n8n
     networks:
@@ -221,16 +228,15 @@ networks:
 N8N_COMPOSE
 
     cat > .env << N8N_ENV
-# n8n configuration
-N8N_HOST=n8n.${SITE_DOMAIN}
-N8N_PORT=5678
-N8N_PROTOCOL=https
+# n8n environment — edit before starting if needed
+N8N_HOST=n8n
 WEBHOOK_URL=https://n8n.${SITE_DOMAIN}
 GENERIC_TIMEZONE=${SITE_TZ}
 CADDY_NET=${SITE_CADDY_NET}
 N8N_ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$N8N_DIR"
+    chmod 600 "$N8N_DIR/.env"
 
     echo ""
     log_success "n8n configured at $N8N_DIR"
@@ -240,20 +246,24 @@ N8N_ENV
     write_readme "$N8N_DIR" << 'MD'
 # n8n
 
-Workflow automation — connect all your self-hosted services with a visual
-node-based editor. An owner account is created on first login.
+Workflow automation platform — connect all your self-hosted services with
+a visual editor. Create webhooks, scheduled jobs, and multi-step automations.
 
 ## Access
 - URL: http://localhost:5678
-- Create an owner account on first visit
+- On first run, n8n prompts you to create an owner account.
 
 ## Manage
 ```bash
-docker compose up -d
-docker compose down
-docker compose logs -f
-docker compose pull && docker compose down && docker compose up -d
+docker compose up -d      # start
+docker compose down       # stop
+docker compose logs -f    # logs
+docker compose pull && docker compose down && docker compose up -d  # update
 ```
+
+## Environment
+Edit `.env` to change `WEBHOOK_URL` or `N8N_HOST` after deployment,
+then restart: `docker compose down && docker compose up -d`
 MD
 
     local START_N8N=""
@@ -265,7 +275,7 @@ MD
     fi
 
     echo "  Access at:  http://localhost:5678"
-    echo "  Create an owner account on first visit."
+    echo "  Create your owner account on first visit."
     echo ""
 }
 
