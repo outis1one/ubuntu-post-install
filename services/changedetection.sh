@@ -1,20 +1,12 @@
 #!/bin/bash
-# services/wg-easy.sh — WireGuard VPN with a web management UI (wg-easy).
+# services/changedetection.sh — Web page change detection and notification (Changedetection.io).
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
-#   sudo bash wg-easy.sh
+#   sudo bash changedetection.sh
 # (Docker must already be installed when run standalone)
-#
-# Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- WG-EASY ----).
-# Own ~/docker/wg-easy/ with a standalone docker-compose.yml + .env.
-# Requires cap_add: NET_ADMIN + SYS_MODULE and ip_forward sysctl.
-# Forward UDP 51820 on your router to this server for external VPN access.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
-# Detected when the script is executed directly rather than sourced by setup.sh.
-# Sets up helpers and globals, then defers execution until after the function
-# definition at the bottom of this file.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 
@@ -22,11 +14,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _COMMON="$_SELF_DIR/../lib/common.sh"
 
     if [[ -f "$_COMMON" ]]; then
-        # Full repo present — use the real helpers (picks up ~/docker/.config too)
-        # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
-        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -49,7 +38,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
-        # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -176,8 +164,6 @@ CBLOCK
         }
     fi
 
-    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
-    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
     ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
     DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
@@ -186,142 +172,117 @@ CBLOCK
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
-    register_service() { :; }   # no-op — no wizard to register into
+    register_service() { :; }
     _RUN_STANDALONE=1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy)" 51821
+register_service changedetection utilities "Web page change detection and notification (Changedetection.io)" 5000
 
-install_wg-easy() {
+install_changedetection() {
     require_docker || return 1
+    log_info "Installing Changedetection.io..."
 
-    local WGEASY_DIR="$DOCKER_DIR/wg-easy"
+    local CD_DIR="$DOCKER_DIR/changedetection"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] wg-easy would:"
-        echo "  - Create $WGEASY_DIR with docker-compose.yml + .env (config/)"
-        echo "  - Auto-detect public IP for WG_HOST"
-        echo "  - Generate a random web UI password"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
-        echo "  - Require router port-forward: UDP 51820 → this server"
-        echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "[DRY-RUN] Would create $CD_DIR"
+        echo "[DRY-RUN] Would write docker-compose.yml and .env"
         return 0
     fi
 
-    mkdir -p "$WGEASY_DIR"
-    ensure_docker_dir_ownership "$WGEASY_DIR"
-    cd "$WGEASY_DIR" || return 1
+    mkdir -p "$CD_DIR/data"
+    ensure_docker_dir_ownership "$CD_DIR"
+    cd "$CD_DIR" || return 1
 
-    # Auto-detect public IP as default for WG_HOST
-    local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
-    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
-    WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
-
-    # wg-easy v14+ requires PASSWORD_HASH (bcrypt). Generate via docker.
-    log_info "Generating bcrypt password hash (requires Docker)..."
-    WG_PASSWORD_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy:latest wgpw "$WG_PASSWORD" 2>/dev/null \
-        | grep -oP '\$2[ab]\$[^\s]+' | head -1)
-    if [[ -z "$WG_PASSWORD_HASH" ]]; then
-        log_warning "Could not generate bcrypt hash — falling back to plaintext PASSWORD env var."
-        log_warning "If wg-easy fails to start, run: docker run --rm ghcr.io/wg-easy/wg-easy wgpw 'yourpassword'"
-        log_warning "Then set PASSWORD_HASH in docker-compose.yml and remove PASSWORD."
-    fi
-
-    # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
-    local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
-
-    cat > docker-compose.yml << WGEASY_COMPOSE
-name: wg-easy
+    cat > docker-compose.yml << 'CD_COMPOSE'
+name: changedetection
 
 services:
-  wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:latest
-    container_name: wg-easy
-    hostname: wg-easy
+  changedetection:
+    image: ghcr.io/dgtlmoon/changedetection.io:latest
+    container_name: changedetection
+    hostname: changedetection
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-    environment:
-      - WG_HOST=\${WG_HOST}
-      - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
-      - WG_DEFAULT_DNS=1.1.1.1
-    volumes:
-      - ./config:/etc/wireguard
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "5000:5000"
+    environment:
+      - BASE_URL=${BASE_URL}
+      - PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000
+    volumes:
+      - ./data:/datastore
+    networks:
+      - caddy_net
+    depends_on:
+      - playwright-chrome
+
+  playwright-chrome:
+    image: browserless/chrome:latest
+    container_name: playwright-chrome
+    hostname: playwright-chrome
+    restart: unless-stopped
+    environment:
+      - DEFAULT_LAUNCH_ARGS=--no-sandbox --disable-dev-shm-usage
     networks:
       - caddy_net
 
 networks:
   caddy_net:
     external: true
-    name: \${CADDY_NET:-caddy_net}
-WGEASY_COMPOSE
+    name: ${CADDY_NET:-caddy_net}
+CD_COMPOSE
 
-    cat > .env << WGEASY_ENV
-WG_HOST=$WG_HOST
-# Plain-text password — used only if PASSWORD_HASH could not be generated above
-WG_PASSWORD=$WG_PASSWORD
-CADDY_NET=$SITE_CADDY_NET
-WGEASY_ENV
+    cat > .env << CD_ENV
+# Changedetection.io environment — edit before starting if needed
+BASE_URL=https://changes.${SITE_DOMAIN}
+CADDY_NET=${SITE_CADDY_NET}
+CD_ENV
 
-    mkdir -p config
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
-    log_success "wg-easy configured at $WGEASY_DIR"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CD_DIR"
+    chmod 600 "$CD_DIR/.env"
 
-    configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
+    echo ""
+    log_success "Changedetection.io configured at $CD_DIR"
 
-    write_readme "$WGEASY_DIR" << MD
-# wg-easy
+    configure_caddy_for_service "Changedetection" "changedetection:5000" "changes"
 
-WireGuard VPN with a web UI for managing clients, generating QR codes,
-and monitoring connections.
+    write_readme "$CD_DIR" << 'MD'
+# Changedetection.io
 
-- Web UI: http://localhost:51821
-- VPN:    UDP port 51820 (forward this on your router)
-- Password: stored in \`.env\` (\`WG_PASSWORD\`)
-- VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
-- Config: \`config/\`
+Monitor web pages for changes and receive notifications via email, Slack,
+Discord, ntfy, and many other channels. Includes a Playwright/Chrome sidecar
+for JavaScript-heavy pages.
+
+## Access
+- URL: http://localhost:5000
+- Optional password can be set in Settings → General within the UI.
 
 ## Manage
-\`\`\`bash
-cd $WGEASY_DIR
+```bash
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
-docker compose pull && docker compose up -d   # update
-\`\`\`
+docker compose pull && docker compose down && docker compose up -d  # update
+```
 
-## Router setup
-Forward **UDP port 51820** to this server's LAN IP for external VPN access.
-
-## Adding clients
-Open http://localhost:51821, log in with your password, click "+ New Client",
-download or scan the QR code with the WireGuard app.
+## Environment
+Edit `.env` to change `BASE_URL` (used for notification links),
+then restart: `docker compose down && docker compose up -d`
 MD
 
-    local START_WGEASY=""
-    prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
-    if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
-        docker compose up -d && log_success "wg-easy started" || log_warning "Failed to start — check: docker compose logs"
+    local START_CD=""
+    prompt_yn "Start Changedetection.io now? (y/n):" "y" START_CD
+    if [ "$START_CD" = "y" ] || [ "$START_CD" = "Y" ]; then
+        docker compose up -d 2>/dev/null \
+            && log_success "Changedetection.io started" \
+            || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo ""
-    echo "  Web UI:   http://localhost:51821"
-    echo "  Password: $WG_PASSWORD  (saved in .env)"
-    [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
-        || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
-    echo "  Router:   forward UDP 51820 → this server for external VPN access"
+    echo "  Access at:  http://localhost:5000"
     echo ""
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_wg-easy
+# Run immediately when executed directly (deferred until after function definition)
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_changedetection

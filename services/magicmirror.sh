@@ -317,7 +317,15 @@ MM_COMPOSE
         log_success "MagicMirror instance $i configured at $MM_DIR (port $MM_PORT)"
 
         # Offer Caddy only for first instance
-        [ "$i" -eq 1 ] && configure_caddy_for_service "MagicMirror" "magicmirror-${MM_PORT}:8080" "mirror"
+        if [ "$i" -eq 1 ]; then
+            local MM_EXTRA_BLOCK=""
+            if [ -d "$DOCKER_DIR/authelia" ]; then
+                local _use_auth=""
+                prompt_yn "Protect MagicMirror with Authelia SSO? (y/n):" "y" _use_auth
+                [[ "$_use_auth" =~ ^[Yy]$ ]] && MM_EXTRA_BLOCK="    import authelia"
+            fi
+            configure_caddy_for_service "MagicMirror" "magicmirror-${MM_PORT}:8080" "mirror" "$MM_EXTRA_BLOCK"
+        fi
 
         local START_MM=""
         prompt_yn "Start instance $i now? (y/n):" "y" START_MM

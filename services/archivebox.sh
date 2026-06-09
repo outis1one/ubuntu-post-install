@@ -1,20 +1,12 @@
 #!/bin/bash
-# services/wg-easy.sh — WireGuard VPN with a web management UI (wg-easy).
+# services/archivebox.sh — Self-hosted web archiving (ArchiveBox).
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
-#   sudo bash wg-easy.sh
+#   sudo bash archivebox.sh
 # (Docker must already be installed when run standalone)
-#
-# Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- WG-EASY ----).
-# Own ~/docker/wg-easy/ with a standalone docker-compose.yml + .env.
-# Requires cap_add: NET_ADMIN + SYS_MODULE and ip_forward sysctl.
-# Forward UDP 51820 on your router to this server for external VPN access.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
-# Detected when the script is executed directly rather than sourced by setup.sh.
-# Sets up helpers and globals, then defers execution until after the function
-# definition at the bottom of this file.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 
@@ -22,11 +14,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _COMMON="$_SELF_DIR/../lib/common.sh"
 
     if [[ -f "$_COMMON" ]]; then
-        # Full repo present — use the real helpers (picks up ~/docker/.config too)
-        # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
-        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -49,7 +38,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
-        # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -70,7 +58,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             local _caddyfile="$_caddy_dir/Caddyfile"
             local _display_port="${_upstream##*:}"
 
-            # Determine mode: local Caddy, remote Caddy, or none
             local _mode="none"
             [[ -d "$_caddy_dir" ]] && _mode="local"
             [[ -n "${CADDY_REMOTE_HOST:-}" ]] && [[ "$_mode" != "local" ]] && _mode="remote"
@@ -91,7 +78,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 return 0
             }
 
-            # Domain prompt — pre-fill from SITE_DOMAIN when available
             local _default_domain=""
             if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$SITE_DOMAIN" != "example.com" ]]; then
                 _default_domain="${_subdomain}.${SITE_DOMAIN}"
@@ -102,7 +88,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             _domain="${_domain:-$_default_domain}"
             [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
 
-            # Build upstream — remote Caddy uses host IP:port, not container name
             local _block_upstream="$_upstream"
             if [[ "$_mode" == "remote" ]]; then
                 _block_upstream="${CADDY_REMOTE_HOST}:${_display_port}"
@@ -176,8 +161,6 @@ CBLOCK
         }
     fi
 
-    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
-    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
     ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
     DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
@@ -186,142 +169,117 @@ CBLOCK
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
-    register_service() { :; }   # no-op — no wizard to register into
+    register_service() { :; }
     _RUN_STANDALONE=1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy)" 51821
+register_service archivebox utilities "Self-hosted web archiving — save pages like Wayback Machine (ArchiveBox)" 8000
 
-install_wg-easy() {
+install_archivebox() {
     require_docker || return 1
 
-    local WGEASY_DIR="$DOCKER_DIR/wg-easy"
+    local AB_DIR="$DOCKER_DIR/archivebox"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] wg-easy would:"
-        echo "  - Create $WGEASY_DIR with docker-compose.yml + .env (config/)"
-        echo "  - Auto-detect public IP for WG_HOST"
-        echo "  - Generate a random web UI password"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
-        echo "  - Require router port-forward: UDP 51820 → this server"
-        echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "[DRY-RUN] archivebox would:"
+        echo "  - Create $AB_DIR with docker-compose.yml"
+        echo "  - Initialize ArchiveBox data directory"
+        echo "  - Expose port 8000 (web UI)"
         return 0
     fi
 
-    mkdir -p "$WGEASY_DIR"
-    ensure_docker_dir_ownership "$WGEASY_DIR"
-    cd "$WGEASY_DIR" || return 1
+    mkdir -p "$AB_DIR"
+    ensure_docker_dir_ownership "$AB_DIR"
+    cd "$AB_DIR" || return 1
 
-    # Auto-detect public IP as default for WG_HOST
-    local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
-    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
-    WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
-
-    # wg-easy v14+ requires PASSWORD_HASH (bcrypt). Generate via docker.
-    log_info "Generating bcrypt password hash (requires Docker)..."
-    WG_PASSWORD_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy:latest wgpw "$WG_PASSWORD" 2>/dev/null \
-        | grep -oP '\$2[ab]\$[^\s]+' | head -1)
-    if [[ -z "$WG_PASSWORD_HASH" ]]; then
-        log_warning "Could not generate bcrypt hash — falling back to plaintext PASSWORD env var."
-        log_warning "If wg-easy fails to start, run: docker run --rm ghcr.io/wg-easy/wg-easy wgpw 'yourpassword'"
-        log_warning "Then set PASSWORD_HASH in docker-compose.yml and remove PASSWORD."
-    fi
-
-    # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
-    local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
-
-    cat > docker-compose.yml << WGEASY_COMPOSE
-name: wg-easy
+    cat > docker-compose.yml << 'ABCOMPOSE'
+name: archivebox
 
 services:
-  wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:latest
-    container_name: wg-easy
-    hostname: wg-easy
+  archivebox:
+    image: archivebox/archivebox:latest
+    container_name: archivebox
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
+    user: "1000:1000"
     environment:
-      - WG_HOST=\${WG_HOST}
-      - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
-      - WG_DEFAULT_DNS=1.1.1.1
+      - ALLOWED_HOSTS=*
+      - MEDIA_MAX_SIZE=750m
+      - PUBLIC_INDEX=True
+      - PUBLIC_SNAPSHOTS=True
+      - PUBLIC_ADD_VIEW=False
     volumes:
-      - ./config:/etc/wireguard
+      - ./data:/data
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "8000:8000"
     networks:
       - caddy_net
 
 networks:
   caddy_net:
     external: true
-    name: \${CADDY_NET:-caddy_net}
-WGEASY_COMPOSE
+    name: ${CADDY_NET:-caddy_net}
+ABCOMPOSE
 
-    cat > .env << WGEASY_ENV
-WG_HOST=$WG_HOST
-# Plain-text password — used only if PASSWORD_HASH could not be generated above
-WG_PASSWORD=$WG_PASSWORD
+    cat > .env << ABENV
 CADDY_NET=$SITE_CADDY_NET
-WGEASY_ENV
+ABENV
 
-    mkdir -p config
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
-    log_success "wg-easy configured at $WGEASY_DIR"
+    mkdir -p data
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$AB_DIR"
 
-    configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
+    log_info "Initializing ArchiveBox data directory..."
+    docker compose run --rm archivebox init --setup \
+        && log_success "ArchiveBox initialized" \
+        || log_warning "Init failed — will retry on first start"
 
-    write_readme "$WGEASY_DIR" << MD
-# wg-easy
+    configure_caddy_for_service "ArchiveBox" "archivebox:8000" "archive"
 
-WireGuard VPN with a web UI for managing clients, generating QR codes,
-and monitoring connections.
+    write_readme "$AB_DIR" << 'MD'
+# ArchiveBox
 
-- Web UI: http://localhost:51821
-- VPN:    UDP port 51820 (forward this on your router)
-- Password: stored in \`.env\` (\`WG_PASSWORD\`)
-- VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
-- Config: \`config/\`
+Self-hosted web archiving — saves full snapshots of web pages (HTML, screenshots,
+PDFs, WARC) like a personal Wayback Machine.
+
+- Web UI: http://localhost:8000
 
 ## Manage
-\`\`\`bash
-cd $WGEASY_DIR
+```bash
+cd ~/docker/archivebox
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
 docker compose pull && docker compose up -d   # update
-\`\`\`
+```
 
-## Router setup
-Forward **UDP port 51820** to this server's LAN IP for external VPN access.
+## Add URLs to archive
+```bash
+# Via web UI — visit http://localhost:8000 and use the Add page
+# Via CLI:
+echo "https://example.com" | docker compose run --rm archivebox add
+docker compose run --rm archivebox add --depth=1 https://example.com
+```
 
-## Adding clients
-Open http://localhost:51821, log in with your password, click "+ New Client",
-download or scan the QR code with the WireGuard app.
+## Create admin user
+```bash
+docker compose run --rm archivebox manage createsuperuser
+```
 MD
 
-    local START_WGEASY=""
-    prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
-    if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
-        docker compose up -d && log_success "wg-easy started" || log_warning "Failed to start — check: docker compose logs"
+    local START_AB=""
+    prompt_yn "Start ArchiveBox now? (y/n):" "y" START_AB
+    if [ "$START_AB" = "y" ] || [ "$START_AB" = "Y" ]; then
+        docker compose up -d \
+            && log_success "ArchiveBox started — http://localhost:8000" \
+            || log_warning "Start failed — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Web UI:   http://localhost:51821"
-    echo "  Password: $WG_PASSWORD  (saved in .env)"
-    [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
-        || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
-    echo "  Router:   forward UDP 51820 → this server for external VPN access"
+    echo "  Web UI:  http://localhost:8000"
+    echo "  Add URLs via the web UI or: echo 'URL' | docker compose run --rm archivebox add"
     echo ""
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_wg-easy
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_archivebox

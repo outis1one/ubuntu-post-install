@@ -235,6 +235,28 @@ CADDY_NET=$SITE_CADDY_NET
 NTFY_ENV
 
     mkdir -p cache config
+
+    # Write server.yml — ntfy needs base-url for correct push notification links
+    # Only on fresh install; never clobber existing config
+    if [ ! -f config/server.yml ]; then
+        local NTFY_BASE_URL=""
+        if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+            NTFY_BASE_URL="https://ntfy.${SITE_DOMAIN}"
+        fi
+        cat > config/server.yml << NTFY_CFG
+# ntfy server configuration — https://docs.ntfy.sh/config/
+base-url: "${NTFY_BASE_URL:-https://ntfy.example.com}"  # UPDATE to your actual domain
+cache-file: /var/cache/ntfy/cache.db
+cache-duration: 12h
+auth-file: /var/cache/ntfy/auth.db
+auth-default-access: deny-all
+behind-proxy: true
+NTFY_CFG
+        [[ -n "$NTFY_BASE_URL" ]] \
+            && log_info "base-url set to $NTFY_BASE_URL — update if domain changes" \
+            || log_warning "base-url set to placeholder — edit config/server.yml after install"
+    fi
+
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$NTFY_DIR"
 
     echo ""

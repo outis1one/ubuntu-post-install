@@ -1046,7 +1046,7 @@ PYEOF
     echo "  Set up automatic backups with the backup module:"
     echo "       sudo ./setup.sh backup"
     echo ""
-    # ── Caddy reverse proxy (Wolf web UI — no built-in auth, offer Authelia) ────
+    # Wolf's web UI (pair/manage) has no built-in auth — protect with Authelia if available
     local WOLF_EXTRA_BLOCK=""
     if [ -d "$DOCKER_DIR/authelia" ]; then
         local _use_auth=""
@@ -1060,32 +1060,54 @@ PYEOF
 
 Cloud gaming via Moonlight. Stream any Moonlight-compatible game or app from
 this server to any device on your network.
+# Wolf — Cloud Gaming (Games-on-Whales)
+
+Stream games to any Moonlight client over your LAN or Tailscale VPN.
+
+## Pair a new client
+1. Open Moonlight on the client device
+2. Add host: this server's IP
+3. Run the pin command on the server:
+\`\`\`bash
+cd $WOLF_DIR && ./manage.sh pin
+\`\`\`
 
 ## Manage
 \`\`\`bash
 cd $WOLF_DIR
-./manage.sh start      # start Wolf
-./manage.sh stop       # stop Wolf
-./manage.sh logs       # stream logs
-./manage.sh pin        # show pairing PIN
-./manage.sh update     # pull latest and restart
+./manage.sh start        # start Wolf
+./manage.sh stop         # stop
+./manage.sh restart      # restart
+./manage.sh logs         # live logs
+./manage.sh status       # container status
+./manage.sh update       # pull latest image and restart
+./manage.sh add-apps     # add game launchers
 \`\`\`
 
-## Pairing
-1. Open Moonlight on your device, select this server
-2. Run \`./manage.sh pin\` to get the pairing PIN
-3. Enter the PIN in Moonlight
+## Ports (open on firewall / router)
+| Port(s) | Protocol | Use |
+|---------|----------|-----|
+| 47984–47990 | TCP | Moonlight control |
+| 48010 | TCP | RTSP |
+| 47998–48000 | UDP | RTP video/audio/control |
 
 ## Game storage: \`$GAME_STORAGE_DIR\`
 - \`roms/\`   → /ROMs (EmulationStation)
 - \`steam/\`  → Steam data
 - \`saves/\`  → RetroArch saves
+
+## Backup
+\`\`\`bash
+sudo ./setup.sh backup   # covers /etc/wolf saves and ES-DE settings
+\`\`\`
 MD
 
     local START_WOLF=""
     prompt_yn "Start Wolf now? (y/n):" "y" START_WOLF
-    if [ "$START_WOLF" = "y" ] || [ "$START_WOLF" = "Y" ]; then
-        docker compose up -d && log_success "Wolf started" || log_warning "Failed to start — check: docker compose logs"
+    if [[ "$START_WOLF" =~ ^[Yy]$ ]]; then
+        docker compose up -d \
+            && log_success "Wolf started — pair Moonlight to this server's IP" \
+            || log_warning "Start failed — check: docker compose logs"
     fi
 
     log_success "Done. Pair Moonlight and play."

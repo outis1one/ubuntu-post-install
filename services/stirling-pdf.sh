@@ -1,20 +1,12 @@
 #!/bin/bash
-# services/wg-easy.sh — WireGuard VPN with a web management UI (wg-easy).
+# services/stirling-pdf.sh — PDF toolkit — merge, split, compress, OCR (Stirling PDF).
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
-#   sudo bash wg-easy.sh
+#   sudo bash stirling-pdf.sh
 # (Docker must already be installed when run standalone)
-#
-# Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- WG-EASY ----).
-# Own ~/docker/wg-easy/ with a standalone docker-compose.yml + .env.
-# Requires cap_add: NET_ADMIN + SYS_MODULE and ip_forward sysctl.
-# Forward UDP 51820 on your router to this server for external VPN access.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
-# Detected when the script is executed directly rather than sourced by setup.sh.
-# Sets up helpers and globals, then defers execution until after the function
-# definition at the bottom of this file.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 
@@ -22,11 +14,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _COMMON="$_SELF_DIR/../lib/common.sh"
 
     if [[ -f "$_COMMON" ]]; then
-        # Full repo present — use the real helpers (picks up ~/docker/.config too)
-        # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
-        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -49,7 +38,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
-        # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -176,8 +164,6 @@ CBLOCK
         }
     fi
 
-    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
-    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
     ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
     DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
@@ -186,142 +172,134 @@ CBLOCK
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
-    register_service() { :; }   # no-op — no wizard to register into
+    register_service() { :; }
     _RUN_STANDALONE=1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy)" 51821
+register_service stirling-pdf utilities "PDF toolkit — merge, split, compress, OCR (Stirling PDF)" 8070
 
-install_wg-easy() {
+install_stirling_pdf() {
     require_docker || return 1
+    log_info "Installing Stirling PDF..."
 
-    local WGEASY_DIR="$DOCKER_DIR/wg-easy"
+    local PDF_DIR="$DOCKER_DIR/stirling-pdf"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] wg-easy would:"
-        echo "  - Create $WGEASY_DIR with docker-compose.yml + .env (config/)"
-        echo "  - Auto-detect public IP for WG_HOST"
-        echo "  - Generate a random web UI password"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
-        echo "  - Require router port-forward: UDP 51820 → this server"
-        echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "[DRY-RUN] Would create $PDF_DIR"
+        echo "[DRY-RUN] Would write docker-compose.yml and .env"
         return 0
     fi
 
-    mkdir -p "$WGEASY_DIR"
-    ensure_docker_dir_ownership "$WGEASY_DIR"
-    cd "$WGEASY_DIR" || return 1
+    mkdir -p "$PDF_DIR"
+    ensure_docker_dir_ownership "$PDF_DIR"
+    cd "$PDF_DIR" || return 1
 
-    # Auto-detect public IP as default for WG_HOST
-    local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
-    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
-    WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
-
-    # wg-easy v14+ requires PASSWORD_HASH (bcrypt). Generate via docker.
-    log_info "Generating bcrypt password hash (requires Docker)..."
-    WG_PASSWORD_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy:latest wgpw "$WG_PASSWORD" 2>/dev/null \
-        | grep -oP '\$2[ab]\$[^\s]+' | head -1)
-    if [[ -z "$WG_PASSWORD_HASH" ]]; then
-        log_warning "Could not generate bcrypt hash — falling back to plaintext PASSWORD env var."
-        log_warning "If wg-easy fails to start, run: docker run --rm ghcr.io/wg-easy/wg-easy wgpw 'yourpassword'"
-        log_warning "Then set PASSWORD_HASH in docker-compose.yml and remove PASSWORD."
-    fi
-
-    # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
-    local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
-
-    cat > docker-compose.yml << WGEASY_COMPOSE
-name: wg-easy
+    cat > docker-compose.yml << 'PDF_COMPOSE'
+name: stirling-pdf
 
 services:
-  wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:latest
-    container_name: wg-easy
-    hostname: wg-easy
+  stirling-pdf:
+    image: frooodle/s-pdf:latest
+    container_name: stirling-pdf
+    hostname: stirling-pdf
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-    environment:
-      - WG_HOST=\${WG_HOST}
-      - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
-      - WG_DEFAULT_DNS=1.1.1.1
-    volumes:
-      - ./config:/etc/wireguard
+    env_file: .env
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "8070:8080"
+    volumes:
+      - ./training-data:/usr/share/tessdata
+      - ./extraConfigs:/configs
+      - ./logs:/logs
     networks:
       - caddy_net
 
 networks:
   caddy_net:
     external: true
-    name: \${CADDY_NET:-caddy_net}
-WGEASY_COMPOSE
+    name: ${CADDY_NET:-caddy_net}
+PDF_COMPOSE
 
-    cat > .env << WGEASY_ENV
-WG_HOST=$WG_HOST
-# Plain-text password — used only if PASSWORD_HASH could not be generated above
-WG_PASSWORD=$WG_PASSWORD
-CADDY_NET=$SITE_CADDY_NET
-WGEASY_ENV
+    cat > .env << PDF_ENV
+# Stirling PDF configuration
 
-    mkdir -p config
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
-    log_success "wg-easy configured at $WGEASY_DIR"
+# Set to true to enable login/user management (requires restart)
+DOCKER_ENABLE_SECURITY=false
 
-    configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
+# Set to true to install LibreOffice for advanced HTML/book conversion ops
+INSTALL_BOOK_AND_ADVANCED_HTML_OPS=false
 
-    write_readme "$WGEASY_DIR" << MD
-# wg-easy
+# Caddy network
+CADDY_NET=${SITE_CADDY_NET}
+PDF_ENV
 
-WireGuard VPN with a web UI for managing clients, generating QR codes,
-and monitoring connections.
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PDF_DIR"
 
-- Web UI: http://localhost:51821
-- VPN:    UDP port 51820 (forward this on your router)
-- Password: stored in \`.env\` (\`WG_PASSWORD\`)
-- VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
-- Config: \`config/\`
+    echo ""
+    log_success "Stirling PDF configured at $PDF_DIR"
+    log_info "Security/login is disabled by default (DOCKER_ENABLE_SECURITY=false)."
+    log_info "To enable built-in auth, set DOCKER_ENABLE_SECURITY=true in .env and restart."
+
+    # No built-in auth by default — offer Authelia SSO protection
+    local EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect Stirling PDF with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && EXTRA_BLOCK="    import authelia"
+    fi
+
+    configure_caddy_for_service "Stirling PDF" "stirling-pdf:8080" "pdf" "$EXTRA_BLOCK"
+
+    write_readme "$PDF_DIR" << MD
+# Stirling PDF
+
+Feature-rich PDF toolkit: merge, split, compress, rotate, OCR, convert, and more.
+
+## Access
+- URL: http://localhost:8070
+- No login required by default (security disabled)
+
+## Enabling built-in auth
+Set \`DOCKER_ENABLE_SECURITY=true\` in \`.env\`, then restart:
+\`\`\`bash
+cd $PDF_DIR
+docker compose down && docker compose up -d
+\`\`\`
+
+## OCR / Tesseract
+Additional Tesseract language packs can be placed in \`./training-data/\`.
+See: https://github.com/Frooodle/Stirling-PDF#ocr
 
 ## Manage
 \`\`\`bash
-cd $WGEASY_DIR
-docker compose up -d      # start
-docker compose down       # stop
-docker compose logs -f    # logs
-docker compose pull && docker compose up -d   # update
+cd $PDF_DIR
+docker compose up -d                                        # start
+docker compose down                                         # stop
+docker compose logs -f                                      # logs
+docker compose pull && docker compose down && docker compose up -d  # update
 \`\`\`
 
-## Router setup
-Forward **UDP port 51820** to this server's LAN IP for external VPN access.
-
-## Adding clients
-Open http://localhost:51821, log in with your password, click "+ New Client",
-download or scan the QR code with the WireGuard app.
+## Files
+- docker-compose.yml  — stack definition
+- .env                — configuration flags
+- training-data/      — Tesseract OCR language data
+- extraConfigs/       — optional extra config files
+- logs/               — application logs
 MD
 
-    local START_WGEASY=""
-    prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
-    if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
-        docker compose up -d && log_success "wg-easy started" || log_warning "Failed to start — check: docker compose logs"
+    local START_PDF=""
+    prompt_yn "Start Stirling PDF now? (y/n):" "y" START_PDF
+    if [ "$START_PDF" = "y" ] || [ "$START_PDF" = "Y" ]; then
+        docker compose up -d 2>/dev/null \
+            && log_success "Stirling PDF started" \
+            || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo ""
-    echo "  Web UI:   http://localhost:51821"
-    echo "  Password: $WG_PASSWORD  (saved in .env)"
-    [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
-        || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
-    echo "  Router:   forward UDP 51820 → this server for external VPN access"
+    echo "  Access at:  http://localhost:8070"
     echo ""
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_wg-easy
+# Run immediately when executed directly (deferred until after function definition)
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_stirling_pdf

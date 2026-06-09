@@ -455,7 +455,13 @@ COMPOSE
     log_success "js99er configured at $JS99ER_DIR"
 
     # ── 5. Reverse proxy (no-ops if Caddy isn't installed locally) ───────────
-    configure_caddy_for_service "js99er" "js99er:80" "js99er"
+    local JS99ER_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect js99er with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && JS99ER_EXTRA_BLOCK="    import authelia"
+    fi
+    configure_caddy_for_service "js99er" "js99er:80" "js99er" "$JS99ER_EXTRA_BLOCK"
 
     # ── 6. Build & start ─────────────────────────────────────────────────────
     local START_JS99ER=""
@@ -477,7 +483,24 @@ COMPOSE
         fi
     fi
 
-    # ── 7. Access summary ────────────────────────────────────────────────────
+    write_readme "$JS99ER_DIR" << MD
+# js99er — TI-99/4A Emulator
+
+Browser-based TI-99/4A emulator. No built-in auth — protect with Authelia if exposing externally.
+
+## Access
+- URL: http://localhost:${JS99ER_PORT}
+- Online (no install): https://js99er.net
+
+## Manage
+\`\`\`bash
+cd $JS99ER_DIR
+docker compose up -d --build               # start (or rebuild)
+docker compose down                        # stop
+docker compose logs -f                     # logs
+\`\`\`
+MD
+
     echo ""
     echo "  Access at:  http://localhost:${JS99ER_PORT}"
     echo "  If you set a domain above, it is also reachable via that domain (HTTPS)."

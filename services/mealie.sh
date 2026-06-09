@@ -205,6 +205,13 @@ install_mealie() {
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     UID_VAL=$(id -u "$ACTUAL_USER"); GID_VAL=$(id -g "$ACTUAL_USER")
 
+    # BASE_URL must match the public URL Mealie is served on (used for email links,
+    # OAuth redirects, and the web app manifest). Default to SITE_DOMAIN if set.
+    local MEALIE_BASE_URL="http://localhost:9925"
+    if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+        MEALIE_BASE_URL="https://recipes.${SITE_DOMAIN}"
+    fi
+
     cat > docker-compose.yml << MEALIE_COMPOSE
 name: mealie
 
@@ -214,6 +221,7 @@ services:
     container_name: mealie
     hostname: mealie
     restart: unless-stopped
+    env_file: .env
     environment:
       - PUID=$UID_VAL
       - PGID=$GID_VAL
@@ -221,7 +229,6 @@ services:
       - ALLOW_SIGNUP=true
       - MAX_WORKERS=1
       - WEB_CONCURRENCY=1
-      - BASE_URL=http://localhost:9925
     volumes:
       - ./data:/app/data
     ports:
@@ -234,6 +241,13 @@ networks:
     external: true
     name: \${CADDY_NET:-caddy_net}
 MEALIE_COMPOSE
+
+    cat > .env << MEALIE_ENV
+# Public URL Mealie is served on — used for email links and OAuth redirects.
+# Update if you change your domain or switch from HTTP to HTTPS.
+BASE_URL=$MEALIE_BASE_URL
+CADDY_NET=$SITE_CADDY_NET
+MEALIE_ENV
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MEALIE_DIR"

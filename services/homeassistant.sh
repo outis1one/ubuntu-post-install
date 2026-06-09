@@ -278,6 +278,25 @@ HA_CONFIG
         configure_caddy_for_service "Home Assistant" "homeassistant:8123" "home"
     fi
 
+    write_readme "$HOMEASSISTANT_DIR" << MD
+# Home Assistant
+
+Home automation hub. Built-in auth — no Authelia needed.
+
+## Access
+- URL: http://localhost:8123
+- First run: create your admin account through the onboarding wizard
+
+## Manage
+\`\`\`bash
+cd $HOMEASSISTANT_DIR
+docker compose up -d                          # start
+docker compose down                           # stop
+docker compose logs -f                        # logs
+docker compose pull && docker compose up -d   # update
+\`\`\`
+MD
+
     local START_HA=""
     prompt_yn "Start Home Assistant now? (y/n):" "y" START_HA
     if [ "$START_HA" = "y" ] || [ "$START_HA" = "Y" ]; then

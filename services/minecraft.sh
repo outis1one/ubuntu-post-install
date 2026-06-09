@@ -2490,6 +2490,25 @@ NETEOF
     echo "  Run:  sudo ./setup.sh backup"
     echo ""
 
+    write_readme "$MC_DIR" << MD
+# Minecraft — ${MC_NAME}
+
+## Manage
+\`\`\`bash
+cd $MC_DIR
+docker compose up -d --build   # start (builds image on first run)
+docker compose down            # stop
+docker compose logs -f         # logs
+docker compose pull && docker compose up -d --build  # update
+\`\`\`
+
+## Backups
+World data lives in \`./data\` — covered by Kopia/Borg if installed.
+\`\`\`bash
+sudo ./setup.sh backup
+\`\`\`
+MD
+
     # ── Optional: start server and run pre-gen now ──────────────────────────────
     local START_MC=""
     prompt_yn "Start the Minecraft server now? (first build takes a few minutes) (y/n) [y]:" "y" START_MC

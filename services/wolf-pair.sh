@@ -433,7 +433,13 @@ COMPOSE
     fi
 
     # ── 5. Caddy (optional) ───────────────────────────────────────────────────
-    configure_caddy_for_service "wolf-pair" "$WOLFPAIR_PORT" "wolf-pair"
+    local WOLFPAIR_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect wolf-pair with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && WOLFPAIR_EXTRA_BLOCK="    import authelia"
+    fi
+    configure_caddy_for_service "wolf-pair" "$WOLFPAIR_PORT" "wolf-pair" "$WOLFPAIR_EXTRA_BLOCK"
 
     # ── 6. README ─────────────────────────────────────────────────────────────
     write_readme "$WOLFPAIR_DIR" << 'MD'

@@ -1,20 +1,16 @@
 #!/bin/bash
-# services/wg-easy.sh — WireGuard VPN with a web management UI (wg-easy).
+# services/drum-rhythm-game.sh — Browser-based drum rhythm game (outis1one/drum-rhythm-game).
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
-#   sudo bash wg-easy.sh
+#   sudo bash drum-rhythm-game.sh
 # (Docker must already be installed when run standalone)
 #
-# Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- WG-EASY ----).
-# Own ~/docker/wg-easy/ with a standalone docker-compose.yml + .env.
-# Requires cap_add: NET_ADMIN + SYS_MODULE and ip_forward sysctl.
-# Forward UDP 51820 on your router to this server for external VPN access.
+# Serves a single self-contained index.html via nginx. No login — protect
+# with Authelia via Caddy if you want access control.
+# Source: https://github.com/outis1one/drum-rhythm-game
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
-# Detected when the script is executed directly rather than sourced by setup.sh.
-# Sets up helpers and globals, then defers execution until after the function
-# definition at the bottom of this file.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
 
@@ -22,11 +18,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _COMMON="$_SELF_DIR/../lib/common.sh"
 
     if [[ -f "$_COMMON" ]]; then
-        # Full repo present — use the real helpers (picks up ~/docker/.config too)
-        # shellcheck source=../lib/common.sh
         source "$_COMMON"
     else
-        # One-off copy — inline minimal stubs so the script works without the repo
         log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
         log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
         log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
@@ -49,7 +42,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
-        # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -70,7 +62,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             local _caddyfile="$_caddy_dir/Caddyfile"
             local _display_port="${_upstream##*:}"
 
-            # Determine mode: local Caddy, remote Caddy, or none
             local _mode="none"
             [[ -d "$_caddy_dir" ]] && _mode="local"
             [[ -n "${CADDY_REMOTE_HOST:-}" ]] && [[ "$_mode" != "local" ]] && _mode="remote"
@@ -91,7 +82,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 return 0
             }
 
-            # Domain prompt — pre-fill from SITE_DOMAIN when available
             local _default_domain=""
             if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$SITE_DOMAIN" != "example.com" ]]; then
                 _default_domain="${_subdomain}.${SITE_DOMAIN}"
@@ -102,7 +92,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             _domain="${_domain:-$_default_domain}"
             [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
 
-            # Build upstream — remote Caddy uses host IP:port, not container name
             local _block_upstream="$_upstream"
             if [[ "$_mode" == "remote" ]]; then
                 _block_upstream="${CADDY_REMOTE_HOST}:${_display_port}"
@@ -176,8 +165,6 @@ CBLOCK
         }
     fi
 
-    # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
-    # ($HOME under sudo is /root, not the real user's home)
     ACTUAL_USER="${ACTUAL_USER:-${SUDO_USER:-$USER}}"
     ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "${HOME:-/root}")"
     DOCKER_DIR="${DOCKER_DIR:-$ACTUAL_HOME/docker}"
@@ -186,142 +173,126 @@ CBLOCK
     SITE_TZ="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     SITE_DOMAIN="${SITE_DOMAIN:-example.com}"
     SITE_CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
+    CADDY_REMOTE_HOST="${CADDY_REMOTE_HOST:-}"
 
-    register_service() { :; }   # no-op — no wizard to register into
+    register_service() { :; }
     _RUN_STANDALONE=1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy)" 51821
+register_service drum-rhythm-game gaming "Browser-based drum rhythm game (outis1one/drum-rhythm-game)" 8096
 
-install_wg-easy() {
+install_drum-rhythm-game() {
     require_docker || return 1
 
-    local WGEASY_DIR="$DOCKER_DIR/wg-easy"
+    local DRUM_DIR="$DOCKER_DIR/drum-rhythm-game"
+    local REPO_URL="https://github.com/outis1one/drum-rhythm-game.git"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] wg-easy would:"
-        echo "  - Create $WGEASY_DIR with docker-compose.yml + .env (config/)"
-        echo "  - Auto-detect public IP for WG_HOST"
-        echo "  - Generate a random web UI password"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
-        echo "  - Require router port-forward: UDP 51820 → this server"
-        echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "[DRY-RUN] drum-rhythm-game would:"
+        echo "  - Clone $REPO_URL to $DRUM_DIR/html"
+        echo "  - Serve index.html via nginx on port 8096"
+        echo "  - Offer Authelia SSO protection via Caddy (no built-in auth)"
         return 0
     fi
 
-    mkdir -p "$WGEASY_DIR"
-    ensure_docker_dir_ownership "$WGEASY_DIR"
-    cd "$WGEASY_DIR" || return 1
+    mkdir -p "$DRUM_DIR"
+    ensure_docker_dir_ownership "$DRUM_DIR"
+    cd "$DRUM_DIR" || return 1
 
-    # Auto-detect public IP as default for WG_HOST
-    local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
-    PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
-    WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
-
-    # wg-easy v14+ requires PASSWORD_HASH (bcrypt). Generate via docker.
-    log_info "Generating bcrypt password hash (requires Docker)..."
-    WG_PASSWORD_HASH=$(docker run --rm ghcr.io/wg-easy/wg-easy:latest wgpw "$WG_PASSWORD" 2>/dev/null \
-        | grep -oP '\$2[ab]\$[^\s]+' | head -1)
-    if [[ -z "$WG_PASSWORD_HASH" ]]; then
-        log_warning "Could not generate bcrypt hash — falling back to plaintext PASSWORD env var."
-        log_warning "If wg-easy fails to start, run: docker run --rm ghcr.io/wg-easy/wg-easy wgpw 'yourpassword'"
-        log_warning "Then set PASSWORD_HASH in docker-compose.yml and remove PASSWORD."
+    # Clone or update the game source
+    if [ -d "$DRUM_DIR/html/.git" ]; then
+        log_info "Updating drum-rhythm-game source..."
+        git -C "$DRUM_DIR/html" pull --ff-only 2>/dev/null \
+            && log_success "Updated to latest" \
+            || log_warning "Could not pull latest — using existing version"
+    else
+        log_info "Cloning drum-rhythm-game..."
+        git clone --depth 1 "$REPO_URL" "$DRUM_DIR/html" \
+            || { log_error "Clone failed — check network and git access"; return 1; }
     fi
 
-    # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
-    local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DRUM_DIR/html"
 
-    cat > docker-compose.yml << WGEASY_COMPOSE
-name: wg-easy
+    cat > docker-compose.yml << 'DRUM_COMPOSE'
+name: drum-rhythm-game
 
 services:
-  wg-easy:
-    image: ghcr.io/wg-easy/wg-easy:latest
-    container_name: wg-easy
-    hostname: wg-easy
+  drum-rhythm-game:
+    image: nginx:alpine
+    container_name: drum-rhythm-game
+    hostname: drum-rhythm-game
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.src_valid_mark=1
-    environment:
-      - WG_HOST=\${WG_HOST}
-      - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
-      - WG_DEFAULT_DNS=1.1.1.1
     volumes:
-      - ./config:/etc/wireguard
+      - ./html:/usr/share/nginx/html:ro
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "8096:80"
     networks:
       - caddy_net
 
 networks:
   caddy_net:
     external: true
-    name: \${CADDY_NET:-caddy_net}
-WGEASY_COMPOSE
+    name: ${CADDY_NET:-caddy_net}
+DRUM_COMPOSE
 
-    cat > .env << WGEASY_ENV
-WG_HOST=$WG_HOST
-# Plain-text password — used only if PASSWORD_HASH could not be generated above
-WG_PASSWORD=$WG_PASSWORD
-CADDY_NET=$SITE_CADDY_NET
-WGEASY_ENV
+    cat > .env << DRUM_ENV
+CADDY_NET=${SITE_CADDY_NET}
+DRUM_ENV
 
-    mkdir -p config
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WGEASY_DIR"
-    log_success "wg-easy configured at $WGEASY_DIR"
+    ensure_docker_dir_ownership "$DRUM_DIR"
+    log_success "drum-rhythm-game configured at $DRUM_DIR"
 
-    configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
+    # No built-in auth — offer Authelia SSO protection
+    local DRUM_EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect drum-rhythm-game with Authelia SSO? (y/n):" "y" _use_auth
+        [[ "$_use_auth" =~ ^[Yy]$ ]] && DRUM_EXTRA_BLOCK="    import authelia"
+    fi
+    configure_caddy_for_service "Drum Rhythm Game" "drum-rhythm-game:80" "drums" "$DRUM_EXTRA_BLOCK"
 
-    write_readme "$WGEASY_DIR" << MD
-# wg-easy
+    write_readme "$DRUM_DIR" << 'MD'
+# Drum Rhythm Game
 
-WireGuard VPN with a web UI for managing clients, generating QR codes,
-and monitoring connections.
+Browser-based drum rhythm game — 124 synthesized orchestra pieces across
+18 genres, 120 drum patterns. Supports keyboard and USB drum controllers.
+No server required; all audio synthesized in-browser via Web Audio API.
 
-- Web UI: http://localhost:51821
-- VPN:    UDP port 51820 (forward this on your router)
-- Password: stored in \`.env\` (\`WG_PASSWORD\`)
-- VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
-- Config: \`config/\`
+Source: https://github.com/outis1one/drum-rhythm-game
+
+## Access
+- URL: http://localhost:8096
 
 ## Manage
-\`\`\`bash
-cd $WGEASY_DIR
+```bash
+cd ~/docker/drum-rhythm-game
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
-docker compose pull && docker compose up -d   # update
-\`\`\`
+```
 
-## Router setup
-Forward **UDP port 51820** to this server's LAN IP for external VPN access.
-
-## Adding clients
-Open http://localhost:51821, log in with your password, click "+ New Client",
-download or scan the QR code with the WireGuard app.
+## Update game
+```bash
+cd ~/docker/drum-rhythm-game
+git -C html pull
+docker compose restart
+```
 MD
 
-    local START_WGEASY=""
-    prompt_yn "Start wg-easy now? (y/n):" "y" START_WGEASY
-    if [ "$START_WGEASY" = "y" ] || [ "$START_WGEASY" = "Y" ]; then
-        docker compose up -d && log_success "wg-easy started" || log_warning "Failed to start — check: docker compose logs"
+    local START_DRUM=""
+    prompt_yn "Start drum-rhythm-game now? (y/n):" "y" START_DRUM
+    if [ "$START_DRUM" = "y" ] || [ "$START_DRUM" = "Y" ]; then
+        docker compose up -d \
+            && log_success "Drum Rhythm Game started — http://localhost:8096" \
+            || log_warning "Start failed — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Web UI:   http://localhost:51821"
-    echo "  Password: $WG_PASSWORD  (saved in .env)"
-    [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
-        || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
-    echo "  Router:   forward UDP 51820 → this server for external VPN access"
+    echo "  URL:         http://localhost:8096"
+    echo "  Controls:    keyboard or USB drum controller"
+    echo "  Update:      git -C $DRUM_DIR/html pull && docker compose -f $DRUM_DIR/docker-compose.yml restart"
     echo ""
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_wg-easy
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_drum-rhythm-game
