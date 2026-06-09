@@ -1,13 +1,18 @@
 #!/bin/bash
-# services/iopaint.sh — AI image inpainting: object removal, fill, restore (IOPaint + LaMa).
+# services/iopaint.sh — AI image editing: erase objects, fill regions, replace with text prompt.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
 #   sudo bash iopaint.sh
 # (Docker must already be installed when run standalone)
 #
-# Runs the LaMa model (erase/fill objects) by default on CPU.
-# For GPU inference set DEVICE=cuda in .env and install nvidia-container-toolkit.
+# Three use cases:
+#   Erase/remove  — mask an object, AI fills the gap (LaMa, CPU-safe)
+#   Inpaint/fill  — restore damaged areas, remove watermarks (multiple models)
+#   Replace       — mask + text prompt → AI draws new content (PowerPaint, GPU required)
+#
+# IOPaint is local-only: it cannot call a remote GPU or InvokeAI on another machine.
+# For text-guided replacement the GPU must be on this same machine.
 # IOPaint has no built-in auth — protect with Authelia via Caddy.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
@@ -192,8 +197,9 @@ install_iopaint() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $IOPAINT_DIR"
+        echo "[DRY-RUN] Would prompt for model and GPU (CUDA) support"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
-        echo "[DRY-RUN] Would offer GPU (CUDA) support and Authelia SSO"
+        echo "[DRY-RUN] Would offer Authelia SSO"
         return 0
     fi
 
@@ -201,10 +207,67 @@ install_iopaint() {
     ensure_docker_dir_ownership "$IOPAINT_DIR"
     cd "$IOPAINT_DIR" || return 1
 
-    # Ask about GPU
+    # ── GPU ──────────────────────────────────────────────────────────────────
+    log_info "IOPaint can:"
+    log_info "  • Erase / remove  — mask an object, AI fills the gap (works CPU-only)"
+    log_info "  • Inpaint / fill  — restore damaged areas, remove watermarks"
+    log_info "  • Replace         — mask + type what goes there → AI draws it (needs GPU)"
+    log_info "  Note: inference is always local — IOPaint cannot use a GPU on another machine."
+    echo ""
     local USE_GPU=""
     prompt_yn "Enable CUDA GPU support? Requires nvidia-container-toolkit (y/n):" "n" USE_GPU
 
+    # ── Model selection ───────────────────────────────────────────────────────
+    echo ""
+    log_info "Select default model (you can switch models in the UI without restarting):"
+    echo ""
+    log_info "  ── CPU-safe — work on any machine ─────────────────────────────────────────"
+    log_info "  1) lama                    Erase / removal. Intelligent gap fill. ~200 MB  ← Recommended"
+    log_info "  2) cv2                     OpenCV fill. No download, instant. Rough quality."
+    log_info "  3) zits                    Portrait & face restoration. ~200 MB."
+    log_info "  4) manga                   Comic/manga text bubble removal. ~100 MB."
+    echo ""
+    if [[ "$USE_GPU" =~ ^[Yy]$ ]]; then
+        log_info "  ── GPU-accelerated fill ───────────────────────────────────────────────────"
+        log_info "  5) migan                   MiGAN: fast GPU inpainting. ~50 MB."
+        log_info "  6) fcf                     FcF: high-quality contextual fill. ~600 MB."
+        log_info "  7) mat                     MAT: large missing region fill. ~300 MB."
+        log_info "  8) ldm                     LDM: latent diffusion texture fill. ~1.2 GB."
+        echo ""
+        log_info "  ── Text-guided REPLACEMENT (GPU + Stable Diffusion) ───────────────────────"
+        log_info "  9) Sanster/PowerPaint-V2-filling"
+        log_info "                             Mask + type 'a red barn' → AI draws it. ~4 GB."
+        log_info "                             Modes: text-guided, shape-guided, erase, outpaint."
+        log_info " 10) runwayml/stable-diffusion-inpainting"
+        log_info "                             Classic SD 1.5 inpaint. Huge LoRA/style library. ~4 GB."
+        echo ""
+    fi
+
+    local MODEL_NUM=""
+    prompt_text "Model choice [1=lama]:" "1" MODEL_NUM
+
+    local IOPAINT_MODEL="lama"
+    case "$MODEL_NUM" in
+        2)  IOPAINT_MODEL="cv2" ;;
+        3)  IOPAINT_MODEL="zits" ;;
+        4)  IOPAINT_MODEL="manga" ;;
+        5)  IOPAINT_MODEL="migan" ;;
+        6)  IOPAINT_MODEL="fcf" ;;
+        7)  IOPAINT_MODEL="mat" ;;
+        8)  IOPAINT_MODEL="ldm" ;;
+        9)  IOPAINT_MODEL="Sanster/PowerPaint-V2-filling" ;;
+        10) IOPAINT_MODEL="runwayml/stable-diffusion-inpainting" ;;
+        *)  IOPAINT_MODEL="lama" ;;
+    esac
+
+    local DEVICE_VAL="cpu"
+    [[ "$USE_GPU" =~ ^[Yy]$ ]] && DEVICE_VAL="cuda"
+
+    # ── docker-compose.yml ────────────────────────────────────────────────────
+    # MODEL and DEVICE come from .env — change them there and restart to switch.
+    # Volume ./models:/root/.cache persists ALL model caches:
+    #   /root/.cache/torch/hub/checkpoints/  (LaMa, CV2, ZITS, etc.)
+    #   /root/.cache/huggingface/             (SD, PowerPaint, LDM, etc.)
     if [[ "$USE_GPU" =~ ^[Yy]$ ]]; then
         cat > docker-compose.yml << 'IOPAINT_GPU'
 name: iopaint
@@ -215,15 +278,19 @@ services:
     container_name: iopaint
     hostname: iopaint
     restart: unless-stopped
-    command: iopaint start --model=lama --device=cuda --port=8080 --host=0.0.0.0
+    command: >-
+      iopaint start
+      --model=${MODEL:-lama}
+      --device=${DEVICE:-cuda}
+      --port=8080
+      --host=0.0.0.0
     ports:
       - "8100:8080"
+    env_file: .env
     volumes:
-      - ./models:/root/.cache/iopaint
+      - ./models:/root/.cache
       - ./input:/app/input
       - ./output:/app/output
-    environment:
-      - DEVICE=cuda
     deploy:
       resources:
         reservations:
@@ -239,7 +306,6 @@ networks:
     external: true
     name: ${CADDY_NET:-caddy_net}
 IOPAINT_GPU
-        log_info "CUDA GPU mode enabled."
     else
         cat > docker-compose.yml << 'IOPAINT_CPU'
 name: iopaint
@@ -250,11 +316,17 @@ services:
     container_name: iopaint
     hostname: iopaint
     restart: unless-stopped
-    command: iopaint start --model=lama --device=cpu --port=8080 --host=0.0.0.0
+    command: >-
+      iopaint start
+      --model=${MODEL:-lama}
+      --device=${DEVICE:-cpu}
+      --port=8080
+      --host=0.0.0.0
     ports:
       - "8100:8080"
+    env_file: .env
     volumes:
-      - ./models:/root/.cache/iopaint
+      - ./models:/root/.cache
       - ./input:/app/input
       - ./output:/app/output
     networks:
@@ -265,18 +337,18 @@ networks:
     external: true
     name: ${CADDY_NET:-caddy_net}
 IOPAINT_CPU
-        log_info "CPU mode (default). Change DEVICE to cuda in .env and update the command to use GPU later."
     fi
 
+    # ── .env ─────────────────────────────────────────────────────────────────
     cat > .env << IOPAINT_ENV
-# IOPaint configuration
+# IOPaint — change MODEL and restart to switch (no need to edit docker-compose.yml)
 
-# Model to use for inpainting (lama recommended for object removal/erase)
-# Other models: ldm, zits, mat, fcf, manga, cv2, migan
-MODEL=lama
+# Current model (set during install — see README for full model list)
+MODEL=${IOPAINT_MODEL}
 
-# Device: cpu or cuda (cuda requires nvidia-container-toolkit + GPU deploy block)
-DEVICE=$([ "${USE_GPU,,}" = "y" ] && echo "cuda" || echo "cpu")
+# Device: cpu or cuda
+# For GPU: also requires the deploy: block in docker-compose.yml
+DEVICE=${DEVICE_VAL}
 
 # Caddy network
 CADDY_NET=${SITE_CADDY_NET}
@@ -287,9 +359,14 @@ IOPAINT_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IOPAINT_DIR"
 
     echo ""
-    log_success "IOPaint configured at $IOPAINT_DIR"
-    log_info "LaMa model downloads on first start (~170 MB). Upload images via the web UI."
-    log_info "To switch models later: edit the --model= argument in docker-compose.yml and restart."
+    log_success "IOPaint configured — model: $IOPAINT_MODEL | device: $DEVICE_VAL"
+    if [[ "$IOPAINT_MODEL" == *"PowerPaint"* ]] || [[ "$IOPAINT_MODEL" == *"stable-diffusion"* ]]; then
+        log_info "SD-based model selected (~4 GB). It downloads from HuggingFace on first start."
+        log_info "If the download fails, try: HF_TOKEN=your_token docker compose up -d"
+    else
+        log_info "Model downloads automatically on first start (LaMa ~200 MB)."
+    fi
+    log_info "Switch models any time by editing MODEL= in .env and restarting."
 
     # No built-in auth — offer Authelia SSO protection
     local EXTRA_BLOCK=""
@@ -301,63 +378,97 @@ IOPAINT_ENV
 
     configure_caddy_for_service "IOPaint" "iopaint:8080" "inpaint" "$EXTRA_BLOCK"
 
-    write_readme "$IOPAINT_DIR" << MD
+    write_readme "$IOPAINT_DIR" << 'MD'
 # IOPaint
 
-AI-powered image inpainting — erase objects, fill regions, restore photos.
-Uses the LaMa (Large Mask) model for high-quality object removal by default.
+AI-powered image editing:
+- **Erase / remove** — mask an object, AI fills the background (LaMa, works CPU-only)
+- **Inpaint / restore** — fix damaged areas, remove watermarks
+- **Replace with AI** — mask something + type what goes there → AI draws it (PowerPaint, GPU)
+
+Note: IOPaint is **local only** — all inference runs on this machine.
+For text-guided replacement a CUDA GPU on this machine is required.
 
 ## Access
 - URL: http://localhost:8100
-- No built-in login — protect via Authelia SSO if needed
+- No built-in login — protect via Authelia SSO if exposed
 
-## Models
-The \`--model\` argument in docker-compose.yml selects the AI model:
-| Model  | Best for |
-|--------|----------|
-| \`lama\` | Object removal, erase (default) |
-| \`ldm\`  | Texture-aware fill |
-| \`zits\` | Face/portrait restoration |
-| \`mat\`  | Large missing region fill |
-| \`manga\`| Manga/comic text removal |
+## Switching models
+Edit `MODEL=` in `.env` and restart — no need to touch `docker-compose.yml`:
+```bash
+cd ~/docker/iopaint
+nano .env          # change MODEL= line
+docker compose restart
+```
 
-Models download automatically on first use. Cached in \`./models/\`.
+## Model reference
+
+| # | Model | Type | Size | Best for |
+|---|-------|------|------|---------|
+| 1 | `lama` | CPU-safe | ~200 MB | **Object erase/removal** (default) |
+| 2 | `cv2` | CPU-safe | built-in | Basic fill, no download |
+| 3 | `zits` | CPU-safe | ~200 MB | Portrait & face restoration |
+| 4 | `manga` | CPU-safe | ~100 MB | Comic/manga text bubble removal |
+| 5 | `migan` | GPU | ~50 MB | Fast GPU inpainting |
+| 6 | `fcf` | GPU | ~600 MB | High-quality contextual fill |
+| 7 | `mat` | GPU | ~300 MB | Large missing region fill |
+| 8 | `ldm` | GPU | ~1.2 GB | Latent diffusion texture fill |
+| 9 | `Sanster/PowerPaint-V2-filling` | GPU+SD | ~4 GB | **Text-guided replacement** |
+| 10 | `runwayml/stable-diffusion-inpainting` | GPU+SD | ~4 GB | SD 1.5 inpaint, large LoRA library |
+
+SD-based models (9, 10) download from HuggingFace on first start.
+If a gated model needs a token: add `HF_TOKEN=xxx` to `.env`.
+
+## How to use
+1. Open http://localhost:8100
+2. Upload an image (or drag & drop)
+3. Paint a mask over the area to change
+4. For erase models: click Run → gap fills automatically
+5. For SD models (PowerPaint): type a text prompt → AI draws it into the masked area
 
 ## GPU acceleration
-Requires \`nvidia-container-toolkit\`. To enable:
-1. Edit docker-compose.yml: change \`--device=cpu\` → \`--device=cuda\`
-2. Uncomment the \`deploy:\` block (or re-run this installer with GPU=y)
-3. Restart: \`docker compose down && docker compose up -d\`
+Requires `nvidia-container-toolkit`. The GPU compose adds a `deploy:` block.
+Re-run the installer with GPU=y to regenerate docker-compose.yml, or manually add:
+```yaml
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+Then change `DEVICE=cuda` in `.env` and restart.
 
 ## Manage
-\`\`\`bash
-cd $IOPAINT_DIR
-docker compose up -d                                      # start
-docker compose down                                       # stop
-docker compose logs -f                                    # logs
-docker compose pull && docker compose down && docker compose up -d  # update
-\`\`\`
+```bash
+cd ~/docker/iopaint
+docker compose up -d
+docker compose down
+docker compose logs -f
+docker compose pull && docker compose down && docker compose up -d
+```
 
 ## Files
-- docker-compose.yml — stack definition (edit for model/device changes)
-- .env               — runtime config
-- models/            — cached AI model weights
-- input/             — optional: place images here
-- output/            — processed images written here
+- docker-compose.yml — stack (MODEL and DEVICE come from .env)
+- .env               — model and device config
+- models/            — all cached model weights (torch + HuggingFace)
+- input/, output/    — optional file staging
 MD
 
     local START_IO=""
     prompt_yn "Start IOPaint now? (y/n):" "y" START_IO
     if [ "$START_IO" = "y" ] || [ "$START_IO" = "Y" ]; then
         docker compose up -d \
-            && log_success "IOPaint started — LaMa model will download on first use" \
+            && log_success "IOPaint started — model downloads on first use" \
             || log_warning "Start failed — check: docker compose logs"
     fi
 
     echo ""
     echo "  URL:      http://localhost:8100"
-    echo "  Model:    LaMa (erase / object removal)"
-    echo "  Device:   $([ "${USE_GPU,,}" = "y" ] && echo "CUDA GPU" || echo "CPU")"
+    echo "  Model:    $IOPAINT_MODEL"
+    echo "  Device:   $DEVICE_VAL"
+    echo "  Switch:   edit MODEL= in $IOPAINT_DIR/.env and restart"
     echo ""
 }
 

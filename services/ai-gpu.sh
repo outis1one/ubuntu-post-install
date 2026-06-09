@@ -206,19 +206,94 @@ install_ai_gpu() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would clone $REPO_URL to $REPO_DIR"
         echo "[DRY-RUN] Would create stacks: image-gen (InvokeAI:9090), llm (Ollama:11434 + OpenWebUI:3000), portal (8080)"
-        echo "[DRY-RUN] Would write .env files and patch portal volume paths to $ACTUAL_HOME/docker"
-        echo "[DRY-RUN] Would configure Caddy for portal (localai) and InvokeAI (images)"
+        echo "[DRY-RUN] Would prompt for Ollama and InvokeAI model selection"
+        echo "[DRY-RUN] Would auto-pull selected Ollama models after LLM stack starts"
+        echo "[DRY-RUN] Would queue InvokeAI starter model via REST API"
         return 0
     fi
 
-    # TZ — repo defaults to America/New_York, replace with user preference
+    # ── Timezone ──────────────────────────────────────────────────────────────
     local TZ_VAL="${SITE_TZ:-UTC}"
     prompt_text "Timezone (e.g. America/New_York) [$TZ_VAL]:" "$TZ_VAL" TZ_VAL
     TZ_VAL="${TZ_VAL:-UTC}"
 
-    mkdir -p "$AI_DIR"
+    # ── Ollama model selection ────────────────────────────────────────────────
+    echo ""
+    log_info "Ollama LLM models — select which to download (enter numbers separated by spaces):"
+    log_info "All models are quantized (Q4_K_M) and run comfortably on 6 GB VRAM."
+    echo ""
+    log_info "  1) llama3.2:3b       ~2.0 GB  Fast general chat. Great all-rounder.  ← Recommended"
+    log_info "  2) llama3.2:1b       ~1.3 GB  Ultra-fast. Light tasks, low latency."
+    log_info "  3) qwen2.5:7b        ~4.7 GB  Top code + math model. Strong reasoning."
+    log_info "  4) mistral:7b        ~4.1 GB  Solid all-rounder. Good at instruction follow."
+    log_info "  5) phi4-mini         ~2.5 GB  Microsoft Phi-4 mini. Excellent for coding."
+    log_info "  6) gemma3:4b         ~2.5 GB  Google Gemma 3. Well-rounded, multilingual."
+    log_info "  7) deepseek-r1:7b    ~4.7 GB  Strong reasoning and math. Think-step model."
+    log_info "  8) nomic-embed-text  ~274 MB  Embedding model — enables RAG/doc search."
+    log_info "                                 Recommended to add alongside a chat model."
+    echo ""
+    log_info "  Example: '1 8' pulls llama3.2:3b + nomic-embed-text"
+    log_info "  Enter '0' or leave blank to skip and pull models manually later."
+    echo ""
+
+    local OLLAMA_CHOICES=""
+    prompt_text "Models to download [1 8]:" "1 8" OLLAMA_CHOICES
+
+    declare -a OLLAMA_MODELS=()
+    for _n in $OLLAMA_CHOICES; do
+        case "$_n" in
+            1) OLLAMA_MODELS+=("llama3.2:3b") ;;
+            2) OLLAMA_MODELS+=("llama3.2:1b") ;;
+            3) OLLAMA_MODELS+=("qwen2.5:7b") ;;
+            4) OLLAMA_MODELS+=("mistral:7b") ;;
+            5) OLLAMA_MODELS+=("phi4-mini") ;;
+            6) OLLAMA_MODELS+=("gemma3:4b") ;;
+            7) OLLAMA_MODELS+=("deepseek-r1:7b") ;;
+            8) OLLAMA_MODELS+=("nomic-embed-text") ;;
+        esac
+    done
+
+    # ── InvokeAI model selection ──────────────────────────────────────────────
+    echo ""
+    log_info "InvokeAI image generation models (for 6 GB VRAM with partial GPU offload):"
+    log_info "InvokeAI uses VRAM=3 GB + 8 GB RAM cache, so all models below work on 6 GB."
+    echo ""
+    log_info "  1) stabilityai/stable-diffusion-v1-5   ~4 GB  SD 1.5 — fast, huge style/LoRA library."
+    log_info "                                                  Best starting model for most uses."
+    log_info "  2) stabilityai/sdxl-turbo              ~7 GB  SDXL Turbo — 4-step generation."
+    log_info "                                                  Fast, high quality, slightly slower on 6 GB."
+    log_info "  3) stabilityai/stable-diffusion-xl-base-1.0"
+    log_info "                                         ~7 GB  SDXL base — best quality at 1024px."
+    log_info "                                                  Slowest due to RAM offload on 6 GB."
+    log_info "  4) Skip — install models via the Model Manager at http://localhost:9090"
+    echo ""
+    log_info "  Tip: SD 1.5 (choice 1) is fastest and most compatible. Start here."
+    log_info "  HuggingFace token: required for some gated models (free at huggingface.co/settings/tokens)"
+    echo ""
+
+    local INVOKE_CHOICE=""
+    prompt_text "InvokeAI starter model [1]:" "1" INVOKE_CHOICE
+
+    local INVOKE_MODEL_SOURCE=""
+    local INVOKE_MODEL_NAME=""
+    case "$INVOKE_CHOICE" in
+        2) INVOKE_MODEL_SOURCE="stabilityai/sdxl-turbo"
+           INVOKE_MODEL_NAME="SDXL Turbo" ;;
+        3) INVOKE_MODEL_SOURCE="stabilityai/stable-diffusion-xl-base-1.0"
+           INVOKE_MODEL_NAME="SDXL Base" ;;
+        4) INVOKE_MODEL_SOURCE=""
+           INVOKE_MODEL_NAME="" ;;
+        *) INVOKE_MODEL_SOURCE="stabilityai/stable-diffusion-v1-5"
+           INVOKE_MODEL_NAME="SD 1.5" ;;
+    esac
+
+    local HF_TOKEN=""
+    if [ -n "$INVOKE_MODEL_SOURCE" ]; then
+        prompt_text "HuggingFace token (optional — needed for gated models, enter to skip):" "" HF_TOKEN
+    fi
 
     # ── Clone / update repo ───────────────────────────────────────────────────
+    mkdir -p "$AI_DIR"
     if [ -d "$REPO_DIR/.git" ]; then
         log_info "Updating ai-6gb-gpu repo..."
         git -C "$REPO_DIR" pull --ff-only 2>/dev/null \
@@ -235,7 +310,6 @@ install_ai_gpu() {
     mkdir -p "$IMAGE_GEN_DIR"
     if [ -d "$REPO_DIR/ai-image-gen" ]; then
         cp -rn "$REPO_DIR/ai-image-gen/." "$IMAGE_GEN_DIR/" 2>/dev/null || true
-        # Replace any hardcoded timezone
         find "$IMAGE_GEN_DIR" -name "docker-compose.yml" -exec \
             sed -i "s|America/New_York|$TZ_VAL|g" {} \;
     fi
@@ -243,10 +317,11 @@ install_ai_gpu() {
     cat > "$IMAGE_GEN_DIR/.env" << IMGENV
 # InvokeAI — image generation
 TZ=${TZ_VAL}
-# VRAM cap: 3 GB leaves headroom on a 6 GB card
+# VRAM cap: 3 GB leaves headroom on a 6 GB card; remaining model layers go to RAM
 INVOKEAI_vram=3
-# RAM cache for model layers
+# RAM cache size for model layer offload
 INVOKEAI_ram=8
+${HF_TOKEN:+HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}}
 CADDY_NET=${SITE_CADDY_NET}
 IMGENV
     chmod 600 "$IMAGE_GEN_DIR/.env"
@@ -266,8 +341,11 @@ IMGENV
     cat > "$LLM_DIR/.env" << LLMENV
 # Ollama + Open WebUI + SearXNG
 TZ=${TZ_VAL}
-# Open WebUI session secret
 WEBUI_SECRET_KEY=${WEBUI_SECRET}
+# Open WebUI: enable SearXNG for web search in chats
+ENABLE_RAG_WEB_SEARCH=true
+RAG_WEB_SEARCH_ENGINE=searxng
+SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>&format=json
 CADDY_NET=${SITE_CADDY_NET}
 LLMENV
     chmod 600 "$LLM_DIR/.env"
@@ -277,7 +355,6 @@ LLMENV
     mkdir -p "$PORTAL_DIR"
     if [ -d "$REPO_DIR/ai-portal" ]; then
         cp -rn "$REPO_DIR/ai-portal/." "$PORTAL_DIR/" 2>/dev/null || true
-        # Fix hardcoded home path in docker-compose.yml volume mounts
         if [ -f "$PORTAL_DIR/docker-compose.yml" ]; then
             sed -i \
                 "s|/home/[^/]*/docker:|${ACTUAL_HOME}/docker:|g" \
@@ -289,25 +366,20 @@ LLMENV
     cat > "$PORTAL_DIR/.env" << PORTALENV
 # AI Portal — GPU stack swap controller
 TZ=${TZ_VAL}
-# Paths inside the container (Docker socket mount maps ACTUAL_HOME/docker → /docker)
+# Paths inside the container (/docker maps to ${ACTUAL_HOME}/docker via volume mount)
 IMAGE_STACK=/docker/ai-gpu/image-gen
 LLM_STACK=/docker/ai-gpu/llm
 CADDY_NET=${SITE_CADDY_NET}
 PORTALENV
     chmod 600 "$PORTAL_DIR/.env"
 
-    # Set ownership across everything
     ensure_docker_dir_ownership "$AI_DIR"
 
     echo ""
     log_success "AI GPU stacks configured under $AI_DIR"
-    log_info "Stack layout:"
-    log_info "  image-gen/  — InvokeAI  (port 9090,  nvidia GPU)"
-    log_info "  llm/        — Ollama (11434) + Open WebUI (3000) + SearXNG (internal)"
-    log_info "  portal/     — GPU swap portal (port 8080)"
-    echo ""
     log_warning "Only ONE GPU stack can run at a time on a 6 GB card."
-    log_warning "Use the portal to switch, or manually: docker compose -f <stack>/docker-compose.yml down/up."
+    log_info "Use the portal (port 8080) to hot-swap between image-gen and llm."
+    echo ""
 
     # ── Caddy ─────────────────────────────────────────────────────────────────
     configure_caddy_for_service "AI Portal" "ai-portal:8080" "localai"
@@ -324,125 +396,177 @@ Source: https://github.com/outis1one/ai-6gb-gpu
 
 | Stack | Service | Port | Notes |
 |-------|---------|------|-------|
-| \`image-gen/\` | InvokeAI | 9090 | Image generation (SDXL, Flux, etc.) |
+| \`image-gen/\` | InvokeAI | 9090 | Image generation (SD 1.5, SDXL, Flux…) |
 | \`llm/\` | Ollama | 11434 | LLM inference engine |
-| \`llm/\` | Open WebUI | 3000 | Chat UI for Ollama |
-| \`llm/\` | SearXNG | — | Internal web search for RAG |
-| \`portal/\` | AI Portal | 8080 | GPU swap controller UI |
+| \`llm/\` | Open WebUI | 3000 | Chat UI — models, RAG, web search |
+| \`llm/\` | SearXNG | internal | Web search backend for RAG in OpenWebUI |
+| \`portal/\` | AI Portal | 8080 | GPU swap controller — start/stop stacks |
 
-## Important: GPU time-sharing
+## GPU time-sharing (important)
 
-A 6 GB GPU can only run one AI stack at a time. Use the portal at
-http://localhost:8080 to swap between image-gen and llm — it stops the
-active stack before starting the requested one.
+A 6 GB GPU can only run one AI stack at a time.
+Use the portal at http://localhost:8080 to swap.
 
 Manual swap:
 \`\`\`bash
-# Stop image-gen, start llm
-docker compose -f $AI_DIR/image-gen/docker-compose.yml down
-docker compose -f $AI_DIR/llm/docker-compose.yml up -d
-
-# Stop llm, start image-gen
 docker compose -f $AI_DIR/llm/docker-compose.yml down
 docker compose -f $AI_DIR/image-gen/docker-compose.yml up -d
 \`\`\`
 
-## First-run setup
+## InvokeAI — add more models
 
-### InvokeAI
-1. Open http://localhost:9090
-2. Install models via the Model Manager (HuggingFace token may be needed)
-3. Recommended for 6 GB: SDXL-Turbo, Flux-Schnell-quantised
+Models installed at setup are in the Model Manager. To add more:
+1. Open http://localhost:9090 → Model Manager → Add Model
+2. Paste a HuggingFace repo ID (e.g. \`stabilityai/stable-diffusion-2-1\`)
+3. Or import a local .safetensors file
 
-### Ollama
+For gated models, add \`HUGGING_FACE_HUB_TOKEN=xxx\` to \`image-gen/.env\`.
+
+Recommended models for 6 GB (with partial GPU offload):
+
+| Model | Source | Notes |
+|-------|--------|-------|
+| SD 1.5 | \`stabilityai/stable-diffusion-v1-5\` | Fast, huge LoRA library |
+| SDXL Turbo | \`stabilityai/sdxl-turbo\` | 4-step, good quality |
+| SDXL Base | \`stabilityai/stable-diffusion-xl-base-1.0\` | Best quality, slower |
+| SD 2.1 | \`stabilityai/stable-diffusion-2-1\` | Good mid-size choice |
+
+## Ollama — add more models
+
 \`\`\`bash
-# Pull a model (while llm stack is running)
-docker exec ollama ollama pull llama3.2
-docker exec ollama ollama pull nomic-embed-text  # for RAG embeddings
+# Pull any model while llm stack is running
+docker exec ollama ollama pull llama3.2:3b
+docker exec ollama ollama pull nomic-embed-text    # RAG embeddings
+docker exec ollama ollama list                      # see installed models
 \`\`\`
 
-### Open WebUI
-Open http://localhost:3000 — create admin account on first visit.
+Browse models at: https://ollama.com/library
+For 6 GB cards, stick to 7B or smaller with Q4_K_M quantisation (~4.5 GB).
+
+## Open WebUI — first login
+
+Open http://localhost:3000 and create your admin account on first visit.
+Models pulled into Ollama appear automatically in the model dropdown.
+Enable web search: Settings → Admin → Web Search (SearXNG is pre-configured).
 
 ## Manage individual stacks
 \`\`\`bash
-# Image generation
-cd $AI_DIR/image-gen
-docker compose up -d
-docker compose down
-docker compose logs -f invokeai
-
-# LLM + chat
-cd $AI_DIR/llm
-docker compose up -d
-docker compose down
-docker compose logs -f openwebui
-
-# Portal
-cd $AI_DIR/portal
-docker compose up -d
-docker compose down
+cd $AI_DIR/image-gen && docker compose up -d    # start InvokeAI
+cd $AI_DIR/llm       && docker compose up -d    # start Ollama + OpenWebUI
+cd $AI_DIR/portal    && docker compose up -d    # start portal
+docker compose -f $AI_DIR/image-gen/docker-compose.yml logs -f invokeai
+docker compose -f $AI_DIR/llm/docker-compose.yml       logs -f openwebui
 \`\`\`
 
 ## Update
 \`\`\`bash
-# Pull latest repo changes and rebuild
 cd $REPO_DIR && git pull
 cd $AI_DIR/image-gen && docker compose pull && docker compose up -d
 cd $AI_DIR/llm       && docker compose pull && docker compose up -d
 cd $AI_DIR/portal    && docker compose build --pull && docker compose up -d
 \`\`\`
-
-## Files
-- image-gen/.env  — InvokeAI VRAM/RAM limits and TZ
-- llm/.env        — Open WebUI secret key and TZ
-- portal/.env     — stack paths and TZ
 MD
 
-    # ── Start prompt ──────────────────────────────────────────────────────────
+    # ── Start stacks + pull models ────────────────────────────────────────────
     echo ""
-    log_info "Which stack do you want to start now?"
-    log_info "  1) Portal only (recommended first — lets you manage the others)"
-    log_info "  2) Portal + image-gen (InvokeAI)"
-    log_info "  3) Portal + llm (Ollama/OpenWebUI)"
-    log_info "  4) None — start manually later"
+    log_info "What would you like to start now?"
+    log_info "  1) Portal only           — start the swap controller, configure the rest later"
+    log_info "  2) Portal + LLM stack    — start Ollama/OpenWebUI and pull selected models"
+    log_info "  3) Portal + image-gen    — start InvokeAI and queue the starter model download"
+    log_info "  4) None                  — start manually later"
+    echo ""
 
     local START_CHOICE=""
-    prompt_text "Choice [1]:" "1" START_CHOICE
+    prompt_text "Choice [2]:" "2" START_CHOICE
 
-    case "$START_CHOICE" in
-        1)
-            docker compose -f "$PORTAL_DIR/docker-compose.yml" up -d \
-                && log_success "Portal started — http://localhost:8080" \
-                || log_warning "Portal start failed — check: docker compose -f $PORTAL_DIR/docker-compose.yml logs"
-            ;;
-        2)
-            docker compose -f "$PORTAL_DIR/docker-compose.yml" up -d \
-                && log_success "Portal started" \
-                || log_warning "Portal start failed"
-            docker compose -f "$IMAGE_GEN_DIR/docker-compose.yml" up -d \
-                && log_success "InvokeAI started — http://localhost:9090" \
-                || log_warning "InvokeAI start failed — check: docker compose -f $IMAGE_GEN_DIR/docker-compose.yml logs"
-            ;;
-        3)
-            docker compose -f "$PORTAL_DIR/docker-compose.yml" up -d \
-                && log_success "Portal started" \
-                || log_warning "Portal start failed"
-            docker compose -f "$LLM_DIR/docker-compose.yml" up -d \
-                && log_success "LLM stack started — Open WebUI: http://localhost:3000" \
-                || log_warning "LLM start failed — check: docker compose -f $LLM_DIR/docker-compose.yml logs"
-            ;;
-        *)
-            log_info "Skipped. Start when ready:"
-            log_info "  docker compose -f $PORTAL_DIR/docker-compose.yml up -d"
-            ;;
-    esac
+    # Always start portal if any stack is starting
+    if [[ "$START_CHOICE" =~ ^[123]$ ]]; then
+        docker compose -f "$PORTAL_DIR/docker-compose.yml" up -d \
+            && log_success "Portal started — http://localhost:8080" \
+            || log_warning "Portal start failed — check: docker compose -f $PORTAL_DIR/docker-compose.yml logs"
+    fi
+
+    if [[ "$START_CHOICE" == "2" ]]; then
+        # Start LLM stack
+        docker compose -f "$LLM_DIR/docker-compose.yml" up -d \
+            && log_success "LLM stack started" \
+            || { log_warning "LLM stack start failed"; START_CHOICE="0"; }
+
+        # Pull Ollama models if any were selected
+        if [ ${#OLLAMA_MODELS[@]} -gt 0 ] && [[ "$START_CHOICE" == "2" ]]; then
+            log_info "Waiting for Ollama to be ready..."
+            local _w=0
+            while ! curl -sf "http://localhost:11434/api/version" &>/dev/null; do
+                sleep 3; _w=$((_w+3))
+                [[ $_w -ge 90 ]] && { log_warning "Ollama not responding after 90s — pull models manually later"; break; }
+            done
+
+            if curl -sf "http://localhost:11434/api/version" &>/dev/null; then
+                for _m in "${OLLAMA_MODELS[@]}"; do
+                    log_info "Pulling $_m (this may take a while)..."
+                    docker exec ollama ollama pull "$_m" \
+                        && log_success "$_m ready" \
+                        || log_warning "Pull failed for $_m — retry: docker exec ollama ollama pull $_m"
+                done
+                log_success "Open WebUI ready at: http://localhost:3000"
+                log_info "Create your admin account on the first visit."
+            fi
+        fi
+    fi
+
+    if [[ "$START_CHOICE" == "3" ]]; then
+        # Start image-gen stack
+        docker compose -f "$IMAGE_GEN_DIR/docker-compose.yml" up -d \
+            && log_success "InvokeAI started" \
+            || { log_warning "InvokeAI start failed — check: docker compose -f $IMAGE_GEN_DIR/docker-compose.yml logs"; START_CHOICE="0"; }
+
+        # Queue starter model via InvokeAI REST API
+        if [ -n "$INVOKE_MODEL_SOURCE" ] && [[ "$START_CHOICE" == "3" ]]; then
+            log_info "Waiting for InvokeAI to be ready (model database initialises on first start)..."
+            local _w=0
+            while ! curl -sf "http://localhost:9090/api/v1/app/version" &>/dev/null; do
+                sleep 5; _w=$((_w+5))
+                [[ $_w -ge 180 ]] && { log_warning "InvokeAI not responding after 3 min"; break; }
+            done
+
+            if curl -sf "http://localhost:9090/api/v1/app/version" &>/dev/null; then
+                log_info "Queuing $INVOKE_MODEL_NAME download..."
+                local _resp
+                _resp=$(curl -s -X POST "http://localhost:9090/api/v2/models/install" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"source\": \"${INVOKE_MODEL_SOURCE}\"}" 2>/dev/null)
+                if echo "$_resp" | grep -q '"id"'; then
+                    log_success "$INVOKE_MODEL_NAME queued — downloading in background"
+                    log_info "Track progress: http://localhost:9090 → Model Manager → In Progress"
+                else
+                    log_warning "Could not queue via API. Install manually:"
+                    log_info "  Open http://localhost:9090 → Model Manager → Add Model"
+                    log_info "  Source: $INVOKE_MODEL_SOURCE"
+                fi
+            fi
+        fi
+    fi
+
+    if [[ "$START_CHOICE" == "4" ]] || [[ "$START_CHOICE" == "0" ]]; then
+        log_info "Start when ready:"
+        log_info "  docker compose -f $PORTAL_DIR/docker-compose.yml up -d"
+        log_info "  docker compose -f $LLM_DIR/docker-compose.yml up -d"
+        log_info "  docker compose -f $IMAGE_GEN_DIR/docker-compose.yml up -d"
+    fi
 
     echo ""
-    echo "  Portal:    http://localhost:8080"
-    echo "  InvokeAI:  http://localhost:9090  (image-gen stack)"
-    echo "  OpenWebUI: http://localhost:3000  (llm stack)"
-    echo "  Source:    $REPO_DIR"
+    echo "  Portal:       http://localhost:8080  (GPU swap controller)"
+    echo "  InvokeAI:     http://localhost:9090  (image-gen stack)"
+    echo "  Open WebUI:   http://localhost:3000  (llm stack)"
+    echo "  Ollama API:   http://localhost:11434 (llm stack)"
+    echo "  Source repo:  $REPO_DIR"
+    echo ""
+    if [ ${#OLLAMA_MODELS[@]} -gt 0 ]; then
+        echo "  Ollama models queued: ${OLLAMA_MODELS[*]}"
+    fi
+    if [ -n "$INVOKE_MODEL_NAME" ]; then
+        echo "  InvokeAI starter:     $INVOKE_MODEL_NAME ($INVOKE_MODEL_SOURCE)"
+    fi
     echo ""
 }
 
