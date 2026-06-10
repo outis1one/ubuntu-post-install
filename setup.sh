@@ -122,19 +122,34 @@ run_site_configure() {
     local _cur_tz="${SITE_TZ:-$_sys_tz}"
     local _cur_dom="${SITE_DOMAIN:-}"
     local _cur_net="${SITE_CADDY_NET:-caddy_net}"
-    local _cur_caddy_host="${CADDY_REMOTE_HOST:-}"
+    # Resolve current Caddy mode for display — handle legacy CADDY_REMOTE_HOST
+    local _cur_mode="${CADDY_MODE:-}"
+    [ -z "$_cur_mode" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _cur_mode="remote"
+    [ -z "$_cur_mode" ] && _cur_mode="local"
 
     prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
     prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
     prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
 
     echo ""
-    echo "  Caddy location: leave blank if Caddy runs on THIS machine (default)."
-    echo "  Set to this machine's LAN IP or hostname if Caddy runs on a DIFFERENT"
-    echo "  machine — service installers will generate snippet files to copy over."
-    prompt_text "  Caddy remote host (LAN IP/hostname) [${_cur_caddy_host:-<this machine>}]:" "$_cur_caddy_host" CADDY_REMOTE_HOST
+    echo "  Where does Caddy run?"
+    echo "    [1] This machine  — Caddy installed here (default)"
+    echo "    [2] Remote machine — different server, VPN node, or Netbird peer"
+    echo "        (service installers save snippet files to ~/docker/caddy-snippets/)"
+    echo "    [3] None / skip   — configure Caddy later"
+    echo ""
+    local _caddy_default="1"
+    case "$_cur_mode" in remote) _caddy_default="2" ;; none) _caddy_default="3" ;; esac
+    local _caddy_choice=""
+    prompt_text "  Caddy location [${_caddy_default}]:" "$_caddy_default" _caddy_choice
+    case "${_caddy_choice:-$_caddy_default}" in
+        2) CADDY_MODE="remote" ;;
+        3) CADDY_MODE="none"   ;;
+        *) CADDY_MODE="local"  ;;
+    esac
+    CADDY_REMOTE_HOST=""   # clear legacy value; CADDY_MODE is authoritative now
 
-    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET CADDY_REMOTE_HOST
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET CADDY_MODE CADDY_REMOTE_HOST
     mkdir -p "$DOCKER_DIR"
     save_site_config
     log_success "Saved to $DOCKER_DIR/.config"

@@ -56,7 +56,8 @@ SITE_DOMAIN=""
 SITE_CADDY_NET="caddy_net"
 SITE_PUID=""
 SITE_PGID=""
-CADDY_REMOTE_HOST=""   # LAN IP/hostname of this machine, used when Caddy runs elsewhere
+CADDY_MODE=""          # local | remote | none  (set by site configure wizard)
+CADDY_REMOTE_HOST=""   # legacy — kept for backward compat with old .config files
 
 load_site_config() {
     local cfg="$DOCKER_DIR/.config"
@@ -66,16 +67,19 @@ load_site_config() {
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// }" ]] && continue
         case "$key" in
-            SITE_TZ)        SITE_TZ="$val"                              ;;
-            SITE_DOMAIN)    SITE_DOMAIN="$val"                          ;;
+            SITE_TZ)           SITE_TZ="$val"                              ;;
+            SITE_DOMAIN)       SITE_DOMAIN="$val"                          ;;
             SITE_CADDY_NET)    SITE_CADDY_NET="$val"                       ;;
             SITE_PUID)         SITE_PUID="$val"                            ;;
             SITE_PGID)         SITE_PGID="$val"                            ;;
+            CADDY_MODE)        CADDY_MODE="$val"                           ;;
             CADDY_REMOTE_HOST) CADDY_REMOTE_HOST="$val"                    ;;
             BASE_DOMAIN)       [ -z "$SITE_DOMAIN" ] && SITE_DOMAIN="$val" ;;
         esac
     done < "$cfg"
-    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID CADDY_REMOTE_HOST
+    # Backward compat: old installs used CADDY_REMOTE_HOST to signal remote mode
+    [ -z "$CADDY_MODE" ] && [ -n "$CADDY_REMOTE_HOST" ] && CADDY_MODE="remote"
+    export SITE_TZ SITE_DOMAIN SITE_CADDY_NET SITE_PUID SITE_PGID CADDY_MODE CADDY_REMOTE_HOST
 }
 
 save_site_config() {
@@ -87,11 +91,11 @@ save_site_config() {
         [ -n "$SITE_TZ" ]        && echo "SITE_TZ=$SITE_TZ"
         [ -n "$SITE_DOMAIN" ]    && echo "SITE_DOMAIN=$SITE_DOMAIN"
         [ -n "$SITE_CADDY_NET" ] && echo "SITE_CADDY_NET=$SITE_CADDY_NET"
-        [ -n "$SITE_PUID" ]         && echo "SITE_PUID=$SITE_PUID"
-        [ -n "$SITE_PGID" ]         && echo "SITE_PGID=$SITE_PGID"
-        [ -n "$CADDY_REMOTE_HOST" ] && echo "CADDY_REMOTE_HOST=$CADDY_REMOTE_HOST"
+        [ -n "$SITE_PUID" ]      && echo "SITE_PUID=$SITE_PUID"
+        [ -n "$SITE_PGID" ]      && echo "SITE_PGID=$SITE_PGID"
+        [ -n "$CADDY_MODE" ]     && echo "CADDY_MODE=$CADDY_MODE"
         # Backward-compat alias for services that still read BASE_DOMAIN directly
-        [ -n "$SITE_DOMAIN" ]       && echo "BASE_DOMAIN=$SITE_DOMAIN"
+        [ -n "$SITE_DOMAIN" ]    && echo "BASE_DOMAIN=$SITE_DOMAIN"
     } > "$cfg"
     chmod 600 "$cfg"
 }
@@ -280,12 +284,11 @@ configure_caddy_for_service() {
     esac
 
     # ── Determine Caddy mode ──────────────────────────────────────────────────
-    # local:  Caddy container running on this machine → write Caddyfile + reload
-    # remote: Caddy on another machine → generate snippet file to copy over
-    # none:   no Caddy anywhere → silent return
-    local _CADDY_MODE="none"
-    [ -d "$DOCKER_DIR/caddy" ]   && _CADDY_MODE="local"
-    [ -n "$CADDY_REMOTE_HOST" ] && [ "$_CADDY_MODE" != "local" ] && _CADDY_MODE="remote"
+    # Explicit CADDY_MODE (set by site wizard) takes priority.
+    # Fall back to: local if ~/docker/caddy exists, remote if legacy CADDY_REMOTE_HOST set.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ]  && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
     [ "$_CADDY_MODE" = "none" ] && return 0
 
     echo ""
@@ -294,11 +297,10 @@ configure_caddy_for_service() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     if [ "$_CADDY_MODE" = "remote" ]; then
-        echo "  Remote Caddy configured ($CADDY_REMOTE_HOST)."
-        echo "  A snippet file will be saved to ~/docker/caddy-snippets/ for you to"
-        echo "  copy to your Caddy machine."
+        echo "  Caddy is on a remote machine — a snippet file will be saved to"
+        echo "  ~/docker/caddy-snippets/ for you to copy to your Caddy machine."
     else
-        echo "Caddy is installed. You can configure a reverse proxy for $SERVICE_NAME."
+        echo "  Caddy is installed on this machine."
     fi
     echo ""
 
@@ -329,8 +331,15 @@ configure_caddy_for_service() {
     # Build the site block — upstream differs by mode
     local _BLOCK_UPSTREAM="$_UPSTREAM"
     if [ "$_CADDY_MODE" = "remote" ]; then
-        # Remote Caddy can't resolve Docker container names — use host IP + published port
-        _BLOCK_UPSTREAM="${CADDY_REMOTE_HOST}:${_DISPLAY_PORT}"
+        # Remote Caddy can't resolve Docker container names — use this machine's IP + published port.
+        # Prefer legacy CADDY_REMOTE_HOST if set (old installs that stored it explicitly),
+        # otherwise auto-detect the primary non-loopback IP.
+        local _THIS_IP="${CADDY_REMOTE_HOST:-}"
+        if [ -z "$_THIS_IP" ]; then
+            _THIS_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        fi
+        [ -z "$_THIS_IP" ] && _THIS_IP="$(hostname -f 2>/dev/null || echo "127.0.0.1")"
+        _BLOCK_UPSTREAM="${_THIS_IP}:${_DISPLAY_PORT}"
     fi
 
     local _SITE_BLOCK
