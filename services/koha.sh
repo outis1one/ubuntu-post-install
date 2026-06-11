@@ -10,6 +10,8 @@
 # background jobs worker) + MariaDB + Memcached + RabbitMQ sidecars.
 # OPAC (patron UI): port 8097  |  Staff/admin: port 8098
 # RAM: needs ~2.5 GB free.
+#
+# Database lives in ~/docker/koha/data/ (bind-mount, fully backed up by backup.sh).
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -165,6 +167,7 @@ CBLOCK
                 log_info "  rsync -av $_snippet_dir/ caddy-host:~/caddy-snippets/  (all at once)"
             fi
         }
+
         write_readme() {
             local _dir="$1"; shift
             mkdir -p "$_dir"
@@ -194,33 +197,156 @@ install_koha() {
 
     local KOHA_DIR="$DOCKER_DIR/koha"
 
+    echo ""
+    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    echo "║   Koha — Integrated Library System                               ║"
+    echo "╚═══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  • ISBN barcode scanning → auto-fetch cover art, author, summary"
+    echo "  • Shelf / location tracking (define your own codes)"
+    echo "  • Loan / checkout system with due dates and history"
+    echo "  • OPAC (patron browsing UI) + staff admin interface"
+    echo "  • Requires ~2.5 GB free RAM"
+    echo ""
+    echo "  SETUP OVERVIEW:"
+    echo "    1) Answer the questions below (collects library details + credentials)"
+    echo "    2) Koha starts — takes 2–3 min on first boot"
+    echo "    3) Open http://localhost:8098 and complete the brief web installer (~2 min)"
+    echo "    4) Run  $KOHA_DIR/post-setup.sh  to auto-configure library, items, locations"
+    echo ""
+
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] koha would:"
-        echo "  - Create $KOHA_DIR with docker-compose.yml + config-main.env"
-        echo "  - Deploy teogramm/koha + MariaDB + Memcached + RabbitMQ"
-        echo "  - OPAC (patron UI):   port 8097"
-        echo "  - Staff/admin:        port 8098"
-        echo "  - Requires ~2.5 GB free RAM"
+        echo "[DRY-RUN] Would create $KOHA_DIR with docker-compose.yml + config-main.env"
+        echo "[DRY-RUN] Would deploy teogramm/koha + MariaDB (./data/) + Memcached + RabbitMQ"
+        echo "[DRY-RUN] Would generate post-setup.sh for REST API configuration"
+        echo "[DRY-RUN] OPAC (patron UI):   port 8097"
+        echo "[DRY-RUN] Staff/admin:        port 8098"
         return 0
     fi
 
-    echo ""
-    echo "  Koha is a full Integrated Library System (ILS):"
-    echo "  • ISBN barcode scanning → auto-fetch cover art, author, summary"
-    echo "  • Shelf / location tracking (define your own locations)"
-    echo "  • Loan / checkout system with due dates and history"
-    echo "  • OPAC (patron browsing UI) + staff admin interface"
-    echo "  • Requires ~2.5 GB free RAM (4 containers: Koha, MariaDB, Memcached, RabbitMQ)"
+    # ── Collect library details ───────────────────────────────────────────────
+    echo "══════════════════════════════════════════════════════"
+    echo "  LIBRARY DETAILS"
+    echo "══════════════════════════════════════════════════════"
     echo ""
 
-    local DB_PASS RABBIT_PASS
-    DB_PASS=$(generate_password 24)
-    RABBIT_PASS=$(generate_password 24)
+    local LIB_NAME=""
+    prompt_text "Library name (shown in OPAC header) [My Home Library]:" "My Home Library" LIB_NAME
 
-    mkdir -p "$KOHA_DIR"
+    # Auto-derive a library code from the name
+    local _auto_code
+    _auto_code="$(echo "$LIB_NAME" | tr '[:lower:]' '[:upper:]' | tr -dc 'A-Z0-9' | head -c 5)"
+    [[ -z "$_auto_code" ]] && _auto_code="HOME"
+    local LIB_CODE=""
+    prompt_text "Library code (3-8 letters/numbers) [${_auto_code}]:" "$_auto_code" LIB_CODE
+    LIB_CODE="${LIB_CODE//[^A-Za-z0-9]/}"
+    LIB_CODE="${LIB_CODE^^}"
+    [[ ${#LIB_CODE} -lt 2 ]] && LIB_CODE="HOME"
+
+    echo ""
+    echo "══════════════════════════════════════════════════════"
+    echo "  ADMIN ACCOUNT"
+    echo "══════════════════════════════════════════════════════"
+    echo ""
+    echo "  You will enter this password during the web installer."
+    echo "  It is stored in config-main.env (chmod 600) for the post-setup script."
+    echo ""
+
+    local KOHA_ADMIN_USER=""
+    prompt_text "Admin username [admin]:" "admin" KOHA_ADMIN_USER
+    [[ -z "$KOHA_ADMIN_USER" ]] && KOHA_ADMIN_USER="admin"
+
+    local KOHA_ADMIN_PASS=""
+    if [ "$UNATTENDED" = true ]; then
+        KOHA_ADMIN_PASS="$(generate_password 20)"
+    else
+        read -rsp "  Admin password [Enter = auto-generate]: " KOHA_ADMIN_PASS; echo
+        [[ -z "$KOHA_ADMIN_PASS" ]] && KOHA_ADMIN_PASS="$(generate_password 20)"
+    fi
+
+    local KOHA_ADMIN_EMAIL=""
+    prompt_text "Admin email [blank to skip]:" "" KOHA_ADMIN_EMAIL
+
+    # ── Item types ────────────────────────────────────────────────────────────
+    echo ""
+    echo "══════════════════════════════════════════════════════"
+    echo "  ITEM TYPES"
+    echo "══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Default set: Book, DVD, Blu-ray, Magazine, Comic, Board Game"
+    echo "  (You can add/edit more later in Staff UI → Administration → Item types)"
+    echo ""
+
+    # Store as "CODE:Description:loan_days" triplets
+    local -a ITEM_TYPES=(
+        "BK:Book:21"
+        "DVD:DVD:7"
+        "BLU:Blu-ray:7"
+        "MAG:Magazine:14"
+        "COM:Comic:14"
+        "BG:Board Game:14"
+    )
+
+    local _add_items=""
+    prompt_yn "Add custom item types now? (y/N):" "n" _add_items
+    if [[ "$_add_items" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "  Enter each type (blank code to finish)."
+        echo "  Example:  CD : Compact Disc : 14"
+        echo ""
+        local _ic _id _il
+        while true; do
+            prompt_text "  Code (3-5 chars, blank to finish):" "" _ic
+            [[ -z "$_ic" ]] && break
+            _ic="${_ic//[^A-Za-z0-9]/}"
+            _ic="${_ic^^}"
+            prompt_text "  Description for '$_ic':" "$_ic" _id
+            prompt_text "  Loan period in days [14]:" "14" _il
+            _il="${_il//[^0-9]/}"; [[ -z "$_il" ]] && _il="14"
+            ITEM_TYPES+=("${_ic}:${_id}:${_il}")
+            log_success "  Added: $_ic — $_id (${_il}d)"
+        done
+    fi
+
+    # ── Shelf locations ───────────────────────────────────────────────────────
+    echo ""
+    echo "══════════════════════════════════════════════════════"
+    echo "  SHELF LOCATIONS"
+    echo "══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Define where books live (e.g. LR1=Living Room Shelf 1, BR=Bedroom)."
+    echo "  Used on item records so you can find them again."
+    echo "  (You can add/edit more later in Staff UI → Administration → Authorized values → LOC)"
+    echo ""
+
+    local -a SHELF_LOCS=()
+    local _add_locs=""
+    prompt_yn "Add shelf locations now? (y/N):" "n" _add_locs
+    if [[ "$_add_locs" =~ ^[Yy]$ ]]; then
+        echo ""
+        local _lc _ld
+        while true; do
+            prompt_text "  Location code (blank to finish):" "" _lc
+            [[ -z "$_lc" ]] && break
+            _lc="${_lc//[^A-Za-z0-9_]/_}"
+            prompt_text "  Description for '$_lc':" "$_lc" _ld
+            SHELF_LOCS+=("${_lc}:${_ld}")
+            log_success "  Added: $_lc — $_ld"
+        done
+    fi
+
+    # ── Passwords ─────────────────────────────────────────────────────────────
+    local DB_PASS DB_ROOT_PASS RABBIT_PASS
+    DB_PASS="$(generate_password 24)"
+    DB_ROOT_PASS="$(generate_password 24)"
+    RABBIT_PASS="$(generate_password 24)"
+
+    # ── Create directories ────────────────────────────────────────────────────
+    mkdir -p "$KOHA_DIR/data"
     ensure_docker_dir_ownership "$KOHA_DIR"
     cd "$KOHA_DIR" || return 1
 
+    # ── docker-compose.yml ────────────────────────────────────────────────────
     cat > docker-compose.yml << 'KOHA_COMPOSE'
 name: koha
 
@@ -257,7 +383,7 @@ services:
       MYSQL_USER: koha_default
       MYSQL_PASSWORD: ${DB_PASS}
     volumes:
-      - koha_db_data:/var/lib/mysql
+      - ./data:/var/lib/mysql
     networks:
       - koha_internal
 
@@ -280,9 +406,6 @@ services:
     networks:
       - koha_internal
 
-volumes:
-  koha_db_data:
-
 networks:
   koha_internal:
     internal: true
@@ -291,32 +414,208 @@ networks:
     name: ${CADDY_NET:-caddy_net}
 KOHA_COMPOSE
 
+    # ── config-main.env ───────────────────────────────────────────────────────
     cat > config-main.env << KOHA_ENV
 # Koha ILS configuration — generated at install time
 MYSQL_SERVER=koha-db
 DB_NAME=koha_default
 MYSQL_USER=koha_default
 MYSQL_PASSWORD=$DB_PASS
-DB_ROOT_PASS=$(generate_password 24)
+DB_ROOT_PASS=$DB_ROOT_PASS
+DB_PASS=$DB_PASS
 MEMCACHED_SERVERS=koha-memcached:11211
 MB_HOST=koha-rabbitmq
 MB_PORT=61613
 MB_USER=koha
 MB_PASS=$RABBIT_PASS
 RABBIT_PASS=$RABBIT_PASS
-DB_PASS=$DB_PASS
 CADDY_NET=$SITE_CADDY_NET
 KOHA_LANGS=en
 ZEBRA_MARC_FORMAT=marc21
 USE_Z3950=1
+# Admin credentials (used by post-setup.sh after web installer)
+KOHA_ADMIN_USER=$KOHA_ADMIN_USER
+KOHA_ADMIN_PASS=$KOHA_ADMIN_PASS
 KOHA_ENV
 
     chmod 600 config-main.env
     ensure_docker_dir_ownership "$KOHA_DIR"
+
+    # ── Generate post-setup.sh ────────────────────────────────────────────────
+    log_info "Writing post-setup.sh ..."
+
+    # Serialise item types and shelf locs into env-safe strings
+    local _items_str _locs_str
+    _items_str="$(IFS='|'; echo "${ITEM_TYPES[*]}")"
+    _locs_str="$(IFS='|'; echo "${SHELF_LOCS[*]}")"
+
+    cat > post-setup.sh << POSTSETUP
+#!/bin/bash
+# post-setup.sh — Run AFTER completing the Koha web installer at http://localhost:8098
+# Configures library, item types, and shelf locations via the Koha REST API.
+# Generated by ubuntu-post-install on $(date '+%F').
+
+set -uo pipefail
+
+KOHA_STAFF_URL="http://localhost:8098"
+KOHA_DIR="${KOHA_DIR}"
+CONF="\${KOHA_DIR}/config-main.env"
+
+[ -f "\$CONF" ] || { echo "config-main.env not found at \$CONF"; exit 1; }
+source "\$CONF"
+
+ADMIN_USER="\${KOHA_ADMIN_USER:-admin}"
+ADMIN_PASS="\${KOHA_ADMIN_PASS:-}"
+LIB_NAME="${LIB_NAME}"
+LIB_CODE="${LIB_CODE}"
+ITEMS_RAW="${_items_str}"
+LOCS_RAW="${_locs_str}"
+
+log()  { echo "[\$(date '+%T')] \$*"; }
+ok()   { echo "  ✓ \$*"; }
+warn() { echo "  ⚠ \$*"; }
+fail() { echo "  ✗ \$*" >&2; }
+
+echo ""
+echo "╔═══════════════════════════════════════════════════════╗"
+echo "║   Koha Post-Setup Configuration                      ║"
+echo "╚═══════════════════════════════════════════════════════╝"
+echo ""
+echo "  Library : \$LIB_NAME (\$LIB_CODE)"
+echo "  Admin   : \$ADMIN_USER"
+echo ""
+
+# ── Wait for Koha API ────────────────────────────────────────────────────────
+log "Waiting for Koha REST API..."
+_tries=0
+until curl -sf "\$KOHA_STAFF_URL/api/v1/auth/session" -o /dev/null 2>/dev/null; do
+    _tries=\$((_tries+1))
+    [ "\$_tries" -gt 60 ] && { fail "Koha API not available after 5 min — is the stack running?"; exit 1; }
+    printf "."
+    sleep 5
+done
+echo ""
+ok "Koha API is up"
+
+# ── Authenticate ─────────────────────────────────────────────────────────────
+if [ -z "\$ADMIN_PASS" ]; then
+    read -rsp "  Admin password (from web installer): " ADMIN_PASS; echo
+fi
+
+_COOKIE="\$(mktemp)"
+trap 'rm -f "\$_COOKIE"' EXIT
+
+_auth_resp=\$(curl -sf -c "\$_COOKIE" -X POST "\$KOHA_STAFF_URL/api/v1/auth/session" \\
+    -H "Content-Type: application/json" \\
+    -d "{\"userid\":\"\$ADMIN_USER\",\"password\":\"\$ADMIN_PASS\"}" 2>&1) || true
+if ! curl -sf -b "\$_COOKIE" "\$KOHA_STAFF_URL/api/v1/libraries" -o /dev/null 2>/dev/null; then
+    fail "Authentication failed — check admin username/password in config-main.env"
+    echo "  You can update KOHA_ADMIN_PASS in \$CONF and re-run this script."
+    exit 1
+fi
+ok "Authenticated as \$ADMIN_USER"
+
+# ── Helper: POST with JSON ────────────────────────────────────────────────────
+koha_post() {
+    local _endpoint="\$1" _body="\$2"
+    curl -sf -b "\$_COOKIE" -X POST "\$KOHA_STAFF_URL/api/v1/\$_endpoint" \\
+        -H "Content-Type: application/json" \\
+        -d "\$_body" -o /dev/null -w "%{http_code}"
+}
+
+koha_patch() {
+    local _endpoint="\$1" _body="\$2"
+    curl -sf -b "\$_COOKIE" -X PATCH "\$KOHA_STAFF_URL/api/v1/\$_endpoint" \\
+        -H "Content-Type: application/json" \\
+        -d "\$_body" -o /dev/null -w "%{http_code}"
+}
+
+# ── Library branch ────────────────────────────────────────────────────────────
+echo ""
+log "Creating library branch '\$LIB_CODE' (\$LIB_NAME)..."
+_code=\$(koha_post "libraries" "{\"library_id\":\"\$LIB_CODE\",\"name\":\"\$LIB_NAME\"}")
+case "\$_code" in
+    201) ok "Library created" ;;
+    409) warn "Library '\$LIB_CODE' already exists — skipping" ;;
+    *)   warn "Unexpected response \$_code — may need manual setup in Staff UI" ;;
+esac
+
+# ── System preferences ────────────────────────────────────────────────────────
+log "Setting system preferences..."
+docker exec koha bash -c "\\
+    mysql -u root -p\${DB_ROOT_PASS:-\$DB_ROOT_PASS} koha_default -e \\
+    \\\"UPDATE systempreferences SET value='\$LIB_NAME' WHERE variable='LibraryName';\\\"
+" 2>/dev/null && ok "LibraryName → \$LIB_NAME" || warn "Could not set LibraryName (set manually in Staff UI → Admin → System preferences → OPAC)"
+
+docker exec koha bash -c "\\
+    mysql -u root -p\${DB_ROOT_PASS:-\$DB_ROOT_PASS} koha_default -e \\
+    \\\"UPDATE systempreferences SET value='\$LIB_NAME' WHERE variable='OPACLibraryName';\\\"
+" 2>/dev/null && ok "OPACLibraryName → \$LIB_NAME" || true
+
+# ── Item types ────────────────────────────────────────────────────────────────
+echo ""
+log "Creating item types..."
+IFS='|' read -ra _ITEMS <<< "\$ITEMS_RAW"
+for _item in "\${_ITEMS[@]}"; do
+    IFS=':' read -r _ic _id _il <<< "\$_item"
+    [[ -z "\$_ic" ]] && continue
+    _body="{\"item_type_id\":\"\$_ic\",\"description\":\"\$_id\",\"loan_period\":\$_il,\"renewals_allowed\":99}"
+    _code=\$(koha_post "item_types" "\$_body")
+    case "\$_code" in
+        201) ok "\$_ic — \$_id (\${_il}d loan)" ;;
+        409) warn "\$_ic already exists — skipping" ;;
+        *)   warn "\$_ic: unexpected response \$_code" ;;
+    esac
+done
+
+# ── Shelf locations (LOC authorized values) ───────────────────────────────────
+if [ -n "\$LOCS_RAW" ]; then
+    echo ""
+    log "Creating shelf locations..."
+    IFS='|' read -ra _LOCS <<< "\$LOCS_RAW"
+    for _loc in "\${_LOCS[@]}"; do
+        IFS=':' read -r _lc _ld <<< "\$_loc"
+        [[ -z "\$_lc" ]] && continue
+        _body="{\"authorised_value\":\"\$_lc\",\"lib\":\"\$_ld\",\"lib_opac\":\"\$_ld\"}"
+        _code=\$(koha_post "authorised_value_categories/LOC/authorised_values" "\$_body")
+        case "\$_code" in
+            201) ok "\$_lc — \$_ld" ;;
+            409) warn "\$_lc already exists — skipping" ;;
+            *)   warn "\$_lc: unexpected response \$_code" ;;
+        esac
+    done
+fi
+
+echo ""
+echo "══════════════════════════════════════════════════════"
+echo "  SETUP COMPLETE"
+echo "══════════════════════════════════════════════════════"
+echo ""
+echo "  Your Koha library is ready to use."
+echo ""
+echo "  OPAC (patron browsing):  http://localhost:8097"
+echo "  Staff / admin:           http://localhost:8098"
+echo ""
+echo "  Next steps in Staff UI:"
+echo "    1. Administration → Patron categories → add patron types"
+echo "       (e.g. ADULT, CHILD, FAMILY)"
+echo "    2. Administration → Circulation and fines rules → set loan rules"
+echo "    3. Cataloguing → Z39.50/SRU — verify WorldCat/OpenLibrary targets work"
+echo "       (test by searching an ISBN)"
+echo ""
+echo "  Adding books:"
+echo "    Cataloguing → Z39.50/SRU search → enter ISBN"
+echo "    Or use a USB barcode scanner — scan the ISBN barcode on any book"
+echo ""
+POSTSETUP
+
+    chmod +x post-setup.sh
+    chown "$ACTUAL_USER:$ACTUAL_USER" post-setup.sh 2>/dev/null || true
+    log_success "post-setup.sh written"
+
     log_success "Koha configured at $KOHA_DIR"
 
     # Koha has its own staff login — no Authelia for staff interface
-    # OPAC is public-facing, Caddy proxies to OPAC port
     configure_caddy_for_service "Koha OPAC" "koha:8080" "library"
 
     write_readme "$KOHA_DIR" << MD
@@ -328,45 +627,64 @@ Full Integrated Library System for managing a physical book collection.
 - **OPAC** (patron browsing): http://localhost:8097
 - **Staff / admin**:          http://localhost:8098
 
-## First-time setup (important — takes ~5 minutes)
-1. Open the **staff interface**: http://localhost:8098
-2. Wait for the setup wizard (Koha takes 2–3 minutes to initialize on first start)
-3. Follow the web installer — it asks for library name, MARC flavour (choose MARC21),
-   and creates your admin account
-4. Go to Administration → Basic parameters → Libraries to add your library
-5. Go to Administration → Basic parameters → Item types to define your book categories
-6. Go to Administration → Basic parameters → Authorized values → LOC to define
-   shelf locations (e.g. "LR1" = Living Room Shelf 1)
+## Quick setup (4 steps)
+
+### Step 1 — Start the stack
+\`\`\`bash
+cd $KOHA_DIR
+docker compose up -d
+\`\`\`
+Takes 2–3 minutes on first boot while Koha initialises.
+
+### Step 2 — Complete the web installer
+1. Open **http://localhost:8098**
+2. You may see a "Database connection" page first — wait 1–2 min and refresh
+3. The installer wizard appears automatically:
+   - **Language**: click "Install for language English" → Continue
+   - **Koha database**: fields are pre-filled from env → Continue
+   - **Select MARC flavour**: choose **MARC21** → Continue
+   - **Install basic Koha data**: check all boxes → Continue
+   - **Set Koha administrator password**: enter **$KOHA_ADMIN_PASS** exactly
+   - **Finish**: click the login link
+4. Log in with username **$KOHA_ADMIN_USER** and the password above
+
+### Step 3 — Run post-setup
+\`\`\`bash
+sudo $KOHA_DIR/post-setup.sh
+\`\`\`
+Auto-creates your library branch, item types, and shelf locations via the REST API.
+
+### Step 4 — Add patron categories and circulation rules
+In Staff UI:
+- Administration → Patron categories → New category (e.g. ADULT, CHILD)
+- Administration → Circulation and fines rules → add a rule for your library
 
 ## Adding books
-- **By ISBN** (recommended): Cataloguing → Z39.50/SRU search → enter ISBN →
-  imports full metadata, cover art, summary from WorldCat/OpenLibrary
-- **Barcode scanning**: use any USB barcode scanner or phone camera app;
-  scan ISBN on the back of the book
+- **By ISBN** (recommended): Cataloguing → Z39.50/SRU search → enter ISBN
+  → imports metadata, cover art, and summary from WorldCat / Open Library
+- **Barcode scanner**: any USB scanner works; scan the ISBN barcode on the book cover
 
 ## Loans / checkout
-- Patron management: Patrons → New patron (add family members)
-- Checkout: Circulation → Check out → scan patron card, scan book barcode
+- Add patrons: Patrons → New patron
+- Checkout: Circulation → Check out → scan/enter patron card, scan book barcode
 - Return: Circulation → Check in
+
+## Data location
+- **Database**: \`$KOHA_DIR/data/\`  (MariaDB bind-mount, included in backup)
+- **Config**:   \`$KOHA_DIR/config-main.env\`  (chmod 600)
 
 ## Manage
 \`\`\`bash
 cd $KOHA_DIR
-docker compose up -d      # start (allow 3 min for first-time init)
-docker compose down       # stop
-docker compose logs -f    # logs
+docker compose up -d            # start (3 min first boot)
+docker compose down             # stop
+docker compose logs -f          # logs
+docker compose logs -f koha     # Koha app logs only
 docker compose pull && docker compose up -d   # update
 \`\`\`
-
-## Shelf locations
-Define custom locations in Staff → Administration → Authorized values → LOST
-(or create a new category). Common home library codes:
-- LR1, LR2 — Living Room shelves
-- BR — Bedroom
-- OF — Office
-- BS — Basement
 MD
 
+    # ── Start ──────────────────────────────────────────────────────────────────
     local START_KOHA=""
     prompt_yn "Start Koha now? (y/n):" "y" START_KOHA
     if [ "$START_KOHA" = "y" ] || [ "$START_KOHA" = "Y" ]; then
@@ -376,10 +694,27 @@ MD
     fi
 
     echo ""
-    echo "  OPAC (patron UI): http://localhost:8097"
-    echo "  Staff / admin:    http://localhost:8098"
-    echo "  First run: open staff interface and complete the setup wizard (~5 min)"
-    echo "  Credentials saved in: $KOHA_DIR/config-main.env"
+    echo "╔═══════════════════════════════════════════════════════════════════╗"
+    echo "║   KOHA SETUP SUMMARY                                             ║"
+    echo "╚═══════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  Library name : $LIB_NAME  ($LIB_CODE)"
+    echo "  Admin user   : $KOHA_ADMIN_USER"
+    echo "  Admin pass   : $KOHA_ADMIN_PASS"
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────────────────┐"
+    echo "  │  IMPORTANT — Write down or save the admin password above.    │"
+    echo "  │  You will type it during the web installer in Step 3.        │"
+    echo "  │  Also stored in: $KOHA_DIR/config-main.env                   │"
+    echo "  └──────────────────────────────────────────────────────────────┘"
+    echo ""
+    echo "  NEXT STEPS:"
+    echo "    1. Wait ~3 min, then open:  http://localhost:8098"
+    echo "    2. Complete the web installer (use password above when asked)"
+    echo "    3. Run:  sudo $KOHA_DIR/post-setup.sh"
+    echo ""
+    echo "  OPAC (patron UI):  http://localhost:8097"
+    echo "  Staff / admin:     http://localhost:8098"
     echo ""
 }
 

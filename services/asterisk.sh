@@ -63,28 +63,49 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
             local _caddy_dir="$DOCKER_DIR/caddy"
             local _caddyfile="$_caddy_dir/Caddyfile"
+            local _display_port="${_upstream##*:}"
 
-            # Remote Caddy support: if CADDY_REMOTE_HOST is set, operate on the
-            # remote machine via SSH instead of the local filesystem.
-            if [[ -n "${CADDY_REMOTE_HOST:-}" ]]; then
-                echo ""
-                local _do_caddy=""
-                read -r -p "  Configure Caddy reverse proxy for $_name on $CADDY_REMOTE_HOST? [y/N]: " _do_caddy
-                [[ "${_do_caddy,,}" == "y" ]] || {
-                    log_info "Skipping — access at: http://$(hostname -I | awk '{print $1}'):${_upstream##*:}"
-                    return 0
-                }
+            local _mode="none"
+            [[ -d "$_caddy_dir" ]] && _mode="local"
+            [[ -n "${CADDY_REMOTE_HOST:-}" ]] && [[ "$_mode" != "local" ]] && _mode="remote"
+            [[ "$_mode" == "none" ]] && {
+                log_info "Access $_name directly on port $_display_port."
+                return 0
+            }
 
-                local _domain=""
-                read -r -p "  Domain (e.g. ${_subdomain}.${SITE_DOMAIN:-example.com}): " _domain
-                [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
+            echo ""
+            local _do_caddy=""
+            if [[ "$_mode" == "remote" ]]; then
+                log_info "Remote Caddy configured (${CADDY_REMOTE_HOST})."
+                log_info "A snippet file will be saved to ~/docker/caddy-snippets/."
+            fi
+            read -r -p "  Configure Caddy reverse proxy for $_name? [y/N]: " _do_caddy
+            [[ "${_do_caddy,,}" == "y" ]] || {
+                log_info "Skipping — access at: http://localhost:$_display_port"
+                return 0
+            }
 
-                local _block
-                _block="$(cat << CBLOCK
+            local _default_domain=""
+            if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$SITE_DOMAIN" != "example.com" ]]; then
+                _default_domain="${_subdomain}.${SITE_DOMAIN}"
+                log_info "Default: $_default_domain"
+            fi
+            local _domain=""
+            read -r -p "  Domain [${_default_domain:-required}]: " _domain
+            _domain="${_domain:-$_default_domain}"
+            [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
+
+            local _block_upstream="$_upstream"
+            if [[ "$_mode" == "remote" ]]; then
+                _block_upstream="${CADDY_REMOTE_HOST}:${_display_port}"
+            fi
+
+            local _site_block
+            _site_block="$(cat << CBLOCK
 
 # $_name
-$_domain {
-    reverse_proxy $_upstream
+${_domain} {
+    reverse_proxy ${_block_upstream}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -101,79 +122,43 @@ ${_extra}
 }
 CBLOCK
 )"
-                echo "$_block" | ssh "$CADDY_REMOTE_HOST" "cat >> $_caddyfile"
-                ssh "$CADDY_REMOTE_HOST" "docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true"
-                if ssh "$CADDY_REMOTE_HOST" "docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null"; then
+
+            if [[ "$_mode" == "local" ]]; then
+                if [[ -f "$_caddyfile" ]]; then
+                    local _bk="$_caddy_dir/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
+                    cp "$_caddyfile" "$_bk"
+                    log_info "Backed up Caddyfile to $(basename "$_bk")"
+                else
+                    touch "$_caddyfile"
+                fi
+
+                if grep -q "^${_domain}" "$_caddyfile" 2>/dev/null; then
+                    log_warning "$_domain already in Caddyfile"
+                    local _ow=""
+                    read -r -p "  Overwrite? [y/N]: " _ow
+                    [[ "${_ow,,}" == "y" ]] || { log_info "Keeping existing entry."; return 0; }
+                    sed -i "/^${_domain}/,/^}/d" "$_caddyfile"
+                fi
+
+                printf '%s\n' "$_site_block" >> "$_caddyfile"
+                log_success "Added $_domain to Caddyfile"
+                docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
                     log_success "$_name accessible at: https://$_domain"
                 else
-                    log_warning "Reload failed — check: ssh $CADDY_REMOTE_HOST docker logs caddy"
+                    log_warning "Reload failed — check: docker logs caddy"
+                    log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
                 fi
-                return 0
-            fi
-
-            if [[ ! -d "$_caddy_dir" ]]; then
-                log_info "Access $_name directly on port ${_upstream##*:}."
-                return 0
-            fi
-
-            echo ""
-            local _do_caddy=""
-            read -r -p "  Configure Caddy reverse proxy for $_name? [y/N]: " _do_caddy
-            [[ "${_do_caddy,,}" == "y" ]] || {
-                log_info "Skipping — access at: http://localhost:${_upstream##*:}"
-                return 0
-            }
-
-            local _domain=""
-            read -r -p "  Domain (e.g. ${_subdomain}.${SITE_DOMAIN:-example.com}): " _domain
-            [[ -n "$_domain" ]] || { log_warning "No domain entered — skipping Caddy."; return 0; }
-
-            # Back up before touching
-            if [[ -f "$_caddyfile" ]]; then
-                local _bk="$_caddy_dir/Caddyfile.backup.$(date +%Y%m%d-%H%M%S)"
-                cp "$_caddyfile" "$_bk"
-                log_info "Backed up Caddyfile to $(basename "$_bk")"
             else
-                touch "$_caddyfile"
-            fi
-
-            # Remove existing block for this domain if present
-            if grep -q "^${_domain}" "$_caddyfile" 2>/dev/null; then
-                log_warning "$_domain already in Caddyfile"
-                local _ow=""
-                read -r -p "  Overwrite? [y/N]: " _ow
-                [[ "${_ow,,}" == "y" ]] || { log_info "Keeping existing entry."; return 0; }
-                sed -i "/^${_domain}/,/^}/d" "$_caddyfile"
-            fi
-
-            cat >> "$_caddyfile" << CBLOCK
-
-# $_name
-$_domain {
-    reverse_proxy $_upstream
-
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "SAMEORIGIN"
-        Referrer-Policy "strict-origin-when-cross-origin"
-    }
-
-    log {
-        output file /var/log/caddy/${_domain}.log
-        format json
-    }
-${_extra}
-}
-CBLOCK
-
-            log_success "Added $_domain to Caddyfile"
-            docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-            if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
-                log_success "$_name accessible at: https://$_domain"
-            else
-                log_warning "Reload failed — check: docker logs caddy"
-                log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                local _snippet_dir="$DOCKER_DIR/caddy-snippets"
+                local _snippet_file="$_snippet_dir/${_subdomain}.caddy"
+                mkdir -p "$_snippet_dir"
+                printf '%s\n' "$_site_block" > "$_snippet_file"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$_snippet_file" 2>/dev/null || true
+                log_success "Snippet saved: $_snippet_file"
+                log_info "Copy to Caddy machine:"
+                log_info "  scp $_snippet_file caddy-host:~/caddy-snippets/"
+                log_info "  rsync -av $_snippet_dir/ caddy-host:~/caddy-snippets/  (all at once)"
             fi
         }
 
@@ -224,6 +209,8 @@ install_asterisk() {
     fi
 
     mkdir -p "$EA_DIR"
+    mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
+             "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib"
     ensure_docker_dir_ownership "$EA_DIR"
     cd "$EA_DIR" || return 1
 
@@ -287,11 +274,11 @@ services:
       coturn:
         condition: service_started
     volumes:
-      - asterisk-config:/etc/asterisk
-      - easy-asterisk-config:/etc/easy-asterisk
-      - asterisk-logs:/var/log/asterisk
-      - asterisk-spool:/var/spool/asterisk
-      - asterisk-lib:/var/lib/asterisk
+      - ./config/asterisk:/etc/asterisk
+      - ./config/easy-asterisk:/etc/easy-asterisk
+      - ./logs:/var/log/asterisk
+      - ./spool:/var/spool/asterisk
+      - ./lib:/var/lib/asterisk
       - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
     env_file: .env
     restart: unless-stopped
@@ -327,12 +314,6 @@ services:
       - --log-file=stdout
     restart: unless-stopped
 
-volumes:
-  asterisk-config:
-  easy-asterisk-config:
-  asterisk-logs:
-  asterisk-spool:
-  asterisk-lib:
 EOF
 
     # ── .env ──────────────────────────────────────────────────────────────────
@@ -428,15 +409,15 @@ Recommended softphones: Linphone, Zoiper, Bria, Grandstream Wave.
 Access the Easy Asterisk web interface at http://<host-ip>:8080
 or via your configured reverse-proxy domain.
 
-## Volumes
+## Data directories (all inside ~/docker/asterisk/, included in backup)
 
-| Volume               | Contents                       |
-|----------------------|-------------------------------|
-| asterisk-config      | /etc/asterisk — dialplan, SIP  |
-| easy-asterisk-config | /etc/easy-asterisk — web config|
-| asterisk-logs        | /var/log/asterisk              |
-| asterisk-spool       | /var/spool/asterisk            |
-| asterisk-lib         | /var/lib/asterisk              |
+| Directory            | Contents                        |
+|----------------------|---------------------------------|
+| config/asterisk/     | /etc/asterisk — dialplan, SIP   |
+| config/easy-asterisk/| /etc/easy-asterisk — web config |
+| logs/                | /var/log/asterisk               |
+| spool/               | /var/spool/asterisk             |
+| lib/                 | /var/lib/asterisk               |
 
 ## Ports
 
