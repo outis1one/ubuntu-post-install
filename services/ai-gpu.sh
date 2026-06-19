@@ -9,6 +9,7 @@
 # Clones https://github.com/outis1one/ai-6gb-gpu and installs three stacks:
 #   image-gen/  — InvokeAI (port 9090), nvidia GPU, optimised for 6 GB VRAM
 #   llm/        — Ollama (11434) + Open WebUI (3000) + SearXNG (internal)
+#               + optional Groq Cloud API (api.groq.com) wired in as an OpenAI connection
 #   portal/     — Flask app (port 8080), mounts Docker socket, hot-swaps GPU between stacks
 #
 # Because a 6 GB GPU can only run ONE stack at a time, the portal handles the swap:
@@ -207,6 +208,7 @@ install_ai_gpu() {
         echo "[DRY-RUN] Would clone $REPO_URL to $REPO_DIR"
         echo "[DRY-RUN] Would create stacks: image-gen (InvokeAI:9090), llm (Ollama:11434 + OpenWebUI:3000), portal (8080)"
         echo "[DRY-RUN] Would prompt for Ollama and InvokeAI model selection"
+        echo "[DRY-RUN] Would optionally wire Groq Cloud API into Open WebUI (api.groq.com)"
         echo "[DRY-RUN] Would auto-pull selected Ollama models after LLM stack starts"
         echo "[DRY-RUN] Would queue InvokeAI starter model via REST API"
         return 0
@@ -252,6 +254,22 @@ install_ai_gpu() {
             8) OLLAMA_MODELS+=("nomic-embed-text") ;;
         esac
     done
+
+    # ── Groq Cloud API (optional) ─────────────────────────────────────────────
+    echo ""
+    log_info "Groq Cloud API — free, fast cloud inference (Llama, Qwen, Kimi, etc.) at https://groq.com"
+    log_info "Wires Groq into Open WebUI as an OpenAI-compatible connection, alongside local Ollama models."
+    log_info "Free API key: https://console.groq.com/keys"
+    echo ""
+
+    local USE_GROQ=""
+    prompt_yn "Connect Open WebUI to the Groq Cloud API? (y/n):" "n" USE_GROQ
+
+    local GROQ_KEY=""
+    if [[ "$USE_GROQ" =~ ^[Yy]$ ]]; then
+        prompt_text "Groq API key:" "" GROQ_KEY
+        [ -z "$GROQ_KEY" ] && log_warning "No key entered — skipping Groq setup."
+    fi
 
     # ── InvokeAI model selection ──────────────────────────────────────────────
     echo ""
@@ -335,6 +353,20 @@ IMGENV
             sed -i "s|America/New_York|$TZ_VAL|g" {} \;
     fi
 
+    # Wire Groq into Open WebUI as an OpenAI-compatible connection (idempotent)
+    if [ -n "$GROQ_KEY" ]; then
+        local LLM_COMPOSE="$LLM_DIR/docker-compose.yml"
+        if [ -f "$LLM_COMPOSE" ] && ! grep -q "OPENAI_API_BASE_URL" "$LLM_COMPOSE"; then
+            sed -i '/- OLLAMA_BASE_URL=http:\/\/ollama:11434/a\
+      - ENABLE_OPENAI_API=true\
+      - OPENAI_API_BASE_URL=https://api.groq.com/openai/v1\
+      - OPENAI_API_KEY=${GROQ_API_KEY}' "$LLM_COMPOSE"
+            grep -q "OPENAI_API_BASE_URL" "$LLM_COMPOSE" \
+                && log_success "Groq Cloud API wired into Open WebUI" \
+                || log_warning "Could not patch docker-compose.yml for Groq — add OPENAI_API_BASE_URL/OPENAI_API_KEY to the open-webui service's environment manually"
+        fi
+    fi
+
     local WEBUI_SECRET
     WEBUI_SECRET="$(generate_password 32)"
 
@@ -346,6 +378,8 @@ WEBUI_SECRET_KEY=${WEBUI_SECRET}
 ENABLE_RAG_WEB_SEARCH=true
 RAG_WEB_SEARCH_ENGINE=searxng
 SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>&format=json
+# Groq Cloud API key for Open WebUI (https://console.groq.com/keys) — blank disables it
+${GROQ_KEY:+GROQ_API_KEY=${GROQ_KEY}}
 CADDY_NET=${SITE_CADDY_NET}
 LLMENV
     chmod 600 "$LLM_DIR/.env"
@@ -448,6 +482,25 @@ For 6 GB cards, stick to 7B or smaller with Q4_K_M quantisation (~4.5 GB).
 Open http://localhost:3000 and create your admin account on first visit.
 Models pulled into Ollama appear automatically in the model dropdown.
 Enable web search: Settings → Admin → Web Search (SearXNG is pre-configured).
+
+## Groq Cloud API
+
+$([ -n "$GROQ_KEY" ] && echo "Configured at install time — Groq models appear in the model dropdown alongside Ollama's." || echo "Not configured. To add it later:")
+
+Add/rotate the key:
+\`\`\`bash
+# llm/.env — set or update:
+GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx
+
+# llm/docker-compose.yml — open-webui service needs these under 'environment:'
+#   - ENABLE_OPENAI_API=true
+#   - OPENAI_API_BASE_URL=https://api.groq.com/openai/v1
+#   - OPENAI_API_KEY=\${GROQ_API_KEY}
+
+cd $AI_DIR/llm && docker compose up -d   # recreate with the new key
+\`\`\`
+Free API key: https://console.groq.com/keys — Groq hosts open models (Llama, Qwen, Kimi, etc.)
+on custom inference chips, much faster than local Ollama on a 6 GB card.
 
 ## Manage individual stacks
 \`\`\`bash
@@ -566,6 +619,9 @@ MD
     fi
     if [ -n "$INVOKE_MODEL_NAME" ]; then
         echo "  InvokeAI starter:     $INVOKE_MODEL_NAME ($INVOKE_MODEL_SOURCE)"
+    fi
+    if [ -n "$GROQ_KEY" ]; then
+        echo "  Groq Cloud API:       wired into Open WebUI (https://console.groq.com/keys)"
     fi
     echo ""
 }
