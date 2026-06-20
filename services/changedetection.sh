@@ -197,7 +197,24 @@ install_changedetection() {
     ensure_docker_dir_ownership "$CD_DIR"
     cd "$CD_DIR" || return 1
 
-    cat > docker-compose.yml << 'CD_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << CD_COMPOSE
 name: changedetection
 
 services:
@@ -209,13 +226,11 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - BASE_URL=${BASE_URL}
+      - BASE_URL=\${BASE_URL}
       - PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000
     volumes:
       - ./data:/datastore
-    networks:
-      - caddy_net
-    depends_on:
+${_CADDY_NET_BLOCK}    depends_on:
       - playwright-chrome
 
   playwright-chrome:
@@ -225,13 +240,7 @@ services:
     restart: unless-stopped
     environment:
       - DEFAULT_LAUNCH_ARGS=--no-sandbox --disable-dev-shm-usage
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 CD_COMPOSE
 
     cat > .env << CD_ENV

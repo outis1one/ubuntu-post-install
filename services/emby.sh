@@ -222,6 +222,23 @@ install_emby() {
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     UID_VAL=$(id -u "$ACTUAL_USER"); GID_VAL=$(id -g "$ACTUAL_USER")
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << EMBY_COMPOSE
 name: emby
 
@@ -244,13 +261,7 @@ services:
     # Uncomment for hardware transcoding (Intel/AMD):
     # devices:
     #   - /dev/dri:/dev/dri
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 EMBY_COMPOSE
 
     cat > .env << EMBY_ENV

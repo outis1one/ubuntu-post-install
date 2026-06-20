@@ -194,7 +194,24 @@ install_portainer() {
     ensure_docker_dir_ownership "$PORTAINER_DIR"
     cd "$PORTAINER_DIR" || return 1
 
-    cat > docker-compose.yml << 'PORTAINER_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << PORTAINER_COMPOSE
 name: portainer
 
 services:
@@ -209,13 +226,7 @@ services:
     ports:
       - "9000:9000"
       - "9443:9443"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 PORTAINER_COMPOSE
 
     mkdir -p data

@@ -212,7 +212,24 @@ install_mail-archiver() {
     ADMIN_PASS=$(generate_password 24)
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
-    cat > docker-compose.yml << 'MA_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << MA_COMPOSE
 name: mail-archiver
 
 services:
@@ -227,9 +244,7 @@ services:
     depends_on:
       mailarchiver-db:
         condition: service_healthy
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   mailarchiver-db:
     image: postgres:17-alpine
     container_name: mailarchiver-db
@@ -246,11 +261,7 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 MA_COMPOSE
 
     cat > .env << MA_ENV

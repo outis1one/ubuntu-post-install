@@ -203,7 +203,24 @@ install_traccar() {
     ensure_docker_dir_ownership "$TRACCAR_DIR"
     cd "$TRACCAR_DIR" || return 1
 
-    cat > docker-compose.yml << 'TRACCAR_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << TRACCAR_COMPOSE
 name: traccar
 
 services:
@@ -220,13 +237,7 @@ services:
       - "8082:8082"
       - "5000-5150:5000-5150"
       - "5000-5150:5000-5150/udp"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 TRACCAR_COMPOSE
 
     mkdir -p logs data config

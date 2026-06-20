@@ -199,6 +199,23 @@ install_filebrowser() {
     local FB_PATH=""
     prompt_text "Primary files directory to browse [default: $ACTUAL_HOME]:" "$ACTUAL_HOME" FB_PATH
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << FB_COMPOSE
 name: filebrowser
 
@@ -215,13 +232,7 @@ services:
       - ${FB_PATH}:/files
     ports:
       - "8085:80"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FB_COMPOSE
 
     cat > .env << FB_ENV

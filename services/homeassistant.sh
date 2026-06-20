@@ -218,9 +218,23 @@ install_homeassistant() {
     else
         HA_NET_LINES="    ports:
       - \"8123:8123\""
-        HA_CADDY_NET_LINES="    networks:
+        if [ -d "$DOCKER_DIR/caddy" ]; then
+            HA_CADDY_NET_LINES="    networks:
       - caddy_net"
+        else
+            HA_CADDY_NET_LINES=""
+        fi
         echo "  → Bridge networking selected (port 8123 published)."
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ "$HA_NETMODE" != "2" ] && [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
     fi
 
     cat > docker-compose.yml << HOMEASSISTANT_COMPOSE
@@ -240,11 +254,7 @@ services:
       - /run/dbus:/run/dbus:ro
 ${HA_NET_LINES}
 ${HA_CADDY_NET_LINES}
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 HOMEASSISTANT_COMPOSE
 
     mkdir -p config

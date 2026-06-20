@@ -197,6 +197,23 @@ install_calibre_web() {
     ensure_docker_dir_ownership "$CW_DIR"
     cd "$CW_DIR" || return 1
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << CW_COMPOSE
 name: calibre-web
 
@@ -216,13 +233,7 @@ services:
       - ./books:/books
     ports:
       - "8083:8083"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 CW_COMPOSE
 
     cat > .env << CW_ENV

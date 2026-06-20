@@ -234,6 +234,23 @@ install_wg-easy() {
     # Escape $ in hash for docker-compose env (bcrypt hashes contain $$)
     local WG_HASH_ESCAPED="${WG_PASSWORD_HASH//\$/\$\$}"
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << WGEASY_COMPOSE
 name: wg-easy
 
@@ -258,13 +275,7 @@ services:
     ports:
       - "51820:51820/udp"
       - "51821:51821/tcp"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 WGEASY_COMPOSE
 
     cat > .env << WGEASY_ENV

@@ -214,7 +214,24 @@ install_drum-rhythm-game() {
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DRUM_DIR/html"
 
-    cat > docker-compose.yml << 'DRUM_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << DRUM_COMPOSE
 name: drum-rhythm-game
 
 services:
@@ -227,13 +244,7 @@ services:
       - ./html:/usr/share/nginx/html:ro
     ports:
       - "8096:80"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 DRUM_COMPOSE
 
     cat > .env << DRUM_ENV

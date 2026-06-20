@@ -214,7 +214,24 @@ install_fmd() {
     local FMD_PASS
     FMD_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    cat > docker-compose.yml << 'FMD_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << FMD_COMPOSE
 name: fmd
 
 services:
@@ -224,18 +241,12 @@ services:
     hostname: fmd
     restart: unless-stopped
     environment:
-      - FMD_ADMIN_PASSWORD=${FMD_ADMIN_PASSWORD}
+      - FMD_ADMIN_PASSWORD=\${FMD_ADMIN_PASSWORD}
     volumes:
       - ./data:/fmd/data
     ports:
       - "8084:8080"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FMD_COMPOSE
 
     cat > .env << FMD_ENV

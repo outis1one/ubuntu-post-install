@@ -242,10 +242,6 @@ services:
       - ./playlists:/playlists:rw
       - /etc/localtime:/etc/localtime:ro
 
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
 LYRION_COMPOSE
 
     cat > .env << LYRION_ENV

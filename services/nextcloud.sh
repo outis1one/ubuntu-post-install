@@ -205,8 +205,25 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 NCDF
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     # ── docker-compose.yml ──────────────────────────────────────────────────
-    cat > docker-compose.yml << 'NCCOMPOSE'
+    cat > docker-compose.yml << NCCOMPOSE
 name: nextcloud
 services:
   nextcloud:
@@ -223,9 +240,7 @@ services:
       - ./custom_apps:/var/www/html/custom_apps
     ports:
       - "8080:80"
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   db:
     image: mariadb:10.11
     container_name: nextcloud-db
@@ -234,13 +249,7 @@ services:
     env_file: .env
     volumes:
       - ./db:/var/lib/mysql
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 NCCOMPOSE
 
     # ── .env ────────────────────────────────────────────────────────────────

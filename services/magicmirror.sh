@@ -231,6 +231,23 @@ install_magicmirror() {
         ensure_docker_dir_ownership "$MM_DIR"
         cd "$MM_DIR" || continue
 
+        local _CADDY_NET_BLOCK=""
+        if [ -d "$DOCKER_DIR/caddy" ]; then
+            _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+        fi
+
+        local _CADDY_NET_SECTION=""
+        if [ -d "$DOCKER_DIR/caddy" ]; then
+            _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+        fi
+
         cat > docker-compose.yml << MM_COMPOSE
 name: mm-$MM_PORT
 
@@ -248,13 +265,7 @@ services:
       - ./css:/opt/magic_mirror/css
     ports:
       - "$MM_PORT:8080"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 MM_COMPOSE
 
         mkdir -p config modules css
