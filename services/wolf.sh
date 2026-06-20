@@ -866,6 +866,11 @@ UDEV
         WOLF_MAC="$LAN_MAC"
     fi
 
+    # Write compose using a mixed heredoc: WOLF_STATE_DIR comes from .env at
+    # runtime (docker compose variable substitution), so it stays correct even
+    # if the drive is remounted at a different path. IP/MAC/render-node are
+    # baked in at install time because they're hardware-specific and not stored
+    # in .env — use 'manage.sh update-network' to regenerate if they change.
     cat > docker-compose.yml << EOF
 name: wolf
 
@@ -877,17 +882,17 @@ services:
     restart: unless-stopped
     environment:
       - NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
-      # State + config live on the game drive. HOST_APPS_STATE_FOLDER must be a
-      # HOST path because Wolf hands it to the host Docker daemon when spawning
-      # app containers — so it's mounted at the SAME path inside this container.
-      - HOST_APPS_STATE_FOLDER=${WOLF_STATE_DIR}
-      - WOLF_CFG_FOLDER=${WOLF_STATE_DIR}/cfg
+      # WOLF_STATE_DIR is read from .env at runtime — edit .env to relocate.
+      # Must be the same path inside and outside the container so that app
+      # containers Wolf spawns via the Docker socket resolve it on the host.
+      - HOST_APPS_STATE_FOLDER=\${WOLF_STATE_DIR}
+      - WOLF_CFG_FOLDER=\${WOLF_STATE_DIR}/cfg
       - WOLF_INTERNAL_IP=${WOLF_IP}
       - WOLF_INTERNAL_MAC=${WOLF_MAC}
       - WOLF_RENDER_NODE=${WOLF_RENDER_NODE}
       - LD_LIBRARY_PATH=/usr/nvidia/lib:/usr/nvidia/lib32
     volumes:
-      - ${WOLF_STATE_DIR}:${WOLF_STATE_DIR}:rw
+      - \${WOLF_STATE_DIR}:\${WOLF_STATE_DIR}:rw
       - /var/run/docker.sock:/var/run/docker.sock:rw
       - /dev/:/dev/:rw
       - /run/udev:/run/udev:rw
