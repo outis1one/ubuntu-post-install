@@ -514,15 +514,18 @@ UDEV
     # ── Build a numbered candidate list ──────────────────────────────────────
     # Slots:  0 = home dir,  1..N = mounted non-system partitions,
     #         last = unmounted block devices (for formatting+mounting)
-    local -a _CAND_PATH _CAND_LABEL _CAND_DEV
+    local -a _CAND_PATH _CAND_LABEL _CAND_DEV _CAND_UUID
     local _ci=0
 
     # Option 0 — home directory
-    local _home_free
+    local _home_free _home_dev _home_uuid
     _home_free=$(df -h "$ACTUAL_HOME" 2>/dev/null | awk 'NR==2{print $4}')
+    _home_dev=$(df "$ACTUAL_HOME" 2>/dev/null | awk 'NR==2{print $1}')
+    _home_uuid=$(blkid -s UUID -o value "$_home_dev" 2>/dev/null)
     _CAND_PATH[0]="$ACTUAL_HOME/games"
     _CAND_LABEL[0]="Home directory  ($ACTUAL_HOME, ${_home_free:-?} free)"
-    _CAND_DEV[0]=""
+    _CAND_DEV[0]="$_home_dev"
+    _CAND_UUID[0]="${_home_uuid:-n/a}"
     _ci=1
 
     # Mounted partitions — skip /, /boot*, /snap*, /tmp, home itself
@@ -531,29 +534,38 @@ UDEV
         [[ -z "$_mnt" ]] && continue
         [[ "$_mnt" =~ $_skip_re ]] && continue
         [[ "$_mnt" == "$ACTUAL_HOME" ]] && continue
-        local _dev _label _size _free
+        local _dev _label _size _free _uuid
         _dev=$(df "$_mnt" 2>/dev/null | awk 'NR==2{print $1}')
         _label=$(lsblk -no LABEL "$_dev" 2>/dev/null | head -1)
         _size=$(lsblk -no SIZE "$_dev" 2>/dev/null | head -1)
         _free=$(df -h "$_mnt" 2>/dev/null | awk 'NR==2{print $4}')
+        _uuid=$(blkid -s UUID -o value "$_dev" 2>/dev/null)
         local _display="${_label:-$(basename "$_dev")}"
         _CAND_PATH[$_ci]="$_mnt/games"
         _CAND_LABEL[$_ci]="$_mnt  (${_display}, ${_size:-?} total, ${_free:-?} free)"
         _CAND_DEV[$_ci]="$_dev"
+        _CAND_UUID[$_ci]="${_uuid:-n/a}"
         ((_ci++))
     done < <(lsblk -no MOUNTPOINT 2>/dev/null | sort -u)
 
-    # Unmounted block devices (disks and partitions with no mountpoint)
-    local -a _UNMT_DEV _UNMT_LABEL
+    # Unmounted block devices — skip disks that have any mounted partition
+    local -a _UNMT_DEV _UNMT_LABEL _UNMT_UUID
     local _ui=0
     while IFS= read -r _line; do
         local _name _size _type _fstype _mnt _label
         read -r _name _size _type _fstype _mnt _label <<< "$_line"
         [[ "$_name" =~ ^loop ]] && continue
         [[ "$_type" != "disk" && "$_type" != "part" ]] && continue
-        [[ -n "$_mnt" ]] && continue   # already mounted → shown above
+        [[ -n "$_mnt" ]] && continue   # this entry itself is mounted
+        # For whole disks, also skip if any child partition is mounted
+        if [[ "$_type" == "disk" ]]; then
+            lsblk -no MOUNTPOINT "/dev/$_name" 2>/dev/null | grep -q '[^[:space:]]' && continue
+        fi
+        local _uuid
+        _uuid=$(blkid -s UUID -o value "/dev/$_name" 2>/dev/null)
         _UNMT_DEV[$_ui]="$_name"
-        _UNMT_LABEL[$_ui]="${_label:+$_label, }${_size} ${_fstype:+($_fstype)}"
+        _UNMT_LABEL[$_ui]="${_label:+$_label, }${_size}${_fstype:+ ($_fstype)}"
+        _UNMT_UUID[$_ui]="${_uuid:-no UUID}"
         ((_ui++))
     done < <(lsblk -no NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null)
 
@@ -561,8 +573,9 @@ UDEV
     echo "  Mounted locations:"
     local _n
     for _n in "${!_CAND_PATH[@]}"; do
-        printf "    %2d)  %s\n" "$((_n + 1))" "${_CAND_LABEL[$_n]}"
-        printf "         → %s\n" "${_CAND_PATH[$_n]}"
+        printf "    %2d)  %s\n"   "$((_n + 1))" "${_CAND_LABEL[$_n]}"
+        printf "         UUID: %s\n" "${_CAND_UUID[$_n]}"
+        printf "         → %s\n"  "${_CAND_PATH[$_n]}"
     done
 
     if [ "${#_UNMT_DEV[@]}" -gt 0 ]; then
@@ -570,6 +583,7 @@ UDEV
         echo "  Unmounted drives (script can format + mount):"
         for _n in "${!_UNMT_DEV[@]}"; do
             printf "    U%d)  /dev/%s  %s\n" "$((_n + 1))" "${_UNMT_DEV[$_n]}" "${_UNMT_LABEL[$_n]}"
+            printf "         UUID: %s\n" "${_UNMT_UUID[$_n]}"
         done
     fi
 
