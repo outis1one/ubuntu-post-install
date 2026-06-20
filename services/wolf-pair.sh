@@ -384,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    HTTPServer.allow_reuse_address = True
     HTTPServer(('0.0.0.0', 8090), Handler).serve_forever()
 PYEOF
     log_success "server.py written"
