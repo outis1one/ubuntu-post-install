@@ -697,7 +697,7 @@ UDEV
     mkdir -p "$GAME_STORAGE_DIR/steam" "$GAME_STORAGE_DIR/saves" \
              "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
-             "$GAME_STORAGE_DIR/kodi"
+             "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
 
     # Pre-create ES-DE ROM directories so the user knows where to drop files
     # and ES-DE shows the system in its list immediately on first launch.
@@ -718,8 +718,40 @@ UDEV
     done
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$GAME_STORAGE_DIR" 2>/dev/null || true
-    log_success "Storage layout: $GAME_STORAGE_DIR/{roms/<system>/,steam,saves,media,...}"
+    log_success "Storage layout: $GAME_STORAGE_DIR/{roms/<system>/,steam,saves,media,emulators,...}"
     log_info "ES-DE ROM directories pre-created. Drop ROMs in the matching subfolder."
+
+    # ── Optional: download Azahar (3DS emulator) ─────────────────────────────
+    # Azahar is an open-source Citra fork — the recommended legal 3DS emulator
+    # for ES-DE. AppImages dropped in emulators/ are found automatically by
+    # ES-DE's app finder (checks ~/Applications inside the container).
+    local _AZAHAR_DIR="$GAME_STORAGE_DIR/emulators"
+    if ! ls "$_AZAHAR_DIR"/azahar*.AppImage 2>/dev/null | grep -q .; then
+        local _get_az=""
+        echo ""
+        log_info "3DS emulation: Azahar (open-source Citra fork) can be auto-downloaded."
+        prompt_yn "Download Azahar 3DS emulator AppImage now? (y/n):" "y" _get_az
+        if [[ "$_get_az" =~ ^[Yy]$ ]]; then
+            log_info "Fetching latest Azahar release from GitHub..."
+            local _AZ_URL
+            _AZ_URL=$(curl -fsSL "https://api.github.com/repos/azahar-emu/azahar/releases/latest" \
+                | python3 -c "import sys,json; r=json.load(sys.stdin); \
+                  print(next((a['browser_download_url'] for a in r['assets'] \
+                  if a['name'].endswith('.AppImage')), ''))" 2>/dev/null)
+            if [[ -n "$_AZ_URL" ]]; then
+                local _AZ_FILE="$_AZAHAR_DIR/$(basename "$_AZ_URL")"
+                curl -fL --progress-bar -o "$_AZ_FILE" "$_AZ_URL" \
+                    && chmod +x "$_AZ_FILE" \
+                    && chown "$ACTUAL_USER:$ACTUAL_USER" "$_AZ_FILE" \
+                    && log_success "Azahar downloaded: $_AZ_FILE" \
+                    || log_warning "Download failed — get it manually from https://github.com/azahar-emu/azahar/releases"
+            else
+                log_warning "Could not resolve download URL — get it manually from https://github.com/azahar-emu/azahar/releases"
+            fi
+        fi
+    else
+        log_info "Azahar already present in $GAME_STORAGE_DIR/emulators/"
+    fi
 
     # ── App selection ─────────────────────────────────────────────────────────
     echo ""
@@ -972,7 +1004,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/home/retro/.steam:rw'],
+        mounts=[f'{games}/steam:/home/retro:rw'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -986,7 +1018,8 @@ CATALOG = {
         image='ghcr.io/games-on-whales/es-de:edge',
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/home/retro/.config/retroarch/saves:rw',
-                f'{games}/media:/media:rw'],
+                f'{games}/media:/media:rw',
+                f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -1212,7 +1245,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/home/retro/.steam:rw'],
+        mounts=[f'{games}/steam:/home/retro:rw'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1227,7 +1260,8 @@ CATALOG = {
         image='ghcr.io/games-on-whales/es-de:edge',
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/home/retro/.config/retroarch/saves:rw',
-                f'{games}/media:/media:rw'],
+                f'{games}/media:/media:rw',
+                f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -1523,9 +1557,17 @@ cd $WOLF_DIR
 | 47998–48000 | UDP | RTP video/audio/control |
 
 ## Game storage: \`$GAME_STORAGE_DIR\`
-- \`roms/\`   → /ROMs (EmulationStation)
-- \`steam/\`  → Steam data
-- \`saves/\`  → RetroArch saves
+- \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
+- \`steam/\`         → Steam home (library + user data + Proton prefixes)
+- \`saves/\`         → RetroArch saves & states
+- \`emulators/\`     → AppImages (Azahar 3DS, etc.) — ES-DE finds them automatically
+
+## 3DS emulation
+Azahar (open-source Citra fork) — download AppImage to \`emulators/\`:
+\`\`\`bash
+# Or re-run manage.sh apps to trigger the download prompt
+cd $WOLF_DIR && ./manage.sh apps
+\`\`\`
 
 ## Backup
 \`\`\`bash
