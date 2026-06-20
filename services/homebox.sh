@@ -197,6 +197,23 @@ install_homebox() {
     ensure_docker_dir_ownership "$HB_DIR"
     cd "$HB_DIR" || return 1
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << HB_COMPOSE
 name: homebox
 
@@ -213,13 +230,7 @@ services:
       - ./data:/data
     ports:
       - "7745:7745"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 HB_COMPOSE
 
     cat > .env << HB_ENV

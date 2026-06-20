@@ -128,6 +128,23 @@ install_watchtower() {
         NTFY_URL="http://ntfy/watchtower"
     fi
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << WT_COMPOSE
 name: watchtower
 
@@ -152,13 +169,7 @@ services:
       - WATCHTOWER_DEBUG=false
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 WT_COMPOSE
 
     # Create .env
