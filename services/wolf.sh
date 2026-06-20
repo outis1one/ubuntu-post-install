@@ -528,11 +528,18 @@ UDEV
     _CAND_UUID[0]="${_home_uuid:-n/a}"
     _ci=1
 
-    # Mounted partitions — skip /, /boot*, /snap*, /tmp, home itself
-    local _skip_re="^(/|/boot|/snap|/tmp|/run|/sys|/proc|/dev)"
+    # Mounted partitions — skip root, system paths, and home itself
     while IFS= read -r _mnt; do
         [[ -z "$_mnt" ]] && continue
-        [[ "$_mnt" =~ $_skip_re ]] && continue
+        [[ "$_mnt" == "/"        ]] && continue
+        [[ "$_mnt" == /boot*     ]] && continue
+        [[ "$_mnt" == /snap*     ]] && continue
+        [[ "$_mnt" == /tmp*      ]] && continue
+        [[ "$_mnt" == /run*      ]] && continue
+        [[ "$_mnt" == /sys*      ]] && continue
+        [[ "$_mnt" == /proc*     ]] && continue
+        [[ "$_mnt" == /dev*      ]] && continue
+        [[ "$_mnt" == "[SWAP]"   ]] && continue
         [[ "$_mnt" == "$ACTUAL_HOME" ]] && continue
         local _dev _label _size _free _uuid
         _dev=$(df "$_mnt" 2>/dev/null | awk 'NR==2{print $1}')
