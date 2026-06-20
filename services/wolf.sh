@@ -200,6 +200,40 @@ fi
 
 register_service wolf gaming "Cloud gaming via Moonlight (Games-on-Whales Wolf)" 47989
 
+# relocate_steam_home <game_storage_dir>
+# Make Steam's home physically live on the game drive. Wolf bind-mounts each
+# app's session home (/etc/wolf/<id>/Steam) to /home/retro. By replacing that
+# session home with a symlink to <game_storage_dir>/steam-home, everything Steam
+# writes — its install, game files, and Proton prefixes — lands on the game
+# drive, and Steam's Storage screen reports that drive's free space. This is the
+# reliable alternative to seeding libraryfolders.vdf, which Steam overwrites on
+# every launch. Safe to run repeatedly; only acts on real dirs, never symlinks.
+# Returns 0 if it relocated at least one session home.
+relocate_steam_home() {
+    local game_dir="$1"
+    [ -n "$game_dir" ] || return 1
+    local target="$game_dir/steam-home"
+    mkdir -p "$target"
+    chown -R 1000:1000 "$target" 2>/dev/null || true
+    local did=0 src
+    for src in /etc/wolf/[0-9]*/Steam; do
+        [ -e "$src" ] || continue
+        [ -L "$src" ] && continue          # already relocated
+        [ -d "$src" ] || continue
+        # Preserve an existing Steam install: move contents over once.
+        if [ -z "$(ls -A "$target" 2>/dev/null)" ] && [ -n "$(ls -A "$src" 2>/dev/null)" ]; then
+            cp -a "$src/." "$target/" 2>/dev/null || true
+        fi
+        rm -rf "$src"
+        ln -s "$target" "$src"
+        chown -h 1000:1000 "$src" 2>/dev/null || true
+        chown -R 1000:1000 "$target" 2>/dev/null || true
+        echo "  Steam home → $target  (via $src)"
+        did=1
+    done
+    return $((did ? 0 : 1))
+}
+
 install_wolf() {
     require_docker || return 1
 
@@ -701,30 +735,18 @@ UDEV
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
 
-    # Pre-seed Steam library config. Wolf mounts each app's home from
-    # /etc/wolf/<id>/Steam — Steam reads libraryfolders.vdf from there.
-    # We stash a copy in game storage and manage.sh fix-perms propagates it
-    # into every Wolf session dir after Wolf has run once.
-    local _VDF_CONTENT
-    _VDF_CONTENT='"libraryfolders"
-{
-	"0"
-	{
-		"path"		"/mnt/games/steam"
-		"label"		""
-		"mounted"	"1"
-		"contentid"	"1"
-	}
-}'
-    mkdir -p "$GAME_STORAGE_DIR/steam/steamapps"
-    echo "$_VDF_CONTENT" > "$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf"
-    # Also seed into any Wolf session dirs that already exist
-    for _wdir in /etc/wolf/[0-9]*/Steam; do
-        [ -d "$_wdir" ] || continue
-        mkdir -p "$_wdir/.local/share/Steam/steamapps"
-        echo "$_VDF_CONTENT" > "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
-        chown -R 1000:1000 "$_wdir"
-    done
+    # Steam home lives on the game drive — the bulletproof way to make games
+    # land where the user chose. Seeding libraryfolders.vdf does NOT work:
+    # Steam rewrites that file on every launch and forces library "0" back to
+    # its own install dir (/home/retro/.local/share/Steam). Instead we make
+    # /home/retro itself physically live on the game drive by symlinking the
+    # Wolf Steam session home (/etc/wolf/<id>/Steam) to $GAME_STORAGE_DIR/
+    # steam-home. Then Steam's one and only library IS the game drive — its
+    # install, games, AND Proton prefixes all land there, and Steam's Storage
+    # screen reports the game drive's free space. See _relocate_steam_home in
+    # manage.sh, which is run on start / fix-perms / first install.
+    mkdir -p "$GAME_STORAGE_DIR/steam-home"
+    chown -R 1000:1000 "$GAME_STORAGE_DIR/steam-home"
 
     # Pre-create ES-DE ROM directories so the user knows where to drop files
     # and ES-DE shows the system in its list immediately on first launch.
@@ -928,23 +950,34 @@ EOF
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-_seed_steam_library() {
+# Make Steam's home physically live on the game drive by symlinking each Wolf
+# Steam session home (/etc/wolf/<id>/Steam, mounted to /home/retro) at
+# $GAME_STORAGE_DIR/steam-home. Steam then installs, stores games, and keeps
+# Proton prefixes on the game drive, and its Storage screen shows that drive's
+# free space. Seeding libraryfolders.vdf does NOT work — Steam rewrites it every
+# launch. Safe to run repeatedly; skips dirs already symlinked. Needs the Steam
+# app to be DISCONNECTED (no running container holding the mount).
+_relocate_steam_home() {
     local game_dir
     game_dir=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
-    local vdf="$game_dir/steam/steamapps/libraryfolders.vdf"
-    [ -f "$vdf" ] || return 0
-    local changed=0
-    for wdir in /etc/wolf/[0-9]*/Steam; do
-        [ -d "$wdir" ] || continue
-        local dest="$wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
-        if [ ! -f "$dest" ]; then
-            sudo mkdir -p "$(dirname "$dest")"
-            sudo cp "$vdf" "$dest"
-            sudo chown -R 1000:1000 "$wdir"
-            changed=1
+    [ -n "$game_dir" ] || return 0
+    local target="$game_dir/steam-home"
+    sudo mkdir -p "$target"
+    local did=0 src
+    for src in /etc/wolf/[0-9]*/Steam; do
+        [ -e "$src" ] || continue
+        [ -L "$src" ] && continue
+        [ -d "$src" ] || continue
+        if [ -z "$(sudo ls -A "$target" 2>/dev/null)" ] && [ -n "$(sudo ls -A "$src" 2>/dev/null)" ]; then
+            sudo cp -a "$src/." "$target/" 2>/dev/null || true
         fi
+        sudo rm -rf "$src"
+        sudo ln -s "$target" "$src"
+        echo "  Steam home → $target"
+        did=1
     done
-    [ "$changed" = 1 ] && echo "Steam library config seeded into Wolf session dir."
+    sudo chown -R 1000:1000 "$target" 2>/dev/null || true
+    [ "$did" = 1 ] && echo "Steam now stores everything on the game drive. Reconnect Moonlight."
 }
 
 case "$1" in
@@ -952,7 +985,7 @@ case "$1" in
         docker compose up -d
         echo "Wolf started. Pair Moonlight to this server's IP."
         sleep 3
-        _seed_steam_library
+        _relocate_steam_home
         ;;
     stop)    docker compose down ;;
     restart) docker compose restart ;;
@@ -1057,7 +1090,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/mnt/games/steam:rw'],
+        mounts=[],  # Steam home is symlinked onto the game drive (relocate_steam_home)
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1241,18 +1274,10 @@ PYEOF
             echo "  fixed: $GAME_DIR"
             found=1
         fi
-        # Propagate the Steam library seed into every Wolf session home so Steam
-        # uses /mnt/games/steam rather than defaulting to /home/retro.
-        if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/steam/steamapps/libraryfolders.vdf" ]; then
-            for _wdir in /etc/wolf/[0-9]*/Steam; do
-                [ -d "$_wdir" ] || continue
-                sudo mkdir -p "$_wdir/.local/share/Steam/steamapps"
-                sudo cp "$GAME_DIR/steam/steamapps/libraryfolders.vdf" \
-                        "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
-                sudo chown -R 1000:1000 "$_wdir"
-                echo "  seeded libraryfolders.vdf → $_wdir"
-            done
-        fi
+        # Relocate Steam's home onto the game drive so games install there
+        # (and stay there). This moves an existing Steam install over once,
+        # then symlinks the session home — no re-download needed.
+        _relocate_steam_home
         [ "$found" = 0 ] && echo "  Nothing to fix (no Wolf app dirs found yet)."
         echo "Done. Reconnect from Moonlight to relaunch the app."
         ;;
@@ -1337,7 +1362,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/mnt/games/steam:rw'],
+        mounts=[],  # Steam home is symlinked onto the game drive (relocate_steam_home)
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1500,31 +1525,15 @@ PYEOF
         docker compose restart wolf
         log_success "Wolf restarted with updated config"
 
-        # Seed Steam library config so games go to game storage on first launch.
-        # Wolf creates session dirs after the restart; wait up to 30s for them.
+        # Point Steam's home at the game drive (see steam-home note above).
+        # Wolf only creates the Steam session dir on first Moonlight connect,
+        # so it almost certainly doesn't exist yet here — relocate any that do,
+        # and tell the user the one-time step for the rest.
         if echo "$APP_KEYS" | grep -qw steam; then
-            log_info "Waiting for Wolf session dirs to appear..."
-            local _sw
-            for _sw in $(seq 1 30); do
-                compgen -G "/etc/wolf/[0-9]*/Steam" >/dev/null 2>&1 && break
-                sleep 1
-            done
-            local _INSTALL_VDF="$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf"
-            if [ -f "$_INSTALL_VDF" ]; then
-                local _seeded=0
-                for _wdir in /etc/wolf/[0-9]*/Steam; do
-                    [ -d "$_wdir" ] || continue
-                    mkdir -p "$_wdir/.local/share/Steam/steamapps"
-                    cp "$_INSTALL_VDF" "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
-                    chown -R 1000:1000 "$_wdir"
-                    ((_seeded++))
-                done
-                if [ "$_seeded" -gt 0 ]; then
-                    log_success "Steam library config seeded — games will install to $GAME_STORAGE_DIR/steam"
-                else
-                    log_warning "Steam session dir not found yet. Run: ./manage.sh fix-perms  after first Moonlight connection."
-                fi
-            fi
+            relocate_steam_home "$GAME_STORAGE_DIR" || true
+            log_info "Steam storage: after your FIRST Moonlight connection, run"
+            log_info "  cd $WOLF_DIR && ./manage.sh fix-perms"
+            log_info "to move Steam onto the game drive, then reconnect. (Once only.)"
         fi
     else
         log_warning "Wolf config not generated in time. Add apps manually to /etc/wolf/cfg/config.toml"
@@ -1678,7 +1687,7 @@ cd $WOLF_DIR
 ## Game storage: \`$GAME_STORAGE_DIR\`
 On-disk dirs are bind-mounted into each app container under \`/mnt/games/\`:
 - \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
-- \`steam/\`         → /mnt/games/steam (add as a Steam Library Folder once)
+- \`steam-home/\`     → Steam's home (/home/retro) — installs, games, prefixes
 - \`saves/\`         → /mnt/games/saves (RetroArch saves & states)
 - \`emulators/\`     → /mnt/games/emulators (Azahar 3DS AppImage, etc.)
 
@@ -1686,9 +1695,24 @@ Mounting under \`/mnt/games\` (not the container's \`/home/retro\`) avoids
 clobbering the app's home directory, which Wolf manages per-session under
 \`/etc/wolf/<id>/<App>\`.
 
-## First Steam launch
-Steam → Settings → Storage → add \`/mnt/games/steam\` and set it default,
-so game installs land on the storage disk instead of the ephemeral home.
+## Steam storage — how games land on the game drive
+Steam rewrites \`libraryfolders.vdf\` on every launch and forces its primary
+library back to its own install dir, so seeding that file does NOT work.
+Instead, this setup symlinks Steam's session home
+(\`/etc/wolf/<id>/Steam\` → \`/home/retro\`) at \`steam-home/\` on the game
+drive. Steam's one and only library is therefore the game drive — installs,
+game files, and Proton prefixes all land there with nothing to configure.
+
+Wolf creates the Steam session dir only on your FIRST Moonlight connection.
+So the one-time sequence is:
+1. Connect once and let Steam open (it lands on the OS drive this first time).
+2. Disconnect, then run \`./manage.sh fix-perms\` (moves Steam to the game
+   drive and symlinks it — no re-download).
+3. Reconnect. Steam → Settings → Storage now shows the game drive's free
+   space, and everything installs there from here on.
+
+\`./manage.sh start\` re-applies this automatically, so it self-heals on
+reboots.
 
 ## 3DS emulation
 Azahar (open-source Citra fork) AppImage lives in \`emulators/\` → mounted at
