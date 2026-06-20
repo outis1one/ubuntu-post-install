@@ -1160,11 +1160,30 @@ def make_app_block(app):
     )
 
 def update_mounts(lines, wolf_name, new_mounts):
+    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
+    # so we must replace the entire array (from `mounts =` to its closing `]`),
+    # not just the first line — otherwise the old elements are left orphaned and
+    # the file becomes invalid TOML. Always rewrite as a single line.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-10), min(len(lines), i+15)):
-                if lines[j].strip().startswith('mounts ='):
-                    lines[j] = f"        mounts = {new_mounts}\n"
+            for j in range(max(0, i-20), min(len(lines), i+20)):
+                if lines[j].lstrip().startswith('mounts ='):
+                    indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                    # End of the array = first line containing ']'.
+                    k = j
+                    while k < len(lines) and ']' not in lines[k]:
+                        k += 1
+                    # Heal any orphaned array remnants left by a previously
+                    # corrupted single-line rewrite (stray '…' elements / a lone
+                    # ']' sitting below the mounts line).
+                    m = k + 1
+                    while m < len(lines):
+                        s = lines[m].lstrip()
+                        if s.startswith("'") or s.startswith(']'):
+                            m += 1
+                        else:
+                            break
+                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
                     return True
     return False
 
@@ -1658,11 +1677,30 @@ def make_app_block(app):
     )
 
 def update_mounts(lines, wolf_name, new_mounts):
+    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
+    # so we must replace the entire array (from `mounts =` to its closing `]`),
+    # not just the first line — otherwise the old elements are left orphaned and
+    # the file becomes invalid TOML. Always rewrite as a single line.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-10), min(len(lines), i+15)):
-                if lines[j].strip().startswith('mounts ='):
-                    lines[j] = f"        mounts = {new_mounts}\n"
+            for j in range(max(0, i-20), min(len(lines), i+20)):
+                if lines[j].lstrip().startswith('mounts ='):
+                    indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                    # End of the array = first line containing ']'.
+                    k = j
+                    while k < len(lines) and ']' not in lines[k]:
+                        k += 1
+                    # Heal any orphaned array remnants left by a previously
+                    # corrupted single-line rewrite (stray '…' elements / a lone
+                    # ']' sitting below the mounts line).
+                    m = k + 1
+                    while m < len(lines):
+                        s = lines[m].lstrip()
+                        if s.startswith("'") or s.startswith(']'):
+                            m += 1
+                        else:
+                            break
+                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
                     return True
     return False
 
