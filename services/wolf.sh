@@ -694,11 +694,25 @@ UDEV
     log_success "Game storage: $GAME_STORAGE_DIR"
 
     # Create the storage sub-directories
-    mkdir -p "$GAME_STORAGE_DIR/steam" "$GAME_STORAGE_DIR/saves" \
+    mkdir -p "$GAME_STORAGE_DIR/steam/steamapps" "$GAME_STORAGE_DIR/saves" \
              "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
 
+    # Pre-seed Steam library config so it uses /mnt/games/steam on first launch
+    # without requiring the user to navigate Settings → Storage inside Steam.
+    cat > "$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf" << 'VDFEOF'
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"/mnt/games/steam"
+		"label"		""
+		"mounted"	"1"
+		"contentid"	"1"
+	}
+}
+VDFEOF
     # Pre-create ES-DE ROM directories so the user knows where to drop files
     # and ES-DE shows the system in its list immediately on first launch.
     local _ESDE_SYSTEMS=(
@@ -1165,6 +1179,32 @@ PYEOF
     backup)
         echo "Set up backups with the modular system:  sudo ./setup.sh backup"
         ;;
+    fix-perms)
+        # Wolf creates each app's home directory under /etc/wolf/<session-id>/<App>
+        # and mounts it as /home/retro inside the app container. If anything in
+        # there ends up root-owned (e.g. left over from an earlier mount layout),
+        # the in-container 'retro' user (uid 1000) can't write to it and the app
+        # bails on startup with "Permission denied" creating ~/.steam, etc.
+        # Re-own every Wolf app home dir to uid/gid 1000 to clear that.
+        echo "Fixing ownership of Wolf app home directories (uid 1000)..."
+        found=0
+        for d in /etc/wolf/[0-9]*/; do
+            [ -d "$d" ] || continue
+            sudo chown -R 1000:1000 "$d"
+            echo "  fixed: $d"
+            found=1
+        done
+        # Also re-own the on-disk game storage so the retro user can write saves/installs
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        GAME_DIR=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
+        if [ -n "$GAME_DIR" ] && [ -d "$GAME_DIR" ]; then
+            sudo chown -R 1000:1000 "$GAME_DIR"
+            echo "  fixed: $GAME_DIR"
+            found=1
+        fi
+        [ "$found" = 0 ] && echo "  Nothing to fix (no Wolf app dirs found yet)."
+        echo "Done. Reconnect from Moonlight to relaunch the app."
+        ;;
     pin)
         # Wolf logs: "Insert pin at http://SOMEIP:47989/pin/#HEXHASH"
         # Extract just the hash fragment and build URLs for every interface
@@ -1204,6 +1244,7 @@ PYEOF
         echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
         echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
+        echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
 esac
@@ -1557,17 +1598,35 @@ cd $WOLF_DIR
 | 47998–48000 | UDP | RTP video/audio/control |
 
 ## Game storage: \`$GAME_STORAGE_DIR\`
+On-disk dirs are bind-mounted into each app container under \`/mnt/games/\`:
 - \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
-- \`steam/\`         → Steam library (steamapps, Proton prefixes, user data)
-- \`saves/\`         → RetroArch saves & states
-- \`emulators/\`     → AppImages (Azahar 3DS, etc.) — ES-DE finds them automatically
+- \`steam/\`         → /mnt/games/steam (add as a Steam Library Folder once)
+- \`saves/\`         → /mnt/games/saves (RetroArch saves & states)
+- \`emulators/\`     → /mnt/games/emulators (Azahar 3DS AppImage, etc.)
+
+Mounting under \`/mnt/games\` (not the container's \`/home/retro\`) avoids
+clobbering the app's home directory, which Wolf manages per-session under
+\`/etc/wolf/<id>/<App>\`.
+
+## First Steam launch
+Steam → Settings → Storage → add \`/mnt/games/steam\` and set it default,
+so game installs land on the storage disk instead of the ephemeral home.
 
 ## 3DS emulation
-Azahar (open-source Citra fork) — download AppImage to \`emulators/\`:
+Azahar (open-source Citra fork) AppImage lives in \`emulators/\` → mounted at
+\`/mnt/games/emulators\`. Point ES-DE's 3DS system at it via Alternative
+Emulators if it isn't auto-detected. Re-download with:
 \`\`\`bash
-# Or re-run manage.sh apps to trigger the download prompt
 cd $WOLF_DIR && ./manage.sh apps
 \`\`\`
+
+## Troubleshooting: app exits immediately ("Permission denied")
+If a launcher (Steam, etc.) closes the moment it opens, its Wolf-managed home
+dir has root-owned files the in-container user (uid 1000) can't write. Fix:
+\`\`\`bash
+cd $WOLF_DIR && ./manage.sh fix-perms
+\`\`\`
+Then reconnect from Moonlight.
 
 ## Backup
 \`\`\`bash
