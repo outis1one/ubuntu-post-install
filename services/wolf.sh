@@ -694,11 +694,25 @@ UDEV
     log_success "Game storage: $GAME_STORAGE_DIR"
 
     # Create the storage sub-directories
-    mkdir -p "$GAME_STORAGE_DIR/steam" "$GAME_STORAGE_DIR/saves" \
+    mkdir -p "$GAME_STORAGE_DIR/steam/steamapps" "$GAME_STORAGE_DIR/saves" \
              "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
 
+    # Pre-seed Steam library config so it uses /mnt/games/steam on first launch
+    # without requiring the user to navigate Settings → Storage inside Steam.
+    cat > "$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf" << 'VDFEOF'
+"libraryfolders"
+{
+	"0"
+	{
+		"path"		"/mnt/games/steam"
+		"label"		""
+		"mounted"	"1"
+		"contentid"	"1"
+	}
+}
+VDFEOF
     # Pre-create ES-DE ROM directories so the user knows where to drop files
     # and ES-DE shows the system in its list immediately on first launch.
     local _ESDE_SYSTEMS=(
