@@ -585,6 +585,7 @@ UDEV
     # Create the storage sub-directories
     mkdir -p "$GAME_STORAGE_DIR/roms" "$GAME_STORAGE_DIR/steam" \
              "$GAME_STORAGE_DIR/saves" "$GAME_STORAGE_DIR/media"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$GAME_STORAGE_DIR" 2>/dev/null || true
     log_success "Storage layout: $GAME_STORAGE_DIR/{roms,steam,saves,media}"
 
     # ── docker-compose.yml ────────────────────────────────────────────────────
@@ -658,6 +659,15 @@ volumes:
 EOF
     log_success "docker-compose.yml created"
 
+    # Save the game storage path so it's visible and editable later
+    cat > .env << EOF
+# Wolf game/ROM storage root — edit this and run ./manage.sh update-storage to apply
+GAME_STORAGE_DIR=${GAME_STORAGE_DIR}
+EOF
+    chmod 600 .env
+    chown "$ACTUAL_USER:$ACTUAL_USER" .env
+    log_success ".env written with GAME_STORAGE_DIR=${GAME_STORAGE_DIR}"
+
     # ── Firewall ──────────────────────────────────────────────────────────────
     if command -v ufw &>/dev/null; then
         log_info "Opening Moonlight ports in UFW..."
@@ -682,18 +692,40 @@ case "$1" in
         docker compose pull
         docker compose up -d
         ;;
-    add-apps)
+    add-apps|update-storage)
         WOLF_CFG=/etc/wolf/cfg/config.toml
         GAME_DIR="${2}"
+
+        # update-storage: read path from .env if not given on command line
+        if [ "$1" = "update-storage" ] && [ -z "$GAME_DIR" ]; then
+            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+            ENV_FILE="$SCRIPT_DIR/.env"
+            if [ -f "$ENV_FILE" ]; then
+                GAME_DIR=$(grep '^GAME_STORAGE_DIR=' "$ENV_FILE" | cut -d= -f2-)
+            fi
+        fi
+
         if [ -z "$GAME_DIR" ]; then
-            echo "Usage: ./manage.sh add-apps /path/to/game/storage"
-            echo "  e.g. ./manage.sh add-apps /home/user/drives/games"
+            echo "Usage: ./manage.sh add-apps <path>"
+            echo "       ./manage.sh update-storage [<new-path>]"
+            echo ""
+            echo "  <path>  root of game storage, e.g. /home/user/drives/games"
+            echo "  update-storage with no path reads GAME_STORAGE_DIR from .env"
             exit 1
         fi
         if [ ! -f "$WOLF_CFG" ]; then
             echo "Wolf config not found at $WOLF_CFG — is Wolf running?"
             exit 1
         fi
+
+        # Persist new path in .env when update-storage is called with explicit path
+        if [ "$1" = "update-storage" ] && [ -n "${2:-}" ]; then
+            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+            sed -i "s|^GAME_STORAGE_DIR=.*|GAME_STORAGE_DIR=${GAME_DIR}|" "$SCRIPT_DIR/.env" 2>/dev/null \
+                || echo "GAME_STORAGE_DIR=${GAME_DIR}" >> "$SCRIPT_DIR/.env"
+            echo "Updated .env: GAME_STORAGE_DIR=${GAME_DIR}"
+        fi
+
         python3 - "$GAME_DIR" "$WOLF_CFG" << 'PYEOF'
 import sys
 
@@ -712,6 +744,30 @@ for i, line in enumerate(lines):
 
 if first_start is None:
     print('ERROR: no [[profiles]] section found'); sys.exit(1)
+
+def update_mounts(lines, app_name, new_mounts_line):
+    for i, line in enumerate(lines):
+        if f"name = '{app_name}'" in line:
+            # scan forward for the mounts line within this app block
+            for j in range(i - 10, i + 10):
+                if 0 <= j < len(lines) and lines[j].strip().startswith('mounts ='):
+                    lines[j] = new_mounts_line
+                    return True
+    return False
+
+first_block = lines[first_start:insert_at]
+has_steam = any("name = 'WolfSteam'" in l for l in first_block)
+has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
+
+updated = []
+if has_steam:
+    new_line = f"        mounts = [ '{games}/steam:/home/retro/.steam:rw' ]\n"
+    if update_mounts(lines, 'WolfSteam', new_line):
+        updated.append('Steam mounts updated')
+if has_esde:
+    new_line = f"        mounts = [ '{games}/roms:/ROMs:rw', '{games}/saves:/home/retro/.config/retroarch/saves:rw', '{games}/media:/media:rw' ]\n"
+    if update_mounts(lines, 'WolfES-DE', new_line):
+        updated.append('ES-DE mounts updated')
 
 first_block = lines[first_start:insert_at]
 has_steam = any("name = 'WolfSteam'" in l for l in first_block)
@@ -779,8 +835,12 @@ if to_insert:
         f.writelines(new_lines)
     added = [n for n, exists in [('Steam', has_steam), ('EmulationStation', has_esde)] if not exists]
     print(f"Added to default profile: {', '.join(added)}")
+elif updated:
+    with open(cfg, 'w') as f:
+        f.writelines(lines)
+    print('; '.join(updated))
 else:
-    print('Both apps already in default profile')
+    print('Both apps already in profile (paths unchanged)')
 PYEOF
         docker compose restart wolf
         echo "Wolf restarted. Steam and EmulationStation should now appear in Moonlight."
@@ -819,15 +879,17 @@ PYEOF
         ;;
     *)
         echo "Wolf Cloud Gaming"
-        echo "  ./manage.sh start              - Start Wolf"
-        echo "  ./manage.sh stop               - Stop Wolf"
-        echo "  ./manage.sh restart            - Restart Wolf"
-        echo "  ./manage.sh logs               - Follow Wolf logs"
-        echo "  ./manage.sh status             - Show Wolf + app containers"
-        echo "  ./manage.sh pin                - Show recent Moonlight pairing PIN link"
-        echo "  ./manage.sh update             - Pull latest Wolf image and restart"
-        echo "  ./manage.sh add-apps <path>    - Add Steam + ES-DE to Wolf config"
-        echo "  ./manage.sh backup             - How to set up backups (sudo ./setup.sh backup)"
+        echo "  ./manage.sh start                        - Start Wolf"
+        echo "  ./manage.sh stop                         - Stop Wolf"
+        echo "  ./manage.sh restart                      - Restart Wolf"
+        echo "  ./manage.sh logs                         - Follow Wolf logs"
+        echo "  ./manage.sh status                       - Show Wolf + app containers"
+        echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
+        echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
+        echo "  ./manage.sh add-apps <path>              - Add Steam + ES-DE to Wolf config"
+        echo "  ./manage.sh update-storage [<new-path>]  - Update game storage path in Wolf config"
+        echo "                                             (reads .env if no path given)"
+        echo "  ./manage.sh backup                       - How to set up backups"
         ;;
 esac
 MEOF
@@ -850,7 +912,7 @@ MEOF
     if [ -f "$WOLF_CFG" ]; then
         log_info "Adding Steam and EmulationStation to Wolf config..."
         python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" << 'PYEOF'
-import sys
+import sys, re
 
 games = sys.argv[1].rstrip('/')
 cfg   = sys.argv[2]
@@ -871,6 +933,32 @@ for i, line in enumerate(lines):
 if first_start is None:
     print('[ERROR] No [[profiles]] section found in config'); sys.exit(1)
 
+first_block = lines[first_start:insert_at]
+has_steam = any("name = 'WolfSteam'" in l for l in first_block)
+has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
+
+# If an app already exists, update its mounts line in place rather than skip.
+def update_mounts(lines, app_name, new_mounts_line):
+    in_app = False
+    for i, line in enumerate(lines):
+        if f"name = '{app_name}'" in line:
+            in_app = True
+        if in_app and line.strip().startswith('mounts ='):
+            lines[i] = new_mounts_line
+            return True
+    return False
+
+updated = []
+if has_steam:
+    new_line = f"        mounts = [ '{games}/steam:/home/retro/.steam:rw' ]\n"
+    if update_mounts(lines, 'WolfSteam', new_line):
+        updated.append('Steam mounts updated')
+if has_esde:
+    new_line = f"        mounts = [ '{games}/roms:/ROMs:rw', '{games}/saves:/home/retro/.config/retroarch/saves:rw', '{games}/media:/media:rw' ]\n"
+    if update_mounts(lines, 'WolfES-DE', new_line):
+        updated.append('ES-DE mounts updated')
+
+# Re-derive first_block after in-place updates
 first_block = lines[first_start:insert_at]
 has_steam = any("name = 'WolfSteam'" in l for l in first_block)
 has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
@@ -937,8 +1025,12 @@ if to_insert:
         f.writelines(new_lines)
     added = [n for n, exists in [('Steam', has_steam), ('EmulationStation', has_esde)] if not exists]
     print(f"[INFO] Added to default profile: {', '.join(added)}")
+elif updated:
+    with open(cfg, 'w') as f:
+        f.writelines(lines)
+    print(f"[INFO] {'; '.join(updated)}")
 else:
-    print('[INFO] Steam and EmulationStation already in default profile')
+    print('[INFO] Steam and EmulationStation already in default profile (paths unchanged)')
 PYEOF
         docker compose restart wolf
         log_success "Wolf restarted with updated config"
