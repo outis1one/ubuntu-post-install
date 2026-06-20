@@ -1655,6 +1655,31 @@ PYEOF
         [ "$found" = 0 ] && echo "  Nothing to fix (no Wolf state dir found yet)."
         echo "Done. Reconnect from Moonlight to relaunch the app."
         ;;
+    install-completion)
+        # Install bash tab-completion for this manage.sh so that double-tab
+        # after './manage.sh ' shows all available commands. Works for any
+        # user whose shell sources ~/.bash_completion.d/ (most modern setups
+        # do; Ubuntu 22.04+ sources it automatically via /etc/bash.bashrc).
+        COMP_DIR="$HOME/.bash_completion.d"
+        COMP_FILE="$COMP_DIR/manage-wolf"
+        mkdir -p "$COMP_DIR"
+        cat > "$COMP_FILE" << 'COMPEOF'
+_manage_wolf_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local commands="start stop restart logs status pin update apps reorder
+                    add-web ge-proton games fix-ea-game fix-perms
+                    install-completion backup"
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+}
+# Register for any script named manage.sh regardless of path
+complete -F _manage_wolf_complete manage.sh
+COMPEOF
+        # Also source it immediately in the current shell if possible
+        echo "source \"$COMP_FILE\"" >> "$HOME/.bash_completion" 2>/dev/null || true
+        echo "Bash completion installed → $COMP_FILE"
+        echo "Open a new terminal (or run: source \"$COMP_FILE\"), then:"
+        echo "  ./manage.sh <TAB><TAB>  shows all commands"
+        ;;
     pin)
         # Wolf logs: "Insert pin at http://SOMEIP:47989/pin/#HEXHASH"
         # Extract just the hash fragment and build URLs for every interface
@@ -1700,6 +1725,7 @@ PYEOF
         echo "  ./manage.sh games                        - List installed games + their AppIDs"
         echo "  ./manage.sh fix-ea-game [appid]          - Unstick EA App install loop (default: SWBF2 1237950)"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
+        echo "  ./manage.sh install-completion           - Enable tab-completion for this script"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
 esac
