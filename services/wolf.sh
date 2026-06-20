@@ -507,80 +507,170 @@ UDEV
     echo "  GAME STORAGE LOCATION"
     echo "═══════════════════════════════════════════════════════"
     echo ""
-
-    log_info "Drives on this machine:"
-    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | grep -v "^loop" | sed 's/^/  /'
-    echo ""
-    echo "  ROMs, Steam library, and saves will be stored under one directory."
-    echo "  Recommended: a larger/secondary drive (HDD) to keep the OS SSD free."
-    echo "  The directory will be created if it doesn't exist."
-    echo "  If it's on an unmounted drive the script will mount it and add it to fstab."
+    echo "  ROMs, Steam library, and saves all live under one directory."
+    echo "  Recommended: a large secondary drive so the OS SSD stays free."
     echo ""
 
-    local DEFAULT_STORAGE="$ACTUAL_HOME/drives/games" GAME_STORAGE_DIR=""
-    prompt_text "  Game storage path [${DEFAULT_STORAGE}]:" "$DEFAULT_STORAGE" GAME_STORAGE_DIR
-    GAME_STORAGE_DIR="${GAME_STORAGE_DIR:-$DEFAULT_STORAGE}"
+    # ── Build a numbered candidate list ──────────────────────────────────────
+    # Slots:  0 = home dir,  1..N = mounted non-system partitions,
+    #         last = unmounted block devices (for formatting+mounting)
+    local -a _CAND_PATH _CAND_LABEL _CAND_DEV
+    local _ci=0
+
+    # Option 0 — home directory
+    local _home_free
+    _home_free=$(df -h "$ACTUAL_HOME" 2>/dev/null | awk 'NR==2{print $4}')
+    _CAND_PATH[0]="$ACTUAL_HOME/games"
+    _CAND_LABEL[0]="Home directory  ($ACTUAL_HOME, ${_home_free:-?} free)"
+    _CAND_DEV[0]=""
+    _ci=1
+
+    # Mounted partitions — skip /, /boot*, /snap*, /tmp, home itself
+    local _skip_re="^(/|/boot|/snap|/tmp|/run|/sys|/proc|/dev)"
+    while IFS= read -r _mnt; do
+        [[ -z "$_mnt" ]] && continue
+        [[ "$_mnt" =~ $_skip_re ]] && continue
+        [[ "$_mnt" == "$ACTUAL_HOME" ]] && continue
+        local _dev _label _size _free
+        _dev=$(df "$_mnt" 2>/dev/null | awk 'NR==2{print $1}')
+        _label=$(lsblk -no LABEL "$_dev" 2>/dev/null | head -1)
+        _size=$(lsblk -no SIZE "$_dev" 2>/dev/null | head -1)
+        _free=$(df -h "$_mnt" 2>/dev/null | awk 'NR==2{print $4}')
+        local _display="${_label:-$(basename "$_dev")}"
+        _CAND_PATH[$_ci]="$_mnt/games"
+        _CAND_LABEL[$_ci]="$_mnt  (${_display}, ${_size:-?} total, ${_free:-?} free)"
+        _CAND_DEV[$_ci]="$_dev"
+        ((_ci++))
+    done < <(lsblk -no MOUNTPOINT 2>/dev/null | sort -u)
+
+    # Unmounted block devices (disks and partitions with no mountpoint)
+    local -a _UNMT_DEV _UNMT_LABEL
+    local _ui=0
+    while IFS= read -r _line; do
+        local _name _size _type _fstype _mnt _label
+        read -r _name _size _type _fstype _mnt _label <<< "$_line"
+        [[ "$_name" =~ ^loop ]] && continue
+        [[ "$_type" != "disk" && "$_type" != "part" ]] && continue
+        [[ -n "$_mnt" ]] && continue   # already mounted → shown above
+        _UNMT_DEV[$_ui]="$_name"
+        _UNMT_LABEL[$_ui]="${_label:+$_label, }${_size} ${_fstype:+($_fstype)}"
+        ((_ui++))
+    done < <(lsblk -no NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null)
+
+    # ── Display the menu ──────────────────────────────────────────────────────
+    echo "  Mounted locations:"
+    local _n
+    for _n in "${!_CAND_PATH[@]}"; do
+        printf "    %2d)  %s\n" "$((_n + 1))" "${_CAND_LABEL[$_n]}"
+        printf "         → %s\n" "${_CAND_PATH[$_n]}"
+    done
+
+    if [ "${#_UNMT_DEV[@]}" -gt 0 ]; then
+        echo ""
+        echo "  Unmounted drives (script can format + mount):"
+        for _n in "${!_UNMT_DEV[@]}"; do
+            printf "    U%d)  /dev/%s  %s\n" "$((_n + 1))" "${_UNMT_DEV[$_n]}" "${_UNMT_LABEL[$_n]}"
+        done
+    fi
+
+    echo ""
+    echo "   c)  Enter a custom path"
+    echo ""
+
+    local _PICK="" _BASE_PATH="" GAME_STORAGE_DIR=""
+    if [ "$UNATTENDED" = true ]; then
+        _BASE_PATH="${_CAND_PATH[0]}"
+        log_info "Unattended — using default: $_BASE_PATH"
+    else
+        while true; do
+            read -r -p "  Select drive [1]: " _PICK
+            _PICK="${_PICK:-1}"
+
+            if [[ "$_PICK" =~ ^[0-9]+$ ]] && [ "$_PICK" -ge 1 ] && [ "$_PICK" -le "${#_CAND_PATH[@]}" ]; then
+                _BASE_PATH="${_CAND_PATH[$((_PICK - 1))]}"
+                break
+            elif [[ "${_PICK,,}" =~ ^u([0-9]+)$ ]]; then
+                local _uidx=$(( ${BASH_REMATCH[1]} - 1 ))
+                if [ "$_uidx" -ge 0 ] && [ "$_uidx" -lt "${#_UNMT_DEV[@]}" ]; then
+                    _BASE_PATH=""   # will be set after mounting below
+                    break
+                fi
+                echo "  Invalid selection — try again."
+            elif [[ "${_PICK,,}" == "c" ]]; then
+                _BASE_PATH=""
+                break
+            else
+                echo "  Invalid selection — enter a number, U<n>, or c."
+            fi
+        done
+    fi
+
+    # ── Handle unmounted drive selection ─────────────────────────────────────
+    if [[ "${_PICK,,}" =~ ^u([0-9]+)$ ]]; then
+        local _uidx=$(( ${BASH_REMATCH[1]} - 1 ))
+        local _RAW_DEV="${_UNMT_DEV[$_uidx]}"
+        local _DEV="/dev/$_RAW_DEV"
+        local _DEFAULT_MP="$ACTUAL_HOME/drives/${_RAW_DEV%%[0-9]}"
+        local _MOUNT_POINT=""
+        prompt_text "  Mount point for /dev/$_RAW_DEV [${_DEFAULT_MP}]:" "$_DEFAULT_MP" _MOUNT_POINT
+        _MOUNT_POINT="${_MOUNT_POINT:-$_DEFAULT_MP}"
+
+        local _PARTITION="$_DEV"
+        [[ "$_DEV" =~ [0-9]$ ]] || _PARTITION="${_DEV}1"
+
+        if ! blkid "$_PARTITION" &>/dev/null; then
+            log_info "Creating partition on $_DEV..."
+            printf 'g\nn\n1\n\n\nw\n' | fdisk "$_DEV"
+            partprobe "$_DEV"; sleep 2
+        fi
+
+        if ! blkid -s TYPE "$_PARTITION" 2>/dev/null | grep -q TYPE; then
+            log_info "Formatting $_PARTITION as ext4..."
+            mkfs.ext4 -F -L "games" "$_PARTITION"
+        else
+            log_info "$_PARTITION already has a filesystem — keeping existing data"
+        fi
+
+        mkdir -p "$_MOUNT_POINT"
+        mount "$_PARTITION" "$_MOUNT_POINT"
+
+        local _PART_UUID
+        _PART_UUID=$(blkid -s UUID -o value "$_PARTITION")
+        if [ -n "$_PART_UUID" ]; then
+            if grep -qs "$_PART_UUID" /etc/fstab; then
+                log_info "fstab: UUID=${_PART_UUID} already present"
+            else
+                echo "UUID=${_PART_UUID}  ${_MOUNT_POINT}  ext4  defaults,nofail  0  2" \
+                    | tee -a /etc/fstab >/dev/null
+                log_success "fstab: UUID=${_PART_UUID} → ${_MOUNT_POINT}"
+            fi
+        else
+            log_warning "Could not read UUID — add /etc/fstab entry manually"
+        fi
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$_MOUNT_POINT" 2>/dev/null || true
+        log_success "$_PARTITION mounted at $_MOUNT_POINT"
+        _BASE_PATH="$_MOUNT_POINT/games"
+    fi
+
+    # ── Handle custom path ────────────────────────────────────────────────────
+    if [[ "${_PICK,,}" == "c" ]]; then
+        local _CUSTOM=""
+        prompt_text "  Full game storage path:" "$ACTUAL_HOME/games" _CUSTOM
+        _BASE_PATH="${_CUSTOM:-$ACTUAL_HOME/games}"
+        _BASE_PATH="${_BASE_PATH/#\~/$ACTUAL_HOME}"
+    fi
+
+    # ── Let user confirm / edit the subdirectory ──────────────────────────────
+    # _BASE_PATH is now the full suggested path (e.g. /mnt/bigdrive/games).
+    # Show it and let the user change the trailing component.
+    echo ""
+    log_info "Suggested game storage path: $_BASE_PATH"
+    local _FINAL=""
+    prompt_text "  Confirm or edit path [${_BASE_PATH}]:" "$_BASE_PATH" _FINAL
+    GAME_STORAGE_DIR="${_FINAL:-$_BASE_PATH}"
     GAME_STORAGE_DIR="${GAME_STORAGE_DIR/#\~/$ACTUAL_HOME}"
 
-    # Check if the path crosses an unmounted drive
-    local _PARENT
-    _PARENT=$(dirname "$GAME_STORAGE_DIR")
-    if [ ! -d "$_PARENT" ]; then
-        log_warning "Parent directory $_PARENT does not exist."
-        echo ""
-        echo "  If this path is on a separate drive, pick the device to mount:"
-        echo ""
-        lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT | grep -v "^loop" | sed 's/^/  /'
-        echo ""
-        local RAW_DEV=""
-        prompt_text "  Device to mount at ${GAME_STORAGE_DIR%/*} (e.g. sda, sdb1) or Enter to skip:" "" RAW_DEV
-        if [ -n "$RAW_DEV" ]; then
-            RAW_DEV="${RAW_DEV##/dev/}"
-            local DEV="/dev/$RAW_DEV"
-            local MOUNT_POINT="${GAME_STORAGE_DIR%/*}"
-
-            if [ -b "$DEV" ]; then
-                local PARTITION="${DEV}"
-                [[ "$DEV" =~ [0-9]$ ]] || PARTITION="${DEV}1"
-
-                if ! blkid "$PARTITION" &>/dev/null && \
-                   ! fdisk -l "$DEV" 2>/dev/null | grep -q "^${PARTITION}"; then
-                    log_info "Creating partition on $DEV..."
-                    printf 'g\nn\n1\n\n\nw\n' | fdisk "$DEV"
-                    partprobe "$DEV"; sleep 2
-                fi
-
-                if ! blkid -s TYPE "$PARTITION" 2>/dev/null | grep -q TYPE; then
-                    log_info "Formatting ${PARTITION} as ext4..."
-                    mkfs.ext4 -F -L "games" "$PARTITION"
-                else
-                    log_info "${PARTITION} already has a filesystem — keeping data"
-                fi
-
-                mkdir -p "$MOUNT_POINT"
-                mount "$PARTITION" "$MOUNT_POINT"
-
-                local PART_UUID
-                PART_UUID=$(blkid -s UUID -o value "$PARTITION")
-                if [ -n "$PART_UUID" ]; then
-                    if grep -qs "$PART_UUID" /etc/fstab; then
-                        log_info "fstab: UUID=${PART_UUID} already present"
-                    else
-                        echo "UUID=${PART_UUID}  ${MOUNT_POINT}  ext4  defaults,nofail  0  2" \
-                            | tee -a /etc/fstab >/dev/null
-                        log_success "fstab: UUID=${PART_UUID} → ${MOUNT_POINT} (nofail, auto-mount on boot)"
-                    fi
-                else
-                    log_warning "Could not read UUID for ${PARTITION} — add /etc/fstab entry manually"
-                fi
-
-                chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MOUNT_POINT" 2>/dev/null || true
-                log_success "${PARTITION} mounted at ${MOUNT_POINT}"
-            else
-                log_warning "$DEV not found — continuing, ensure drive is mounted before starting Wolf"
-            fi
-        fi
-    fi
+    log_success "Game storage: $GAME_STORAGE_DIR"
 
     # Create the storage sub-directories
     mkdir -p "$GAME_STORAGE_DIR/roms" "$GAME_STORAGE_DIR/steam" \
