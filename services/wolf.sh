@@ -1499,6 +1499,33 @@ if not added and not updated:
 PYEOF
         docker compose restart wolf
         log_success "Wolf restarted with updated config"
+
+        # Seed Steam library config so games go to game storage on first launch.
+        # Wolf creates session dirs after the restart; wait up to 30s for them.
+        if echo "$APP_KEYS" | grep -qw steam; then
+            log_info "Waiting for Wolf session dirs to appear..."
+            local _sw
+            for _sw in $(seq 1 30); do
+                compgen -G "/etc/wolf/[0-9]*/Steam" >/dev/null 2>&1 && break
+                sleep 1
+            done
+            local _INSTALL_VDF="$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf"
+            if [ -f "$_INSTALL_VDF" ]; then
+                local _seeded=0
+                for _wdir in /etc/wolf/[0-9]*/Steam; do
+                    [ -d "$_wdir" ] || continue
+                    mkdir -p "$_wdir/.local/share/Steam/steamapps"
+                    cp "$_INSTALL_VDF" "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+                    chown -R 1000:1000 "$_wdir"
+                    ((_seeded++))
+                done
+                if [ "$_seeded" -gt 0 ]; then
+                    log_success "Steam library config seeded — games will install to $GAME_STORAGE_DIR/steam"
+                else
+                    log_warning "Steam session dir not found yet. Run: ./manage.sh fix-perms  after first Moonlight connection."
+                fi
+            fi
+        fi
     else
         log_warning "Wolf config not generated in time. Add apps manually to /etc/wolf/cfg/config.toml"
         log_warning "Then run: ./manage.sh apps"
