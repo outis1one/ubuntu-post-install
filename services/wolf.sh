@@ -1004,7 +1004,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/home/retro:rw'],
+        mounts=[f'{games}/steam:/home/retro/.local/share/Steam:rw'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1245,7 +1245,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[f'{games}/steam:/home/retro:rw'],
+        mounts=[f'{games}/steam:/home/retro/.local/share/Steam:rw'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1558,7 +1558,7 @@ cd $WOLF_DIR
 
 ## Game storage: \`$GAME_STORAGE_DIR\`
 - \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
-- \`steam/\`         → Steam home (library + user data + Proton prefixes)
+- \`steam/\`         → Steam library (steamapps, Proton prefixes, user data)
 - \`saves/\`         → RetroArch saves & states
 - \`emulators/\`     → AppImages (Azahar 3DS, etc.) — ES-DE finds them automatically
 
