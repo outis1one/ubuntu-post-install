@@ -694,10 +694,84 @@ UDEV
     log_success "Game storage: $GAME_STORAGE_DIR"
 
     # Create the storage sub-directories
-    mkdir -p "$GAME_STORAGE_DIR/roms" "$GAME_STORAGE_DIR/steam" \
-             "$GAME_STORAGE_DIR/saves" "$GAME_STORAGE_DIR/media"
+    mkdir -p "$GAME_STORAGE_DIR/steam" "$GAME_STORAGE_DIR/saves" \
+             "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
+             "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
+             "$GAME_STORAGE_DIR/kodi"
+
+    # Pre-create ES-DE ROM directories so the user knows where to drop files
+    # and ES-DE shows the system in its list immediately on first launch.
+    local _ESDE_SYSTEMS=(
+        3do amstradcpc arcade atari2600 atari5200 atari7800 atari800
+        atarijaguar atarilynx atarist c64 cavestory channelf coco colecovision
+        dreamcast dos famicom fds gamegear gb gba gbc gc genesis
+        gx4000 intellivision j2me lynx mame megadrive megadrive-japan
+        msx msx2 n64 naomi nds neogeo neogeocd ngp ngpc nes nintendo3ds
+        odyssey2 pc88 pc98 pcengine pcenginecd pcfx pokemini ps2 ps3 psp psx
+        saturn scummvm sega32x segacd sg-1000 snes snesmsu1 supervision
+        switch tg16 tg-cd vectrex vic20 videopac wii wiiu wonderswan
+        wonderswancolor x68000 xbox xbox360 zmachine zxspectrum
+    )
+    local _sys
+    for _sys in "${_ESDE_SYSTEMS[@]}"; do
+        mkdir -p "$GAME_STORAGE_DIR/roms/$_sys"
+    done
+
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$GAME_STORAGE_DIR" 2>/dev/null || true
-    log_success "Storage layout: $GAME_STORAGE_DIR/{roms,steam,saves,media}"
+    log_success "Storage layout: $GAME_STORAGE_DIR/{roms/<system>/,steam,saves,media,...}"
+    log_info "ES-DE ROM directories pre-created. Drop ROMs in the matching subfolder."
+
+    # ── App selection ─────────────────────────────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  WOLF APPS"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Select apps to add to Wolf (shown in Moonlight)."
+    echo "  Containers are pulled on first launch, not now."
+    echo ""
+    echo "   1) Steam              - Big Picture + Proton (PC games)"
+    echo "   2) EmulationStation   - ES-DE + RetroArch (retro ROMs) [default]"
+    echo "   3) Lutris             - GOG / Epic / Wine / non-Steam"
+    echo "   4) RetroArch          - standalone emulator frontend"
+    echo "   5) Prism Launcher     - Minecraft (Java + Bedrock)"
+    echo "   6) Kodi               - media center"
+    echo "   7) Firefox            - browser"
+    echo "   8) Desktop            - full XFCE desktop session"
+    echo ""
+    echo "  Enter numbers separated by spaces, or 'all', or Enter for [1 2]:"
+    echo ""
+
+    local _APP_PICKS="" _SELECTED_APPS=()
+    if [ "$UNATTENDED" = true ]; then
+        _SELECTED_APPS=(1 2)
+        log_info "Unattended — selecting Steam + EmulationStation"
+    else
+        read -r -p "  Apps [1 2]: " _APP_PICKS
+        _APP_PICKS="${_APP_PICKS:-1 2}"
+        if [[ "${_APP_PICKS,,}" == "all" ]]; then
+            _SELECTED_APPS=(1 2 3 4 5 6 7 8)
+        else
+            read -ra _SELECTED_APPS <<< "$_APP_PICKS"
+        fi
+    fi
+
+    # Map numbers to app keys for the Python injector
+    local _APP_KEYS=""
+    for _n in "${_SELECTED_APPS[@]}"; do
+        case "$_n" in
+            1) _APP_KEYS="$_APP_KEYS steam" ;;
+            2) _APP_KEYS="$_APP_KEYS esde" ;;
+            3) _APP_KEYS="$_APP_KEYS lutris" ;;
+            4) _APP_KEYS="$_APP_KEYS retroarch" ;;
+            5) _APP_KEYS="$_APP_KEYS prismlauncher" ;;
+            6) _APP_KEYS="$_APP_KEYS kodi" ;;
+            7) _APP_KEYS="$_APP_KEYS firefox" ;;
+            8) _APP_KEYS="$_APP_KEYS desktop" ;;
+        esac
+    done
+    _APP_KEYS="${_APP_KEYS# }"   # trim leading space
+    log_info "Will add: ${_APP_KEYS:-none}"
 
     # ── docker-compose.yml ────────────────────────────────────────────────────
     log_info "Generating docker-compose.yml..."
@@ -803,45 +877,208 @@ case "$1" in
         docker compose pull
         docker compose up -d
         ;;
-    add-apps|update-storage)
+    apps|add-apps|update-storage)
         WOLF_CFG=/etc/wolf/cfg/config.toml
-        GAME_DIR="${2}"
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-        # update-storage: read path from .env if not given on command line
-        if [ "$1" = "update-storage" ] && [ -z "$GAME_DIR" ]; then
-            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-            ENV_FILE="$SCRIPT_DIR/.env"
-            if [ -f "$ENV_FILE" ]; then
-                GAME_DIR=$(grep '^GAME_STORAGE_DIR=' "$ENV_FILE" | cut -d= -f2-)
-            fi
-        fi
-
+        # Resolve game storage dir: explicit arg > .env > prompt
+        GAME_DIR="${2:-}"
         if [ -z "$GAME_DIR" ]; then
-            echo "Usage: ./manage.sh add-apps <path>"
-            echo "       ./manage.sh update-storage [<new-path>]"
-            echo ""
-            echo "  <path>  root of game storage, e.g. /home/user/drives/games"
-            echo "  update-storage with no path reads GAME_STORAGE_DIR from .env"
-            exit 1
+            GAME_DIR=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
         fi
+        if [ -z "$GAME_DIR" ]; then
+            read -r -p "  Game storage path: " GAME_DIR
+        fi
+        if [ -z "$GAME_DIR" ]; then echo "No game storage path."; exit 1; fi
+
+        # Persist path back to .env if it changed
+        if grep -qs '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null; then
+            sed -i "s|^GAME_STORAGE_DIR=.*|GAME_STORAGE_DIR=${GAME_DIR}|" "$SCRIPT_DIR/.env"
+        else
+            echo "GAME_STORAGE_DIR=${GAME_DIR}" >> "$SCRIPT_DIR/.env"
+        fi
+
         if [ ! -f "$WOLF_CFG" ]; then
             echo "Wolf config not found at $WOLF_CFG — is Wolf running?"
             exit 1
         fi
 
-        # Persist new path in .env when update-storage is called with explicit path
-        if [ "$1" = "update-storage" ] && [ -n "${2:-}" ]; then
-            SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-            sed -i "s|^GAME_STORAGE_DIR=.*|GAME_STORAGE_DIR=${GAME_DIR}|" "$SCRIPT_DIR/.env" 2>/dev/null \
-                || echo "GAME_STORAGE_DIR=${GAME_DIR}" >> "$SCRIPT_DIR/.env"
-            echo "Updated .env: GAME_STORAGE_DIR=${GAME_DIR}"
+        # Show which apps are already installed and what's available
+        echo ""
+        echo "  Checking current Wolf config..."
+        INSTALLED=$(grep "^    name = 'Wolf" "$WOLF_CFG" 2>/dev/null | sed "s/.*name = '//;s/'//" | tr '\n' ' ')
+        [ -n "$INSTALLED" ] && echo "  Already installed: $INSTALLED" || echo "  No Wolf apps installed yet."
+        echo ""
+        echo "  Available apps:"
+        echo "   1) Steam              - Big Picture + Proton (PC games)"
+        echo "   2) EmulationStation   - ES-DE + RetroArch (retro ROMs)"
+        echo "   3) Lutris             - GOG / Epic / Wine / non-Steam"
+        echo "   4) RetroArch          - standalone emulator frontend"
+        echo "   5) Prism Launcher     - Minecraft (Java + Bedrock)"
+        echo "   6) Kodi               - media center"
+        echo "   7) Firefox            - browser"
+        echo "   8) Desktop            - full XFCE desktop session"
+        echo ""
+        echo "  Enter numbers (space-separated), 'all', or Enter to update existing mounts only:"
+        read -r -p "  Apps [Enter=update mounts only]: " _PICKS
+        if [[ "${_PICKS,,}" == "all" ]]; then
+            APP_KEYS="steam esde lutris retroarch prismlauncher kodi firefox desktop"
+        elif [ -z "$_PICKS" ]; then
+            # No new apps — just re-run with whatever keys are already installed
+            APP_KEYS=""
+            [[ "$INSTALLED" == *WolfSteam* ]]         && APP_KEYS="$APP_KEYS steam"
+            [[ "$INSTALLED" == *WolfES-DE* ]]          && APP_KEYS="$APP_KEYS esde"
+            [[ "$INSTALLED" == *WolfLutris* ]]         && APP_KEYS="$APP_KEYS lutris"
+            [[ "$INSTALLED" == *WolfRetroArch* ]]      && APP_KEYS="$APP_KEYS retroarch"
+            [[ "$INSTALLED" == *WolfPrismLauncher* ]]  && APP_KEYS="$APP_KEYS prismlauncher"
+            [[ "$INSTALLED" == *WolfKodi* ]]           && APP_KEYS="$APP_KEYS kodi"
+            [[ "$INSTALLED" == *WolfFirefox* ]]        && APP_KEYS="$APP_KEYS firefox"
+            [[ "$INSTALLED" == *WolfDesktop* ]]        && APP_KEYS="$APP_KEYS desktop"
+            APP_KEYS="${APP_KEYS# }"
+            [ -z "$APP_KEYS" ] && APP_KEYS="steam esde"
+        else
+            APP_KEYS=""
+            for _n in $_PICKS; do
+                case "$_n" in
+                    1) APP_KEYS="$APP_KEYS steam" ;;
+                    2) APP_KEYS="$APP_KEYS esde" ;;
+                    3) APP_KEYS="$APP_KEYS lutris" ;;
+                    4) APP_KEYS="$APP_KEYS retroarch" ;;
+                    5) APP_KEYS="$APP_KEYS prismlauncher" ;;
+                    6) APP_KEYS="$APP_KEYS kodi" ;;
+                    7) APP_KEYS="$APP_KEYS firefox" ;;
+                    8) APP_KEYS="$APP_KEYS desktop" ;;
+                esac
+            done
+            APP_KEYS="${APP_KEYS# }"
         fi
 
-        python3 - "$GAME_DIR" "$WOLF_CFG" << 'PYEOF'
-import sys
+        echo "  Applying: ${APP_KEYS:-none}"
+        [ -z "$APP_KEYS" ] && exit 0
 
-games = sys.argv[1].rstrip('/')
-cfg   = sys.argv[2]
+        python3 - "$GAME_DIR" "$WOLF_CFG" $APP_KEYS << 'PYEOF'
+import sys, json
+
+games    = sys.argv[1].rstrip('/')
+cfg      = sys.argv[2]
+selected = set(sys.argv[3:])
+
+STD_CAP   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
+STD_ENV   = ['RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
+STD_RULES = ['c 13:* rmw', 'c 244:* rmw']
+
+CATALOG = {
+    'steam': dict(
+        name='WolfSteam', title='Steam',
+        icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
+        image='ghcr.io/games-on-whales/steam:edge',
+        mounts=[f'{games}/steam:/home/retro/.steam:rw'],
+        env=['PROTON_LOG=1', 'RUN_SWAY=true',
+             'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
+        cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
+        security_opt=['seccomp=unconfined', 'apparmor=unconfined'],
+        ipc_mode='host', ulimits=[{'Name': 'nofile', 'Hard': 10240, 'Soft': 10240}],
+        privileged=False,
+    ),
+    'esde': dict(
+        name='WolfES-DE', title='EmulationStation',
+        icon='https://games-on-whales.github.io/wildlife/apps/es-de/assets/icon.png',
+        image='ghcr.io/games-on-whales/es-de:edge',
+        mounts=[f'{games}/roms:/ROMs:rw',
+                f'{games}/saves:/home/retro/.config/retroarch/saves:rw',
+                f'{games}/media:/media:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'lutris': dict(
+        name='WolfLutris', title='Lutris',
+        icon='https://games-on-whales.github.io/wildlife/apps/lutris/assets/icon.png',
+        image='ghcr.io/games-on-whales/lutris:edge',
+        mounts=[f'{games}/lutris:/home/retro/.local/share/lutris:rw'],
+        env=['RUN_SWAY=true',
+             'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
+        cap_add=['SYS_ADMIN', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
+        security_opt=['seccomp=unconfined', 'apparmor=unconfined'],
+        ipc_mode='host', ulimits=[], privileged=False,
+    ),
+    'retroarch': dict(
+        name='WolfRetroArch', title='RetroArch',
+        icon='https://games-on-whales.github.io/wildlife/apps/retroarch/assets/icon.png',
+        image='ghcr.io/games-on-whales/retroarch:edge',
+        mounts=[f'{games}/roms:/ROMs:rw',
+                f'{games}/saves:/home/retro/.config/retroarch/saves:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'prismlauncher': dict(
+        name='WolfPrismLauncher', title='Prism Launcher',
+        icon='https://games-on-whales.github.io/wildlife/apps/prismlauncher/assets/icon.png',
+        image='ghcr.io/games-on-whales/prismlauncher:edge',
+        mounts=[f'{games}/minecraft:/home/retro/.local/share/PrismLauncher:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'kodi': dict(
+        name='WolfKodi', title='Kodi',
+        icon='https://games-on-whales.github.io/wildlife/apps/kodi/assets/icon.png',
+        image='ghcr.io/games-on-whales/kodi:edge',
+        mounts=[f'{games}/kodi:/home/retro/.kodi:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'firefox': dict(
+        name='WolfFirefox', title='Firefox',
+        icon='https://games-on-whales.github.io/wildlife/apps/firefox/assets/icon.png',
+        image='ghcr.io/games-on-whales/firefox:edge',
+        mounts=[f'{games}/firefox:/home/retro/.mozilla:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'desktop': dict(
+        name='WolfDesktop', title='Desktop',
+        icon='https://games-on-whales.github.io/wildlife/apps/desktop/assets/icon.png',
+        image='ghcr.io/games-on-whales/desktop:edge',
+        mounts=[],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+}
+
+def make_app_block(app):
+    host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
+                'Privileged': app['privileged'], 'DeviceCgroupRules': STD_RULES}
+    if app['security_opt']: host_cfg['SecurityOpt'] = app['security_opt']
+    if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
+    create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
+    mounts_str  = str(app['mounts']).replace('"', "'")
+    env_str     = str(app['env']).replace('"', "'")
+    return (
+        f"\n"
+        f"    [[profiles.apps]]\n"
+        f"    icon_png_path = '{app['icon']}'\n"
+        f"    start_virtual_compositor = true\n"
+        f"    title = '{app['title']}'\n"
+        f"\n"
+        f"        [profiles.apps.runner]\n"
+        f"        base_create_json = '''{create_json}\n"
+        f"'''\n"
+        f"        devices = []\n"
+        f"        env = {env_str}\n"
+        f"        image = '{app['image']}'\n"
+        f"        mounts = {mounts_str}\n"
+        f"        name = '{app['name']}'\n"
+        f"        ports = []\n"
+        f"        type = 'docker'\n"
+    )
+
+def update_mounts(lines, wolf_name, new_mounts):
+    for i, line in enumerate(lines):
+        if f"name = '{wolf_name}'" in line:
+            for j in range(max(0, i-10), min(len(lines), i+15)):
+                if lines[j].strip().startswith('mounts ='):
+                    lines[j] = f"        mounts = {new_mounts}\n"
+                    return True
+    return False
 
 with open(cfg, 'r') as f:
     lines = f.readlines()
@@ -856,105 +1093,41 @@ for i, line in enumerate(lines):
 if first_start is None:
     print('ERROR: no [[profiles]] section found'); sys.exit(1)
 
-def update_mounts(lines, app_name, new_mounts_line):
-    for i, line in enumerate(lines):
-        if f"name = '{app_name}'" in line:
-            # scan forward for the mounts line within this app block
-            for j in range(i - 10, i + 10):
-                if 0 <= j < len(lines) and lines[j].strip().startswith('mounts ='):
-                    lines[j] = new_mounts_line
-                    return True
-    return False
-
 first_block = lines[first_start:insert_at]
-has_steam = any("name = 'WolfSteam'" in l for l in first_block)
-has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
+added, updated, to_insert = [], [], []
 
-updated = []
-if has_steam:
-    new_line = f"        mounts = [ '{games}/steam:/home/retro/.steam:rw' ]\n"
-    if update_mounts(lines, 'WolfSteam', new_line):
-        updated.append('Steam mounts updated')
-if has_esde:
-    new_line = f"        mounts = [ '{games}/roms:/ROMs:rw', '{games}/saves:/home/retro/.config/retroarch/saves:rw', '{games}/media:/media:rw' ]\n"
-    if update_mounts(lines, 'WolfES-DE', new_line):
-        updated.append('ES-DE mounts updated')
-
-first_block = lines[first_start:insert_at]
-has_steam = any("name = 'WolfSteam'" in l for l in first_block)
-has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
-
-to_insert = []
-if not has_steam:
-    to_insert += [
-        '\n',
-        "    [[profiles.apps]]\n",
-        "    icon_png_path = 'https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png'\n",
-        "    start_virtual_compositor = true\n",
-        "    title = 'Steam'\n",
-        '\n',
-        "        [profiles.apps.runner]\n",
-        "        base_create_json = '''{\n",
-        '  "HostConfig": {\n',
-        '    "IpcMode": "host",\n',
-        '    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],\n',
-        '    "SecurityOpt": ["seccomp=unconfined", "apparmor=unconfined"],\n',
-        '    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],\n',
-        '    "Privileged": false,\n',
-        '    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]\n',
-        '  }\n',
-        "}\n",
-        "'''\n",
-        "        devices = []\n",
-        "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]\n",
-        "        image = 'ghcr.io/games-on-whales/steam:edge'\n",
-        "        mounts = [ '" + games + "/steam:/home/retro/.steam:rw' ]\n",
-        "        name = 'WolfSteam'\n",
-        "        ports = []\n",
-        "        type = 'docker'\n",
-    ]
-if not has_esde:
-    to_insert += [
-        '\n',
-        "    [[profiles.apps]]\n",
-        "    icon_png_path = 'https://games-on-whales.github.io/wildlife/apps/es-de/assets/icon.png'\n",
-        "    start_virtual_compositor = true\n",
-        "    title = 'EmulationStation'\n",
-        '\n',
-        "        [profiles.apps.runner]\n",
-        "        base_create_json = '''{\n",
-        '  "HostConfig": {\n',
-        '    "IpcMode": "host",\n',
-        '    "Privileged": false,\n',
-        '    "CapAdd": ["NET_RAW", "MKNOD", "NET_ADMIN"],\n',
-        '    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]\n',
-        '  }\n',
-        "}\n",
-        "'''\n",
-        "        devices = []\n",
-        "        env = [ 'RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]\n",
-        "        image = 'ghcr.io/games-on-whales/es-de:edge'\n",
-        "        mounts = [ '" + games + "/roms:/ROMs:rw', '" + games + "/saves:/home/retro/.config/retroarch/saves:rw', '" + games + "/media:/media:rw' ]\n",
-        "        name = 'WolfES-DE'\n",
-        "        ports = []\n",
-        "        type = 'docker'\n",
-    ]
+for key in list(CATALOG.keys()):
+    if key not in selected: continue
+    app = CATALOG[key]
+    wolf_name  = app['name']
+    new_mounts = str(app['mounts']).replace('"', "'")
+    already    = any(f"name = '{wolf_name}'" in l for l in first_block)
+    if already:
+        if update_mounts(lines, wolf_name, new_mounts):
+            updated.append(app['title'])
+    else:
+        to_insert.append(make_app_block(app))
+        added.append(app['title'])
 
 if to_insert:
-    new_lines = lines[:insert_at] + to_insert + lines[insert_at:]
+    block_lines = []
+    for block in to_insert:
+        block_lines += [l + '\n' if not l.endswith('\n') else l
+                        for l in block.splitlines()]
+    new_lines = lines[:insert_at] + block_lines + lines[insert_at:]
     with open(cfg, 'w') as f:
         f.writelines(new_lines)
-    added = [n for n, exists in [('Steam', has_steam), ('EmulationStation', has_esde)] if not exists]
-    print(f"Added to default profile: {', '.join(added)}")
 elif updated:
     with open(cfg, 'w') as f:
         f.writelines(lines)
-    print('; '.join(updated))
-else:
-    print('Both apps already in profile (paths unchanged)')
+
+if added:   print(f"Added: {', '.join(added)}")
+if updated: print(f"Updated mounts: {', '.join(updated)}")
+if not added and not updated:
+    print('All selected apps already present and up to date')
 PYEOF
         docker compose restart wolf
-        echo "Wolf restarted. Steam and EmulationStation should now appear in Moonlight."
+        echo "Wolf restarted. Apps will appear in Moonlight on next connection."
         ;;
     backup)
         echo "Set up backups with the modular system:  sudo ./setup.sh backup"
@@ -997,9 +1170,7 @@ PYEOF
         echo "  ./manage.sh status                       - Show Wolf + app containers"
         echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
         echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
-        echo "  ./manage.sh add-apps <path>              - Add Steam + ES-DE to Wolf config"
-        echo "  ./manage.sh update-storage [<new-path>]  - Update game storage path in Wolf config"
-        echo "                                             (reads .env if no path given)"
+        echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
 esac
@@ -1021,19 +1192,139 @@ MEOF
     done
 
     if [ -f "$WOLF_CFG" ]; then
-        log_info "Adding Steam and EmulationStation to Wolf config..."
-        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" << 'PYEOF'
-import sys, re
+        log_info "Injecting selected apps into Wolf config..."
+        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" $([[ -n "$_APP_KEYS" ]] && echo "$_APP_KEYS" || echo "steam esde") << 'PYEOF'
+import sys, json
 
-games = sys.argv[1].rstrip('/')
-cfg   = sys.argv[2]
+games    = sys.argv[1].rstrip('/')
+cfg      = sys.argv[2]
+selected = set(sys.argv[3:])   # app keys chosen by the user
+
+# ── App catalog ───────────────────────────────────────────────────────────────
+# Each entry: (wolf_name, title, icon_url, image, mounts, env, cap_add,
+#              security_opt, ipc_mode, ulimits, privileged)
+STD_CAP   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
+STD_ENV   = ['RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
+STD_RULES = ['c 13:* rmw', 'c 244:* rmw']
+
+CATALOG = {
+    'steam': dict(
+        name='WolfSteam', title='Steam',
+        icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
+        image='ghcr.io/games-on-whales/steam:edge',
+        mounts=[f'{games}/steam:/home/retro/.steam:rw'],
+        env=['PROTON_LOG=1', 'RUN_SWAY=true',
+             'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
+        cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
+        security_opt=['seccomp=unconfined', 'apparmor=unconfined'],
+        ipc_mode='host',
+        ulimits=[{'Name': 'nofile', 'Hard': 10240, 'Soft': 10240}],
+        privileged=False,
+    ),
+    'esde': dict(
+        name='WolfES-DE', title='EmulationStation',
+        icon='https://games-on-whales.github.io/wildlife/apps/es-de/assets/icon.png',
+        image='ghcr.io/games-on-whales/es-de:edge',
+        mounts=[f'{games}/roms:/ROMs:rw',
+                f'{games}/saves:/home/retro/.config/retroarch/saves:rw',
+                f'{games}/media:/media:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'lutris': dict(
+        name='WolfLutris', title='Lutris',
+        icon='https://games-on-whales.github.io/wildlife/apps/lutris/assets/icon.png',
+        image='ghcr.io/games-on-whales/lutris:edge',
+        mounts=[f'{games}/lutris:/home/retro/.local/share/lutris:rw'],
+        env=['RUN_SWAY=true',
+             'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
+        cap_add=['SYS_ADMIN', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
+        security_opt=['seccomp=unconfined', 'apparmor=unconfined'],
+        ipc_mode='host', ulimits=[], privileged=False,
+    ),
+    'retroarch': dict(
+        name='WolfRetroArch', title='RetroArch',
+        icon='https://games-on-whales.github.io/wildlife/apps/retroarch/assets/icon.png',
+        image='ghcr.io/games-on-whales/retroarch:edge',
+        mounts=[f'{games}/roms:/ROMs:rw',
+                f'{games}/saves:/home/retro/.config/retroarch/saves:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'prismlauncher': dict(
+        name='WolfPrismLauncher', title='Prism Launcher',
+        icon='https://games-on-whales.github.io/wildlife/apps/prismlauncher/assets/icon.png',
+        image='ghcr.io/games-on-whales/prismlauncher:edge',
+        mounts=[f'{games}/minecraft:/home/retro/.local/share/PrismLauncher:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'kodi': dict(
+        name='WolfKodi', title='Kodi',
+        icon='https://games-on-whales.github.io/wildlife/apps/kodi/assets/icon.png',
+        image='ghcr.io/games-on-whales/kodi:edge',
+        mounts=[f'{games}/kodi:/home/retro/.kodi:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'firefox': dict(
+        name='WolfFirefox', title='Firefox',
+        icon='https://games-on-whales.github.io/wildlife/apps/firefox/assets/icon.png',
+        image='ghcr.io/games-on-whales/firefox:edge',
+        mounts=[f'{games}/firefox:/home/retro/.mozilla:rw'],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+    'desktop': dict(
+        name='WolfDesktop', title='Desktop',
+        icon='https://games-on-whales.github.io/wildlife/apps/desktop/assets/icon.png',
+        image='ghcr.io/games-on-whales/desktop:edge',
+        mounts=[],
+        env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
+        ulimits=[], privileged=False,
+    ),
+}
+
+def make_app_block(app):
+    """Render a [[profiles.apps]] TOML block from a catalog entry."""
+    host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
+                'Privileged': app['privileged'], 'DeviceCgroupRules': STD_RULES}
+    if app['security_opt']: host_cfg['SecurityOpt'] = app['security_opt']
+    if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
+    create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
+    mounts_str  = str(app['mounts']).replace('"', "'")
+    env_str     = str(app['env']).replace('"', "'")
+    return (
+        f"\n"
+        f"    [[profiles.apps]]\n"
+        f"    icon_png_path = '{app['icon']}'\n"
+        f"    start_virtual_compositor = true\n"
+        f"    title = '{app['title']}'\n"
+        f"\n"
+        f"        [profiles.apps.runner]\n"
+        f"        base_create_json = '''{create_json}\n"
+        f"'''\n"
+        f"        devices = []\n"
+        f"        env = {env_str}\n"
+        f"        image = '{app['image']}'\n"
+        f"        mounts = {mounts_str}\n"
+        f"        name = '{app['name']}'\n"
+        f"        ports = []\n"
+        f"        type = 'docker'\n"
+    )
+
+def update_mounts(lines, wolf_name, new_mounts):
+    for i, line in enumerate(lines):
+        if f"name = '{wolf_name}'" in line:
+            for j in range(max(0, i-10), min(len(lines), i+15)):
+                if lines[j].strip().startswith('mounts ='):
+                    lines[j] = f"        mounts = {new_mounts}\n"
+                    return True
+    return False
 
 with open(cfg, 'r') as f:
     lines = f.readlines()
 
-# Wolf uses [[profiles]] / [[profiles.apps]] format.
-# Apps must be inserted into the FIRST profile (the default paired-client
-# profile) before the second [[profiles]] section starts.
 profiles_seen, first_start, insert_at = 0, None, len(lines)
 for i, line in enumerate(lines):
     if line.strip() == '[[profiles]]':
@@ -1045,109 +1336,46 @@ if first_start is None:
     print('[ERROR] No [[profiles]] section found in config'); sys.exit(1)
 
 first_block = lines[first_start:insert_at]
-has_steam = any("name = 'WolfSteam'" in l for l in first_block)
-has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
 
-# If an app already exists, update its mounts line in place rather than skip.
-def update_mounts(lines, app_name, new_mounts_line):
-    in_app = False
-    for i, line in enumerate(lines):
-        if f"name = '{app_name}'" in line:
-            in_app = True
-        if in_app and line.strip().startswith('mounts ='):
-            lines[i] = new_mounts_line
-            return True
-    return False
-
-updated = []
-if has_steam:
-    new_line = f"        mounts = [ '{games}/steam:/home/retro/.steam:rw' ]\n"
-    if update_mounts(lines, 'WolfSteam', new_line):
-        updated.append('Steam mounts updated')
-if has_esde:
-    new_line = f"        mounts = [ '{games}/roms:/ROMs:rw', '{games}/saves:/home/retro/.config/retroarch/saves:rw', '{games}/media:/media:rw' ]\n"
-    if update_mounts(lines, 'WolfES-DE', new_line):
-        updated.append('ES-DE mounts updated')
-
-# Re-derive first_block after in-place updates
-first_block = lines[first_start:insert_at]
-has_steam = any("name = 'WolfSteam'" in l for l in first_block)
-has_esde  = any("name = 'WolfES-DE'"  in l for l in first_block)
-
+added, updated = [], []
 to_insert = []
-if not has_steam:
-    to_insert += [
-        '\n',
-        "    [[profiles.apps]]\n",
-        "    icon_png_path = 'https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png'\n",
-        "    start_virtual_compositor = true\n",
-        "    title = 'Steam'\n",
-        '\n',
-        "        [profiles.apps.runner]\n",
-        "        base_create_json = '''{\n",
-        '  "HostConfig": {\n',
-        '    "IpcMode": "host",\n',
-        '    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],\n',
-        '    "SecurityOpt": ["seccomp=unconfined", "apparmor=unconfined"],\n',
-        '    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],\n',
-        '    "Privileged": false,\n',
-        '    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]\n',
-        '  }\n',
-        "}\n",
-        "'''\n",
-        "        devices = []\n",
-        "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]\n",
-        "        image = 'ghcr.io/games-on-whales/steam:edge'\n",
-        f"        mounts = [ '{games}/steam:/home/retro/.steam:rw' ]\n",
-        "        name = 'WolfSteam'\n",
-        "        ports = []\n",
-        "        type = 'docker'\n",
-    ]
-if not has_esde:
-    to_insert += [
-        '\n',
-        "    [[profiles.apps]]\n",
-        "    icon_png_path = 'https://games-on-whales.github.io/wildlife/apps/es-de/assets/icon.png'\n",
-        "    start_virtual_compositor = true\n",
-        "    title = 'EmulationStation'\n",
-        '\n',
-        "        [profiles.apps.runner]\n",
-        "        base_create_json = '''{\n",
-        '  "HostConfig": {\n',
-        '    "IpcMode": "host",\n',
-        '    "Privileged": false,\n',
-        '    "CapAdd": ["NET_RAW", "MKNOD", "NET_ADMIN"],\n',
-        '    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]\n',
-        '  }\n',
-        "}\n",
-        "'''\n",
-        "        devices = []\n",
-        "        env = [ 'RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]\n",
-        "        image = 'ghcr.io/games-on-whales/es-de:edge'\n",
-        f"        mounts = [ '{games}/roms:/ROMs:rw', '{games}/saves:/home/retro/.config/retroarch/saves:rw', '{games}/media:/media:rw' ]\n",
-        "        name = 'WolfES-DE'\n",
-        "        ports = []\n",
-        "        type = 'docker'\n",
-    ]
+
+for key in list(CATALOG.keys()):   # preserve display order
+    if key not in selected:
+        continue
+    app = CATALOG[key]
+    wolf_name = app['name']
+    already   = any(f"name = '{wolf_name}'" in l for l in first_block)
+    new_mounts = str(app['mounts']).replace('"', "'")
+    if already:
+        if update_mounts(lines, wolf_name, new_mounts):
+            updated.append(app['title'])
+    else:
+        to_insert.append(make_app_block(app))
+        added.append(app['title'])
 
 if to_insert:
-    new_lines = lines[:insert_at] + to_insert + lines[insert_at:]
+    block_lines = []
+    for block in to_insert:
+        block_lines += [l + '\n' if not l.endswith('\n') else l
+                        for l in block.splitlines()]
+    new_lines = lines[:insert_at] + block_lines + lines[insert_at:]
     with open(cfg, 'w') as f:
         f.writelines(new_lines)
-    added = [n for n, exists in [('Steam', has_steam), ('EmulationStation', has_esde)] if not exists]
-    print(f"[INFO] Added to default profile: {', '.join(added)}")
 elif updated:
     with open(cfg, 'w') as f:
         f.writelines(lines)
-    print(f"[INFO] {'; '.join(updated)}")
-else:
-    print('[INFO] Steam and EmulationStation already in default profile (paths unchanged)')
+
+if added:   print(f"[INFO] Added: {', '.join(added)}")
+if updated: print(f"[INFO] Updated mounts: {', '.join(updated)}")
+if not added and not updated:
+    print('[INFO] All selected apps already present and up to date')
 PYEOF
         docker compose restart wolf
         log_success "Wolf restarted with updated config"
     else
         log_warning "Wolf config not generated in time. Add apps manually to /etc/wolf/cfg/config.toml"
-        log_warning "Then run: ./manage.sh restart"
+        log_warning "Then run: ./manage.sh apps"
     fi
 
     # Hand the folder back to the real user
@@ -1238,7 +1466,7 @@ PYEOF
     echo "  Online together    → each player launches their own session,"
     echo "                        all connect to the same game server"
     echo ""
-    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|add-apps}"
+    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps}"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -1284,7 +1512,7 @@ cd $WOLF_DIR
 ./manage.sh logs         # live logs
 ./manage.sh status       # container status
 ./manage.sh update       # pull latest image and restart
-./manage.sh add-apps     # add game launchers
+./manage.sh apps         # add / update game launchers
 \`\`\`
 
 ## Ports (open on firewall / router)
