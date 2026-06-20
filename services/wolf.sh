@@ -924,6 +924,9 @@ GAME_STORAGE_DIR=${GAME_STORAGE_DIR}
 # Wolf state folder (config.toml + every app session home) — lives on the game
 # drive so Steam installs, games, and Proton prefixes stay off the OS drive.
 WOLF_STATE_DIR=${WOLF_STATE_DIR}
+# Timezone for app containers (Steam/Proton etc.) — set on each app's TZ env so
+# Steam, EA App, and games show the correct local time. Edit + ./manage.sh apps.
+WOLF_TZ=${SITE_TZ}
 EOF
     chmod 600 .env
     chown "$ACTUAL_USER:$ACTUAL_USER" .env
@@ -951,6 +954,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # the drive because docker-compose.yml mounts it as HOST_APPS_STATE_FOLDER.
 WOLF_STATE_DIR=$(grep '^WOLF_STATE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 WOLF_CFG="${WOLF_STATE_DIR:-/etc/wolf}/cfg/config.toml"
+WOLF_TZ=$(grep '^WOLF_TZ=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 
 case "$1" in
     start)
@@ -1043,12 +1047,13 @@ case "$1" in
         echo "  Applying: ${APP_KEYS:-none}"
         [ -z "$APP_KEYS" ] && exit 0
 
-        sudo python3 - "$GAME_DIR" "$WOLF_CFG" $APP_KEYS << 'PYEOF'
+        sudo python3 - "$GAME_DIR" "$WOLF_CFG" "$WOLF_TZ" $APP_KEYS << 'PYEOF'
 import sys, json
 
 games    = sys.argv[1].rstrip('/')
 cfg      = sys.argv[2]
-selected = set(sys.argv[3:])
+TZ       = sys.argv[3].strip()
+selected = set(sys.argv[4:])
 
 STD_CAP   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
 STD_ENV   = ['RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
@@ -1132,6 +1137,14 @@ CATALOG = {
     ),
 }
 
+def ensure_tz(env_list):
+    # Set the container timezone so Steam / EA App / games show local time
+    # (a wrong/UTC display can confuse EA App's installer). Driven by WOLF_TZ.
+    e = [x for x in env_list if not x.startswith('TZ=')]
+    if TZ:
+        e.append(f'TZ={TZ}')
+    return e
+
 def make_app_block(app):
     host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
                 'Privileged': app['privileged'], 'DeviceCgroupRules': STD_RULES}
@@ -1139,7 +1152,7 @@ def make_app_block(app):
     if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
     create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
     mounts_str  = str(app['mounts']).replace('"', "'")
-    env_str     = str(app['env']).replace('"', "'")
+    env_str     = str(ensure_tz(app['env'])).replace('"', "'")
     return (
         f"\n"
         f"    [[profiles.apps]]\n"
@@ -1159,23 +1172,20 @@ def make_app_block(app):
         f"        type = 'docker'\n"
     )
 
-def update_mounts(lines, wolf_name, new_mounts):
-    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
-    # so we must replace the entire array (from `mounts =` to its closing `]`),
+def update_field(lines, wolf_name, field, new_value):
+    # Wolf rewrites config.toml and reformats arrays (mounts/env) as MULTI-LINE,
+    # so we must replace the entire array (from `<field> =` to its closing `]`),
     # not just the first line — otherwise the old elements are left orphaned and
-    # the file becomes invalid TOML. Always rewrite as a single line.
+    # the file becomes invalid TOML. Always rewrite as a single line, and heal
+    # any orphaned remnants left by a previously corrupted single-line rewrite.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-20), min(len(lines), i+20)):
-                if lines[j].lstrip().startswith('mounts ='):
+            for j in range(max(0, i-25), min(len(lines), i+25)):
+                if lines[j].lstrip().startswith(field + ' ='):
                     indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
-                    # End of the array = first line containing ']'.
                     k = j
                     while k < len(lines) and ']' not in lines[k]:
                         k += 1
-                    # Heal any orphaned array remnants left by a previously
-                    # corrupted single-line rewrite (stray '…' elements / a lone
-                    # ']' sitting below the mounts line).
                     m = k + 1
                     while m < len(lines):
                         s = lines[m].lstrip()
@@ -1183,7 +1193,7 @@ def update_mounts(lines, wolf_name, new_mounts):
                             m += 1
                         else:
                             break
-                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
+                    lines[j:m] = [f"{indent}{field} = {new_value}\n"]
                     return True
     return False
 
@@ -1208,9 +1218,12 @@ for key in list(CATALOG.keys()):
     app = CATALOG[key]
     wolf_name  = app['name']
     new_mounts = str(app['mounts']).replace('"', "'")
+    new_env    = str(ensure_tz(app['env'])).replace('"', "'")
     already    = any(f"name = '{wolf_name}'" in l for l in first_block)
     if already:
-        if update_mounts(lines, wolf_name, new_mounts):
+        ok = update_field(lines, wolf_name, 'mounts', new_mounts)
+        ok = update_field(lines, wolf_name, 'env', new_env) or ok
+        if ok:
             updated.append(app['title'])
     else:
         to_insert.append(make_app_block(app))
@@ -1229,7 +1242,7 @@ elif updated:
         f.writelines(lines)
 
 if added:   print(f"Added: {', '.join(added)}")
-if updated: print(f"Updated mounts: {', '.join(updated)}")
+if updated: print(f"Updated mounts + timezone: {', '.join(updated)}")
 if not added and not updated:
     print('All selected apps already present and up to date')
 PYEOF
@@ -1510,6 +1523,116 @@ PYEOF
     backup)
         echo "Set up backups with the modular system:  sudo ./setup.sh backup"
         ;;
+    ge-proton)
+        # Install the latest GloriousEggroll Proton-GE build into Steam's
+        # compatibilitytools.d so it appears in each game's Compatibility
+        # dropdown. GE-Proton ships fixes (notably for the EA App installer)
+        # that stock Proton / Proton Experimental lack — required to get EA
+        # titles like Star Wars Battlefront II (2017) past their install script.
+        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
+        if [ -z "$STEAM_HOME" ]; then
+            echo "No Steam home found yet under ${WOLF_STATE_DIR:-/etc/wolf}."
+            echo "Launch Steam once from Moonlight, then re-run: ./manage.sh ge-proton"
+            exit 1
+        fi
+        # Steam scans ~/.steam/root/compatibilitytools.d, which resolves to
+        # <Steam home>/.steam/compatibilitytools.d on disk.
+        COMPAT="$STEAM_HOME/.steam/compatibilitytools.d"
+        echo "Fetching latest GE-Proton release info..."
+        URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+        if [ -z "$URL" ]; then
+            echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
+            exit 1
+        fi
+        # Optional: pin a specific GE-Proton version for reproducibility,
+        # e.g. ./manage.sh ge-proton GE-Proton10-34
+        if [ -n "$2" ]; then
+            URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$2/$2.tar.gz"
+        fi
+        NAME=$(basename "$URL" .tar.gz)
+        if [ -d "$COMPAT/$NAME" ]; then
+            echo "$NAME already installed."
+        else
+            echo "Downloading $NAME (~500 MB)..."
+            sudo mkdir -p "$COMPAT"
+            TMP=$(mktemp -d)
+            if ! curl -L -o "$TMP/ge.tar.gz" "$URL"; then
+                echo "Download failed."; rm -rf "$TMP"; exit 1
+            fi
+            sudo tar -xzf "$TMP/ge.tar.gz" -C "$COMPAT"
+            rm -rf "$TMP"
+        fi
+        # Wolf's app containers run as uid 1000 (retro). The compat tool must be
+        # owned by that user or Wine refuses to use it / Steam can't launch it.
+        sudo chown -R 1000:1000 "$COMPAT"
+        echo ""
+        echo "Installed: $COMPAT/$NAME"
+        echo "Now fully quit and reopen Steam in Moonlight, then per game:"
+        echo "  Properties → Compatibility → Force the use of $NAME"
+        ;;
+    games)
+        # List installed Steam games with their AppIDs, read from the Steam
+        # app manifests. Use this to find the AppID to pass to fix-ea-game.
+        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
+        APPSDIR="$STEAM_HOME/.steam/steam/steamapps"
+        if [ ! -d "$APPSDIR" ]; then
+            echo "No Steam library found yet. Launch Steam and install a game first."
+            exit 1
+        fi
+        shopt -s nullglob
+        found=0
+        printf "  %-10s  %s\n" "AppID" "Name"
+        printf "  %-10s  %s\n" "-----" "----"
+        for acf in "$APPSDIR"/appmanifest_*.acf; do
+            id=$(grep -oP '"appid"\s*"\K[0-9]+' "$acf" | head -1)
+            name=$(grep -oP '"name"\s*"\K[^"]+' "$acf" | head -1)
+            printf "  %-10s  %s\n" "$id" "$name"
+            found=1
+        done
+        [ "$found" = 0 ] && echo "  (no games installed yet)"
+        echo ""
+        echo "EA titles stuck on 'running install script': ./manage.sh fix-ea-game <AppID>"
+        ;;
+    fix-ea-game)
+        # Some EA titles on Steam (e.g. Star Wars Battlefront II 2017,
+        # AppID 1237950) bundle an EA App bootstrapper that hangs indefinitely
+        # under Proton inside a container, leaving the game stuck on "running
+        # install script (EA app)". This pre-satisfies the install-script
+        # markers in the game's Proton prefix so Steam skips the bootstrapper
+        # and launches the game directly.
+        #
+        # Safe + opt-in: only touches the AppID you pass, and only if its prefix
+        # already exists. No effect on other games or on users who don't own the
+        # title. Run AFTER setting the game to GE-Proton and clicking Play once
+        # (so the prefix exists). Usage: ./manage.sh fix-ea-game [appid]
+        APPID="${2:-1237950}"
+        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
+        REG="$STEAM_HOME/.steam/steam/steamapps/compatdata/$APPID/pfx/system.reg"
+        if [ ! -f "$REG" ]; then
+            echo "No Proton prefix for AppID $APPID yet (looked for $REG)."
+            echo "In Steam: set the game to GE-Proton (./manage.sh ge-proton),"
+            echo "click Play once to build the prefix, then re-run this command."
+            exit 1
+        fi
+        if sudo grep -q 'EADesktopSetup' "$REG" 2>/dev/null; then
+            echo "AppID $APPID already patched. Cancel the 'installing' screen in Steam and Play."
+            exit 0
+        fi
+        echo "Patching EA install-script markers for AppID $APPID..."
+        # Wine v2 registry format uses doubled backslashes as the path separator.
+        # InstallSuccessful satisfies the EA Desktop string check; EADesktopSetup
+        # satisfies the Valve has-run-key check used by the bundled install script.
+        {
+            printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+            printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+            printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$APPID"
+            printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$APPID"
+        } | sudo tee -a "$REG" >/dev/null
+        # Keep the prefix owned by the in-container user or Wine rejects it.
+        sudo chown 1000:1000 "$REG"
+        echo "Done. In Steam: cancel the 'running install script' screen if shown, then Play."
+        ;;
     fix-perms)
         # Wolf creates each app's home dir under WOLF_STATE_DIR/<session-id>/<App>
         # and mounts it as /home/retro inside the app container. If anything in
@@ -1531,6 +1654,31 @@ PYEOF
         fi
         [ "$found" = 0 ] && echo "  Nothing to fix (no Wolf state dir found yet)."
         echo "Done. Reconnect from Moonlight to relaunch the app."
+        ;;
+    install-completion)
+        # Install bash tab-completion for this manage.sh so that double-tab
+        # after './manage.sh ' shows all available commands. Works for any
+        # user whose shell sources ~/.bash_completion.d/ (most modern setups
+        # do; Ubuntu 22.04+ sources it automatically via /etc/bash.bashrc).
+        COMP_DIR="$HOME/.bash_completion.d"
+        COMP_FILE="$COMP_DIR/manage-wolf"
+        mkdir -p "$COMP_DIR"
+        cat > "$COMP_FILE" << 'COMPEOF'
+_manage_wolf_complete() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local commands="start stop restart logs status pin update apps reorder
+                    add-web ge-proton games fix-ea-game fix-perms
+                    install-completion backup"
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+}
+# Register for any script named manage.sh regardless of path
+complete -F _manage_wolf_complete manage.sh
+COMPEOF
+        # Also source it immediately in the current shell if possible
+        echo "source \"$COMP_FILE\"" >> "$HOME/.bash_completion" 2>/dev/null || true
+        echo "Bash completion installed → $COMP_FILE"
+        echo "Open a new terminal (or run: source \"$COMP_FILE\"), then:"
+        echo "  ./manage.sh <TAB><TAB>  shows all commands"
         ;;
     pin)
         # Wolf logs: "Insert pin at http://SOMEIP:47989/pin/#HEXHASH"
@@ -1573,7 +1721,11 @@ PYEOF
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
         echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
+        echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
+        echo "  ./manage.sh games                        - List installed games + their AppIDs"
+        echo "  ./manage.sh fix-ea-game [appid]          - Unstick EA App install loop (default: SWBF2 1237950)"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
+        echo "  ./manage.sh install-completion           - Enable tab-completion for this script"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
 esac
@@ -1596,12 +1748,13 @@ MEOF
 
     if [ -f "$WOLF_CFG" ]; then
         log_info "Injecting selected apps into Wolf config..."
-        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" $([[ -n "$_APP_KEYS" ]] && echo "$_APP_KEYS" || echo "steam esde") << 'PYEOF'
+        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" "$SITE_TZ" $([[ -n "$_APP_KEYS" ]] && echo "$_APP_KEYS" || echo "steam esde") << 'PYEOF'
 import sys, json
 
 games    = sys.argv[1].rstrip('/')
 cfg      = sys.argv[2]
-selected = set(sys.argv[3:])   # app keys chosen by the user
+TZ       = sys.argv[3].strip()
+selected = set(sys.argv[4:])   # app keys chosen by the user
 
 # ── App catalog ───────────────────────────────────────────────────────────────
 # Each entry: (wolf_name, title, icon_url, image, mounts, env, cap_add,
@@ -1689,6 +1842,14 @@ CATALOG = {
     ),
 }
 
+def ensure_tz(env_list):
+    # Set the container timezone so Steam / EA App / games show local time
+    # (a wrong/UTC display can confuse EA App's installer). Driven by SITE_TZ.
+    e = [x for x in env_list if not x.startswith('TZ=')]
+    if TZ:
+        e.append(f'TZ={TZ}')
+    return e
+
 def make_app_block(app):
     """Render a [[profiles.apps]] TOML block from a catalog entry."""
     host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
@@ -1697,7 +1858,7 @@ def make_app_block(app):
     if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
     create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
     mounts_str  = str(app['mounts']).replace('"', "'")
-    env_str     = str(app['env']).replace('"', "'")
+    env_str     = str(ensure_tz(app['env'])).replace('"', "'")
     return (
         f"\n"
         f"    [[profiles.apps]]\n"
@@ -1717,23 +1878,20 @@ def make_app_block(app):
         f"        type = 'docker'\n"
     )
 
-def update_mounts(lines, wolf_name, new_mounts):
-    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
-    # so we must replace the entire array (from `mounts =` to its closing `]`),
+def update_field(lines, wolf_name, field, new_value):
+    # Wolf rewrites config.toml and reformats arrays (mounts/env) as MULTI-LINE,
+    # so we must replace the entire array (from `<field> =` to its closing `]`),
     # not just the first line — otherwise the old elements are left orphaned and
-    # the file becomes invalid TOML. Always rewrite as a single line.
+    # the file becomes invalid TOML. Always rewrite as a single line, and heal
+    # any orphaned remnants left by a previously corrupted single-line rewrite.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-20), min(len(lines), i+20)):
-                if lines[j].lstrip().startswith('mounts ='):
+            for j in range(max(0, i-25), min(len(lines), i+25)):
+                if lines[j].lstrip().startswith(field + ' ='):
                     indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
-                    # End of the array = first line containing ']'.
                     k = j
                     while k < len(lines) and ']' not in lines[k]:
                         k += 1
-                    # Heal any orphaned array remnants left by a previously
-                    # corrupted single-line rewrite (stray '…' elements / a lone
-                    # ']' sitting below the mounts line).
                     m = k + 1
                     while m < len(lines):
                         s = lines[m].lstrip()
@@ -1741,7 +1899,7 @@ def update_mounts(lines, wolf_name, new_mounts):
                             m += 1
                         else:
                             break
-                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
+                    lines[j:m] = [f"{indent}{field} = {new_value}\n"]
                     return True
     return False
 
@@ -1770,8 +1928,11 @@ for key in list(CATALOG.keys()):   # preserve display order
     wolf_name = app['name']
     already   = any(f"name = '{wolf_name}'" in l for l in first_block)
     new_mounts = str(app['mounts']).replace('"', "'")
+    new_env    = str(ensure_tz(app['env'])).replace('"', "'")
     if already:
-        if update_mounts(lines, wolf_name, new_mounts):
+        ok = update_field(lines, wolf_name, 'mounts', new_mounts)
+        ok = update_field(lines, wolf_name, 'env', new_env) or ok
+        if ok:
             updated.append(app['title'])
     else:
         to_insert.append(make_app_block(app))
@@ -1895,7 +2056,17 @@ PYEOF
     echo "  Online together    → each player launches their own session,"
     echo "                        all connect to the same game server"
     echo ""
-    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps|reorder|add-web}"
+    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps|reorder|add-web|ge-proton|fix-ea-game}"
+    echo ""
+    echo "── EA GAMES (Battlefront II, etc.) ───────────────────"
+    echo ""
+    echo "  EA titles need GE-Proton + an install-script unstick:"
+    echo "    1. ./manage.sh ge-proton            # install GE-Proton once"
+    echo "    2. In Steam: game → Properties → Compatibility → Force GE-Proton"
+    echo "    3. Click Play once (builds the Proton prefix; will hang — that's ok)"
+    echo "    4. ./manage.sh games                # find the game's AppID"
+    echo "    5. ./manage.sh fix-ea-game <appid>  # e.g. 1237950 for SWBF2 2017"
+    echo "    6. Cancel the 'installing' screen in Steam, Play again — it launches"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -1944,7 +2115,37 @@ cd $WOLF_DIR
 ./manage.sh apps         # add / update game launchers
 ./manage.sh reorder      # reorder the Moonlight tile list
 ./manage.sh add-web      # add a URL shortcut tile (Firefox kiosk)
+./manage.sh ge-proton    # install GE-Proton (needed for EA games)
+./manage.sh games        # list installed games + their AppIDs
+./manage.sh fix-ea-game  # unstick the EA App install loop for a game
 \`\`\`
+
+## EA games (Battlefront II 2017, etc.)
+EA titles bundle an EA App bootstrapper that hangs forever under stock Proton
+in a container — the game sits on **"running install script (EA app)"** and
+never starts. Two things fix it: GE-Proton (not in Steam's built-in Proton
+list) and pre-satisfying the install-script markers in the game's prefix.
+
+\`\`\`bash
+cd $WOLF_DIR
+./manage.sh ge-proton                 # 1. install GE-Proton once
+#                                       2. Steam → game → Properties →
+#                                          Compatibility → Force GE-Proton
+#                                       3. Click Play once (builds the prefix;
+#                                          it will hang — that's expected)
+./manage.sh games                     # 4. find the game's AppID
+./manage.sh fix-ea-game 1237950       # 5. unstick it (1237950 = SWBF2 2017)
+#                                       6. Cancel the 'installing' screen,
+#                                          Play again — it launches.
+\`\`\`
+
+Notes:
+- Steam **AppIDs are global** — SWBF2 (2017) is always \`1237950\`, on every
+  machine. \`fix-ea-game\` with no argument defaults to it.
+- \`fix-ea-game\` is safe and opt-in: it only touches the AppID you pass, only
+  if that game's Proton prefix exists, and is a no-op otherwise.
+- \`ge-proton\` takes an optional version to pin, e.g.
+  \`./manage.sh ge-proton GE-Proton10-34\`.
 
 ## Ports (open on firewall / router)
 | Port(s) | Protocol | Use |
