@@ -938,7 +938,7 @@ case "$1" in
         # Show which apps are already installed and what's available
         echo ""
         echo "  Checking current Wolf config..."
-        INSTALLED=$(grep "^    name = 'Wolf" "$WOLF_CFG" 2>/dev/null | sed "s/.*name = '//;s/'//" | tr '\n' ' ')
+        INSTALLED=$(sudo grep "^    name = 'Wolf" "$WOLF_CFG" 2>/dev/null | sed "s/.*name = '//;s/'//" | tr '\n' ' ')
         [ -n "$INSTALLED" ] && echo "  Already installed: $INSTALLED" || echo "  No Wolf apps installed yet."
         echo ""
         echo "  Available apps:"
@@ -988,7 +988,7 @@ case "$1" in
         echo "  Applying: ${APP_KEYS:-none}"
         [ -z "$APP_KEYS" ] && exit 0
 
-        python3 - "$GAME_DIR" "$WOLF_CFG" $APP_KEYS << 'PYEOF'
+        sudo python3 - "$GAME_DIR" "$WOLF_CFG" $APP_KEYS << 'PYEOF'
 import sys, json
 
 games    = sys.argv[1].rstrip('/')
