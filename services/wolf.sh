@@ -528,8 +528,14 @@ UDEV
     _CAND_UUID[0]="${_home_uuid:-n/a}"
     _ci=1
 
-    # Mounted partitions — skip root, system paths, and home itself
-    while IFS= read -r _mnt; do
+    # Mounted block devices — skip root, system paths, and home itself.
+    # Enumerate with lsblk -P (key="value" pairs) so whole-disk mounts (e.g. an
+    # nvme formatted directly with no partition table) and empty LABEL/UUID
+    # fields are handled reliably — df round-trips miss some of these.
+    while IFS= read -r _line; do
+        local NAME="" MOUNTPOINT="" SIZE="" LABEL="" UUID=""
+        eval "$_line"
+        local _mnt="$MOUNTPOINT"
         [[ -z "$_mnt" ]] && continue
         [[ "$_mnt" == "/"        ]] && continue
         [[ "$_mnt" == /boot*     ]] && continue
@@ -541,19 +547,15 @@ UDEV
         [[ "$_mnt" == /dev*      ]] && continue
         [[ "$_mnt" == "[SWAP]"   ]] && continue
         [[ "$_mnt" == "$ACTUAL_HOME" ]] && continue
-        local _dev _label _size _free _uuid
-        _dev=$(df "$_mnt" 2>/dev/null | awk 'NR==2{print $1}')
-        _label=$(lsblk -no LABEL "$_dev" 2>/dev/null | head -1)
-        _size=$(lsblk -no SIZE "$_dev" 2>/dev/null | head -1)
+        local _free
         _free=$(df -h "$_mnt" 2>/dev/null | awk 'NR==2{print $4}')
-        _uuid=$(blkid -s UUID -o value "$_dev" 2>/dev/null)
-        local _display="${_label:-$(basename "$_dev")}"
+        local _display="${LABEL:-$NAME}"
         _CAND_PATH[$_ci]="$_mnt/games"
-        _CAND_LABEL[$_ci]="$_mnt  (${_display}, ${_size:-?} total, ${_free:-?} free)"
-        _CAND_DEV[$_ci]="$_dev"
-        _CAND_UUID[$_ci]="${_uuid:-n/a}"
+        _CAND_LABEL[$_ci]="$_mnt  (${_display}, ${SIZE:-?} total, ${_free:-?} free)"
+        _CAND_DEV[$_ci]="/dev/$NAME"
+        _CAND_UUID[$_ci]="${UUID:-n/a}"
         ((_ci++))
-    done < <(lsblk -no MOUNTPOINT 2>/dev/null | sort -u)
+    done < <(lsblk -Pno NAME,MOUNTPOINT,SIZE,LABEL,UUID 2>/dev/null)
 
     # Unmounted block devices — skip disks that have any mounted partition
     local -a _UNMT_DEV _UNMT_LABEL _UNMT_UUID
