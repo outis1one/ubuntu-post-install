@@ -1545,6 +1545,11 @@ PYEOF
             echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
             exit 1
         fi
+        # Optional: pin a specific GE-Proton version for reproducibility,
+        # e.g. ./manage.sh ge-proton GE-Proton10-34
+        if [ -n "$2" ]; then
+            URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$2/$2.tar.gz"
+        fi
         NAME=$(basename "$URL" .tar.gz)
         if [ -d "$COMPAT/$NAME" ]; then
             echo "$NAME already installed."
@@ -1565,6 +1570,29 @@ PYEOF
         echo "Installed: $COMPAT/$NAME"
         echo "Now fully quit and reopen Steam in Moonlight, then per game:"
         echo "  Properties → Compatibility → Force the use of $NAME"
+        ;;
+    games)
+        # List installed Steam games with their AppIDs, read from the Steam
+        # app manifests. Use this to find the AppID to pass to fix-ea-game.
+        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
+        APPSDIR="$STEAM_HOME/.steam/steam/steamapps"
+        if [ ! -d "$APPSDIR" ]; then
+            echo "No Steam library found yet. Launch Steam and install a game first."
+            exit 1
+        fi
+        shopt -s nullglob
+        found=0
+        printf "  %-10s  %s\n" "AppID" "Name"
+        printf "  %-10s  %s\n" "-----" "----"
+        for acf in "$APPSDIR"/appmanifest_*.acf; do
+            id=$(grep -oP '"appid"\s*"\K[0-9]+' "$acf" | head -1)
+            name=$(grep -oP '"name"\s*"\K[^"]+' "$acf" | head -1)
+            printf "  %-10s  %s\n" "$id" "$name"
+            found=1
+        done
+        [ "$found" = 0 ] && echo "  (no games installed yet)"
+        echo ""
+        echo "EA titles stuck on 'running install script': ./manage.sh fix-ea-game <AppID>"
         ;;
     fix-ea-game)
         # Some EA titles on Steam (e.g. Star Wars Battlefront II 2017,
@@ -1668,7 +1696,8 @@ PYEOF
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
         echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
-        echo "  ./manage.sh ge-proton                    - Install latest GE-Proton (needed for EA games)"
+        echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
+        echo "  ./manage.sh games                        - List installed games + their AppIDs"
         echo "  ./manage.sh fix-ea-game [appid]          - Unstick EA App install loop (default: SWBF2 1237950)"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh backup                       - How to set up backups"
@@ -2009,8 +2038,9 @@ PYEOF
     echo "    1. ./manage.sh ge-proton            # install GE-Proton once"
     echo "    2. In Steam: game → Properties → Compatibility → Force GE-Proton"
     echo "    3. Click Play once (builds the Proton prefix; will hang — that's ok)"
-    echo "    4. ./manage.sh fix-ea-game <appid>  # e.g. 1237950 for SWBF2 2017"
-    echo "    5. Cancel the 'installing' screen in Steam, Play again — it launches"
+    echo "    4. ./manage.sh games                # find the game's AppID"
+    echo "    5. ./manage.sh fix-ea-game <appid>  # e.g. 1237950 for SWBF2 2017"
+    echo "    6. Cancel the 'installing' screen in Steam, Play again — it launches"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -2059,7 +2089,37 @@ cd $WOLF_DIR
 ./manage.sh apps         # add / update game launchers
 ./manage.sh reorder      # reorder the Moonlight tile list
 ./manage.sh add-web      # add a URL shortcut tile (Firefox kiosk)
+./manage.sh ge-proton    # install GE-Proton (needed for EA games)
+./manage.sh games        # list installed games + their AppIDs
+./manage.sh fix-ea-game  # unstick the EA App install loop for a game
 \`\`\`
+
+## EA games (Battlefront II 2017, etc.)
+EA titles bundle an EA App bootstrapper that hangs forever under stock Proton
+in a container — the game sits on **"running install script (EA app)"** and
+never starts. Two things fix it: GE-Proton (not in Steam's built-in Proton
+list) and pre-satisfying the install-script markers in the game's prefix.
+
+\`\`\`bash
+cd $WOLF_DIR
+./manage.sh ge-proton                 # 1. install GE-Proton once
+#                                       2. Steam → game → Properties →
+#                                          Compatibility → Force GE-Proton
+#                                       3. Click Play once (builds the prefix;
+#                                          it will hang — that's expected)
+./manage.sh games                     # 4. find the game's AppID
+./manage.sh fix-ea-game 1237950       # 5. unstick it (1237950 = SWBF2 2017)
+#                                       6. Cancel the 'installing' screen,
+#                                          Play again — it launches.
+\`\`\`
+
+Notes:
+- Steam **AppIDs are global** — SWBF2 (2017) is always \`1237950\`, on every
+  machine. \`fix-ea-game\` with no argument defaults to it.
+- \`fix-ea-game\` is safe and opt-in: it only touches the AppID you pass, only
+  if that game's Proton prefix exists, and is a no-op otherwise.
+- \`ge-proton\` takes an optional version to pin, e.g.
+  \`./manage.sh ge-proton GE-Proton10-34\`.
 
 ## Ports (open on firewall / router)
 | Port(s) | Protocol | Use |
