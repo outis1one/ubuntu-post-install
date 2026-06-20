@@ -924,6 +924,9 @@ GAME_STORAGE_DIR=${GAME_STORAGE_DIR}
 # Wolf state folder (config.toml + every app session home) — lives on the game
 # drive so Steam installs, games, and Proton prefixes stay off the OS drive.
 WOLF_STATE_DIR=${WOLF_STATE_DIR}
+# Timezone for app containers (Steam/Proton etc.) — set on each app's TZ env so
+# Steam, EA App, and games show the correct local time. Edit + ./manage.sh apps.
+WOLF_TZ=${SITE_TZ}
 EOF
     chmod 600 .env
     chown "$ACTUAL_USER:$ACTUAL_USER" .env
@@ -951,6 +954,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # the drive because docker-compose.yml mounts it as HOST_APPS_STATE_FOLDER.
 WOLF_STATE_DIR=$(grep '^WOLF_STATE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 WOLF_CFG="${WOLF_STATE_DIR:-/etc/wolf}/cfg/config.toml"
+WOLF_TZ=$(grep '^WOLF_TZ=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 
 case "$1" in
     start)
@@ -1043,12 +1047,13 @@ case "$1" in
         echo "  Applying: ${APP_KEYS:-none}"
         [ -z "$APP_KEYS" ] && exit 0
 
-        sudo python3 - "$GAME_DIR" "$WOLF_CFG" $APP_KEYS << 'PYEOF'
+        sudo python3 - "$GAME_DIR" "$WOLF_CFG" "$WOLF_TZ" $APP_KEYS << 'PYEOF'
 import sys, json
 
 games    = sys.argv[1].rstrip('/')
 cfg      = sys.argv[2]
-selected = set(sys.argv[3:])
+TZ       = sys.argv[3].strip()
+selected = set(sys.argv[4:])
 
 STD_CAP   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
 STD_ENV   = ['RUN_SWAY=1', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
@@ -1132,6 +1137,14 @@ CATALOG = {
     ),
 }
 
+def ensure_tz(env_list):
+    # Set the container timezone so Steam / EA App / games show local time
+    # (a wrong/UTC display can confuse EA App's installer). Driven by WOLF_TZ.
+    e = [x for x in env_list if not x.startswith('TZ=')]
+    if TZ:
+        e.append(f'TZ={TZ}')
+    return e
+
 def make_app_block(app):
     host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
                 'Privileged': app['privileged'], 'DeviceCgroupRules': STD_RULES}
@@ -1139,7 +1152,7 @@ def make_app_block(app):
     if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
     create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
     mounts_str  = str(app['mounts']).replace('"', "'")
-    env_str     = str(app['env']).replace('"', "'")
+    env_str     = str(ensure_tz(app['env'])).replace('"', "'")
     return (
         f"\n"
         f"    [[profiles.apps]]\n"
@@ -1159,23 +1172,20 @@ def make_app_block(app):
         f"        type = 'docker'\n"
     )
 
-def update_mounts(lines, wolf_name, new_mounts):
-    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
-    # so we must replace the entire array (from `mounts =` to its closing `]`),
+def update_field(lines, wolf_name, field, new_value):
+    # Wolf rewrites config.toml and reformats arrays (mounts/env) as MULTI-LINE,
+    # so we must replace the entire array (from `<field> =` to its closing `]`),
     # not just the first line — otherwise the old elements are left orphaned and
-    # the file becomes invalid TOML. Always rewrite as a single line.
+    # the file becomes invalid TOML. Always rewrite as a single line, and heal
+    # any orphaned remnants left by a previously corrupted single-line rewrite.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-20), min(len(lines), i+20)):
-                if lines[j].lstrip().startswith('mounts ='):
+            for j in range(max(0, i-25), min(len(lines), i+25)):
+                if lines[j].lstrip().startswith(field + ' ='):
                     indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
-                    # End of the array = first line containing ']'.
                     k = j
                     while k < len(lines) and ']' not in lines[k]:
                         k += 1
-                    # Heal any orphaned array remnants left by a previously
-                    # corrupted single-line rewrite (stray '…' elements / a lone
-                    # ']' sitting below the mounts line).
                     m = k + 1
                     while m < len(lines):
                         s = lines[m].lstrip()
@@ -1183,7 +1193,7 @@ def update_mounts(lines, wolf_name, new_mounts):
                             m += 1
                         else:
                             break
-                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
+                    lines[j:m] = [f"{indent}{field} = {new_value}\n"]
                     return True
     return False
 
@@ -1208,9 +1218,12 @@ for key in list(CATALOG.keys()):
     app = CATALOG[key]
     wolf_name  = app['name']
     new_mounts = str(app['mounts']).replace('"', "'")
+    new_env    = str(ensure_tz(app['env'])).replace('"', "'")
     already    = any(f"name = '{wolf_name}'" in l for l in first_block)
     if already:
-        if update_mounts(lines, wolf_name, new_mounts):
+        ok = update_field(lines, wolf_name, 'mounts', new_mounts)
+        ok = update_field(lines, wolf_name, 'env', new_env) or ok
+        if ok:
             updated.append(app['title'])
     else:
         to_insert.append(make_app_block(app))
@@ -1229,7 +1242,7 @@ elif updated:
         f.writelines(lines)
 
 if added:   print(f"Added: {', '.join(added)}")
-if updated: print(f"Updated mounts: {', '.join(updated)}")
+if updated: print(f"Updated mounts + timezone: {', '.join(updated)}")
 if not added and not updated:
     print('All selected apps already present and up to date')
 PYEOF
@@ -1596,12 +1609,13 @@ MEOF
 
     if [ -f "$WOLF_CFG" ]; then
         log_info "Injecting selected apps into Wolf config..."
-        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" $([[ -n "$_APP_KEYS" ]] && echo "$_APP_KEYS" || echo "steam esde") << 'PYEOF'
+        python3 - "$GAME_STORAGE_DIR" "$WOLF_CFG" "$SITE_TZ" $([[ -n "$_APP_KEYS" ]] && echo "$_APP_KEYS" || echo "steam esde") << 'PYEOF'
 import sys, json
 
 games    = sys.argv[1].rstrip('/')
 cfg      = sys.argv[2]
-selected = set(sys.argv[3:])   # app keys chosen by the user
+TZ       = sys.argv[3].strip()
+selected = set(sys.argv[4:])   # app keys chosen by the user
 
 # ── App catalog ───────────────────────────────────────────────────────────────
 # Each entry: (wolf_name, title, icon_url, image, mounts, env, cap_add,
@@ -1689,6 +1703,14 @@ CATALOG = {
     ),
 }
 
+def ensure_tz(env_list):
+    # Set the container timezone so Steam / EA App / games show local time
+    # (a wrong/UTC display can confuse EA App's installer). Driven by SITE_TZ.
+    e = [x for x in env_list if not x.startswith('TZ=')]
+    if TZ:
+        e.append(f'TZ={TZ}')
+    return e
+
 def make_app_block(app):
     """Render a [[profiles.apps]] TOML block from a catalog entry."""
     host_cfg = {'IpcMode': app['ipc_mode'], 'CapAdd': app['cap_add'],
@@ -1697,7 +1719,7 @@ def make_app_block(app):
     if app['ulimits']:       host_cfg['Ulimits'] = app['ulimits']
     create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
     mounts_str  = str(app['mounts']).replace('"', "'")
-    env_str     = str(app['env']).replace('"', "'")
+    env_str     = str(ensure_tz(app['env'])).replace('"', "'")
     return (
         f"\n"
         f"    [[profiles.apps]]\n"
@@ -1717,23 +1739,20 @@ def make_app_block(app):
         f"        type = 'docker'\n"
     )
 
-def update_mounts(lines, wolf_name, new_mounts):
-    # Wolf rewrites config.toml and reformats `mounts` as a MULTI-LINE array,
-    # so we must replace the entire array (from `mounts =` to its closing `]`),
+def update_field(lines, wolf_name, field, new_value):
+    # Wolf rewrites config.toml and reformats arrays (mounts/env) as MULTI-LINE,
+    # so we must replace the entire array (from `<field> =` to its closing `]`),
     # not just the first line — otherwise the old elements are left orphaned and
-    # the file becomes invalid TOML. Always rewrite as a single line.
+    # the file becomes invalid TOML. Always rewrite as a single line, and heal
+    # any orphaned remnants left by a previously corrupted single-line rewrite.
     for i, line in enumerate(lines):
         if f"name = '{wolf_name}'" in line:
-            for j in range(max(0, i-20), min(len(lines), i+20)):
-                if lines[j].lstrip().startswith('mounts ='):
+            for j in range(max(0, i-25), min(len(lines), i+25)):
+                if lines[j].lstrip().startswith(field + ' ='):
                     indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
-                    # End of the array = first line containing ']'.
                     k = j
                     while k < len(lines) and ']' not in lines[k]:
                         k += 1
-                    # Heal any orphaned array remnants left by a previously
-                    # corrupted single-line rewrite (stray '…' elements / a lone
-                    # ']' sitting below the mounts line).
                     m = k + 1
                     while m < len(lines):
                         s = lines[m].lstrip()
@@ -1741,7 +1760,7 @@ def update_mounts(lines, wolf_name, new_mounts):
                             m += 1
                         else:
                             break
-                    lines[j:m] = [f"{indent}mounts = {new_mounts}\n"]
+                    lines[j:m] = [f"{indent}{field} = {new_value}\n"]
                     return True
     return False
 
@@ -1770,8 +1789,11 @@ for key in list(CATALOG.keys()):   # preserve display order
     wolf_name = app['name']
     already   = any(f"name = '{wolf_name}'" in l for l in first_block)
     new_mounts = str(app['mounts']).replace('"', "'")
+    new_env    = str(ensure_tz(app['env'])).replace('"', "'")
     if already:
-        if update_mounts(lines, wolf_name, new_mounts):
+        ok = update_field(lines, wolf_name, 'mounts', new_mounts)
+        ok = update_field(lines, wolf_name, 'env', new_env) or ok
+        if ok:
             updated.append(app['title'])
     else:
         to_insert.append(make_app_block(app))
