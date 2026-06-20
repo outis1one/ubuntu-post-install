@@ -1059,7 +1059,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[],  # Steam home lives on the game drive via Wolf's state folder
+        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1379,6 +1379,29 @@ PYEOF
         # Sanitize title → WolfWeb-<CamelCase>
         WOLF_WEB_NAME="WolfWeb-$(echo "$WEB_TITLE" | tr -s ' \t' '-' | tr -cd 'A-Za-z0-9-')"
 
+        # The GoW firefox image launches `firefox` with no URL and honors no
+        # START_URL env var — it reads a Firefox enterprise policy file at
+        # /etc/firefox/policies/policies.json. Generate a per-app policy that
+        # sets the homepage to our URL and mount it into the container so the
+        # tile opens that site on launch instead of a blank default tab.
+        WEBAPP_DIR="${WOLF_STATE_DIR:-/etc/wolf}/cfg/webapps/$WOLF_WEB_NAME"
+        sudo mkdir -p "$WEBAPP_DIR"
+        sudo tee "$WEBAPP_DIR/policies.json" >/dev/null << JSON
+{
+  "policies": {
+    "Homepage": { "URL": "$WEB_URL", "StartPage": "homepage", "Locked": false },
+    "OverrideFirstRunPage": "",
+    "OverridePostUpdatePage": "",
+    "DisableAppUpdate": true,
+    "DisableTelemetry": true,
+    "Preferences": {
+      "gfx.webrender.all": { "Value": true, "Status": "default" },
+      "webgl.force-enabled": { "Value": true, "Status": "default" }
+    }
+  }
+}
+JSON
+
         echo ""
         echo "  Adding Moonlight tile:"
         echo "    Title : $WEB_TITLE"
@@ -1387,23 +1410,24 @@ PYEOF
         echo "    Name  : $WOLF_WEB_NAME"
         echo ""
 
-        sudo python3 - "$WOLF_CFG" "$WOLF_WEB_NAME" "$WEB_TITLE" "$WEB_ICON" "$WEB_URL" << 'PYEOF'
+        sudo python3 - "$WOLF_CFG" "$WOLF_WEB_NAME" "$WEB_TITLE" "$WEB_ICON" "$WEBAPP_DIR/policies.json" << 'PYEOF'
 import sys, json, re
 
-cfg        = sys.argv[1]
-wolf_name  = sys.argv[2]
-title      = sys.argv[3]
-icon       = sys.argv[4]
-url        = sys.argv[5]
+cfg          = sys.argv[1]
+wolf_name    = sys.argv[2]
+title        = sys.argv[3]
+icon         = sys.argv[4]
+policies     = sys.argv[5]   # host path to the per-app firefox policies.json
 
 STD_RULES = ['c 13:* rmw', 'c 244:* rmw']
 cap_add   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
 env       = [
-    f'START_URL={url}',
     'MOZ_ENABLE_WAYLAND=1',
     'RUN_SWAY=1',
     'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*',
 ]
+# Mount our policy file over the image's default so Firefox opens the homepage.
+mounts    = [f'{policies}:/etc/firefox/policies/policies.json:ro']
 host_cfg = {
     'IpcMode': 'host',
     'CapAdd': cap_add,
@@ -1412,6 +1436,7 @@ host_cfg = {
 }
 create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
 env_str     = str(env).replace('"', "'")
+mounts_str  = str(mounts).replace('"', "'")
 
 block = (
     f"\n"
@@ -1426,7 +1451,7 @@ block = (
     f"        devices = []\n"
     f"        env = {env_str}\n"
     f"        image = 'ghcr.io/games-on-whales/firefox:edge'\n"
-    f"        mounts = []\n"
+    f"        mounts = {mounts_str}\n"
     f"        name = '{wolf_name}'\n"
     f"        ports = []\n"
     f"        type = 'docker'\n"
@@ -1435,10 +1460,25 @@ block = (
 with open(cfg) as f:
     lines = f.readlines()
 
-# Check if already present
-if any(f"name = '{wolf_name}'" in l for l in lines):
-    print(f"'{title}' already exists in config (name={wolf_name}). Remove it first if you want to re-add.")
-    sys.exit(1)
+# If a tile with this name already exists, remove its whole [[profiles.apps]]
+# block first so re-running add-web replaces it (e.g. to fix the URL/mounts).
+def remove_existing(lines, wolf_name):
+    name_idx = next((i for i, l in enumerate(lines)
+                     if f"name = '{wolf_name}'" in l), None)
+    if name_idx is None:
+        return lines, False
+    # Start of this app block = nearest [[profiles.apps]] at/above the name line
+    start = name_idx
+    while start > 0 and lines[start].strip() != '[[profiles.apps]]':
+        start -= 1
+    # End = next app/profiles marker after the name line, else EOF
+    end = name_idx + 1
+    while end < len(lines) and lines[end].strip() not in ('[[profiles.apps]]', '[[profiles]]'):
+        end += 1
+    del lines[start:end]
+    return lines, True
+
+lines, replaced = remove_existing(lines, wolf_name)
 
 # Find insert point: just before the second [[profiles]] block, or end of file
 profiles_seen, insert_at = 0, len(lines)
@@ -1453,7 +1493,8 @@ block_lines = [l + '\n' if not l.endswith('\n') else l for l in block.splitlines
 new_lines   = lines[:insert_at] + block_lines + lines[insert_at:]
 with open(cfg, 'w') as f:
     f.writelines(new_lines)
-print(f"Added '{title}' ({wolf_name}) — tile will appear in Moonlight after Wolf restarts.")
+action = 'Replaced' if replaced else 'Added'
+print(f"{action} '{title}' ({wolf_name}) — tile updates in Moonlight after Wolf restarts.")
 sys.exit(0)
 PYEOF
         if [ $? -eq 0 ]; then
@@ -1574,7 +1615,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[],  # Steam home lives on the game drive via Wolf's state folder
+        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
