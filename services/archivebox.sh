@@ -195,7 +195,24 @@ install_archivebox() {
     ensure_docker_dir_ownership "$AB_DIR"
     cd "$AB_DIR" || return 1
 
-    cat > docker-compose.yml << 'ABCOMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << ABCOMPOSE
 name: archivebox
 
 services:
@@ -214,13 +231,7 @@ services:
       - ./data:/data
     ports:
       - "8000:8000"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 ABCOMPOSE
 
     cat > .env << ABENV

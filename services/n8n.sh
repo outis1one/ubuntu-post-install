@@ -197,7 +197,24 @@ install_n8n() {
     ensure_docker_dir_ownership "$N8N_DIR"
     cd "$N8N_DIR" || return 1
 
-    cat > docker-compose.yml << 'N8N_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << N8N_COMPOSE
 name: n8n
 
 services:
@@ -213,18 +230,12 @@ services:
     environment:
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
-      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-UTC}
-      - N8N_HOST=${N8N_HOST:-n8n}
-      - WEBHOOK_URL=${WEBHOOK_URL}
+      - GENERIC_TIMEZONE=\${GENERIC_TIMEZONE:-UTC}
+      - N8N_HOST=\${N8N_HOST:-n8n}
+      - WEBHOOK_URL=\${WEBHOOK_URL}
     volumes:
       - ./data:/home/node/.n8n
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 N8N_COMPOSE
 
     cat > .env << N8N_ENV

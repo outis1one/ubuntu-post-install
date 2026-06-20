@@ -291,17 +291,34 @@ install_immich() {
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # ── Write docker-compose.yml ────────────────────────────────────────────
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     if [ -n "$EXTERNAL_LIBRARY" ]; then
-        cat > docker-compose.yml << 'IMMICH_COMPOSE'
+        cat > docker-compose.yml << IMMICH_COMPOSE
 name: immich
 
 services:
   immich-server:
     container_name: immich_server
-    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-server:\${IMMICH_VERSION:-release}
     volumes:
-      - ${UPLOAD_LOCATION}:/usr/src/app/upload
-      - ${EXTERNAL_LIBRARY}:/usr/src/app/external:ro
+      - \${UPLOAD_LOCATION}:/usr/src/app/upload
+      - \${EXTERNAL_LIBRARY}:/usr/src/app/external:ro
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
@@ -313,12 +330,10 @@ services:
     restart: always
     healthcheck:
       disable: false
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   immich-machine-learning:
     container_name: immich_machine_learning
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-machine-learning:\${IMMICH_VERSION:-release}
     volumes:
       - model-cache:/cache
     env_file:
@@ -338,32 +353,28 @@ services:
     container_name: immich_postgres
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_PASSWORD: \${DB_PASSWORD}
+      POSTGRES_USER: \${DB_USERNAME}
+      POSTGRES_DB: \${DB_DATABASE_NAME}
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
-      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+      - \${DB_DATA_LOCATION}:/var/lib/postgresql/data
     restart: always
 
 volumes:
   model-cache:
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 IMMICH_COMPOSE
     else
-        cat > docker-compose.yml << 'IMMICH_COMPOSE'
+        cat > docker-compose.yml << IMMICH_COMPOSE
 name: immich
 
 services:
   immich-server:
     container_name: immich_server
-    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-server:\${IMMICH_VERSION:-release}
     volumes:
-      - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      - \${UPLOAD_LOCATION}:/usr/src/app/upload
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
@@ -375,12 +386,10 @@ services:
     restart: always
     healthcheck:
       disable: false
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   immich-machine-learning:
     container_name: immich_machine_learning
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    image: ghcr.io/immich-app/immich-machine-learning:\${IMMICH_VERSION:-release}
     volumes:
       - model-cache:/cache
     env_file:
@@ -400,21 +409,17 @@ services:
     container_name: immich_postgres
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_PASSWORD: \${DB_PASSWORD}
+      POSTGRES_USER: \${DB_USERNAME}
+      POSTGRES_DB: \${DB_DATABASE_NAME}
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
-      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+      - \${DB_DATA_LOCATION}:/var/lib/postgresql/data
     restart: always
 
 volumes:
   model-cache:
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 IMMICH_COMPOSE
     fi
 

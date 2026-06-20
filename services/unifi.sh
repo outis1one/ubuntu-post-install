@@ -118,8 +118,25 @@ install_unifi() {
     UID_VAL=$(id -u "$ACTUAL_USER")
     GID_VAL=$(id -g "$ACTUAL_USER")
 
-    # Single-quoted heredoc: ${...} left literal for Docker Compose to expand from .env
-    cat > docker-compose.yml << 'UNIFI_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    # Unquoted heredoc; ${...} used for caddy_net vars; all Docker Compose vars escaped with \$
+    cat > docker-compose.yml << UNIFI_COMPOSE
 name: unifi
 
 services:
@@ -158,20 +175,13 @@ services:
       # - "8880:8880"       # guest portal HTTP
       # - "6789:6789"       # mobile speed test
       # - "5514:5514/udp"   # remote syslog
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
-
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 # Inline MongoDB init — Docker Compose interpolates vars from .env at startup.
 configs:
   init-mongo.js:
     content: |
-      db.getSiblingDB("${MONGO_DBNAME}").createUser({user: "${MONGO_USER}", pwd: "${MONGO_PASS}", roles: [{role: "${MONGO_ROLE}", db: "${MONGO_DBNAME}"}]});
-      db.getSiblingDB("${MONGO_DBNAME}_stat").createUser({user: "${MONGO_USER}", pwd: "${MONGO_PASS}", roles: [{role: "${MONGO_ROLE}", db: "${MONGO_DBNAME}_stat"}]});
+      db.getSiblingDB("\${MONGO_DBNAME}").createUser({user: "\${MONGO_USER}", pwd: "\${MONGO_PASS}", roles: [{role: "\${MONGO_ROLE}", db: "\${MONGO_DBNAME}"}]});
+      db.getSiblingDB("\${MONGO_DBNAME}_stat").createUser({user: "\${MONGO_USER}", pwd: "\${MONGO_PASS}", roles: [{role: "\${MONGO_ROLE}", db: "\${MONGO_DBNAME}_stat"}]});
 UNIFI_COMPOSE
 
     cat > .env << UNIFI_ENV

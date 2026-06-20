@@ -197,7 +197,24 @@ install_stirling_pdf() {
     ensure_docker_dir_ownership "$PDF_DIR"
     cd "$PDF_DIR" || return 1
 
-    cat > docker-compose.yml << 'PDF_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << PDF_COMPOSE
 name: stirling-pdf
 
 services:
@@ -213,13 +230,7 @@ services:
       - ./training-data:/usr/share/tessdata
       - ./extraConfigs:/configs
       - ./logs:/logs
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 PDF_COMPOSE
 
     cat > .env << PDF_ENV

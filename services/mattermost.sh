@@ -247,7 +247,24 @@ install_mattermost() {
     prompt_text "Mattermost site URL [$SITE_URL]:" "$SITE_URL" CONFIGURED_SITEURL
     [[ -n "$CONFIGURED_SITEURL" ]] && SITE_URL="$CONFIGURED_SITEURL"
 
-    cat > docker-compose.yml << 'EOF'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << EOF
 name: mattermost
 
 services:
@@ -259,10 +276,8 @@ services:
     env_file: .env
     volumes:
       - ./db:/var/lib/postgresql/data
-    networks:
-      - caddy_net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+${_CADDY_NET_BLOCK}    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER} -d \${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -284,9 +299,7 @@ services:
     ports:
       - "8065:8065"
       - "8443:8443/udp"
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   coturn:
     image: coturn/coturn:latest
     container_name: mattermost-coturn
@@ -298,8 +311,8 @@ services:
       - --listening-ip=0.0.0.0
       - --fingerprint
       - --use-auth-secret
-      - --static-auth-secret=${COTURN_SECRET}
-      - --realm=${MM_REALM:-localhost}
+      - --static-auth-secret=\${COTURN_SECRET}
+      - --realm=\${MM_REALM:-localhost}
       - --min-port=49153
       - --max-port=49352
       - --no-tls
@@ -308,11 +321,7 @@ services:
       - --no-multicast-peers
       - --log-file=stdout
     restart: unless-stopped
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 EOF
 
     cat > .env << EOF

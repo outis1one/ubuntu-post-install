@@ -225,6 +225,23 @@ install_jellyfin() {
         log_warning "No /dev/dri/renderD128 — Jellyfin will use CPU transcoding."
     fi
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << JELLYFIN_COMPOSE
 name: jellyfin
 
@@ -245,13 +262,7 @@ $HWACCEL_BLOCK
       - "8096:8096"
       - "1900:1900/udp"
       - "7359:7359/udp"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 JELLYFIN_COMPOSE
 
     cat > .env << JELLYFIN_ENV

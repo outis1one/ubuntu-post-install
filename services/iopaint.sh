@@ -268,8 +268,25 @@ install_iopaint() {
     # Volume ./models:/root/.cache persists ALL model caches:
     #   /root/.cache/torch/hub/checkpoints/  (LaMa, CV2, ZITS, etc.)
     #   /root/.cache/huggingface/             (SD, PowerPaint, LDM, etc.)
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     if [[ "$USE_GPU" =~ ^[Yy]$ ]]; then
-        cat > docker-compose.yml << 'IOPAINT_GPU'
+        cat > docker-compose.yml << IOPAINT_GPU
 name: iopaint
 
 services:
@@ -280,8 +297,8 @@ services:
     restart: unless-stopped
     command: >-
       iopaint start
-      --model=${MODEL:-lama}
-      --device=${DEVICE:-cuda}
+      --model=\${MODEL:-lama}
+      --device=\${DEVICE:-cuda}
       --port=8080
       --host=0.0.0.0
     ports:
@@ -298,16 +315,10 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 IOPAINT_GPU
     else
-        cat > docker-compose.yml << 'IOPAINT_CPU'
+        cat > docker-compose.yml << IOPAINT_CPU
 name: iopaint
 
 services:
@@ -318,8 +329,8 @@ services:
     restart: unless-stopped
     command: >-
       iopaint start
-      --model=${MODEL:-lama}
-      --device=${DEVICE:-cpu}
+      --model=\${MODEL:-lama}
+      --device=\${DEVICE:-cpu}
       --port=8080
       --host=0.0.0.0
     ports:
@@ -329,13 +340,7 @@ services:
       - ./models:/root/.cache
       - ./input:/app/input
       - ./output:/app/output
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 IOPAINT_CPU
     fi
 

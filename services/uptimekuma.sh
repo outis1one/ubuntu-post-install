@@ -196,7 +196,24 @@ install_uptimekuma() {
     ensure_docker_dir_ownership "$UPTIME_DIR"
     cd "$UPTIME_DIR" || return 1
 
-    cat > docker-compose.yml << 'UPTIME_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << UPTIME_COMPOSE
 name: uptime-kuma
 
 services:
@@ -210,13 +227,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "3001:3001"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 UPTIME_COMPOSE
 
     mkdir -p data

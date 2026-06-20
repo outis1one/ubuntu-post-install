@@ -346,8 +346,19 @@ install_koha() {
     ensure_docker_dir_ownership "$KOHA_DIR"
     cd "$KOHA_DIR" || return 1
 
+    local _CADDY_NET_ENTRY=""
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_ENTRY="      - caddy_net
+"
+        _CADDY_NET_SECTION="  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     # ── docker-compose.yml ────────────────────────────────────────────────────
-    cat > docker-compose.yml << 'KOHA_COMPOSE'
+    cat > docker-compose.yml << KOHA_COMPOSE
 name: koha
 
 services:
@@ -370,18 +381,17 @@ services:
       - koha-rabbitmq
     networks:
       - koha_internal
-      - caddy_net
-
+${_CADDY_NET_ENTRY}
   koha-db:
     image: mariadb:11
     container_name: koha-db
     hostname: koha-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}
+      MYSQL_ROOT_PASSWORD: \${DB_ROOT_PASS}
       MYSQL_DATABASE: koha_default
       MYSQL_USER: koha_default
-      MYSQL_PASSWORD: ${DB_PASS}
+      MYSQL_PASSWORD: \${DB_PASS}
     volumes:
       - ./data:/var/lib/mysql
     networks:
@@ -402,16 +412,14 @@ services:
     restart: unless-stopped
     environment:
       RABBITMQ_DEFAULT_USER: koha
-      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS}
+      RABBITMQ_DEFAULT_PASS: \${RABBIT_PASS}
     networks:
       - koha_internal
 
 networks:
   koha_internal:
     internal: true
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_SECTION}
 KOHA_COMPOSE
 
     # ── config-main.env ───────────────────────────────────────────────────────

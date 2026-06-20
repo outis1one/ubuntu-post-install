@@ -242,7 +242,24 @@ install_vaultwarden() {
         prompt_text "SMTP password:" "" SMTP_PASS
     fi
 
-    cat > docker-compose.yml << 'VW_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << VW_COMPOSE
 name: vaultwarden
 
 services:
@@ -256,13 +273,7 @@ services:
       - ./vaultwarden_data:/data
     ports:
       - "8888:80"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 VW_COMPOSE
 
     cat > .env << VW_ENV

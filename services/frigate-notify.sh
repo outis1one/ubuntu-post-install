@@ -211,7 +211,24 @@ install_frigate-notify() {
     ensure_docker_dir_ownership "$FN_DIR"
     cd "$FN_DIR" || return 1
 
-    cat > docker-compose.yml << 'FN_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << FN_COMPOSE
 name: frigate-notify
 
 services:
@@ -222,13 +239,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./config.yml:/app/config.yml:ro
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FN_COMPOSE
 
     # Smart defaults based on what's installed

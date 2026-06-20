@@ -215,7 +215,24 @@ install_meshcentral() {
     ensure_docker_dir_ownership "$MC_DIR"
     cd "$MC_DIR" || return 1
 
-    cat > docker-compose.yml << 'MC_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << MC_COMPOSE
 name: meshcentral
 
 services:
@@ -226,9 +243,9 @@ services:
     restart: unless-stopped
     environment:
       - NODE_ENV=production
-      - HOSTNAME=${MC_HOSTNAME:-localhost}
-      - REVERSE_PROXY=${MC_REVERSE_PROXY:-false}
-      - REVERSE_PROXY_TLS_PORT=${MC_TLS_PORT:-443}
+      - HOSTNAME=\${MC_HOSTNAME:-localhost}
+      - REVERSE_PROXY=\${MC_REVERSE_PROXY:-false}
+      - REVERSE_PROXY_TLS_PORT=\${MC_TLS_PORT:-443}
       - IFRAME=false
       - ALLOW_NEW_ACCOUNTS=true
       - WEBRTC=true
@@ -239,13 +256,7 @@ services:
     ports:
       - "4430:443"
       - "4433:4433"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 MC_COMPOSE
 
     cat > .env << MC_ENV

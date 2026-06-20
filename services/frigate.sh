@@ -230,6 +230,23 @@ install_frigate() {
         log_warning "No /dev/dri/renderD128 — Frigate will use CPU detection."
     fi
 
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > docker-compose.yml << FRIGATE_COMPOSE
 name: frigate
 
@@ -256,13 +273,7 @@ $DEVICE_BLOCK
       - "8554:8554"
       - "8555:8555/tcp"
       - "8555:8555/udp"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FRIGATE_COMPOSE
 
     cat > .env << FRIGATE_ENV

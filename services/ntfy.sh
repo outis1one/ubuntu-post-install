@@ -203,7 +203,24 @@ install_ntfy() {
     ensure_docker_dir_ownership "$NTFY_DIR"
     cd "$NTFY_DIR" || return 1
 
-    cat > docker-compose.yml << 'NTFY_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << NTFY_COMPOSE
 name: ntfy
 
 services:
@@ -214,19 +231,13 @@ services:
     restart: unless-stopped
     command: serve
     environment:
-      - TZ=${TZ}
+      - TZ=\${TZ}
     volumes:
       - ./cache:/var/cache/ntfy
       - ./config:/etc/ntfy
     ports:
       - "8090:80"
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 NTFY_COMPOSE
 
     cat > .env << NTFY_ENV

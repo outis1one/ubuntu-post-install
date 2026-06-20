@@ -201,7 +201,24 @@ install_joplin() {
     DB_PASS="$(generate_password 32)"
     local BASE_URL="https://joplin.${SITE_DOMAIN}"
 
-    cat > docker-compose.yml << 'JOPLIN_COMPOSE'
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
+    cat > docker-compose.yml << JOPLIN_COMPOSE
 name: joplin
 
 services:
@@ -215,9 +232,7 @@ services:
     env_file: .env
     ports:
       - "22300:22300"
-    networks:
-      - caddy_net
-
+${_CADDY_NET_BLOCK}
   joplin-db:
     image: postgres:15-alpine
     container_name: joplin-db
@@ -226,13 +241,7 @@ services:
     env_file: .env
     volumes:
       - ./db-data:/var/lib/postgresql/data
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: ${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 JOPLIN_COMPOSE
 
     cat > .env << JOPLIN_ENV
