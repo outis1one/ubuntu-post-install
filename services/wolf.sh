@@ -1059,7 +1059,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[],  # Steam home lives on the game drive via Wolf's state folder
+        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
@@ -1615,7 +1615,7 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=[],  # Steam home lives on the game drive via Wolf's state folder
+        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
