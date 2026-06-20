@@ -926,8 +926,34 @@ EOF
     # ── Management script ─────────────────────────────────────────────────────
     cat > manage.sh << 'MEOF'
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+_seed_steam_library() {
+    local game_dir
+    game_dir=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    local vdf="$game_dir/steam/steamapps/libraryfolders.vdf"
+    [ -f "$vdf" ] || return 0
+    local changed=0
+    for wdir in /etc/wolf/[0-9]*/Steam; do
+        [ -d "$wdir" ] || continue
+        local dest="$wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+        if [ ! -f "$dest" ]; then
+            sudo mkdir -p "$(dirname "$dest")"
+            sudo cp "$vdf" "$dest"
+            sudo chown -R 1000:1000 "$wdir"
+            changed=1
+        fi
+    done
+    [ "$changed" = 1 ] && echo "Steam library config seeded into Wolf session dir."
+}
+
 case "$1" in
-    start)   docker compose up -d; echo "Wolf started. Pair Moonlight to this server's IP." ;;
+    start)
+        docker compose up -d
+        echo "Wolf started. Pair Moonlight to this server's IP."
+        sleep 3
+        _seed_steam_library
+        ;;
     stop)    docker compose down ;;
     restart) docker compose restart ;;
     logs)    docker compose logs -f wolf ;;
