@@ -866,6 +866,11 @@ UDEV
         WOLF_MAC="$LAN_MAC"
     fi
 
+    # Write compose using a mixed heredoc: WOLF_STATE_DIR comes from .env at
+    # runtime (docker compose variable substitution), so it stays correct even
+    # if the drive is remounted at a different path. IP/MAC/render-node are
+    # baked in at install time because they're hardware-specific and not stored
+    # in .env — use 'manage.sh update-network' to regenerate if they change.
     cat > docker-compose.yml << EOF
 name: wolf
 
@@ -877,17 +882,17 @@ services:
     restart: unless-stopped
     environment:
       - NVIDIA_DRIVER_VOLUME_NAME=nvidia-driver-vol
-      # State + config live on the game drive. HOST_APPS_STATE_FOLDER must be a
-      # HOST path because Wolf hands it to the host Docker daemon when spawning
-      # app containers — so it's mounted at the SAME path inside this container.
-      - HOST_APPS_STATE_FOLDER=${WOLF_STATE_DIR}
-      - WOLF_CFG_FOLDER=${WOLF_STATE_DIR}/cfg
+      # WOLF_STATE_DIR is read from .env at runtime — edit .env to relocate.
+      # Must be the same path inside and outside the container so that app
+      # containers Wolf spawns via the Docker socket resolve it on the host.
+      - HOST_APPS_STATE_FOLDER=\${WOLF_STATE_DIR}
+      - WOLF_CFG_FOLDER=\${WOLF_STATE_DIR}/cfg
       - WOLF_INTERNAL_IP=${WOLF_IP}
       - WOLF_INTERNAL_MAC=${WOLF_MAC}
       - WOLF_RENDER_NODE=${WOLF_RENDER_NODE}
       - LD_LIBRARY_PATH=/usr/nvidia/lib:/usr/nvidia/lib32
     volumes:
-      - ${WOLF_STATE_DIR}:${WOLF_STATE_DIR}:rw
+      - \${WOLF_STATE_DIR}:\${WOLF_STATE_DIR}:rw
       - /var/run/docker.sock:/var/run/docker.sock:rw
       - /dev/:/dev/:rw
       - /run/udev:/run/udev:rw
@@ -1212,6 +1217,236 @@ PYEOF
         docker compose restart wolf
         echo "Wolf restarted. Apps will appear in Moonlight on next connection."
         ;;
+    reorder)
+        # Interactively reorder the Moonlight tiles by reordering the
+        # [[profiles.apps]] blocks in Wolf's config.toml (Moonlight shows them
+        # in file order). config.toml is root-owned, so run Python under sudo;
+        # the prompt is read from /dev/tty since stdin is the heredoc script.
+        if [ ! -f "$WOLF_CFG" ]; then
+            echo "Wolf config not found at $WOLF_CFG — start Wolf once first."
+            exit 1
+        fi
+        sudo python3 - "$WOLF_CFG" << 'PYEOF'
+import sys, re
+cfg = sys.argv[1]
+with open(cfg) as f:
+    lines = f.readlines()
+
+prof = [i for i, l in enumerate(lines) if l.strip() == '[[profiles]]']
+if not prof:
+    print('No [[profiles]] section found.'); sys.exit(1)
+start = prof[0]
+end   = prof[1] if len(prof) > 1 else len(lines)
+
+marks = [i for i in range(start, end) if lines[i].strip() == '[[profiles.apps]]']
+if len(marks) < 2:
+    print('Fewer than two apps — nothing to reorder.'); sys.exit(2)
+
+head     = lines[:start]
+preamble = lines[start:marks[0]]
+tail     = lines[end:]
+blocks   = [lines[s:(marks[k+1] if k+1 < len(marks) else end)]
+            for k, s in enumerate(marks)]
+
+def title_of(b):
+    for l in b:
+        m = re.match(r"\s*title = '(.*)'\s*$", l)
+        if m:
+            return m.group(1)
+    return '(untitled)'
+
+titles = [title_of(b) for b in blocks]
+print('\nCurrent Moonlight order:')
+for i, t in enumerate(titles, 1):
+    print('  %d. %s' % (i, t))
+print('\nType the new order as space-separated numbers (each once).')
+print('Example: 3 1 2%s   — blank line cancels.'
+      % (''.join(' %d' % n for n in range(4, len(blocks) + 1))))
+
+tty = open('/dev/tty')
+sys.stdout.write('New order: '); sys.stdout.flush()
+resp = tty.readline().strip()
+if not resp:
+    print('Cancelled — nothing changed.'); sys.exit(2)
+try:
+    order = [int(x) for x in resp.split()]
+except ValueError:
+    print('Invalid input — expected numbers.'); sys.exit(2)
+if sorted(order) != list(range(1, len(blocks) + 1)):
+    print('Must list each number 1..%d exactly once.' % len(blocks)); sys.exit(2)
+
+out = head + preamble
+for n in order:
+    out += blocks[n - 1]
+out += tail
+with open(cfg, 'w') as f:
+    f.writelines(out)
+print('\nNew order: ' + ' -> '.join(titles[n - 1] for n in order))
+sys.exit(0)
+PYEOF
+        if [ $? -eq 0 ]; then
+            docker compose restart wolf
+            echo "Wolf restarted — the new tile order shows on next Moonlight connection."
+        fi
+        ;;
+    add-web)
+        # Add a Moonlight tile that opens a URL in a Firefox kiosk streaming container.
+        # Usage: ./manage.sh add-web [name] [url]
+        if [ ! -f "$WOLF_CFG" ]; then
+            echo "Wolf config not found at $WOLF_CFG — start Wolf once first."
+            exit 1
+        fi
+
+        # Gather display name
+        WEB_TITLE="${2:-}"
+        if [ -z "$WEB_TITLE" ]; then
+            read -r -p "  Display name (e.g. 'Dinosaur Game'): " WEB_TITLE
+        fi
+        WEB_TITLE="${WEB_TITLE:-Web App}"
+
+        # Gather URL
+        WEB_URL="${3:-}"
+        if [ -z "$WEB_URL" ]; then
+            read -r -p "  URL (e.g. https://dinosaur-game.io/): " WEB_URL
+        fi
+        if [ -z "$WEB_URL" ]; then echo "No URL entered."; exit 1; fi
+        # Prepend https:// if no scheme given
+        [[ "$WEB_URL" =~ ^https?:// ]] || WEB_URL="https://$WEB_URL"
+
+        # Try to auto-detect an icon
+        WEB_DOMAIN=$(python3 -c "from urllib.parse import urlparse; u=urlparse('$WEB_URL'); print(u.scheme+'://'+u.netloc)" 2>/dev/null)
+        WEB_ICON=""
+        echo "  Looking for icon at $WEB_DOMAIN..."
+        for _try_icon in \
+            "$WEB_DOMAIN/apple-touch-icon.png" \
+            "$WEB_DOMAIN/apple-touch-icon-precomposed.png" \
+            "$WEB_DOMAIN/icon.png" \
+            "$WEB_DOMAIN/favicon.png"; do
+            if curl -fsSL --max-time 5 -o /dev/null -w "%{http_code}" "$_try_icon" 2>/dev/null \
+               | grep -q "^2"; then
+                WEB_ICON="$_try_icon"
+                echo "  Found icon: $WEB_ICON"
+                break
+            fi
+        done
+        if [ -z "$WEB_ICON" ]; then
+            echo "  Could not auto-detect a PNG icon."
+            echo "  Options:"
+            echo "    1) Enter an image URL (PNG)"
+            echo "    2) Enter a local PNG file path"
+            echo "    3) Use default browser icon"
+            read -r -p "  Choice [3]: " _ICON_CHOICE
+            _ICON_CHOICE="${_ICON_CHOICE:-3}"
+            if [ "$_ICON_CHOICE" = "1" ]; then
+                read -r -p "  Image URL: " WEB_ICON
+            elif [ "$_ICON_CHOICE" = "2" ]; then
+                read -r -p "  Local PNG path: " _LOCAL_PNG
+                _LOCAL_PNG="${_LOCAL_PNG/#\~/$HOME}"
+                if [ -f "$_LOCAL_PNG" ]; then
+                    # Copy to wolf state dir so Wolf can find it
+                    _ICONS_DIR="${WOLF_STATE_DIR:-/etc/wolf}/cfg/icons"
+                    sudo mkdir -p "$_ICONS_DIR"
+                    _ICON_NAME="$(basename "$_LOCAL_PNG")"
+                    sudo cp "$_LOCAL_PNG" "$_ICONS_DIR/$_ICON_NAME"
+                    WEB_ICON="$_ICONS_DIR/$_ICON_NAME"
+                else
+                    echo "  File not found — using default icon."
+                fi
+            fi
+        fi
+        [ -z "$WEB_ICON" ] && \
+            WEB_ICON="https://games-on-whales.github.io/wildlife/apps/firefox/assets/icon.png"
+
+        # Sanitize title → WolfWeb-<CamelCase>
+        WOLF_WEB_NAME="WolfWeb-$(echo "$WEB_TITLE" | tr -s ' \t' '-' | tr -cd 'A-Za-z0-9-')"
+
+        echo ""
+        echo "  Adding Moonlight tile:"
+        echo "    Title : $WEB_TITLE"
+        echo "    URL   : $WEB_URL"
+        echo "    Icon  : $WEB_ICON"
+        echo "    Name  : $WOLF_WEB_NAME"
+        echo ""
+
+        sudo python3 - "$WOLF_CFG" "$WOLF_WEB_NAME" "$WEB_TITLE" "$WEB_ICON" "$WEB_URL" << 'PYEOF'
+import sys, json, re
+
+cfg        = sys.argv[1]
+wolf_name  = sys.argv[2]
+title      = sys.argv[3]
+icon       = sys.argv[4]
+url        = sys.argv[5]
+
+STD_RULES = ['c 13:* rmw', 'c 244:* rmw']
+cap_add   = ['NET_RAW', 'MKNOD', 'NET_ADMIN']
+env       = [
+    f'START_URL={url}',
+    'MOZ_ENABLE_WAYLAND=1',
+    'RUN_SWAY=1',
+    'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*',
+]
+host_cfg = {
+    'IpcMode': 'host',
+    'CapAdd': cap_add,
+    'Privileged': False,
+    'DeviceCgroupRules': STD_RULES,
+}
+create_json = json.dumps({'HostConfig': host_cfg}, indent=2)
+env_str     = str(env).replace('"', "'")
+
+block = (
+    f"\n"
+    f"    [[profiles.apps]]\n"
+    f"    icon_png_path = '{icon}'\n"
+    f"    start_virtual_compositor = true\n"
+    f"    title = '{title}'\n"
+    f"\n"
+    f"        [profiles.apps.runner]\n"
+    f"        base_create_json = '''{create_json}\n"
+    f"'''\n"
+    f"        devices = []\n"
+    f"        env = {env_str}\n"
+    f"        image = 'ghcr.io/games-on-whales/firefox:edge'\n"
+    f"        mounts = []\n"
+    f"        name = '{wolf_name}'\n"
+    f"        ports = []\n"
+    f"        type = 'docker'\n"
+)
+
+with open(cfg) as f:
+    lines = f.readlines()
+
+# Check if already present
+if any(f"name = '{wolf_name}'" in l for l in lines):
+    print(f"'{title}' already exists in config (name={wolf_name}). Remove it first if you want to re-add.")
+    sys.exit(1)
+
+# Find insert point: just before the second [[profiles]] block, or end of file
+profiles_seen, insert_at = 0, len(lines)
+for i, line in enumerate(lines):
+    if line.strip() == '[[profiles]]':
+        profiles_seen += 1
+        if profiles_seen == 2:
+            insert_at = i
+            break
+
+block_lines = [l + '\n' if not l.endswith('\n') else l for l in block.splitlines()]
+new_lines   = lines[:insert_at] + block_lines + lines[insert_at:]
+with open(cfg, 'w') as f:
+    f.writelines(new_lines)
+print(f"Added '{title}' ({wolf_name}) — tile will appear in Moonlight after Wolf restarts.")
+sys.exit(0)
+PYEOF
+        if [ $? -eq 0 ]; then
+            docker compose restart wolf
+            echo "Wolf restarted — '$WEB_TITLE' will appear in Moonlight on next connection."
+            echo ""
+            echo "  Controller tip: Wolf injects a virtual gamepad into the streaming container."
+            echo "  Sites that use the browser Gamepad API (many classic arcade ports, etc.)"
+            echo "  will respond to your controller. Keyboard-driven sites won't respond to"
+            echo "  gamepad buttons directly, but Wolf's virtual keyboard lets you type."
+        fi
+        ;;
     backup)
         echo "Set up backups with the modular system:  sudo ./setup.sh backup"
         ;;
@@ -1276,6 +1511,8 @@ PYEOF
         echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
         echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
+        echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
+        echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
@@ -1579,7 +1816,7 @@ PYEOF
     echo "  Online together    → each player launches their own session,"
     echo "                        all connect to the same game server"
     echo ""
-    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps}"
+    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps|reorder|add-web}"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -1626,6 +1863,8 @@ cd $WOLF_DIR
 ./manage.sh status       # container status
 ./manage.sh update       # pull latest image and restart
 ./manage.sh apps         # add / update game launchers
+./manage.sh reorder      # reorder the Moonlight tile list
+./manage.sh add-web      # add a URL shortcut tile (Firefox kiosk)
 \`\`\`
 
 ## Ports (open on firewall / router)
