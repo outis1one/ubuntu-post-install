@@ -701,10 +701,12 @@ UDEV
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
 
-    # Pre-seed Steam library config so it uses /mnt/games/steam on first launch
-    # without requiring the user to navigate Settings → Storage inside Steam.
-    cat > "$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf" << 'VDFEOF'
-"libraryfolders"
+    # Pre-seed Steam library config. Wolf mounts each app's home from
+    # /etc/wolf/<id>/Steam — Steam reads libraryfolders.vdf from there.
+    # We stash a copy in game storage and manage.sh fix-perms propagates it
+    # into every Wolf session dir after Wolf has run once.
+    local _VDF_CONTENT
+    _VDF_CONTENT='"libraryfolders"
 {
 	"0"
 	{
@@ -713,8 +715,17 @@ UDEV
 		"mounted"	"1"
 		"contentid"	"1"
 	}
-}
-VDFEOF
+}'
+    mkdir -p "$GAME_STORAGE_DIR/steam/steamapps"
+    echo "$_VDF_CONTENT" > "$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf"
+    # Also seed into any Wolf session dirs that already exist
+    for _wdir in /etc/wolf/[0-9]*/Steam; do
+        [ -d "$_wdir" ] || continue
+        mkdir -p "$_wdir/.local/share/Steam/steamapps"
+        echo "$_VDF_CONTENT" > "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+        chown -R 1000:1000 "$_wdir"
+    done
+
     # Pre-create ES-DE ROM directories so the user knows where to drop files
     # and ES-DE shows the system in its list immediately on first launch.
     local _ESDE_SYSTEMS=(
@@ -915,8 +926,34 @@ EOF
     # ── Management script ─────────────────────────────────────────────────────
     cat > manage.sh << 'MEOF'
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+_seed_steam_library() {
+    local game_dir
+    game_dir=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    local vdf="$game_dir/steam/steamapps/libraryfolders.vdf"
+    [ -f "$vdf" ] || return 0
+    local changed=0
+    for wdir in /etc/wolf/[0-9]*/Steam; do
+        [ -d "$wdir" ] || continue
+        local dest="$wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+        if [ ! -f "$dest" ]; then
+            sudo mkdir -p "$(dirname "$dest")"
+            sudo cp "$vdf" "$dest"
+            sudo chown -R 1000:1000 "$wdir"
+            changed=1
+        fi
+    done
+    [ "$changed" = 1 ] && echo "Steam library config seeded into Wolf session dir."
+}
+
 case "$1" in
-    start)   docker compose up -d; echo "Wolf started. Pair Moonlight to this server's IP." ;;
+    start)
+        docker compose up -d
+        echo "Wolf started. Pair Moonlight to this server's IP."
+        sleep 3
+        _seed_steam_library
+        ;;
     stop)    docker compose down ;;
     restart) docker compose restart ;;
     logs)    docker compose logs -f wolf ;;
@@ -1204,6 +1241,18 @@ PYEOF
             echo "  fixed: $GAME_DIR"
             found=1
         fi
+        # Propagate the Steam library seed into every Wolf session home so Steam
+        # uses /mnt/games/steam rather than defaulting to /home/retro.
+        if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/steam/steamapps/libraryfolders.vdf" ]; then
+            for _wdir in /etc/wolf/[0-9]*/Steam; do
+                [ -d "$_wdir" ] || continue
+                sudo mkdir -p "$_wdir/.local/share/Steam/steamapps"
+                sudo cp "$GAME_DIR/steam/steamapps/libraryfolders.vdf" \
+                        "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+                sudo chown -R 1000:1000 "$_wdir"
+                echo "  seeded libraryfolders.vdf → $_wdir"
+            done
+        fi
         [ "$found" = 0 ] && echo "  Nothing to fix (no Wolf app dirs found yet)."
         echo "Done. Reconnect from Moonlight to relaunch the app."
         ;;
@@ -1450,6 +1499,33 @@ if not added and not updated:
 PYEOF
         docker compose restart wolf
         log_success "Wolf restarted with updated config"
+
+        # Seed Steam library config so games go to game storage on first launch.
+        # Wolf creates session dirs after the restart; wait up to 30s for them.
+        if echo "$APP_KEYS" | grep -qw steam; then
+            log_info "Waiting for Wolf session dirs to appear..."
+            local _sw
+            for _sw in $(seq 1 30); do
+                compgen -G "/etc/wolf/[0-9]*/Steam" >/dev/null 2>&1 && break
+                sleep 1
+            done
+            local _INSTALL_VDF="$GAME_STORAGE_DIR/steam/steamapps/libraryfolders.vdf"
+            if [ -f "$_INSTALL_VDF" ]; then
+                local _seeded=0
+                for _wdir in /etc/wolf/[0-9]*/Steam; do
+                    [ -d "$_wdir" ] || continue
+                    mkdir -p "$_wdir/.local/share/Steam/steamapps"
+                    cp "$_INSTALL_VDF" "$_wdir/.local/share/Steam/steamapps/libraryfolders.vdf"
+                    chown -R 1000:1000 "$_wdir"
+                    ((_seeded++))
+                done
+                if [ "$_seeded" -gt 0 ]; then
+                    log_success "Steam library config seeded — games will install to $GAME_STORAGE_DIR/steam"
+                else
+                    log_warning "Steam session dir not found yet. Run: ./manage.sh fix-perms  after first Moonlight connection."
+                fi
+            fi
+        fi
     else
         log_warning "Wolf config not generated in time. Add apps manually to /etc/wolf/cfg/config.toml"
         log_warning "Then run: ./manage.sh apps"
