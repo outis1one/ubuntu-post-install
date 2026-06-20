@@ -168,6 +168,12 @@ CBLOCK
                 log_info "  rsync -av $_snippet_dir/ caddy-host:~/caddy-snippets/  (all at once)"
             fi
         }
+
+        write_readme() {
+            local _dir="$1"; shift
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
+        }
     fi
 
     # Globals — ACTUAL_USER/ACTUAL_HOME must come before DOCKER_DIR
@@ -428,6 +434,25 @@ NGINXCONF
     log_success "nginx config created"
 
     # ── 4. Standalone docker-compose.yml (per-service folder) ────────────────
+    # Only join caddy_net if Caddy is installed — otherwise the network doesn't
+    # exist and docker compose up will fail with "network not found".
+    local _CADDY_NET_BLOCK=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_BLOCK="    networks:
+      - caddy_net
+"
+    fi
+
+    local _CADDY_NET_SECTION=""
+    if [ -d "$DOCKER_DIR/caddy" ]; then
+        _CADDY_NET_SECTION="
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+"
+    fi
+
     cat > "$JS99ER_DIR/docker-compose.yml" << COMPOSE
 name: js99er
 
@@ -440,13 +465,7 @@ services:
     ports:
       - "${JS99ER_PORT}:80"
     restart: unless-stopped
-    networks:
-      - caddy_net
-
-networks:
-  caddy_net:
-    external: true
-    name: \${CADDY_NET:-caddy_net}
+${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 COMPOSE
     log_success "Created js99er/docker-compose.yml"
 
