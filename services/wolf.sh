@@ -1217,6 +1217,78 @@ PYEOF
         docker compose restart wolf
         echo "Wolf restarted. Apps will appear in Moonlight on next connection."
         ;;
+    reorder)
+        # Interactively reorder the Moonlight tiles by reordering the
+        # [[profiles.apps]] blocks in Wolf's config.toml (Moonlight shows them
+        # in file order). config.toml is root-owned, so run Python under sudo;
+        # the prompt is read from /dev/tty since stdin is the heredoc script.
+        if [ ! -f "$WOLF_CFG" ]; then
+            echo "Wolf config not found at $WOLF_CFG — start Wolf once first."
+            exit 1
+        fi
+        sudo python3 - "$WOLF_CFG" << 'PYEOF'
+import sys, re
+cfg = sys.argv[1]
+with open(cfg) as f:
+    lines = f.readlines()
+
+prof = [i for i, l in enumerate(lines) if l.strip() == '[[profiles]]']
+if not prof:
+    print('No [[profiles]] section found.'); sys.exit(1)
+start = prof[0]
+end   = prof[1] if len(prof) > 1 else len(lines)
+
+marks = [i for i in range(start, end) if lines[i].strip() == '[[profiles.apps]]']
+if len(marks) < 2:
+    print('Fewer than two apps — nothing to reorder.'); sys.exit(2)
+
+head     = lines[:start]
+preamble = lines[start:marks[0]]
+tail     = lines[end:]
+blocks   = [lines[s:(marks[k+1] if k+1 < len(marks) else end)]
+            for k, s in enumerate(marks)]
+
+def title_of(b):
+    for l in b:
+        m = re.match(r"\s*title = '(.*)'\s*$", l)
+        if m:
+            return m.group(1)
+    return '(untitled)'
+
+titles = [title_of(b) for b in blocks]
+print('\nCurrent Moonlight order:')
+for i, t in enumerate(titles, 1):
+    print('  %d. %s' % (i, t))
+print('\nType the new order as space-separated numbers (each once).')
+print('Example: 3 1 2%s   — blank line cancels.'
+      % (''.join(' %d' % n for n in range(4, len(blocks) + 1))))
+
+tty = open('/dev/tty')
+sys.stdout.write('New order: '); sys.stdout.flush()
+resp = tty.readline().strip()
+if not resp:
+    print('Cancelled — nothing changed.'); sys.exit(2)
+try:
+    order = [int(x) for x in resp.split()]
+except ValueError:
+    print('Invalid input — expected numbers.'); sys.exit(2)
+if sorted(order) != list(range(1, len(blocks) + 1)):
+    print('Must list each number 1..%d exactly once.' % len(blocks)); sys.exit(2)
+
+out = head + preamble
+for n in order:
+    out += blocks[n - 1]
+out += tail
+with open(cfg, 'w') as f:
+    f.writelines(out)
+print('\nNew order: ' + ' -> '.join(titles[n - 1] for n in order))
+sys.exit(0)
+PYEOF
+        if [ $? -eq 0 ]; then
+            docker compose restart wolf
+            echo "Wolf restarted — the new tile order shows on next Moonlight connection."
+        fi
+        ;;
     backup)
         echo "Set up backups with the modular system:  sudo ./setup.sh backup"
         ;;
@@ -1281,6 +1353,7 @@ PYEOF
         echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
         echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
+        echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh backup                       - How to set up backups"
         ;;
@@ -1584,7 +1657,7 @@ PYEOF
     echo "  Online together    → each player launches their own session,"
     echo "                        all connect to the same game server"
     echo ""
-    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps}"
+    echo "Manage:  cd $WOLF_DIR && ./manage.sh {start|stop|restart|logs|status|pin|update|apps|reorder}"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -1631,6 +1704,7 @@ cd $WOLF_DIR
 ./manage.sh status       # container status
 ./manage.sh update       # pull latest image and restart
 ./manage.sh apps         # add / update game launchers
+./manage.sh reorder      # reorder the Moonlight tile list
 \`\`\`
 
 ## Ports (open on firewall / router)
