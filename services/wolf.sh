@@ -1958,17 +1958,17 @@ PYEOF
                 "$_ia_wine" reg delete "$_ia_key" /v InstallSuccessful /f 2>/dev/null || true
         done
         sleep 1
-        # Start a wineserver anchor so background processes spawned by the
-        # WiX bootstrapper (EAappInstaller.exe) survive after it exits.
-        # Without this, wineserver shuts down when the foreground wine process
-        # exits, killing the real installer before it can write any files.
+        # Start wineserver in foreground mode (-f) so it keeps running even after
+        # the WiX bootstrapper exits. Without this, wineserver shuts down when
+        # the foreground wine process exits and kills the real installer.
+        # wineserver -f stays alive until explicitly killed with wineserver -k.
+        _ia_wineserver="${_ia_wine%/wine}/wineserver"
         echo "Starting wineserver anchor (keeps Wine alive while installer runs)..."
         docker exec -d -u 1000 \
             -e DISPLAY="$_ia_display" \
             -e WINEPREFIX="$_ia_wineprefix" \
-            -e WINE_LARGE_ADDRESS_AWARE=1 \
             "$_ia_container" \
-            "$_ia_wine" cmd.exe /c "timeout /t 900 > nul"
+            "$_ia_wineserver" -f
         sleep 3
 
         # Launch the installer detached — it will spawn background processes
@@ -2004,7 +2004,7 @@ PYEOF
         docker exec -u 1000 \
             -e WINEPREFIX="$_ia_wineprefix" \
             "$_ia_container" \
-            "$_ia_wine" wineserver -k 2>/dev/null || true
+            "$_ia_wineserver" -k 2>/dev/null || true
         if [ "$_ia_found" = 1 ]; then
             echo "Applying EA fix (registering link2ea:// handler)..."
             _apply_ea_fix "$_ia_appid"
