@@ -956,6 +956,44 @@ WOLF_STATE_DIR=$(grep '^WOLF_STATE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d
 WOLF_CFG="${WOLF_STATE_DIR:-/etc/wolf}/cfg/config.toml"
 WOLF_TZ=$(grep '^WOLF_TZ=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 
+# Locate the Steam home under the Wolf state folder (born on first Steam launch).
+_steam_home() {
+    find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1
+}
+
+# Pre-satisfy the EA App install-script markers in a game's Proton prefix so
+# Steam stops looping on "running install script (EA app)". The EA Desktop
+# InstallSuccessful flag is shared across all EA titles; the Valve has-run key
+# is per-AppID but identical in form for every EA game — so this works for any
+# of them. Safe + idempotent; only touches the AppID passed in.
+_apply_ea_fix() {
+    local appid="$1"
+    local steam_home reg
+    steam_home=$(_steam_home)
+    reg="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/system.reg"
+    if [ ! -f "$reg" ]; then
+        echo "No Proton prefix for AppID $appid yet (looked for $reg)."
+        echo "In Steam: set the game to GE-Proton (./manage.sh ge-proton),"
+        echo "click Play once to build the prefix, then re-run this."
+        return 1
+    fi
+    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null; then
+        echo "AppID $appid already patched. Cancel the 'installing' screen in Steam and Play."
+        return 0
+    fi
+    echo "Patching EA install-script markers for AppID $appid..."
+    # Wine v2 registry format uses doubled backslashes as the path separator.
+    {
+        printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+        printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+        printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
+        printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
+    } | sudo tee -a "$reg" >/dev/null
+    # Keep the prefix owned by the in-container user or Wine rejects it.
+    sudo chown 1000:1000 "$reg"
+    echo "Done. In Steam: cancel the 'running install script' screen if shown, then Play."
+}
+
 case "$1" in
     start)
         docker compose up -d
@@ -1572,66 +1610,55 @@ PYEOF
         echo "  Properties → Compatibility → Force the use of $NAME"
         ;;
     games)
-        # List installed Steam games with their AppIDs, read from the Steam
-        # app manifests. Use this to find the AppID to pass to fix-ea-game.
-        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
+        # List installed Steam games (numbered) with their AppIDs, then offer to
+        # apply the EA App install-script fix to whichever one you pick. Read
+        # straight from the Steam app manifests.
+        STEAM_HOME=$(_steam_home)
         APPSDIR="$STEAM_HOME/.steam/steam/steamapps"
         if [ ! -d "$APPSDIR" ]; then
             echo "No Steam library found yet. Launch Steam and install a game first."
             exit 1
         fi
         shopt -s nullglob
-        found=0
-        printf "  %-10s  %s\n" "AppID" "Name"
-        printf "  %-10s  %s\n" "-----" "----"
+        ids=(); names=(); n=0
         for acf in "$APPSDIR"/appmanifest_*.acf; do
             id=$(grep -oP '"appid"\s*"\K[0-9]+' "$acf" | head -1)
             name=$(grep -oP '"name"\s*"\K[^"]+' "$acf" | head -1)
-            printf "  %-10s  %s\n" "$id" "$name"
-            found=1
+            [ -z "$id" ] && continue
+            n=$((n+1))
+            ids+=("$id"); names+=("$name")
         done
-        [ "$found" = 0 ] && echo "  (no games installed yet)"
-        echo ""
-        echo "EA titles stuck on 'running install script': ./manage.sh fix-ea-game <AppID>"
-        ;;
-    fix-ea-game)
-        # Some EA titles on Steam (e.g. Star Wars Battlefront II 2017,
-        # AppID 1237950) bundle an EA App bootstrapper that hangs indefinitely
-        # under Proton inside a container, leaving the game stuck on "running
-        # install script (EA app)". This pre-satisfies the install-script
-        # markers in the game's Proton prefix so Steam skips the bootstrapper
-        # and launches the game directly.
-        #
-        # Safe + opt-in: only touches the AppID you pass, and only if its prefix
-        # already exists. No effect on other games or on users who don't own the
-        # title. Run AFTER setting the game to GE-Proton and clicking Play once
-        # (so the prefix exists). Usage: ./manage.sh fix-ea-game [appid]
-        APPID="${2:-1237950}"
-        STEAM_HOME=$(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1)
-        REG="$STEAM_HOME/.steam/steam/steamapps/compatdata/$APPID/pfx/system.reg"
-        if [ ! -f "$REG" ]; then
-            echo "No Proton prefix for AppID $APPID yet (looked for $REG)."
-            echo "In Steam: set the game to GE-Proton (./manage.sh ge-proton),"
-            echo "click Play once to build the prefix, then re-run this command."
-            exit 1
-        fi
-        if sudo grep -q 'EADesktopSetup' "$REG" 2>/dev/null; then
-            echo "AppID $APPID already patched. Cancel the 'installing' screen in Steam and Play."
+        if [ "$n" = 0 ]; then
+            echo "  (no games installed yet)"
             exit 0
         fi
-        echo "Patching EA install-script markers for AppID $APPID..."
-        # Wine v2 registry format uses doubled backslashes as the path separator.
-        # InstallSuccessful satisfies the EA Desktop string check; EADesktopSetup
-        # satisfies the Valve has-run-key check used by the bundled install script.
-        {
-            printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
-            printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
-            printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$APPID"
-            printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$APPID"
-        } | sudo tee -a "$REG" >/dev/null
-        # Keep the prefix owned by the in-container user or Wine rejects it.
-        sudo chown 1000:1000 "$REG"
-        echo "Done. In Steam: cancel the 'running install script' screen if shown, then Play."
+        printf "  %-4s %-10s  %s\n" "#" "AppID" "Name"
+        printf "  %-4s %-10s  %s\n" "-" "-----" "----"
+        for i in $(seq 1 "$n"); do
+            printf "  %-4s %-10s  %s\n" "$i" "${ids[$((i-1))]}" "${names[$((i-1))]}"
+        done
+        echo ""
+        echo "An EA game stuck on 'running install script (EA app)'? Enter its"
+        echo "number to apply the EA fix, or just press Enter to skip."
+        read -r -p "  Apply EA fix to # (or Enter to skip): " pick
+        if [ -z "$pick" ]; then
+            exit 0
+        fi
+        if ! [[ "$pick" =~ ^[0-9]+$ ]] || [ "$pick" -lt 1 ] || [ "$pick" -gt "$n" ]; then
+            echo "Not a valid number from the list."
+            exit 1
+        fi
+        sel_id="${ids[$((pick-1))]}"
+        sel_name="${names[$((pick-1))]}"
+        echo "Applying EA fix to '$sel_name' (AppID $sel_id)..."
+        _apply_ea_fix "$sel_id"
+        ;;
+    fix-ea-game)
+        # Apply the EA App install-script fix directly to an AppID (defaults to
+        # Star Wars Battlefront II 2017, AppID 1237950). For an interactive
+        # picker use './manage.sh games' instead. Run AFTER setting the game to
+        # GE-Proton and clicking Play once (so the Proton prefix exists).
+        _apply_ea_fix "${2:-1237950}"
         ;;
     fix-perms)
         # Wolf creates each app's home dir under WOLF_STATE_DIR/<session-id>/<App>
@@ -1722,8 +1749,8 @@ COMPEOF
         echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
-        echo "  ./manage.sh games                        - List installed games + their AppIDs"
-        echo "  ./manage.sh fix-ea-game [appid]          - Unstick EA App install loop (default: SWBF2 1237950)"
+        echo "  ./manage.sh games                        - List games; pick one to apply the EA fix"
+        echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh install-completion           - Enable tab-completion for this script"
         echo "  ./manage.sh backup                       - How to set up backups"
@@ -2064,9 +2091,8 @@ PYEOF
     echo "    1. ./manage.sh ge-proton            # install GE-Proton once"
     echo "    2. In Steam: game → Properties → Compatibility → Force GE-Proton"
     echo "    3. Click Play once (builds the Proton prefix; will hang — that's ok)"
-    echo "    4. ./manage.sh games                # find the game's AppID"
-    echo "    5. ./manage.sh fix-ea-game <appid>  # e.g. 1237950 for SWBF2 2017"
-    echo "    6. Cancel the 'installing' screen in Steam, Play again — it launches"
+    echo "    4. ./manage.sh games                # pick the game's number to fix it"
+    echo "    5. Cancel the 'installing' screen in Steam, Play again — it launches"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -2133,17 +2159,22 @@ cd $WOLF_DIR
 #                                          Compatibility → Force GE-Proton
 #                                       3. Click Play once (builds the prefix;
 #                                          it will hang — that's expected)
-./manage.sh games                     # 4. find the game's AppID
-./manage.sh fix-ea-game 1237950       # 5. unstick it (1237950 = SWBF2 2017)
-#                                       6. Cancel the 'installing' screen,
+./manage.sh games                     # 4. lists games numbered; enter the
+#                                          game's number to apply the EA fix
+#                                       5. Cancel the 'installing' screen,
 #                                          Play again — it launches.
 \`\`\`
 
+\`games\` lists each installed game with a number and AppID, then asks which
+one to fix — just type the number. (\`fix-ea-game [appid]\` does the same thing
+non-interactively, defaulting to SWBF2 2017's \`1237950\`.)
+
 Notes:
-- Steam **AppIDs are global** — SWBF2 (2017) is always \`1237950\`, on every
-  machine. \`fix-ea-game\` with no argument defaults to it.
-- \`fix-ea-game\` is safe and opt-in: it only touches the AppID you pass, only
-  if that game's Proton prefix exists, and is a no-op otherwise.
+- Steam **AppIDs are global** — SWBF2 (2017) is always \`1237950\` on every
+  machine — but you don't need to know it; the \`games\` picker handles it.
+- The fix is safe and opt-in: it only touches the game you pick, only if its
+  Proton prefix exists, and is idempotent. The EA Desktop "installed" marker is
+  shared across all EA titles, so the same fix works for any EA game.
 - \`ge-proton\` takes an optional version to pin, e.g.
   \`./manage.sh ge-proton GE-Proton10-34\`.
 
