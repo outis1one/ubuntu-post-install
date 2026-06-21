@@ -962,6 +962,41 @@ _steam_home() {
     find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1
 }
 
+# Download the GE-Proton tarball to a local cache dir so it is ready to
+# extract the moment Steam has launched (no re-download needed).
+# Idempotent — skips the download if the cache file already exists.
+_cache_ge_proton() {
+    local version="${1:-}"
+    local cache_dir="$SCRIPT_DIR/ge-proton-cache"
+    mkdir -p "$cache_dir"
+    local url name
+    if [ -n "$version" ]; then
+        url="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$version/$version.tar.gz"
+    else
+        echo "Fetching latest GE-Proton release info..."
+        url=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+        if [ -z "$url" ]; then
+            echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
+            return 1
+        fi
+    fi
+    name=$(basename "$url" .tar.gz)
+    local cached="$cache_dir/$name.tar.gz"
+    if [ -f "$cached" ]; then
+        echo "GE-Proton already cached: $cached"
+        echo "$name" > "$cache_dir/.version"
+        return 0
+    fi
+    echo "Downloading $name (~500 MB) to cache..."
+    if curl -L -o "$cached" "$url"; then
+        echo "$name" > "$cache_dir/.version"
+        echo "Cached: $cached"
+    else
+        echo "Download failed."; rm -f "$cached"; return 1
+    fi
+}
+
 # Pre-satisfy the EA App install-script markers in a game's Proton prefix so
 # Steam stops looping on "running install script (EA app)". The EA Desktop
 # InstallSuccessful flag is shared across all EA titles; the Valve has-run key
@@ -1074,6 +1109,23 @@ case "$1" in
     start)
         docker compose up -d
         echo "Wolf started. Pair Moonlight to this server's IP."
+        # If GE-Proton is cached but not yet extracted (Steam launched since
+        # install), extract it now so it appears in the Compatibility dropdown.
+        _STEAM_H=$(_steam_home)
+        if [ -n "$_STEAM_H" ]; then
+            _COMPAT="$_STEAM_H/.steam/compatibilitytools.d"
+            _CACHE="$SCRIPT_DIR/ge-proton-cache"
+            _CACHED_VER=""
+            [ -f "$_CACHE/.version" ] && _CACHED_VER=$(cat "$_CACHE/.version")
+            if [ -n "$_CACHED_VER" ] && [ -f "$_CACHE/$_CACHED_VER.tar.gz" ] \
+               && [ ! -d "$_COMPAT/$_CACHED_VER" ]; then
+                echo "Extracting cached GE-Proton $_CACHED_VER..."
+                sudo mkdir -p "$_COMPAT"
+                sudo tar -xzf "$_CACHE/$_CACHED_VER.tar.gz" -C "$_COMPAT"
+                sudo chown -R 1000:1000 "$_COMPAT"
+                echo "GE-Proton $_CACHED_VER ready. In Steam: game → Properties → Compatibility → Force $_CACHED_VER"
+            fi
+        fi
         ;;
     stop)    docker compose down ;;
     restart) docker compose restart ;;
@@ -1657,30 +1709,48 @@ PYEOF
         # Steam scans ~/.steam/root/compatibilitytools.d, which resolves to
         # <Steam home>/.steam/compatibilitytools.d on disk.
         COMPAT="$STEAM_HOME/.steam/compatibilitytools.d"
-        echo "Fetching latest GE-Proton release info..."
-        URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
-              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
-        if [ -z "$URL" ]; then
-            echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
-            exit 1
-        fi
-        # Optional: pin a specific GE-Proton version for reproducibility,
-        # e.g. ./manage.sh ge-proton GE-Proton10-34
+        # Check for a pre-downloaded cache (populated by wolf.sh at install time).
+        CACHE_DIR="$SCRIPT_DIR/ge-proton-cache"
+        CACHED_VER=""
+        [ -f "$CACHE_DIR/.version" ] && CACHED_VER=$(cat "$CACHE_DIR/.version")
+
         if [ -n "$2" ]; then
-            URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$2/$2.tar.gz"
+            # Explicit version requested — use cache if it matches, else download.
+            NAME="$2"
+            CACHED_FILE="$CACHE_DIR/$NAME.tar.gz"
+        elif [ -n "$CACHED_VER" ] && [ -f "$CACHE_DIR/$CACHED_VER.tar.gz" ]; then
+            NAME="$CACHED_VER"
+            CACHED_FILE="$CACHE_DIR/$NAME.tar.gz"
+            echo "Using pre-downloaded GE-Proton: $NAME"
+        else
+            echo "Fetching latest GE-Proton release info..."
+            URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+                  | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+            if [ -z "$URL" ]; then
+                echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
+                exit 1
+            fi
+            NAME=$(basename "$URL" .tar.gz)
+            CACHED_FILE=""
         fi
-        NAME=$(basename "$URL" .tar.gz)
+
         if [ -d "$COMPAT/$NAME" ]; then
             echo "$NAME already installed."
         else
-            echo "Downloading $NAME (~500 MB)..."
             sudo mkdir -p "$COMPAT"
-            TMP=$(mktemp -d)
-            if ! curl -L -o "$TMP/ge.tar.gz" "$URL"; then
-                echo "Download failed."; rm -rf "$TMP"; exit 1
+            if [ -n "$CACHED_FILE" ] && [ -f "$CACHED_FILE" ]; then
+                echo "Extracting $NAME from cache..."
+                sudo tar -xzf "$CACHED_FILE" -C "$COMPAT"
+            else
+                URL="${URL:-https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$NAME/$NAME.tar.gz}"
+                echo "Downloading $NAME (~500 MB)..."
+                TMP=$(mktemp -d)
+                if ! curl -L -o "$TMP/ge.tar.gz" "$URL"; then
+                    echo "Download failed."; rm -rf "$TMP"; exit 1
+                fi
+                sudo tar -xzf "$TMP/ge.tar.gz" -C "$COMPAT"
+                rm -rf "$TMP"
             fi
-            sudo tar -xzf "$TMP/ge.tar.gz" -C "$COMPAT"
-            rm -rf "$TMP"
         fi
         # Wolf's app containers run as uid 1000 (retro). The compat tool must be
         # owned by that user or Wine refuses to use it / Steam can't launch it.
@@ -2360,6 +2430,34 @@ Then reconnect from Moonlight.
 sudo ./setup.sh backup   # covers wolf-state/ saves and ES-DE settings
 \`\`\`
 MD
+
+    # ── Pre-download GE-Proton ────────────────────────────────────────────────
+    # GE-Proton is required for EA games (Battlefront II etc.) and needs to be
+    # installed into Steam's compatibilitytools.d after first launch. Download
+    # the tarball now while we have the user's attention so that
+    # './manage.sh ge-proton' later is instant (just extracts from cache).
+    log_info "Pre-downloading GE-Proton for EA game support (~500 MB)..."
+    (
+        CACHE_DIR="$WOLF_DIR/ge-proton-cache"
+        mkdir -p "$CACHE_DIR"
+        URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+        if [ -z "$URL" ]; then
+            log_warning "Could not fetch GE-Proton URL — run './manage.sh ge-proton' later."
+        else
+            NAME=$(basename "$URL" .tar.gz)
+            CACHED="$CACHE_DIR/$NAME.tar.gz"
+            if [ -f "$CACHED" ]; then
+                log_success "GE-Proton already cached: $NAME"
+            elif curl -L -o "$CACHED" "$URL"; then
+                echo "$NAME" > "$CACHE_DIR/.version"
+                log_success "GE-Proton cached: $NAME"
+            else
+                log_warning "GE-Proton download failed — run './manage.sh ge-proton' later."
+                rm -f "$CACHED"
+            fi
+        fi
+    )
 
     local START_WOLF=""
     prompt_yn "Start Wolf now? (y/n):" "y" START_WOLF
