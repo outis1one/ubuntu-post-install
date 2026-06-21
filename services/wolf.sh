@@ -699,7 +699,8 @@ UDEV
     mkdir -p "$GAME_STORAGE_DIR/saves" \
              "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
-             "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators"
+             "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators" \
+             "$GAME_STORAGE_DIR/steam-cache"
 
     # ── Wolf state folder on the game drive ───────────────────────────────────
     # This is the clean way to keep Steam (and everything else) off the OS
@@ -1026,6 +1027,10 @@ case "$1" in
         else
             echo "GAME_STORAGE_DIR=${GAME_DIR}" >> "$SCRIPT_DIR/.env"
         fi
+
+        # Ensure steam-cache dir exists (persists DXVK/Mesa shader cache across sessions)
+        mkdir -p "$GAME_DIR/steam-cache"
+        sudo chown -R 1000:1000 "$GAME_DIR/steam-cache" 2>/dev/null || true
 
         if [ ! -f "$WOLF_CFG" ]; then
             echo "Wolf config not found at $WOLF_CFG — is Wolf running?"
@@ -1795,7 +1800,8 @@ CATALOG = {
         name='WolfSteam', title='Steam',
         icon='https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png',
         image='ghcr.io/games-on-whales/steam:edge',
-        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro'],
+        mounts=['/etc/localtime:/etc/localtime:ro', '/etc/timezone:/etc/timezone:ro',
+                f'{games}/steam-cache:/home/retro/.cache:rw'],
         env=['PROTON_LOG=1', 'RUN_SWAY=true',
              'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*'],
         cap_add=['SYS_ADMIN', 'SYS_NICE', 'SYS_PTRACE', 'NET_RAW', 'MKNOD', 'NET_ADMIN'],
