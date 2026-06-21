@@ -967,32 +967,71 @@ _steam_home() {
 # InstallSuccessful flag is shared across all EA titles; the Valve has-run key
 # is per-AppID but identical in form for every EA game — so this works for any
 # of them. Safe + idempotent; only touches the AppID passed in.
+#
+# IMPORTANT: wineserver holds registry state in memory and flushes it back to
+# disk, overwriting any edits made while the container is running. We stop the
+# WolfSteam container first, patch the files on disk, then restart — so the
+# keys survive intact when wineserver next starts.
 _apply_ea_fix() {
     local appid="$1"
-    local steam_home reg
+    local steam_home reg acf container_was_running=0
     steam_home=$(_steam_home)
     reg="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/system.reg"
+    acf="$steam_home/.steam/steam/steamapps/appmanifest_${appid}.acf"
+
     if [ ! -f "$reg" ]; then
         echo "No Proton prefix for AppID $appid yet (looked for $reg)."
         echo "In Steam: set the game to GE-Proton (./manage.sh ge-proton),"
         echo "click Play once to build the prefix, then re-run this."
         return 1
     fi
-    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null; then
-        echo "AppID $appid already patched. Cancel the 'installing' screen in Steam and Play."
-        return 0
+
+    # Stop the Steam container so wineserver is not running when we edit the
+    # registry.  We restart it at the end so the user's session resumes.
+    local steam_container
+    steam_container=$(docker ps --format '{{.Names}}' | grep -i 'WolfSteam' | head -1)
+    if [ -n "$steam_container" ]; then
+        echo "Stopping $steam_container so wineserver is not running during patch..."
+        docker stop "$steam_container" >/dev/null
+        container_was_running=1
+        sleep 2
     fi
-    echo "Patching EA install-script markers for AppID $appid..."
-    # Wine v2 registry format uses doubled backslashes as the path separator.
-    {
-        printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
-        printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
-        printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
-        printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
-    } | sudo tee -a "$reg" >/dev/null
-    # Keep the prefix owned by the in-container user or Wine rejects it.
-    sudo chown 1000:1000 "$reg"
-    echo "Done. In Steam: cancel the 'running install script' screen if shown, then Play."
+
+    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null; then
+        echo "Registry keys already present in AppID $appid prefix."
+    else
+        echo "Patching EA install-script markers for AppID $appid..."
+        # Wine v2 registry format uses doubled backslashes as the path separator.
+        # Both the 64-bit path and the Wow6432Node path are written; Steam's
+        # HasRunStringKey check reads the 64-bit path (no Wow6432Node).
+        {
+            printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+            printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
+            printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
+            printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
+        } | sudo tee -a "$reg" >/dev/null
+        # Keep the prefix owned by the in-container user or Wine rejects it.
+        sudo chown 1000:1000 "$reg"
+        echo "  Registry patched."
+    fi
+
+    # Reset StateFlags to 4 (fully installed) so Steam won't re-run install scripts.
+    if [ -f "$acf" ]; then
+        sudo sed -i 's/"StateFlags"\s*"[0-9]*"/"StateFlags"\t\t"4"/' "$acf"
+        # StateFlags 4 = update required (re-runs install scripts); 6 = fully installed.
+        # We want 6 so Steam launches the game directly.
+        sudo sed -i 's/"StateFlags"\t\t"4"/"StateFlags"\t\t"6"/' "$acf"
+        sudo chown 1000:1000 "$acf"
+        echo "  StateFlags set to 6 (fully installed)."
+    fi
+
+    if [ "$container_was_running" = 1 ]; then
+        echo "Restarting Wolf (Steam will reconnect automatically)..."
+        docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d >/dev/null 2>&1 || \
+            docker start "$steam_container" >/dev/null 2>&1 || true
+        echo "  Wolf restarted. Reconnect from Moonlight and click Play."
+    fi
+    echo "Done. In Steam: if the 'running install script' screen appears, cancel it, then Play."
 }
 
 case "$1" in
