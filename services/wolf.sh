@@ -1704,8 +1704,9 @@ _manage_wolf_complete() {
                     install-completion backup"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
-# Register for any script named manage.sh regardless of path
+# Register for both 'manage.sh' and './manage.sh' invocation styles
 complete -F _manage_wolf_complete manage.sh
+complete -F _manage_wolf_complete ./manage.sh
 COMPEOF
         # Also source it immediately in the current shell if possible
         echo "source \"$COMP_FILE\"" >> "$HOME/.bash_completion" 2>/dev/null || true
