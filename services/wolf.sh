@@ -997,18 +997,54 @@ _apply_ea_fix() {
         sleep 2
     fi
 
-    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null; then
+    # Locate EADesktop.exe inside the Proton prefix (EA App installs here after
+    # EAappInstaller finishes — it runs async so may appear after first Play).
+    local pfx_root
+    pfx_root="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/drive_c"
+    local ea_exe
+    ea_exe=$(sudo find "$pfx_root" -maxdepth 6 \
+        -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
+        -print -quit 2>/dev/null)
+
+    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null && \
+       sudo grep -q 'link2ea' "$reg" 2>/dev/null; then
         echo "Registry keys already present in AppID $appid prefix."
     else
         echo "Patching EA install-script markers for AppID $appid..."
-        # Wine v2 registry format uses doubled backslashes as the path separator.
-        # Both the 64-bit path and the Wow6432Node path are written; Steam's
-        # HasRunStringKey check reads the 64-bit path (no Wow6432Node).
+        # Wine v2 registry format uses doubled backslashes as path separator.
+        # Wow6432Node version is the one wineserver preserves on flush;
+        # Steam's HasRunStringKey check is satisfied by the 32-bit view.
         {
             printf '\n[Software\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
             printf '\n[Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop] 1781772837\n"InstallSuccessful"="true"\n'
             printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
             printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
+
+            # Register the link2ea:// URL protocol so SWBF2 can hand off to EA App.
+            # SWBF2 calls ShellExecute("link2ea://launchgame/...") and exits; without
+            # this handler Wine returns error 31 and the game never gets past the
+            # launch screen.
+            if [ -n "$ea_exe" ]; then
+                # Convert absolute host path to a Wine drive_c–relative Windows path.
+                local win_path
+                win_path=$(echo "$ea_exe" \
+                    | sed "s|$pfx_root||" \
+                    | sed 's|/|\\\\|g' \
+                    | sed 's|^|C:|')
+                printf '\n[Software\\\\Classes\\\\link2ea] 1781772837\n@="link2ea Protocol"\n"URL Protocol"=""\n'
+                printf '\n[Software\\\\Classes\\\\link2ea\\\\shell] 1781772837\n'
+                printf '\n[Software\\\\Classes\\\\link2ea\\\\shell\\\\open] 1781772837\n'
+                printf '\n[Software\\\\Classes\\\\link2ea\\\\shell\\\\open\\\\command] 1781772837\n@="%s \\"%%1\\""\n' "$win_path"
+                printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea] 1781772837\n@="link2ea Protocol"\n"URL Protocol"=""\n'
+                printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell] 1781772837\n'
+                printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell\\\\open] 1781772837\n'
+                printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell\\\\open\\\\command] 1781772837\n@="%s \\"%%1\\""\n' "$win_path"
+                echo "  link2ea:// handler registered → $win_path"
+            else
+                echo "  WARNING: EADesktop.exe not found yet — link2ea:// handler NOT registered."
+                echo "  Run './manage.sh wait-ea-app $appid' after clicking Play once"
+                echo "  to wait for EAappInstaller to finish and then register the handler."
+            fi
         } | sudo tee -a "$reg" >/dev/null
         # Keep the prefix owned by the in-container user or Wine rejects it.
         sudo chown 1000:1000 "$reg"
@@ -1705,6 +1741,49 @@ PYEOF
         # GE-Proton and clicking Play once (so the Proton prefix exists).
         _apply_ea_fix "${2:-1237950}"
         ;;
+    wait-ea-app)
+        # Wait for EAappInstaller to finish installing EA App in the background
+        # (it runs async via RunType=1 in installScript.vdf), then apply the full
+        # EA fix including the link2ea:// protocol handler registration.
+        #
+        # Usage: ./manage.sh wait-ea-app [AppID]
+        #
+        # Flow:
+        #   1. Click Play on the game in Steam — SWBF2 will launch and quit after ~6s
+        #   2. EAappInstaller is now running in the background inside the container
+        #   3. Run this command — it polls every 15s for EADesktop.exe to appear
+        #   4. Once found, it stops the container, patches the registry, restarts
+        _wea_appid="${2:-1237950}"
+        _wea_steam_home=$(_steam_home)
+        _wea_pfx="$_wea_steam_home/.steam/steam/steamapps/compatdata/$_wea_appid/pfx/drive_c"
+        echo "Watching for EA App (EADesktop.exe) to appear in AppID $_wea_appid prefix..."
+        echo "If you haven't yet: go to Steam → click Play on the game now."
+        echo "Press Ctrl+C to abort."
+        _wea_found=0
+        for _wea_i in $(seq 1 80); do
+            _wea_exe=$(sudo find "$_wea_pfx" -maxdepth 6 \
+                -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
+                -print -quit 2>/dev/null)
+            if [ -n "$_wea_exe" ]; then
+                _wea_found=1
+                echo ""
+                echo "EA App found at: $_wea_exe"
+                break
+            fi
+            printf "\r  Waiting... (%ds elapsed)" "$((_wea_i * 15))"
+            sleep 15
+        done
+        if [ "$_wea_found" = 0 ]; then
+            echo ""
+            echo "EA App did not appear after 20 minutes. Things to check:"
+            echo "  • Did you click Play in Steam while Wolf was running?"
+            echo "  • Is the WolfSteam container still up? (./manage.sh status)"
+            echo "  • Check container logs: docker logs \$(docker ps --format '{{.Names}}' | grep WolfSteam | head -1)"
+            exit 1
+        fi
+        echo "Applying full EA fix (includes link2ea:// handler)..."
+        _apply_ea_fix "$_wea_appid"
+        ;;
     fix-perms)
         # Wolf creates each app's home dir under WOLF_STATE_DIR/<session-id>/<App>
         # and mounts it as /home/retro inside the app container. If anything in
@@ -1739,7 +1818,7 @@ PYEOF
 _manage_wolf_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local commands="start stop restart logs status pin update apps reorder
-                    add-web ge-proton games fix-ea-game fix-perms
+                    add-web ge-proton games fix-ea-game wait-ea-app fix-perms
                     install-completion backup"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
@@ -1796,7 +1875,8 @@ COMPEOF
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
         echo "  ./manage.sh games                        - List games; pick one to apply the EA fix"
-        echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)"
+        echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)
+  ./manage.sh wait-ea-app [appid]          - Watch for EA App to install, then register link2ea:// handler"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh install-completion           - Enable tab-completion for this script"
         echo "  ./manage.sh backup                       - How to set up backups"
