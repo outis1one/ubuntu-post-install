@@ -962,6 +962,41 @@ _steam_home() {
     find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1
 }
 
+# Download the GE-Proton tarball to a local cache dir so it is ready to
+# extract the moment Steam has launched (no re-download needed).
+# Idempotent — skips the download if the cache file already exists.
+_cache_ge_proton() {
+    local version="${1:-}"
+    local cache_dir="$SCRIPT_DIR/ge-proton-cache"
+    mkdir -p "$cache_dir"
+    local url name
+    if [ -n "$version" ]; then
+        url="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$version/$version.tar.gz"
+    else
+        echo "Fetching latest GE-Proton release info..."
+        url=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+        if [ -z "$url" ]; then
+            echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
+            return 1
+        fi
+    fi
+    name=$(basename "$url" .tar.gz)
+    local cached="$cache_dir/$name.tar.gz"
+    if [ -f "$cached" ]; then
+        echo "GE-Proton already cached: $cached"
+        echo "$name" > "$cache_dir/.version"
+        return 0
+    fi
+    echo "Downloading $name (~500 MB) to cache..."
+    if curl -L -o "$cached" "$url"; then
+        echo "$name" > "$cache_dir/.version"
+        echo "Cached: $cached"
+    else
+        echo "Download failed."; rm -f "$cached"; return 1
+    fi
+}
+
 # Pre-satisfy the EA App install-script markers in a game's Proton prefix so
 # Steam stops looping on "running install script (EA app)". The EA Desktop
 # InstallSuccessful flag is shared across all EA titles; the Valve has-run key
@@ -997,18 +1032,33 @@ _apply_ea_fix() {
         sleep 2
     fi
 
-    # Locate EADesktop.exe inside the Proton prefix (EA App installs here after
-    # EAappInstaller finishes — it runs async so may appear after first Play).
+    # Locate EA App executables inside the Proton prefix.
+    # Prefer EADesktop.exe (full EA App install); fall back to Link2EA.exe (stub or partial).
     local pfx_root
     pfx_root="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/drive_c"
-    local ea_exe
-    ea_exe=$(sudo find "$pfx_root" -maxdepth 6 \
+    local ureg
+    ureg="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/user.reg"
+    local ea_exe link2ea_exe
+    ea_exe=$(sudo find "$pfx_root" -maxdepth 8 \
         -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
         -print -quit 2>/dev/null)
+    link2ea_exe=$(sudo find "$pfx_root" -maxdepth 8 \
+        -ipath "*/Electronic Arts/EA Desktop/*/EA Desktop/Link2EA.exe" \
+        -print -quit 2>/dev/null)
 
-    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null && \
-       sudo grep -q 'link2ea' "$reg" 2>/dev/null; then
+    # check both system.reg AND user.reg for existing link2ea registration
+    local _has_link2ea=0
+    { sudo grep -q 'link2ea' "$reg" 2>/dev/null || sudo grep -q 'link2ea' "$ureg" 2>/dev/null; } \
+        && _has_link2ea=1
+
+    if sudo grep -q 'EADesktopSetup' "$reg" 2>/dev/null && [ "$_has_link2ea" = 1 ]; then
         echo "Registry keys already present in AppID $appid prefix."
+        if [ -n "$ea_exe" ]; then
+            echo "  EA App: $ea_exe"
+        elif [ -n "$link2ea_exe" ]; then
+            echo "  Link2EA.exe: $link2ea_exe"
+            echo "  NOTE: Full EA App not yet installed. Run ./manage.sh install-ea-app to install it."
+        fi
     else
         echo "Patching EA install-script markers for AppID $appid..."
         # Wine v2 registry format uses doubled backslashes as path separator.
@@ -1020,14 +1070,25 @@ _apply_ea_fix() {
             printf '\n[Software\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
             printf '\n[Software\\\\Wow6432Node\\\\Valve\\\\Steam\\\\Apps\\\\%s] 1781772837\n"EADesktopSetup"=dword:00000001\n' "$appid"
 
-            # Register the link2ea:// URL protocol so SWBF2 can hand off to EA App.
-            # SWBF2 calls ShellExecute("link2ea://launchgame/...") and exits; without
-            # this handler Wine returns error 31 and the game never gets past the
-            # launch screen.
+            # Register the link2ea:// URL protocol handler in system.reg (HKLM).
+            # SWBF2 calls ShellExecute("link2ea://launchgame/...") and exits; the
+            # EA App (EADesktop.exe) re-authenticates and re-launches the game.
+            # GE-Proton's steam.exe intercepts link2ea:// and forwards to Link2EA.exe.
+            # NOTE: user.reg (HKCU) takes priority; GE-Proton may already have registered
+            #       this there during prefix setup. Check with: ./manage.sh diagnose-ea
+            local _handler_exe=""
             if [ -n "$ea_exe" ]; then
-                # Convert absolute host path to a Wine drive_c–relative Windows path.
+                _handler_exe="$ea_exe"
+                echo "  Using real EA App: $ea_exe"
+            elif [ -n "$link2ea_exe" ]; then
+                _handler_exe="$link2ea_exe"
+                echo "  Using Link2EA.exe stub: $link2ea_exe"
+                echo "  NOTE: Run ./manage.sh install-ea-app to install full EA App."
+            fi
+
+            if [ -n "$_handler_exe" ]; then
                 local win_path
-                win_path=$(echo "$ea_exe" \
+                win_path=$(echo "$_handler_exe" \
                     | sed "s|$pfx_root||" \
                     | sed 's|/|\\\\|g' \
                     | sed 's|^|C:|')
@@ -1039,14 +1100,15 @@ _apply_ea_fix() {
                 printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell] 1781772837\n'
                 printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell\\\\open] 1781772837\n'
                 printf '\n[Software\\\\Wow6432Node\\\\Classes\\\\link2ea\\\\shell\\\\open\\\\command] 1781772837\n@="%s \\"%%1\\""\n' "$win_path"
-                echo "  link2ea:// handler registered → $win_path"
+                echo "  link2ea:// handler registered in system.reg → $win_path"
             else
-                echo "  WARNING: EADesktop.exe not found yet — link2ea:// handler NOT registered."
-                echo "  Run './manage.sh wait-ea-app $appid' after clicking Play once"
-                echo "  to wait for EAappInstaller to finish and then register the handler."
+                echo "  WARNING: EA App not found (neither EADesktop.exe nor Link2EA.exe)."
+                echo "  link2ea:// handler NOT registered in system.reg."
+                echo "  GE-Proton may have already registered it in user.reg — check with:"
+                echo "    ./manage.sh diagnose-ea $appid"
+                echo "  To install EA App: ./manage.sh install-ea-app $appid"
             fi
         } | sudo tee -a "$reg" >/dev/null
-        # Keep the prefix owned by the in-container user or Wine rejects it.
         sudo chown 1000:1000 "$reg"
         echo "  Registry patched."
     fi
@@ -1074,6 +1136,23 @@ case "$1" in
     start)
         docker compose up -d
         echo "Wolf started. Pair Moonlight to this server's IP."
+        # If GE-Proton is cached but not yet extracted (Steam launched since
+        # install), extract it now so it appears in the Compatibility dropdown.
+        _STEAM_H=$(_steam_home)
+        if [ -n "$_STEAM_H" ]; then
+            _COMPAT="$_STEAM_H/.steam/compatibilitytools.d"
+            _CACHE="$SCRIPT_DIR/ge-proton-cache"
+            _CACHED_VER=""
+            [ -f "$_CACHE/.version" ] && _CACHED_VER=$(cat "$_CACHE/.version")
+            if [ -n "$_CACHED_VER" ] && [ -f "$_CACHE/$_CACHED_VER.tar.gz" ] \
+               && [ ! -d "$_COMPAT/$_CACHED_VER" ]; then
+                echo "Extracting cached GE-Proton $_CACHED_VER..."
+                sudo mkdir -p "$_COMPAT"
+                sudo tar -xzf "$_CACHE/$_CACHED_VER.tar.gz" -C "$_COMPAT"
+                sudo chown -R 1000:1000 "$_COMPAT"
+                echo "GE-Proton $_CACHED_VER ready. In Steam: game → Properties → Compatibility → Force $_CACHED_VER"
+            fi
+        fi
         ;;
     stop)    docker compose down ;;
     restart) docker compose restart ;;
@@ -1657,30 +1736,48 @@ PYEOF
         # Steam scans ~/.steam/root/compatibilitytools.d, which resolves to
         # <Steam home>/.steam/compatibilitytools.d on disk.
         COMPAT="$STEAM_HOME/.steam/compatibilitytools.d"
-        echo "Fetching latest GE-Proton release info..."
-        URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
-              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
-        if [ -z "$URL" ]; then
-            echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
-            exit 1
-        fi
-        # Optional: pin a specific GE-Proton version for reproducibility,
-        # e.g. ./manage.sh ge-proton GE-Proton10-34
+        # Check for a pre-downloaded cache (populated by wolf.sh at install time).
+        CACHE_DIR="$SCRIPT_DIR/ge-proton-cache"
+        CACHED_VER=""
+        [ -f "$CACHE_DIR/.version" ] && CACHED_VER=$(cat "$CACHE_DIR/.version")
+
         if [ -n "$2" ]; then
-            URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$2/$2.tar.gz"
+            # Explicit version requested — use cache if it matches, else download.
+            NAME="$2"
+            CACHED_FILE="$CACHE_DIR/$NAME.tar.gz"
+        elif [ -n "$CACHED_VER" ] && [ -f "$CACHE_DIR/$CACHED_VER.tar.gz" ]; then
+            NAME="$CACHED_VER"
+            CACHED_FILE="$CACHE_DIR/$NAME.tar.gz"
+            echo "Using pre-downloaded GE-Proton: $NAME"
+        else
+            echo "Fetching latest GE-Proton release info..."
+            URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+                  | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+            if [ -z "$URL" ]; then
+                echo "Could not determine GE-Proton download URL (GitHub rate-limited or offline?)."
+                exit 1
+            fi
+            NAME=$(basename "$URL" .tar.gz)
+            CACHED_FILE=""
         fi
-        NAME=$(basename "$URL" .tar.gz)
+
         if [ -d "$COMPAT/$NAME" ]; then
             echo "$NAME already installed."
         else
-            echo "Downloading $NAME (~500 MB)..."
             sudo mkdir -p "$COMPAT"
-            TMP=$(mktemp -d)
-            if ! curl -L -o "$TMP/ge.tar.gz" "$URL"; then
-                echo "Download failed."; rm -rf "$TMP"; exit 1
+            if [ -n "$CACHED_FILE" ] && [ -f "$CACHED_FILE" ]; then
+                echo "Extracting $NAME from cache..."
+                sudo tar -xzf "$CACHED_FILE" -C "$COMPAT"
+            else
+                URL="${URL:-https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$NAME/$NAME.tar.gz}"
+                echo "Downloading $NAME (~500 MB)..."
+                TMP=$(mktemp -d)
+                if ! curl -L -o "$TMP/ge.tar.gz" "$URL"; then
+                    echo "Download failed."; rm -rf "$TMP"; exit 1
+                fi
+                sudo tar -xzf "$TMP/ge.tar.gz" -C "$COMPAT"
+                rm -rf "$TMP"
             fi
-            sudo tar -xzf "$TMP/ge.tar.gz" -C "$COMPAT"
-            rm -rf "$TMP"
         fi
         # Wolf's app containers run as uid 1000 (retro). The compat tool must be
         # owned by that user or Wine refuses to use it / Steam can't launch it.
@@ -1784,6 +1881,169 @@ PYEOF
         echo "Applying full EA fix (includes link2ea:// handler)..."
         _apply_ea_fix "$_wea_appid"
         ;;
+    install-ea-app)
+        # Run EAappInstaller.exe INSIDE the WolfSteam container using GE-Proton's
+        # wine binary so it sees a virtual display and can complete its GUI.
+        #
+        # Usage: ./manage.sh install-ea-app [AppID]
+        #
+        # Workflow:
+        #   1. Start Wolf and open Steam in Moonlight: ./manage.sh start
+        #   2. From a terminal/SSH: ./manage.sh install-ea-app
+        #   3. Watch Moonlight — the EA App installer window appears; click through it
+        #   4. Log in to your EA account when prompted
+        #   5. After EA App installs, run: ./manage.sh fix-ea-game
+        #   6. Click Play on the game — it should launch via EA App now
+        _ia_appid="${2:-1237950}"
+        _ia_steam_home=$(_steam_home)
+        if [ -z "$_ia_steam_home" ]; then
+            echo "No Steam home found. Start Wolf and open the Steam app in Moonlight first."
+            exit 1
+        fi
+        _ia_container=$(docker ps --format '{{.Names}}' | grep -i WolfSteam | head -1)
+        if [ -z "$_ia_container" ]; then
+            echo "WolfSteam container is not running."
+            echo "  Start Wolf: ./manage.sh start"
+            echo "  Open the Steam app in Moonlight, wait for Steam to load, then re-run."
+            exit 1
+        fi
+        # Find EAappInstaller bundled with the game
+        _ia_installer_host=$(sudo find \
+            "$_ia_steam_home/.steam/steam/steamapps" -maxdepth 12 \
+            -name "EAappInstaller.exe" -print -quit 2>/dev/null)
+        if [ -z "$_ia_installer_host" ]; then
+            echo "EAappInstaller.exe not found. Make sure the game (AppID $_ia_appid) is installed."
+            exit 1
+        fi
+        # Container mounts the session home at /home/retro — translate paths
+        _ia_installer_container="${_ia_installer_host/#$_ia_steam_home//home/retro}"
+        # Find GE-Proton inside the container
+        _ia_gep=$(docker exec -u 1000 "$_ia_container" bash -c \
+            'ls /home/retro/.steam/compatibilitytools.d/ 2>/dev/null | grep -i GE-Proton | sort -V | tail -1' 2>/dev/null)
+        if [ -z "$_ia_gep" ]; then
+            echo "GE-Proton not found inside the container."
+            echo "  Install it: ./manage.sh ge-proton"
+            echo "  Then open Steam in Moonlight, set the game to use GE-Proton in Compatibility,"
+            echo "  click Play once to create the prefix, and re-run this command."
+            exit 1
+        fi
+        _ia_wine="/home/retro/.steam/compatibilitytools.d/$_ia_gep/files/bin/wine"
+        _ia_wineprefix="/home/retro/.steam/steam/steamapps/compatdata/$_ia_appid/pfx"
+        _ia_display=$(docker exec "$_ia_container" printenv DISPLAY 2>/dev/null)
+        _ia_display="${_ia_display:-:0}"
+        echo "Installing EA App inside the WolfSteam container..."
+        echo "  Container:  $_ia_container"
+        echo "  GE-Proton:  $_ia_gep"
+        echo "  Installer:  $_ia_installer_container"
+        echo "  Display:    $_ia_display"
+        echo ""
+        echo "IMPORTANT: The EA App installer window will appear in Moonlight."
+        echo "           Click through it and log in to your EA account."
+        echo "           This may take 2-10 minutes."
+        echo ""
+        # Launch the installer inside the container (background so we can poll)
+        docker exec -u 1000 \
+            -e DISPLAY="$_ia_display" \
+            -e WINEPREFIX="$_ia_wineprefix" \
+            -e WINE_LARGE_ADDRESS_AWARE=1 \
+            -e WINEDEBUG="fixme-all" \
+            "$_ia_container" \
+            "$_ia_wine" "$_ia_installer_container" &
+        _ia_bg_pid=$!
+        # Poll on the HOST for EADesktop.exe to appear (up to 15 min)
+        _ia_pfx_host="$_ia_steam_home/.steam/steam/steamapps/compatdata/$_ia_appid/pfx/drive_c"
+        _ia_found=0
+        for _ia_i in $(seq 1 60); do
+            _ia_exe=$(sudo find "$_ia_pfx_host" -maxdepth 8 \
+                -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
+                -print -quit 2>/dev/null)
+            if [ -n "$_ia_exe" ]; then
+                _ia_found=1
+                echo ""
+                echo "EA App installed at: $_ia_exe"
+                break
+            fi
+            # If wine process has already exited, do one final check
+            if ! kill -0 "$_ia_bg_pid" 2>/dev/null && [ "$_ia_i" -gt 1 ]; then
+                echo ""
+                echo "Wine process exited. Doing final check..."
+                _ia_exe=$(sudo find "$_ia_pfx_host" -maxdepth 8 \
+                    -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
+                    -print -quit 2>/dev/null)
+                if [ -n "$_ia_exe" ]; then
+                    _ia_found=1
+                    echo "EA App installed at: $_ia_exe"
+                else
+                    echo "EA App not found after installer exited."
+                    echo "The installer may have failed or exited early."
+                    echo "Check: ./manage.sh diagnose-ea $_ia_appid"
+                fi
+                break
+            fi
+            printf "\r  Waiting for EA App to install... (%ds elapsed)" "$((_ia_i * 15))"
+            sleep 15
+        done
+        kill "$_ia_bg_pid" 2>/dev/null || true
+        if [ "$_ia_found" = 1 ]; then
+            echo "Applying EA fix (registering link2ea:// handler)..."
+            _apply_ea_fix "$_ia_appid"
+            echo ""
+            echo "Next: Click Play on the game in Steam. EA App should authenticate and launch it."
+        else
+            echo ""
+            echo "EA App did not finish installing within 15 minutes."
+            echo "  • Did the installer window appear in Moonlight?"
+            echo "  • Try running ./manage.sh diagnose-ea $_ia_appid for current state"
+            echo "  • If the installer appeared but failed: check the EA App website for a newer installer"
+            exit 1
+        fi
+        ;;
+    diagnose-ea)
+        # Show the current state of the EA App / link2ea:// setup for debugging.
+        # Run this after ./manage.sh fix-ea-game to verify the registry is correct,
+        # or when troubleshooting why an EA game returns to the Play screen.
+        #
+        # Usage: ./manage.sh diagnose-ea [AppID]
+        _dx_appid="${2:-1237950}"
+        _dx_sh=$(_steam_home)
+        _dx_pfx="$_dx_sh/.steam/steam/steamapps/compatdata/$_dx_appid/pfx"
+        _dx_acf="$_dx_sh/.steam/steam/steamapps/appmanifest_${_dx_appid}.acf"
+        echo "=== EA Diagnostic — AppID $_dx_appid ==="
+        echo "Prefix: $_dx_pfx"
+        echo ""
+        echo "--- system.reg: link2ea entries ---"
+        sudo grep -i -A3 "link2ea" "$_dx_pfx/system.reg" 2>/dev/null || echo "(none in system.reg)"
+        echo ""
+        echo "--- user.reg: link2ea entries ---"
+        sudo grep -i -A3 "link2ea" "$_dx_pfx/user.reg" 2>/dev/null || echo "(none in user.reg)"
+        echo ""
+        echo "--- EA App executables in prefix ---"
+        _dx_desktop=$(sudo find "$_dx_pfx/drive_c" -maxdepth 8 -iname "EADesktop.exe" -print 2>/dev/null)
+        _dx_link2ea=$(sudo find "$_dx_pfx/drive_c" -maxdepth 8 -iname "Link2EA.exe" -print 2>/dev/null)
+        echo "EADesktop.exe: ${_dx_desktop:-(not found)}"
+        echo "Link2EA.exe:   ${_dx_link2ea:-(not found)}"
+        echo ""
+        echo "--- system.reg: InstallSuccessful ---"
+        sudo grep -i "InstallSuccessful" "$_dx_pfx/system.reg" 2>/dev/null | head -5 \
+            || echo "(none)"
+        echo ""
+        echo "--- AppManifest StateFlags ---"
+        if [ -f "$_dx_acf" ]; then
+            grep "StateFlags" "$_dx_acf"
+        else
+            echo "(acf not found at $_dx_acf)"
+        fi
+        echo ""
+        echo "--- Recent Proton log entries (errors + EA-related) ---"
+        _dx_log="$_dx_sh/steam-${_dx_appid}.log"
+        if [ -f "$_dx_log" ]; then
+            grep -i "link2ea\|EA Desktop\|run_process\|ShellExecute\|err:" "$_dx_log" 2>/dev/null \
+                | grep -v "mscoree\|seh_unwind\|loaddll\|fixme" | tail -20
+        else
+            echo "(no log yet — launch the game once to generate it)"
+            echo "Expected path: $_dx_log"
+        fi
+        ;;
     fix-perms)
         # Wolf creates each app's home dir under WOLF_STATE_DIR/<session-id>/<App>
         # and mounts it as /home/retro inside the app container. If anything in
@@ -1818,8 +2078,8 @@ PYEOF
 _manage_wolf_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local commands="start stop restart logs status pin update apps reorder
-                    add-web ge-proton games fix-ea-game wait-ea-app fix-perms
-                    install-completion backup"
+                    add-web ge-proton games fix-ea-game wait-ea-app
+                    install-ea-app diagnose-ea fix-perms install-completion backup"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
 # Register for both 'manage.sh' and './manage.sh' invocation styles
@@ -1875,8 +2135,10 @@ COMPEOF
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
         echo "  ./manage.sh games                        - List games; pick one to apply the EA fix"
-        echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)
-  ./manage.sh wait-ea-app [appid]          - Watch for EA App to install, then register link2ea:// handler"
+        echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)"
+        echo "  ./manage.sh wait-ea-app [appid]          - Watch for EA App to install, then register link2ea:// handler"
+        echo "  ./manage.sh install-ea-app [appid]       - Run EA App installer inside container (GUI appears in Moonlight)"
+        echo "  ./manage.sh diagnose-ea [appid]          - Show link2ea:// registry state and Proton log"
         echo "  ./manage.sh fix-perms                    - Fix 'Permission denied' app startup errors"
         echo "  ./manage.sh install-completion           - Enable tab-completion for this script"
         echo "  ./manage.sh backup                       - How to set up backups"
@@ -2214,12 +2476,16 @@ PYEOF
     echo ""
     echo "── EA GAMES (Battlefront II, etc.) ───────────────────"
     echo ""
-    echo "  EA titles need GE-Proton + an install-script unstick:"
+    echo "  EA titles need GE-Proton + a full EA App install:"
     echo "    1. ./manage.sh ge-proton            # install GE-Proton once"
     echo "    2. In Steam: game → Properties → Compatibility → Force GE-Proton"
-    echo "    3. Click Play once (builds the Proton prefix; will hang — that's ok)"
-    echo "    4. ./manage.sh games                # pick the game's number to fix it"
-    echo "    5. Cancel the 'installing' screen in Steam, Play again — it launches"
+    echo "    3. Click Play once (builds the Proton prefix; hang is expected)"
+    echo "    4. ./manage.sh install-ea-app       # runs EA App installer in the container"
+    echo "       (watch Moonlight — an installer window appears; click through + log in)"
+    echo "    5. ./manage.sh fix-ea-game          # unstick the install-script loop"
+    echo "    6. Click Play — EA App authenticates and launches the game"
+    echo ""
+    echo "  Diagnose: ./manage.sh diagnose-ea   # check link2ea:// registry state"
     echo ""
     echo "── BACKUPS ───────────────────────────────────────────"
     echo ""
@@ -2271,6 +2537,8 @@ cd $WOLF_DIR
 ./manage.sh ge-proton          # install GE-Proton (needed for EA games)
 ./manage.sh games              # list installed games + their AppIDs
 ./manage.sh fix-ea-game        # unstick the EA App install loop for a game
+./manage.sh install-ea-app     # install EA App inside the container (GUI in Moonlight)
+./manage.sh diagnose-ea        # check link2ea:// state when game returns to Play
 ./manage.sh install-completion # enable tab-completion for manage.sh
 \`\`\`
 
@@ -2279,34 +2547,33 @@ Run \`./manage.sh install-completion\` once, then re-open your shell (or
 \`source ~/.bashrc\`). After that, \`./manage.sh <TAB><TAB>\` lists all commands.
 
 ## EA games (Battlefront II 2017, etc.)
-EA titles bundle an EA App bootstrapper that hangs forever under stock Proton
-in a container — the game sits on **"running install script (EA app)"** and
-never starts. Two things fix it: GE-Proton (not in Steam's built-in Proton
-list) and pre-satisfying the install-script markers in the game's prefix.
+EA titles require GE-Proton and the EA App to be installed inside the Wine
+prefix. The EA App handles authentication — without it, the game launches
+and immediately returns to the Play screen.
 
 \`\`\`bash
 cd $WOLF_DIR
-./manage.sh ge-proton                 # 1. install GE-Proton once
-#                                       2. Steam → game → Properties →
-#                                          Compatibility → Force GE-Proton
-#                                       3. Click Play once (builds the prefix;
-#                                          it will hang — that's expected)
-./manage.sh games                     # 4. lists games numbered; enter the
-#                                          game's number to apply the EA fix
-#                                       5. Cancel the 'installing' screen,
-#                                          Play again — it launches.
+./manage.sh ge-proton           # 1. install GE-Proton once
+#                                  2. Steam → game → Properties →
+#                                     Compatibility → Force GE-Proton
+#                                  3. Click Play once (builds the prefix;
+#                                     it will hang — that's expected)
+./manage.sh install-ea-app      # 4. runs EA App installer INSIDE the container
+#                                     (watch Moonlight — installer GUI appears;
+#                                      click through it and log in to EA account)
+./manage.sh fix-ea-game         # 5. unstick the install-script loop
+#                                  6. Click Play — EA App authenticates + launches
 \`\`\`
 
-\`games\` lists each installed game with a number and AppID, then asks which
-one to fix — just type the number. (\`fix-ea-game [appid]\` does the same thing
-non-interactively, defaulting to SWBF2 2017's \`1237950\`.)
+**Troubleshooting**: If the game returns straight to the Play screen after step 6:
+\`\`\`bash
+./manage.sh diagnose-ea         # shows link2ea:// registry state + Proton log
+\`\`\`
 
 Notes:
 - Steam **AppIDs are global** — SWBF2 (2017) is always \`1237950\` on every
   machine — but you don't need to know it; the \`games\` picker handles it.
-- The fix is safe and opt-in: it only touches the game you pick, only if its
-  Proton prefix exists, and is idempotent. The EA Desktop "installed" marker is
-  shared across all EA titles, so the same fix works for any EA game.
+- \`fix-ea-game\` is idempotent and only touches the game you pick.
 - \`ge-proton\` takes an optional version to pin, e.g.
   \`./manage.sh ge-proton GE-Proton10-34\`.
 
@@ -2360,6 +2627,34 @@ Then reconnect from Moonlight.
 sudo ./setup.sh backup   # covers wolf-state/ saves and ES-DE settings
 \`\`\`
 MD
+
+    # ── Pre-download GE-Proton ────────────────────────────────────────────────
+    # GE-Proton is required for EA games (Battlefront II etc.) and needs to be
+    # installed into Steam's compatibilitytools.d after first launch. Download
+    # the tarball now while we have the user's attention so that
+    # './manage.sh ge-proton' later is instant (just extracts from cache).
+    log_info "Pre-downloading GE-Proton for EA game support (~500 MB)..."
+    (
+        CACHE_DIR="$WOLF_DIR/ge-proton-cache"
+        mkdir -p "$CACHE_DIR"
+        URL=$(curl -sL https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest \
+              | grep browser_download_url | grep '\.tar\.gz' | cut -d'"' -f4)
+        if [ -z "$URL" ]; then
+            log_warning "Could not fetch GE-Proton URL — run './manage.sh ge-proton' later."
+        else
+            NAME=$(basename "$URL" .tar.gz)
+            CACHED="$CACHE_DIR/$NAME.tar.gz"
+            if [ -f "$CACHED" ]; then
+                log_success "GE-Proton already cached: $NAME"
+            elif curl -L -o "$CACHED" "$URL"; then
+                echo "$NAME" > "$CACHE_DIR/.version"
+                log_success "GE-Proton cached: $NAME"
+            else
+                log_warning "GE-Proton download failed — run './manage.sh ge-proton' later."
+                rm -f "$CACHED"
+            fi
+        fi
+    )
 
     local START_WOLF=""
     prompt_yn "Start Wolf now? (y/n):" "y" START_WOLF
