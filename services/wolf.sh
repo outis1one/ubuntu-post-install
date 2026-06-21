@@ -2138,19 +2138,24 @@ cd $WOLF_DIR && ./manage.sh pin
 ## Manage
 \`\`\`bash
 cd $WOLF_DIR
-./manage.sh start        # start Wolf
-./manage.sh stop         # stop
-./manage.sh restart      # restart
-./manage.sh logs         # live logs
-./manage.sh status       # container status
-./manage.sh update       # pull latest image and restart
-./manage.sh apps         # add / update game launchers
-./manage.sh reorder      # reorder the Moonlight tile list
-./manage.sh add-web      # add a URL shortcut tile (Firefox kiosk)
-./manage.sh ge-proton    # install GE-Proton (needed for EA games)
-./manage.sh games        # list installed games + their AppIDs
-./manage.sh fix-ea-game  # unstick the EA App install loop for a game
+./manage.sh start              # start Wolf
+./manage.sh stop               # stop
+./manage.sh restart            # restart
+./manage.sh logs               # live logs
+./manage.sh status             # container status
+./manage.sh update             # pull latest image and restart
+./manage.sh apps               # add / update game launchers
+./manage.sh reorder            # reorder the Moonlight tile list
+./manage.sh add-web            # add a URL shortcut tile (Firefox kiosk)
+./manage.sh ge-proton          # install GE-Proton (needed for EA games)
+./manage.sh games              # list installed games + their AppIDs
+./manage.sh fix-ea-game        # unstick the EA App install loop for a game
+./manage.sh install-completion # enable tab-completion for manage.sh
 \`\`\`
+
+### Tab completion
+Run \`./manage.sh install-completion\` once, then re-open your shell (or
+\`source ~/.bashrc\`). After that, \`./manage.sh <TAB><TAB>\` lists all commands.
 
 ## EA games (Battlefront II 2017, etc.)
 EA titles bundle an EA App bootstrapper that hangs forever under stock Proton
