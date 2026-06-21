@@ -1907,12 +1907,14 @@ PYEOF
             echo "  Open the Steam app in Moonlight, wait for Steam to load, then re-run."
             exit 1
         fi
-        # Find EAappInstaller bundled with the game
+        # Find EAappInstaller bundled with the game (in steamapps/common, NOT in
+        # compatdata — ignore temp-extracted copies inside the Wine prefix).
         _ia_installer_host=$(sudo find \
-            "$_ia_steam_home/.steam/steam/steamapps" -maxdepth 12 \
+            "$_ia_steam_home/.steam/steam/steamapps/common" -maxdepth 12 \
             -name "EAappInstaller.exe" -print -quit 2>/dev/null)
         if [ -z "$_ia_installer_host" ]; then
-            echo "EAappInstaller.exe not found. Make sure the game (AppID $_ia_appid) is installed."
+            echo "EAappInstaller.exe not found under steamapps/common."
+            echo "Make sure the game (AppID $_ia_appid) is fully downloaded/installed."
             exit 1
         fi
         # Container mounts the session home at /home/retro — translate paths
@@ -1941,7 +1943,23 @@ PYEOF
         echo "           Click through it and log in to your EA account."
         echo "           This may take 2-10 minutes."
         echo ""
+        # Remove the fake InstallSuccessful keys we added earlier with fix-ea-game.
+        # If those keys are present, EAappInstaller detects EA App is "already installed"
+        # and exits immediately without doing anything — this is why it exited in ~15s.
+        # The real EA App installer will re-create these keys correctly after install.
+        echo "Clearing fake InstallSuccessful registry markers (so the installer actually runs)..."
+        for _ia_key in \
+            "HKLM\\\\Software\\\\Electronic Arts\\\\EA Desktop" \
+            "HKLM\\\\Software\\\\Wow6432Node\\\\Electronic Arts\\\\EA Desktop"; do
+            docker exec -u 1000 \
+                -e DISPLAY="$_ia_display" \
+                -e WINEPREFIX="$_ia_wineprefix" \
+                "$_ia_container" \
+                "$_ia_wine" reg delete "$_ia_key" /v InstallSuccessful /f 2>/dev/null || true
+        done
+        sleep 1
         # Launch the installer inside the container (background so we can poll)
+        echo "Launching EA App installer..."
         docker exec -u 1000 \
             -e DISPLAY="$_ia_display" \
             -e WINEPREFIX="$_ia_wineprefix" \
