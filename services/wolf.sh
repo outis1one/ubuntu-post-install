@@ -1958,16 +1958,30 @@ PYEOF
                 "$_ia_wine" reg delete "$_ia_key" /v InstallSuccessful /f 2>/dev/null || true
         done
         sleep 1
-        # Launch the installer inside the container (background so we can poll)
-        echo "Launching EA App installer..."
-        docker exec -u 1000 \
+        # Start a wineserver anchor so background processes spawned by the
+        # WiX bootstrapper (EAappInstaller.exe) survive after it exits.
+        # Without this, wineserver shuts down when the foreground wine process
+        # exits, killing the real installer before it can write any files.
+        echo "Starting wineserver anchor (keeps Wine alive while installer runs)..."
+        docker exec -d -u 1000 \
             -e DISPLAY="$_ia_display" \
             -e WINEPREFIX="$_ia_wineprefix" \
             -e WINE_LARGE_ADDRESS_AWARE=1 \
-            -e WINEDEBUG="fixme-all" \
             "$_ia_container" \
-            "$_ia_wine" "$_ia_installer_container" &
-        _ia_bg_pid=$!
+            "$_ia_wine" cmd.exe /c "timeout /t 900 > nul"
+        sleep 3
+
+        # Launch the installer detached — it will spawn background processes
+        # and exit, but those processes stay alive because the anchor above
+        # keeps the shared wineserver running.
+        echo "Launching EA App installer (watch Moonlight for the install window)..."
+        docker exec -d -u 1000 \
+            -e DISPLAY="$_ia_display" \
+            -e WINEPREFIX="$_ia_wineprefix" \
+            -e WINE_LARGE_ADDRESS_AWARE=1 \
+            "$_ia_container" \
+            "$_ia_wine" "$_ia_installer_container"
+
         # Poll on the HOST for EADesktop.exe to appear (up to 15 min)
         _ia_pfx_host="$_ia_steam_home/.steam/steam/steamapps/compatdata/$_ia_appid/pfx/drive_c"
         _ia_found=0
@@ -1981,27 +1995,16 @@ PYEOF
                 echo "EA App installed at: $_ia_exe"
                 break
             fi
-            # If wine process has already exited, do one final check
-            if ! kill -0 "$_ia_bg_pid" 2>/dev/null && [ "$_ia_i" -gt 1 ]; then
-                echo ""
-                echo "Wine process exited. Doing final check..."
-                _ia_exe=$(sudo find "$_ia_pfx_host" -maxdepth 8 \
-                    -ipath "*/Electronic Arts/EA Desktop/EA Desktop/EADesktop.exe" \
-                    -print -quit 2>/dev/null)
-                if [ -n "$_ia_exe" ]; then
-                    _ia_found=1
-                    echo "EA App installed at: $_ia_exe"
-                else
-                    echo "EA App not found after installer exited."
-                    echo "The installer may have failed or exited early."
-                    echo "Check: ./manage.sh diagnose-ea $_ia_appid"
-                fi
-                break
-            fi
             printf "\r  Waiting for EA App to install... (%ds elapsed)" "$((_ia_i * 15))"
             sleep 15
         done
-        kill "$_ia_bg_pid" 2>/dev/null || true
+
+        # Kill the anchor (and any remaining wine processes for this prefix)
+        echo "Stopping wineserver anchor..."
+        docker exec -u 1000 \
+            -e WINEPREFIX="$_ia_wineprefix" \
+            "$_ia_container" \
+            "$_ia_wine" wineserver -k 2>/dev/null || true
         if [ "$_ia_found" = 1 ]; then
             echo "Applying EA fix (registering link2ea:// handler)..."
             _apply_ea_fix "$_ia_appid"
