@@ -4,8 +4,8 @@
 **Proton:** GE-Proton10-34 or later (required)
 
 This guide covers two setups:
-- [Wolf / Games-on-Whales + Moonlight streaming](#wolf--moonlight)
 - [Native Linux Steam](#native-linux-steam)
+- [Wolf / Games-on-Whales + Moonlight streaming](#wolf--moonlight)
 
 The underlying fix is the same for both. The EA App MSI bundled with the game
 fails to install in Wine due to a .NET custom action (`JunoConfigureRegistry`)
@@ -40,7 +40,156 @@ account. This is a one-time step that persists across reinstalls.
 
 ---
 
-## Wolf / Moonlight
+## Native Linux Steam
+
+### Prerequisites (native)
+
+- GE-Proton installed via ProtonUp-Qt or manually into `~/.steam/compatibilitytools.d/`
+- In Steam: SWBF2 → Properties → Compatibility → Force GE-Proton10-34
+
+### Automated setup
+
+```bash
+chmod +x setup-swbf2-linux.sh
+./setup-swbf2-linux.sh
+```
+
+Run after completing step 1 below.
+
+### Manual steps
+
+#### 1. Trigger Wine prefix creation
+
+Launch SWBF2 from Steam. Wait approximately 10 seconds. You will see an
+"Origin is not installed" error — this is expected. Close it.
+
+Verify the MSI appeared:
+
+```bash
+ls -lh ~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi
+```
+
+Expected: approximately 227 MB.
+
+#### 2. Extract EA Desktop files
+
+```bash
+mkdir -p /tmp/ea_app_extracted
+msiextract -C /tmp/ea_app_extracted \
+    ~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi
+```
+
+#### 3. Copy EA Desktop files into the Wine prefix
+
+```bash
+PFX_C=~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c
+EA_DEST_BASE="$PFX_C/Program Files/Electronic Arts/EA Desktop"
+
+SYMLINK_TARGET=$(readlink "$EA_DEST_BASE/EA Desktop" 2>/dev/null || echo "14.2.0.3345")
+
+mkdir -p "$EA_DEST_BASE/$SYMLINK_TARGET"
+cp -r "/tmp/ea_app_extracted/Electronic Arts/EA Desktop/EA Desktop/." \
+    "$EA_DEST_BASE/$SYMLINK_TARGET/"
+
+rm -f "$EA_DEST_BASE/EA Desktop"
+ln -sf "$SYMLINK_TARGET" "$EA_DEST_BASE/EA Desktop"
+
+# Verify
+find "$EA_DEST_BASE" -name "Link2EA.exe"
+```
+
+#### 4. Write registry fix files to drive_c
+
+```bash
+PFX_C=~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c
+
+cat > "$PFX_C/link2ea_fix.reg" << 'EOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea]
+@="URL:link2ea Protocol"
+"URL Protocol"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea\shell\open\command]
+@="\"C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\Link2EA.exe\" \"%1\""
+EOF
+
+cat > "$PFX_C/ea_services.reg" << 'EOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EALocalHostSvc]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EALocalHostSvc.exe"
+"DisplayName"="EA Local Host Service"
+"ObjectName"="LocalSystem"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EABackgroundService]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EABackgroundService.exe"
+"DisplayName"="EA Background Service"
+"ObjectName"="LocalSystem"
+EOF
+```
+
+#### 5. Write the launch wrapper
+
+```bash
+mkdir -p ~/.local/bin
+
+cat > ~/.local/bin/ea_install.sh << 'EOF'
+#!/bin/bash
+echo "=== launch $(date) ===" >> /tmp/ea_install.log
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\link2ea_fix.reg"
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\ea_services.reg"
+exec "$@"
+EOF
+
+chmod +x ~/.local/bin/ea_install.sh
+```
+
+#### 6. Set Steam launch options
+
+In Steam: right-click SWBF2 → Properties → Launch Options, enter:
+
+```
+~/.local/bin/ea_install.sh %command%
+```
+
+Alternatively, set it from the terminal. Close Steam first, then:
+
+```bash
+STEAM_UID=$(ls ~/.steam/steam/userdata/ | head -1)
+CFG=~/.steam/steam/userdata/$STEAM_UID/config/localconfig.vdf
+
+python3 - "$CFG" << 'PYEOF'
+import sys, re, os
+path = sys.argv[1]
+opt = os.path.expanduser('~/.local/bin/ea_install.sh') + ' %command%'
+with open(path) as f:
+    content = f.read()
+new = re.sub(r'("1237950".*?"LaunchOptions"\s*)"[^"]*"', rf'\1"{opt}"', content, flags=re.DOTALL)
+if new == content:
+    new = re.sub(r'("1237950"\s*\n\s*\{)', rf'\1\n\t\t\t\t"LaunchOptions"\t\t"{opt}"', content)
+with open(path, 'w') as f:
+    f.write(new)
+print("Done")
+PYEOF
+```
+
+#### 7. Launch the game
+
+1. Launch SWBF2 from Steam
+2. Let Vulkan shaders compile on first run — do not skip
+3. EA App authenticates via your linked Steam/EA account
+4. Game loads
+
+---
+
+## Wolf / Games-on-Whales + Moonlight
 
 ### Prerequisites (Wolf)
 
@@ -241,156 +390,6 @@ step 1. To preserve credentials when moving to a new machine, back up the prefix
 tar -czf swbf2-prefix-backup.tar.gz \
     /path/to/wolf-state/Steam/.steam/steam/steamapps/compatdata/1237950/
 ```
-
----
-
-## Native Linux Steam
-
-### Prerequisites (native)
-
-- GE-Proton installed via ProtonUp-Qt or manually into `~/.steam/compatibilitytools.d/`
-- In Steam: SWBF2 → Properties → Compatibility → Force GE-Proton10-34
-
-### Automated setup
-
-```bash
-chmod +x setup-swbf2-linux.sh
-./setup-swbf2-linux.sh
-```
-
-Run after completing step 1 below.
-
-### Manual steps
-
-#### 1. Trigger Wine prefix creation
-
-Launch SWBF2 from Steam. Wait approximately 10 seconds. You will see an
-"Origin is not installed" error — this is expected. Close it.
-
-Verify the MSI appeared:
-
-```bash
-ls -lh ~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi
-```
-
-Expected: approximately 227 MB.
-
-#### 2. Extract EA Desktop files
-
-```bash
-mkdir -p /tmp/ea_app_extracted
-msiextract -C /tmp/ea_app_extracted \
-    ~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi
-```
-
-#### 3. Copy EA Desktop files into the Wine prefix
-
-```bash
-PFX_C=~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c
-EA_DEST_BASE="$PFX_C/Program Files/Electronic Arts/EA Desktop"
-
-SYMLINK_TARGET=$(readlink "$EA_DEST_BASE/EA Desktop" 2>/dev/null || echo "14.2.0.3345")
-
-mkdir -p "$EA_DEST_BASE/$SYMLINK_TARGET"
-cp -r "/tmp/ea_app_extracted/Electronic Arts/EA Desktop/EA Desktop/." \
-    "$EA_DEST_BASE/$SYMLINK_TARGET/"
-
-rm -f "$EA_DEST_BASE/EA Desktop"
-ln -sf "$SYMLINK_TARGET" "$EA_DEST_BASE/EA Desktop"
-
-# Verify
-find "$EA_DEST_BASE" -name "Link2EA.exe"
-```
-
-#### 4. Write registry fix files to drive_c
-
-```bash
-PFX_C=~/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c
-
-cat > "$PFX_C/link2ea_fix.reg" << 'EOF'
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea]
-@="URL:link2ea Protocol"
-"URL Protocol"=""
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea\shell\open\command]
-@="\"C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\Link2EA.exe\" \"%1\""
-EOF
-
-cat > "$PFX_C/ea_services.reg" << 'EOF'
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EALocalHostSvc]
-"Type"=dword:00000010
-"Start"=dword:00000002
-"ErrorControl"=dword:00000001
-"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EALocalHostSvc.exe"
-"DisplayName"="EA Local Host Service"
-"ObjectName"="LocalSystem"
-
-[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EABackgroundService]
-"Type"=dword:00000010
-"Start"=dword:00000002
-"ErrorControl"=dword:00000001
-"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EABackgroundService.exe"
-"DisplayName"="EA Background Service"
-"ObjectName"="LocalSystem"
-EOF
-```
-
-#### 5. Write the launch wrapper
-
-```bash
-mkdir -p ~/.local/bin
-
-cat > ~/.local/bin/ea_install.sh << 'EOF'
-#!/bin/bash
-echo "=== launch $(date) ===" >> /tmp/ea_install.log
-"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\link2ea_fix.reg"
-"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\ea_services.reg"
-exec "$@"
-EOF
-
-chmod +x ~/.local/bin/ea_install.sh
-```
-
-#### 6. Set Steam launch options
-
-In Steam: right-click SWBF2 → Properties → Launch Options, enter:
-
-```
-~/.local/bin/ea_install.sh %command%
-```
-
-Alternatively, set it from the terminal. Close Steam first, then:
-
-```bash
-STEAM_UID=$(ls ~/.steam/steam/userdata/ | head -1)
-CFG=~/.steam/steam/userdata/$STEAM_UID/config/localconfig.vdf
-
-python3 - "$CFG" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-import os
-opt = os.path.expanduser('~/.local/bin/ea_install.sh') + ' %command%'
-with open(path) as f:
-    content = f.read()
-new = re.sub(r'("1237950".*?"LaunchOptions"\s*)"[^"]*"', rf'\1"{opt}"', content, flags=re.DOTALL)
-if new == content:
-    new = re.sub(r'("1237950"\s*\n\s*\{)', rf'\1\n\t\t\t\t"LaunchOptions"\t\t"{opt}"', content)
-with open(path, 'w') as f:
-    f.write(new)
-print("Done")
-PYEOF
-```
-
-#### 7. Launch the game
-
-1. Launch SWBF2 from Steam
-2. Let Vulkan shaders compile on first run — do not skip
-3. EA App authenticates via your linked Steam/EA account
-4. Game loads
 
 ---
 
