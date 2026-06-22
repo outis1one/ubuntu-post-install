@@ -139,9 +139,18 @@ echo "[2/6] ea_app.msi ($(( MSI_SIZE / 1048576 )) MB): OK"
 # ── Step 3: extract MSI on the host ────────────────────────────────────────
 echo "[3/6] Extracting EA Desktop files from MSI (~30s)..."
 if ! command -v msiextract >/dev/null 2>&1; then
-    echo "ERROR: msitools not installed."
-    echo "  sudo apt-get install -y msitools"
-    exit 1
+    echo "msitools not found — installing..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y msitools
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y msitools
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm msitools
+    else
+        echo "ERROR: Cannot auto-install msitools — package manager not recognised."
+        echo "Install msitools manually and re-run."
+        exit 1
+    fi
 fi
 EXTRACT_DIR="/tmp/ea_app_extracted_$$"
 rm -rf "$EXTRACT_DIR"
