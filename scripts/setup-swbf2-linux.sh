@@ -99,29 +99,45 @@ if [ ! -d "$PFX_C" ]; then
     echo "Required before running this script:"
     echo "  1. In Steam: right-click SWBF2 → Properties → Compatibility"
     echo "     → Force GE-Proton10-34 (or later)"
-    echo "  2. Click Play on SWBF2 — wait ~10 seconds for 'Origin is not installed'"
-    echo "  3. Close the error, then re-run this script"
+    echo "  2. Click Play on SWBF2 — wait ~10 seconds then close it"
+    echo "  3. Re-run this script"
     exit 1
 fi
 echo "[1/6] Wine prefix: OK"
 
-# ── Step 2: verify ea_app.msi exists ───────────────────────────────────────
+# ── Step 2: locate ea_app.msi ──────────────────────────────────────────────
+# The MSI is bundled with the game files. Steam may also copy it to drive_c
+# when the install script runs. Check both locations.
+if [ ! -f "$MSI" ]; then
+    GAME_DIR=$(find "$STEAM_HOME/steamapps/common" -maxdepth 2 \
+        -name "ea_app.msi" 2>/dev/null | head -1)
+    if [ -n "$GAME_DIR" ]; then
+        echo "Found ea_app.msi in game files: $GAME_DIR"
+        MSI="$GAME_DIR"
+    fi
+fi
+if [ ! -f "$MSI" ]; then
+    # Also search anywhere under steamapps
+    MSI_FOUND=$(find "$STEAM_HOME/steamapps" -name "ea_app.msi" 2>/dev/null | head -1)
+    [ -n "$MSI_FOUND" ] && MSI="$MSI_FOUND"
+fi
 if [ ! -f "$MSI" ]; then
     echo ""
-    echo "ERROR: ea_app.msi not found at $MSI"
+    echo "ERROR: ea_app.msi not found."
     echo ""
-    echo "Launch SWBF2 once so Steam drops ea_app.msi into the Wine prefix."
-    echo "You will see an 'Origin is not installed' error — that is expected."
-    echo "Close it, then re-run this script."
+    echo "Launch SWBF2 once from Steam (with GE-Proton set in Compatibility),"
+    echo "wait ~10 seconds for it to attempt startup, then close it and re-run."
+    echo ""
+    echo "If you just installed the game, verify it downloaded fully in Steam."
     exit 1
 fi
 MSI_SIZE=$(stat -c%s "$MSI")
 if [ "$MSI_SIZE" -lt 50000000 ]; then
     echo "WARNING: ea_app.msi is only $MSI_SIZE bytes (expected ~227 MB)."
-    echo "It may still be copying. Wait a moment and re-run."
+    echo "It may still be downloading. Wait a moment and re-run."
     exit 1
 fi
-echo "[2/6] ea_app.msi ($(( MSI_SIZE / 1048576 )) MB): OK"
+echo "[2/6] ea_app.msi ($(( MSI_SIZE / 1048576 )) MB): OK ($MSI)"
 
 # ── Step 3: extract MSI on the host ────────────────────────────────────────
 echo "[3/6] Extracting EA Desktop files from MSI (~30s)..."
