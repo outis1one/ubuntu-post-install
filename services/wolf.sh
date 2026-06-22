@@ -2065,6 +2065,265 @@ PYEOF
             echo "Expected path: $_dx_log"
         fi
         ;;
+    setup-swbf2)
+        # Full automated setup for Star Wars Battlefront II (2017, AppID 1237950)
+        # on Wolf/Moonlight with GE-Proton. Implements the msiextract bypass for
+        # the JunoConfigureRegistry Wine incompatibility, installs EA Desktop files
+        # into the Wine prefix, and wires up a launch wrapper so registry fixes
+        # survive wineserver restarts.
+        #
+        # Prerequisites (do these first, then run this command):
+        #   1. Wolf is running and Steam is open in Moonlight
+        #   2. GE-Proton10-34+ is installed (./manage.sh ge-proton)
+        #   3. SWBF2 (AppID 1237950) is set to use GE-Proton in Steam → Compatibility
+        #   4. msitools is installed on the host (sudo apt-get install -y msitools)
+        #   5. Your EA account is linked to your Steam account at ea.com (one-time manual step)
+        #   6. Launch SWBF2 once from Moonlight, wait ~10s for the "Origin is not installed"
+        #      error, then close it — this triggers Wine prefix creation and drops ea_app.msi
+        #
+        # After this command completes: launch SWBF2 from Moonlight. Let Vulkan
+        # shaders compile on first run (takes several minutes, only once). EA App
+        # authenticates via your linked Steam/EA account and the game launches.
+        #
+        # Usage: ./manage.sh setup-swbf2
+        _sw_appid="1237950"
+        _sw_sh=$(_steam_home)
+        if [ -z "$_sw_sh" ]; then
+            echo "Steam home not found. Start Wolf (./manage.sh start) and open Steam in Moonlight first."
+            exit 1
+        fi
+        _sw_container=$(docker ps --format '{{.Names}}' | grep -i WolfSteam | head -1)
+        if [ -z "$_sw_container" ]; then
+            echo "WolfSteam container is not running. Start Wolf: ./manage.sh start"
+            exit 1
+        fi
+        _sw_pfxc="$_sw_sh/.steam/steam/steamapps/compatdata/$_sw_appid/pfx/drive_c"
+        _sw_msi="$_sw_pfxc/ea_app.msi"
+
+        echo "=== SWBF2 (2017) Wolf/Moonlight Setup ==="
+        echo ""
+
+        # ── Step 1: verify Wine prefix exists ──────────────────────────────────
+        if [ ! -d "$_sw_pfxc" ]; then
+            echo "ERROR: Wine prefix not found at $_sw_pfxc"
+            echo ""
+            echo "Required setup before running this command:"
+            echo "  1. In Steam (via Moonlight): right-click SWBF2 → Properties → Compatibility"
+            echo "     → Force GE-Proton10-34 (or later)"
+            echo "  2. Click Play on SWBF2 — wait ~10 seconds for 'Origin is not installed' error"
+            echo "  3. Close the error and return here"
+            exit 1
+        fi
+        echo "[1/6] Wine prefix found: OK"
+
+        # ── Step 2: check ea_app.msi exists ────────────────────────────────────
+        if [ ! -f "$_sw_msi" ]; then
+            echo ""
+            echo "ERROR: ea_app.msi not found at $_sw_msi"
+            echo ""
+            echo "SWBF2 must be launched once so Steam drops ea_app.msi into the Wine prefix."
+            echo "  1. Open Steam in Moonlight"
+            echo "  2. Click Play on SWBF2"
+            echo "  3. Wait ~10 seconds — you will see an 'Origin is not installed' error"
+            echo "  4. Close the error popup"
+            echo "  5. Re-run: ./manage.sh setup-swbf2"
+            echo ""
+            echo "Expected file size: ~227 MB"
+            exit 1
+        fi
+        _sw_msi_size=$(stat -c%s "$_sw_msi" 2>/dev/null || echo 0)
+        if [ "$_sw_msi_size" -lt 50000000 ]; then
+            echo "WARNING: ea_app.msi looks too small ($_sw_msi_size bytes, expected ~227 MB)."
+            echo "It may still be copying. Try again in a moment."
+            exit 1
+        fi
+        echo "[2/6] ea_app.msi found ($(( _sw_msi_size / 1048576 )) MB): OK"
+
+        # ── Step 3: extract MSI on the host (bypasses JunoConfigureRegistry) ──
+        echo "[3/6] Extracting EA Desktop files from MSI (this takes ~30s)..."
+        if ! command -v msiextract >/dev/null 2>&1; then
+            echo "ERROR: msitools not installed. Run: sudo apt-get install -y msitools"
+            exit 1
+        fi
+        _sw_extract_dir="/tmp/ea_app_extracted_$$"
+        rm -rf "$_sw_extract_dir"
+        mkdir -p "$_sw_extract_dir"
+        if ! msiextract -C "$_sw_extract_dir" "$_sw_msi" >/dev/null 2>&1; then
+            echo "ERROR: msiextract failed. Check that msitools is properly installed."
+            rm -rf "$_sw_extract_dir"
+            exit 1
+        fi
+        _sw_ea_src=$(find "$_sw_extract_dir" -maxdepth 4 \
+            -path "*/Electronic Arts/EA Desktop/EA Desktop" -type d 2>/dev/null | head -1)
+        if [ -z "$_sw_ea_src" ] || [ ! -f "$_sw_ea_src/Link2EA.exe" ]; then
+            echo "ERROR: Link2EA.exe not found after extraction. MSI structure may have changed."
+            echo "Expected: <extracted>/Electronic Arts/EA Desktop/EA Desktop/Link2EA.exe"
+            ls -la "$_sw_extract_dir/Electronic Arts/EA Desktop/" 2>/dev/null || true
+            rm -rf "$_sw_extract_dir"
+            exit 1
+        fi
+        echo "    Extracted to: $_sw_ea_src"
+        echo "    $(ls "$_sw_ea_src" | wc -l) files found including Link2EA.exe"
+
+        # ── Step 4: copy EA Desktop files into Wine prefix ─────────────────────
+        echo "[4/6] Installing EA Desktop files into Wine prefix..."
+        _sw_ea_dest_base="$_sw_pfxc/Program Files/Electronic Arts/EA Desktop"
+        # Determine the version directory name from the extracted content.
+        # The MSI extracts to "EA Desktop" but the real install uses a versioned dir
+        # with a symlink. Use the same version string if a broken symlink exists from
+        # a failed install attempt; otherwise default to 14.2.0.3345.
+        _sw_ea_version=$( \
+            docker exec "$_sw_container" \
+                readlink "/home/retro/.steam/steam/steamapps/compatdata/$_sw_appid/pfx/drive_c/Program Files/Electronic Arts/EA Desktop/EA Desktop" \
+                2>/dev/null || echo "14.2.0.3345")
+        _sw_ea_dest="$_sw_ea_dest_base/$_sw_ea_version"
+        sudo mkdir -p "$_sw_ea_dest"
+        sudo cp -r "$_sw_ea_src/." "$_sw_ea_dest/"
+        sudo chown -R 1000:1000 "$_sw_ea_dest_base"
+        # Remove any broken symlink, then create a clean one
+        sudo rm -f "$_sw_ea_dest_base/EA Desktop"
+        docker exec "$_sw_container" bash -c \
+            "ln -sf '$_sw_ea_version' '/home/retro/.steam/steam/steamapps/compatdata/$_sw_appid/pfx/drive_c/Program Files/Electronic Arts/EA Desktop/EA Desktop'" \
+            2>/dev/null || sudo ln -sf "$_sw_ea_version" "$_sw_ea_dest_base/EA Desktop"
+        if [ ! -f "$_sw_ea_dest/Link2EA.exe" ]; then
+            echo "ERROR: Copy failed — Link2EA.exe not found at $_sw_ea_dest/Link2EA.exe"
+            rm -rf "$_sw_extract_dir"
+            exit 1
+        fi
+        echo "    EA Desktop installed to: $( echo "$_sw_ea_dest" | sed "s|$_sw_sh||" )"
+        rm -rf "$_sw_extract_dir"
+
+        # ── Step 5: write .reg files and wrapper script into Wine prefix ────────
+        echo "[5/6] Writing registry fix files and launch wrapper..."
+        _sw_drive_c="$_sw_pfxc"
+
+        # link2ea:// protocol handler — points Wine at Link2EA.exe
+        sudo tee "$_sw_drive_c/link2ea_fix.reg" > /dev/null << 'REGEOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea]
+@="URL:link2ea Protocol"
+"URL Protocol"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea\shell\open\command]
+@="\"C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\Link2EA.exe\" \"%1\""
+REGEOF
+
+        # EA Desktop Windows services — EALocalHostSvc provides local IPC that
+        # Link2EA.exe requires; without it launch fails with RPC_S_SERVER_UNAVAILABLE
+        sudo tee "$_sw_drive_c/ea_services.reg" > /dev/null << 'REGEOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EALocalHostSvc]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EALocalHostSvc.exe"
+"DisplayName"="EA Local Host Service"
+"ObjectName"="LocalSystem"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EABackgroundService]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EABackgroundService.exe"
+"DisplayName"="EA Background Service"
+"ObjectName"="LocalSystem"
+REGEOF
+        sudo chown 1000:1000 "$_sw_drive_c/link2ea_fix.reg" "$_sw_drive_c/ea_services.reg"
+
+        # Launch wrapper — runs regedit via Steam's launch chain on every launch
+        # so registry entries survive wineserver restarts. Direct edits to
+        # system.reg are overwritten by wineserver when it flushes to disk.
+        sudo tee /tmp/ea_install_wrapper.sh > /dev/null << 'WRAPEOF'
+#!/bin/bash
+echo "=== launch $(date) ===" >> /tmp/ea_install.log
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\link2ea_fix.reg"
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\ea_services.reg"
+exec "$@"
+WRAPEOF
+        chmod +x /tmp/ea_install_wrapper.sh
+        docker cp /tmp/ea_install_wrapper.sh "$_sw_container":/home/retro/ea_install.sh
+        docker exec "$_sw_container" chmod +x /home/retro/ea_install.sh
+        rm -f /tmp/ea_install_wrapper.sh
+        echo "    .reg files and wrapper script installed."
+
+        # ── Step 6: set LaunchOptions in localconfig.vdf and lock config dir ───
+        echo "[6/6] Setting Steam launch options and locking localconfig.vdf..."
+        _sw_steam_uid=$(sudo ls "$_sw_sh/.steam/steam/userdata/" 2>/dev/null | head -1)
+        if [ -z "$_sw_steam_uid" ]; then
+            echo "WARNING: No Steam userdata found. You may need to have logged into Steam first."
+            echo "  Open Steam in Moonlight, sign in, then re-run this command."
+        else
+            _sw_cfg_dir="$_sw_sh/.steam/steam/userdata/$_sw_steam_uid/config"
+            _sw_cfg_file="$_sw_cfg_dir/localconfig.vdf"
+            if [ ! -f "$_sw_cfg_file" ]; then
+                echo "WARNING: localconfig.vdf not found at $_sw_cfg_file"
+                echo "  Open Steam in Moonlight first, then re-run."
+            else
+                # Stop Steam so it flushes current state before we edit
+                docker exec "$_sw_container" pkill -f steam.sh 2>/dev/null || true
+                sleep 5
+
+                # Make sure config dir is writable long enough to edit the file
+                sudo chmod 755 "$_sw_cfg_dir" 2>/dev/null || true
+
+                _sw_launch_opt='STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%'
+                sudo python3 - "$_sw_cfg_file" "$_sw_launch_opt" << 'PYEOF'
+import sys, re
+path, launch_opt = sys.argv[1], sys.argv[2]
+with open(path, 'r') as f:
+    content = f.read()
+new = re.sub(
+    r'("1237950".*?"LaunchOptions"\s*)"[^"]*"',
+    rf'\1"{launch_opt}"',
+    content, flags=re.DOTALL
+)
+if new == content:
+    new = re.sub(
+        r'("1237950"\s*\n\s*\{)',
+        rf'\1\n\t\t\t\t"LaunchOptions"\t\t"{launch_opt}"',
+        content
+    )
+if new == content:
+    print("WARNING: 1237950 block not found in localconfig.vdf — launch options not set.")
+    print("In Steam: right-click SWBF2 → Properties → Launch Options, enter:")
+    print("  STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%")
+else:
+    with open(path, 'w') as f:
+        f.write(new)
+    print("  LaunchOptions set for AppID 1237950.")
+PYEOF
+                sudo chown 1000:1000 "$_sw_cfg_file"
+
+                # Lock the config directory so Steam can't overwrite localconfig.vdf
+                # via atomic rename (temp file + rename). chmod 444 on the file is
+                # bypassed; locking the directory blocks the rename-into.
+                sudo chmod 555 "$_sw_cfg_dir"
+                echo "    Config directory locked (chmod 555) to preserve launch options."
+            fi
+        fi
+
+        echo ""
+        echo "=== Setup complete ==="
+        echo ""
+        echo "Next steps:"
+        echo "  1. In Steam (Moonlight): right-click SWBF2 → Properties → Compatibility"
+        echo "     → Force a specific Steam Play compatibility tool → GE-Proton10-34 (or later)"
+        echo "  2. Click Play on SWBF2"
+        echo "  3. Let Vulkan shaders compile — do NOT skip, takes several minutes, only happens once"
+        echo "  4. EA App will authenticate via your linked Steam/EA account (no manual login needed"
+        echo "     if accounts are linked at ea.com)"
+        echo "  5. Game should launch"
+        echo ""
+        echo "Troubleshooting:"
+        echo "  ./manage.sh diagnose-ea $_sw_appid   - check registry state"
+        echo "  docker exec \$container tail /tmp/ea_install.log   - check wrapper log"
+        echo ""
+        echo "Note: If the config dir was not writable (Steam not stopped cleanly), set launch"
+        echo "options manually in Steam → SWBF2 → Properties → Launch Options:"
+        echo "  STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%"
+        ;;
     fix-perms)
         # Wolf creates each app's home dir under WOLF_STATE_DIR/<session-id>/<App>
         # and mounts it as /home/retro inside the app container. If anything in
@@ -2099,7 +2358,7 @@ PYEOF
 _manage_wolf_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local commands="start stop restart logs status pin update apps reorder
-                    add-web ge-proton games fix-ea-game wait-ea-app
+                    add-web ge-proton games setup-swbf2 fix-ea-game wait-ea-app
                     install-ea-app diagnose-ea fix-perms install-completion backup"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
 }
@@ -2156,6 +2415,7 @@ COMPEOF
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
         echo "  ./manage.sh games                        - List games; pick one to apply the EA fix"
+        echo "  ./manage.sh setup-swbf2                  - Full SWBF2 2017 setup (EA Desktop + wrapper, see docs/SWBF2-2017-wolf-setup.md)"
         echo "  ./manage.sh fix-ea-game [appid]          - Apply EA fix directly (default: SWBF2 1237950)"
         echo "  ./manage.sh wait-ea-app [appid]          - Watch for EA App to install, then register link2ea:// handler"
         echo "  ./manage.sh install-ea-app [appid]       - Run EA App installer inside container (GUI appears in Moonlight)"
