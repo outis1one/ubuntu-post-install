@@ -38,12 +38,12 @@ set -euo pipefail
 
 APPID="1237950"
 WRAPPER_PATH="$HOME/.local/bin/ea_install.sh"
+GE_PROTON_VERSION="GE-Proton10-34"
 
 echo "=== SWBF2 (2017) Linux Steam Setup ==="
 echo ""
 
 # ── Locate Steam home ───────────────────────────────────────────────────────
-# Steam can live in either of two locations depending on install method.
 find_steam_home() {
     for candidate in \
         "$HOME/.steam/steam" \
@@ -62,6 +62,31 @@ STEAM_HOME=$(find_steam_home) || {
     exit 1
 }
 echo "Steam home: $STEAM_HOME"
+
+# ── Install GE-Proton if not present ───────────────────────────────────────
+GEP_DIR="$HOME/.steam/root/compatibilitytools.d"
+mkdir -p "$GEP_DIR"
+if [ -d "$GEP_DIR/$GE_PROTON_VERSION" ]; then
+    echo "GE-Proton: $GE_PROTON_VERSION already installed"
+else
+    echo "Installing $GE_PROTON_VERSION..."
+    GEP_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$GE_PROTON_VERSION/$GE_PROTON_VERSION.tar.gz"
+    GEP_TMP="/tmp/$GE_PROTON_VERSION.tar.gz"
+    if ! curl -L --progress-bar -o "$GEP_TMP" "$GEP_URL"; then
+        echo "ERROR: Download failed. Check your internet connection and try again."
+        exit 1
+    fi
+    tar -xzf "$GEP_TMP" -C "$GEP_DIR"
+    rm -f "$GEP_TMP"
+    echo "GE-Proton installed to: $GEP_DIR/$GE_PROTON_VERSION"
+    echo ""
+    echo "IMPORTANT: Restart Steam now, then:"
+    echo "  Right-click SWBF2 → Properties → Compatibility"
+    echo "  → Force a specific Steam Play compatibility tool → $GE_PROTON_VERSION"
+    echo "Then re-run this script."
+    echo ""
+    read -rp "Press Enter after you have restarted Steam and set GE-Proton, or Ctrl+C to abort..."
+fi
 
 PFX_C="$STEAM_HOME/steamapps/compatdata/$APPID/pfx/drive_c"
 MSI="$PFX_C/ea_app.msi"
