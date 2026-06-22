@@ -19,13 +19,9 @@ wrapper to import the necessary registry entries on every launch.
 ## Prerequisites (both setups)
 
 - SWBF2 (AppID 1237950) installed via Steam and fully downloaded
-- GE-Proton10-34 — the setup scripts install this automatically if not present
+- GE-Proton10-34 — installed automatically by the setup scripts if not present
+- `msitools` — installed automatically by the setup scripts if not present
 - An EA account created at ea.com and linked to your Steam account
-- `msitools` installed on the host:
-  ```bash
-  sudo apt-get install -y msitools     # Debian / Ubuntu
-  sudo dnf install -y msitools         # Fedora
-  ```
 
 ### EA account requirement
 
