@@ -6,16 +6,41 @@
 
 ---
 
-## Why this is hard
+## The EA dependency problem
 
-SWBF2 (2017) is an EA game. EA mandated their **EA App** launcher for all EA Steam titles.
-On launch, Steam passes `link2ea://launchgame/1237950?platform=steam&theme=swbfii` as the
-"executable" to GE-Proton. The game binary itself also checks for Origin/EA App in the
-registry before starting.
+SWBF2 (2017) has a hard dependency on EA's authentication infrastructure:
 
-EA App requires an EA account login, and ea.com/signup has been unreliable. The workaround
-here **bypasses EA App entirely**: launch the game executable directly and spoof the Origin
-registry entries so the game thinks its launcher is installed.
+- **Steam** handles payment, library, and game files
+- **EA App** handles identity and authentication — even for offline single-player
+
+First launch requires an internet connection and an EA account login. After that, EA App
+caches credentials locally and subsequent launches work offline — but only until the token
+expires or EA's servers go dark permanently.
+
+**What happens when EA shuts down authentication servers?**  
+The game becomes unplayable through legitimate means. EA has done this before (Battlefield 2,
+The Sims Online, older Origin titles). For a 9-year-old game with a shrinking playerbase,
+this is a real risk.
+
+Community options if/when that happens:
+- **Private servers** — the SWBF2 community has projects like Kyber for multiplayer. If EA
+  kills auth, expect the community to build replacement auth servers as they did for BF2 (BF2Hub, OpenSpy).
+- **Play SWBF2 (2005) instead** — the classic 2005 Battlefront II runs natively on Linux
+  through Proton with zero launcher requirements, no accounts, no phoning home.
+  AppID: 6060. It just works.
+
+**Backing up credentials for machine transfers:**  
+EA App caches credentials inside the Wine prefix. Back up the entire compatdata directory:
+```bash
+tar -czf swbf2-prefix-backup.tar.gz \
+  /home/retro/.steam/steam/steamapps/compatdata/1237950/
+```
+Restore it on another machine and the cached login travels with it — until the token expires
+(EA tokens last weeks to months). Not a permanent solution but useful for migrations.
+
+---
+
+## Why this is hard (technically)
 
 ---
 
@@ -133,13 +158,25 @@ chmod +x /tmp/ea_install.sh
 docker cp /tmp/ea_install.sh "$WOLF_CONTAINER":/home/retro/ea_install.sh
 ```
 
-### 6. Launch SWBF2 in Moonlight
+### 6. Launch SWBF2 in Moonlight — first-time EA login
 
-Steam → wrapper → `starwarsbattlefrontii.exe` runs directly inside sniper+GE-Proton.
-The game checks Origin registry, finds the spoofed entries, and starts.
+On first launch Steam passes `link2ea://launchgame/1237950?platform=steam&theme=swbfii`
+to GE-Proton, which hands it to `Link2EA.exe`. EA App opens and shows a login screen.
 
-You may see Vulkan shader compilation prompts on first launch — these can be skipped;
-the game will still proceed (shaders compile lazily or are skipped).
+**Vulkan shader compilation** appears before the game loads on first run. Let it complete
+— do not skip it. It only runs once and takes several minutes.
+
+**EA App login:**
+1. Log in with your EA account credentials
+2. Check "Stay logged in" / "Remember me" — this caches the token locally
+3. EA App links your Steam purchase to your EA account
+4. The game launches
+
+**After first login**, credentials are cached in the Wine prefix at:
+```
+compatdata/1237950/pfx/drive_c/users/steamuser/AppData/Local/EADesktop/
+```
+Subsequent launches skip the login screen entirely.
 
 ### 7. Restore clean state (after confirmed working)
 
