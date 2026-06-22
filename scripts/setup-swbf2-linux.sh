@@ -246,6 +246,9 @@ else
     if [ ! -f "$CFG_FILE" ]; then
         echo "WARNING: localconfig.vdf not found. Launch Steam first, then re-run."
     else
+        CFG_DIR=$(dirname "$CFG_FILE")
+        # Remove directory lock before writing (in case script was run before)
+        chmod u+w "$CFG_DIR" 2>/dev/null || true
         LAUNCH_OPT="$WRAPPER_PATH %command%"
         python3 - "$CFG_FILE" "$LAUNCH_OPT" << 'PYEOF'
 import sys, re
@@ -262,6 +265,11 @@ with open(path, 'w') as f:
     f.write(new)
 print("  LaunchOptions set.")
 PYEOF
+        # Lock the directory so Steam's atomic rename cannot overwrite localconfig.vdf.
+        # Steam writes via rename(tmpfile, destination); write permission on the
+        # directory is required for rename-into. This preserves the launch option.
+        chmod 555 "$CFG_DIR"
+        echo "    Config directory locked to prevent Steam overwrite"
     fi
 fi
 
