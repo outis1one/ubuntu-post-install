@@ -41,6 +41,7 @@
 set -euo pipefail
 
 APPID="1237950"
+GE_PROTON_VERSION="GE-Proton10-34"
 
 echo "=== SWBF2 (2017) Wolf/Moonlight Setup ==="
 echo ""
@@ -69,6 +70,36 @@ if [ -z "$STEAM_HOME" ] || [ ! -d "$STEAM_HOME" ]; then
     exit 1
 fi
 echo "Steam home: $STEAM_HOME"
+
+# ── Install GE-Proton inside the container if not present ──────────────────
+GEP_CONTAINER_DIR="/home/retro/.steam/compatibilitytools.d"
+GEP_INSTALLED=$(docker exec "$WOLF_CONTAINER" \
+    bash -c "ls '$GEP_CONTAINER_DIR' 2>/dev/null | grep -i '$GE_PROTON_VERSION'" 2>/dev/null || true)
+if [ -n "$GEP_INSTALLED" ]; then
+    echo "GE-Proton: $GE_PROTON_VERSION already installed in container"
+else
+    echo "Installing $GE_PROTON_VERSION into WolfSteam container..."
+    GEP_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$GE_PROTON_VERSION/$GE_PROTON_VERSION.tar.gz"
+    GEP_TMP="/tmp/$GE_PROTON_VERSION.tar.gz"
+    if ! curl -L --progress-bar -o "$GEP_TMP" "$GEP_URL"; then
+        echo "ERROR: Download failed. Check your internet connection and try again."
+        exit 1
+    fi
+    docker exec "$WOLF_CONTAINER" mkdir -p "$GEP_CONTAINER_DIR"
+    docker cp "$GEP_TMP" "$WOLF_CONTAINER:/tmp/$GE_PROTON_VERSION.tar.gz"
+    docker exec -u 1000 "$WOLF_CONTAINER" \
+        tar -xzf "/tmp/$GE_PROTON_VERSION.tar.gz" -C "$GEP_CONTAINER_DIR"
+    docker exec "$WOLF_CONTAINER" rm -f "/tmp/$GE_PROTON_VERSION.tar.gz"
+    rm -f "$GEP_TMP"
+    echo "GE-Proton installed in container."
+    echo ""
+    echo "IMPORTANT: In Steam (via Moonlight):"
+    echo "  Right-click SWBF2 → Properties → Compatibility"
+    echo "  → Force a specific Steam Play compatibility tool → $GE_PROTON_VERSION"
+    echo "Then re-run this script."
+    echo ""
+    read -rp "Press Enter after you have set GE-Proton in Steam, or Ctrl+C to abort..."
+fi
 
 PFX_C="$STEAM_HOME/.steam/steam/steamapps/compatdata/$APPID/pfx/drive_c"
 MSI="$PFX_C/ea_app.msi"

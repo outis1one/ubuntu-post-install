@@ -19,7 +19,7 @@ wrapper to import the necessary registry entries on every launch.
 ## Prerequisites (both setups)
 
 - SWBF2 (AppID 1237950) installed via Steam and fully downloaded
-- GE-Proton10-34 or later installed
+- GE-Proton10-34 — the setup scripts install this automatically if not present
 - An EA account created at ea.com and linked to your Steam account
 - `msitools` installed on the host:
   ```bash
@@ -44,8 +44,8 @@ account. This is a one-time step that persists across reinstalls.
 
 ### Prerequisites (native)
 
-- GE-Proton installed via ProtonUp-Qt or manually into `~/.steam/compatibilitytools.d/`
 - In Steam: SWBF2 → Properties → Compatibility → Force GE-Proton10-34
+  (the setup script installs GE-Proton10-34 automatically if not present)
 
 ### Automated setup
 
@@ -194,10 +194,9 @@ PYEOF
 ### Prerequisites (Wolf)
 
 - Wolf is running and Steam is open in a Moonlight session
-- GE-Proton is installed inside the WolfSteam container
-  (`./manage.sh ge-proton`)
 - In Steam (via Moonlight): SWBF2 → Properties → Compatibility →
   Force GE-Proton10-34
+  (the setup script installs GE-Proton10-34 into the container automatically if not present)
 
 ### Automated setup
 
