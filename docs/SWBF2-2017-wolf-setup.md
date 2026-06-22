@@ -1,286 +1,311 @@
 # Star Wars Battlefront II (2017) — Wolf/Moonlight Setup
 
 **AppID:** 1237950  
-**Proton:** GE-Proton10-34 (required — stock Proton does not work with EA App)  
+**Proton:** GE-Proton10-34 (required)  
 **Platform:** Wolf (Games-on-Whales) — WolfSteam Docker container  
+
+---
+
+## Prerequisites
+
+- SWBF2 installed via Steam in the WolfSteam session
+- GE-Proton10-34 installed (Steam → Settings → Compatibility → Enable Steam Play)
+- EA account created at ea.com and linked to your Steam account
+- `msitools` on the Docker host: `sudo apt-get install -y msitools`
 
 ---
 
 ## The EA dependency problem
 
-SWBF2 (2017) has a hard dependency on EA's authentication infrastructure:
+SWBF2 (2017) requires EA's launcher infrastructure — even for single-player offline:
 
 - **Steam** handles payment, library, and game files
-- **EA App** handles identity and authentication — even for offline single-player
+- **EA App** handles identity and authentication
 
-First launch requires an internet connection and an EA account login. After that, EA App
-caches credentials locally and subsequent launches work offline — but only until the token
-expires or EA's servers go dark permanently.
+First launch requires internet + EA account. After that, EA App caches credentials
+locally and subsequent launches work offline — until the token expires or EA's servers
+shut down permanently.
 
-**What happens when EA shuts down authentication servers?**  
-The game becomes unplayable through legitimate means. EA has done this before (Battlefield 2,
-The Sims Online, older Origin titles). For a 9-year-old game with a shrinking playerbase,
-this is a real risk.
+**If/when EA shuts down:**
+- Community private server projects (like Kyber) may replace EA's infrastructure
+- SWBF2 (2005, AppID 6060) is the zero-dependency alternative — no accounts, no
+  launchers, active community servers, runs perfectly through Proton
 
-Community options if/when that happens:
-- **Private servers** — the SWBF2 community has projects like Kyber for multiplayer. If EA
-  kills auth, expect the community to build replacement auth servers as they did for BF2 (BF2Hub, OpenSpy).
-- **Play SWBF2 (2005) instead** — the classic 2005 Battlefront II runs natively on Linux
-  through Proton with zero launcher requirements, no accounts, no phoning home.
-  AppID: 6060. It just works.
-
-**Backing up credentials for machine transfers:**  
-EA App caches credentials inside the Wine prefix. Back up the entire compatdata directory:
+**Migrating to another machine:**
 ```bash
+# Back up the Wine prefix — EA credentials travel with it
 tar -czf swbf2-prefix-backup.tar.gz \
-  /home/retro/.steam/steam/steamapps/compatdata/1237950/
+    /home/retro/.steam/steam/steamapps/compatdata/1237950/
 ```
-Restore it on another machine and the cached login travels with it — until the token expires
-(EA tokens last weeks to months). Not a permanent solution but useful for migrations.
+Tokens last weeks to months before requiring re-login.
 
 ---
 
-## Why this is hard (technically)
+## Why docker exec can't run Wine/Proton
 
----
-
-## The bwrap problem (why you can't just docker exec)
-
-The WolfSteam container runs Steam as uid 1000 (`retro` inside container).
 `docker exec` carries high Linux capabilities (`CapEff ≈ 0xa8ac35fb`).
-Steam processes have `CapEff=0`.
-
-When a high-cap shell tries to run bwrap (used by Steam's sniper/pressure-vessel runtime),
-bwrap attempts a privileged uid-map path that fails:
+Steam processes run with `CapEff=0`. When a high-cap process tries to run bwrap
+(Steam's sniper/pressure-vessel sandbox), bwrap tries a privileged uid-map path:
 
 ```
 setting up uid map: Permission denied
 ```
 
-This means you **cannot** run Proton or wine64 via `docker exec` — bwrap always fails.
-Only Steam itself can properly launch programs through sniper+GE-Proton.
+**Only Steam itself can launch programs through sniper+GE-Proton.** All Wine
+operations must go through Steam's launch chain — hence the wrapper approach.
 
 ---
 
-## Solution overview
+## How it works
 
-1. Intercept the Steam launch with a wrapper script (via launch options)
-2. Spoof Origin registry entries so SWBF2 thinks its launcher is present
-3. Skip link2ea:// entirely — launch `starwarsbattlefrontii.exe` directly
+Steam passes a `link2ea://` URL as the "game executable" to GE-Proton. The wrapper
+intercepts this, imports registry fixes, then passes the original URL through.
+GE-Proton's `steam.exe` handles `link2ea://`, finds `Link2EA.exe` via the registry,
+runs it, and EA Desktop authenticates the session before launching the game.
 
-No EA account needed. No EA App login needed.
+```
+Steam → wrapper → regedit (registry fixes) → exec original args
+      → GE-Proton steam.exe → link2ea:// → Link2EA.exe → EA Desktop → SWBF2
+```
 
 ---
 
 ## Step-by-step
 
-### 1. Find the WolfSteam container name and Steam user ID
+### 1. Trigger Wine prefix creation
+
+SWBF2 must be launched at least once so Steam creates the Wine prefix and drops
+`ea_app.msi` into it. Launch SWBF2 from Moonlight, wait ~10 seconds, then close it
+(the "Origin is not installed" error is expected at this point).
+
+Verify the MSI appeared:
+```bash
+WOLF_CONTAINER=$(docker ps --format '{{.Names}}' | grep Wolf)
+docker exec "$WOLF_CONTAINER" ls -lh \
+    /home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi
+```
+Expected: ~227 MB file.
+
+### 2. Extract EA Desktop files on the host
+
+The MSI's `JunoConfigureRegistry` .NET custom action fails in Wine (it uses
+`SetSecurityDescriptorSddlForm` for registry ACLs — unsupported in Wine). This
+causes the entire install to roll back. Extract files on the host instead:
 
 ```bash
 WOLF_CONTAINER=$(docker ps --format '{{.Names}}' | grep Wolf)
-echo "$WOLF_CONTAINER"
 
-STEAM_UID=$(docker exec "$WOLF_CONTAINER" ls /home/retro/.steam/steam/userdata/)
-echo "$STEAM_UID"
+docker cp "$WOLF_CONTAINER:/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi" \
+    /tmp/ea_app.msi
 
-CONFIG_DIR="/home/retro/.steam/steam/userdata/$STEAM_UID/config"
+sudo apt-get install -y msitools
+mkdir -p /tmp/ea_app_extracted
+msiextract -C /tmp/ea_app_extracted /tmp/ea_app.msi
 ```
 
-### 2. Lock localconfig.vdf against Steam overwriting it
+### 3. Copy EA Desktop files into the Wine prefix
 
-Steam uses atomic rename (write temp + rename) when saving config.
-`chmod 444` on the file is bypassed by the rename. Lock the **directory** instead:
+The MSI installs EA Desktop under a versioned directory with a symlink.
+The version (e.g. `14.2.0.3345`) is whatever the extracted MSI contains:
 
 ```bash
-docker exec "$WOLF_CONTAINER" chmod 555 "$CONFIG_DIR"
-```
+EA_VERSION=$(ls /tmp/ea_app_extracted/Electronic\ Arts/EA\ Desktop/ | head -1)
+# Usually "EA Desktop" — this is the versioned dir, renamed during real install
+# Use the version from the failed-install symlink if present:
+SYMLINK_TARGET=$(docker exec "$WOLF_CONTAINER" readlink \
+    "/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/Program Files/Electronic Arts/EA Desktop/EA Desktop" \
+    2>/dev/null || echo "14.2.0.3345")
 
-### 3. Set SWBF2 launch options in localconfig.vdf
+PFXBASE="/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/Program Files/Electronic Arts/EA Desktop"
 
-Kill Steam first so it flushes and releases the file, then edit:
+docker exec "$WOLF_CONTAINER" bash -c "
+    rm -f '$PFXBASE/EA Desktop'
+    mkdir -p '$PFXBASE/$SYMLINK_TARGET'
+    ln -s '$SYMLINK_TARGET' '$PFXBASE/EA Desktop'
+"
 
-```bash
-docker exec "$WOLF_CONTAINER" pkill -f steam.sh || true
-sleep 3
-
-CONFIG_FILE="$CONFIG_DIR/localconfig.vdf"
-
-# The file needs a LaunchOptions entry under AppID 1237950.
-# Find the block and add/replace LaunchOptions:
-docker exec "$WOLF_CONTAINER" grep -A5 '"1237950"' "$CONFIG_FILE"
-# If LaunchOptions is missing, add it manually to the 1237950 block:
-#   "LaunchOptions"   "STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%"
-```
-
-The launch option value must be:
-```
-STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%
-```
-
-### 4. Write the Origin registry spoof
-
-SWBF2's binary checks for Origin in the registry before starting. Spoof it by writing
-directly to Wine's system.reg (plain text file — no Wine needed):
-
-```bash
-SYSREG="/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/system.reg"
-TIMESTAMP=$(date +%s)
-
-docker exec "$WOLF_CONTAINER" bash -c "cat >> '$SYSREG' << 'REGEOF'
-
-[Software\\\\Origin] $TIMESTAMP
-\"ClientPath\"=\"C:\\\\\\\\Program Files\\\\\\\\Electronic Arts\\\\\\\\EA Desktop\\\\\\\\EA Desktop\\\\\\\\EADesktop.exe\"
-\"InstallDir\"=\"C:\\\\\\\\Program Files\\\\\\\\Electronic Arts\\\\\\\\EA Desktop\\\\\\\\EA Desktop\\\\\\\\\"
-
-[Software\\\\Wow6432Node\\\\Origin] $TIMESTAMP
-\"ClientPath\"=\"C:\\\\\\\\Program Files\\\\\\\\Electronic Arts\\\\\\\\EA Desktop\\\\\\\\EA Desktop\\\\\\\\EADesktop.exe\"
-\"InstallDir\"=\"C:\\\\\\\\Program Files\\\\\\\\Electronic Arts\\\\\\\\EA Desktop\\\\\\\\EA Desktop\\\\\\\\\"
-REGEOF"
+docker cp "/tmp/ea_app_extracted/Electronic Arts/EA Desktop/EA Desktop/." \
+    "$WOLF_CONTAINER:$PFXBASE/$SYMLINK_TARGET/"
 
 # Verify
-docker exec "$WOLF_CONTAINER" grep -A3 'Software\\\\Origin' "$SYSREG"
+docker exec "$WOLF_CONTAINER" find "$PFXBASE" -name "Link2EA.exe"
 ```
 
-### 5. Write the launch wrapper
+### 4. Write registry fix files to drive_c
 
-The wrapper receives Steam's full launch chain as `$@` (args 1–11 are the
-sniper+GE-Proton preamble, arg 12 is normally `link2ea://...`). Replace the last
-arg with the actual game executable:
+These are imported into the Wine registry on each launch via the wrapper.
+Writing to drive_c ensures they survive wineserver restarts (unlike direct
+system.reg edits which get overwritten).
+
+```bash
+PFXC="$WOLF_CONTAINER:/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c"
+
+# link2ea:// protocol handler — tells Wine how to run Link2EA.exe
+cat > /tmp/link2ea_fix.reg << 'EOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea]
+@="URL:link2ea Protocol"
+"URL Protocol"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\link2ea\shell\open\command]
+@="\"C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\Link2EA.exe\" \"%1\""
+EOF
+
+# EA Desktop Windows services — EALocalHostSvc provides local IPC that
+# Link2EA.exe needs; without it launch fails with RPC_S_SERVER_UNAVAILABLE
+cat > /tmp/ea_services.reg << 'EOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EALocalHostSvc]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EALocalHostSvc.exe"
+"DisplayName"="EA Local Host Service"
+"ObjectName"="LocalSystem"
+
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\EABackgroundService]
+"Type"=dword:00000010
+"Start"=dword:00000002
+"ErrorControl"=dword:00000001
+"ImagePath"="C:\\Program Files\\Electronic Arts\\EA Desktop\\EA Desktop\\EABackgroundService.exe"
+"DisplayName"="EA Background Service"
+"ObjectName"="LocalSystem"
+EOF
+
+docker cp /tmp/link2ea_fix.reg "$PFXC/link2ea_fix.reg"
+docker cp /tmp/ea_services.reg "$PFXC/ea_services.reg"
+```
+
+### 5. Lock localconfig.vdf and set launch options
+
+Steam overwrites localconfig.vdf on shutdown via atomic rename (temp file +
+rename). `chmod 444` on the file is bypassed. Lock the **directory** instead:
+
+```bash
+STEAM_UID=$(docker exec "$WOLF_CONTAINER" ls /home/retro/.steam/steam/userdata/)
+CONFIG_DIR="/home/retro/.steam/steam/userdata/$STEAM_UID/config"
+CONFIG_FILE="$CONFIG_DIR/localconfig.vdf"
+
+# Stop Steam so it flushes before we edit
+docker exec "$WOLF_CONTAINER" pkill -f steam.sh || true
+sleep 5
+
+# Lock directory
+docker exec "$WOLF_CONTAINER" chmod 555 "$CONFIG_DIR"
+
+# Add launch options for AppID 1237950
+# Find the 1237950 block and insert/replace LaunchOptions
+docker exec "$WOLF_CONTAINER" python3 - "$CONFIG_FILE" << 'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+
+launch_opt = 'STEAM_UNIX_SOCKET=/tmp/steam.sock /home/retro/ea_install.sh %command%'
+
+# Replace existing LaunchOptions in 1237950 block if present
+new = re.sub(
+    r'("1237950".*?"LaunchOptions"\s*)"[^"]*"',
+    rf'\1"{launch_opt}"',
+    content, flags=re.DOTALL
+)
+
+if new == content:
+    # LaunchOptions key missing — add it after the "1237950" line
+    new = re.sub(
+        r'("1237950"\s*\n\s*\{)',
+        rf'\1\n\t\t\t\t"LaunchOptions"\t\t"{launch_opt}"',
+        content
+    )
+
+with open(path, 'w') as f:
+    f.write(new)
+print("Done")
+PYEOF
+
+# Verify
+docker exec "$WOLF_CONTAINER" grep -A3 '"1237950"' "$CONFIG_FILE" | grep -i launch
+```
+
+### 6. Write the wrapper script
 
 ```bash
 cat > /tmp/ea_install.sh << 'EOF'
 #!/bin/bash
 echo "=== launch $(date) ===" >> /tmp/ea_install.log
-GAME_EXE="/home/retro/.steam/steam/steamapps/common/STAR WARS Battlefront II/starwarsbattlefrontii.exe"
-exec "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "$GAME_EXE"
+# Import registry fixes on every launch (survives wineserver restarts)
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\link2ea_fix.reg"
+"$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" regedit /S "C:\\ea_services.reg"
+# Pass original args through — Steam's link2ea:// URL goes to GE-Proton → Link2EA.exe
+exec "$@"
 EOF
 chmod +x /tmp/ea_install.sh
 docker cp /tmp/ea_install.sh "$WOLF_CONTAINER":/home/retro/ea_install.sh
 ```
 
-### 6. Launch SWBF2 in Moonlight — first-time EA login
+### 7. First launch
 
-On first launch Steam passes `link2ea://launchgame/1237950?platform=steam&theme=swbfii`
-to GE-Proton, which hands it to `Link2EA.exe`. EA App opens and shows a login screen.
-
-**Vulkan shader compilation** appears before the game loads on first run. Let it complete
-— do not skip it. It only runs once and takes several minutes.
-
-**EA App login:**
-1. Log in with your EA account credentials
-2. Check "Stay logged in" / "Remember me" — this caches the token locally
-3. EA App links your Steam purchase to your EA account
-4. The game launches
-
-**After first login**, credentials are cached in the Wine prefix at:
-```
-compatdata/1237950/pfx/drive_c/users/steamuser/AppData/Local/EADesktop/
-```
-Subsequent launches skip the login screen entirely.
-
-### 7. Restore clean state (after confirmed working)
-
-```bash
-# Restore directory to writable so Steam can save normally
-docker exec "$WOLF_CONTAINER" chmod 755 "$CONFIG_DIR"
-
-# Remove LaunchOptions for 1237950 from localconfig.vdf while Steam is stopped
-```
+1. Reconnect to Moonlight and launch SWBF2
+2. **Let Vulkan shaders compile** — do not skip, takes several minutes, only happens once
+3. EA App authenticates via your linked Steam/EA account (no manual login if accounts are linked)
+4. Game loads
 
 ---
 
-## Background: what Steam actually passes to the wrapper
+## Is this fragile? Will it work on a fresh install?
 
-```
-$1  = /path/to/steam-launch-wrapper
-$2  = --
-$3  = /path/to/reaper
-$4  = SteamLaunch
-$5  = AppId=1237950
-$6  = --
-$7  = /path/to/SteamLinuxRuntime_sniper/_v2-entry-point
-$8  = --verb=waitforexitandrun
-$9  = --
-$10 = /path/to/GE-Proton10-34/proton
-$11 = waitforexitandrun
-$12 = link2ea://launchgame/1237950?platform=steam&theme=swbfii  ← we replace this
-```
+**Honest assessment:**
 
----
+| Component | Fresh install safe? | Notes |
+|-----------|-------------------|-------|
+| EA Desktop files in Wine prefix | ✅ | Extracted from MSI in game files |
+| Registry fixes (.reg files) | ✅ | Imported on every launch via wrapper |
+| Launch options in localconfig.vdf | ✅ | Set by script |
+| Config dir lock (chmod 555) | ✅ | Set by script |
+| ea_app.msi in drive_c | ⚠️ | Requires one failed launch first to appear |
+| EA account link | ⚠️ | One-time manual step |
+| Vulkan shader cache | ⚠️ | Recompiles on fresh prefix — takes minutes |
+| EA token in Wine prefix | ⚠️ | Requires login if prefix deleted or token expired |
 
-## What doesn't work (and why)
+**The catch:** The Wine prefix (`compatdata/1237950/`) is recreated from scratch if deleted.
+All file copies and registry entries live inside it. A fresh install needs all steps run again
+— but the automation handles that.
 
-### Running msiexec / Wine via docker exec
-`docker exec` carries Linux capabilities that break bwrap. Any attempt to run
-Proton/wine64 outside Steam's own launch chain gets:
-```
-setting up uid map: Permission denied
-```
-
-### Running the EA App MSI through Wine (INST-14-1603)
-The MSI's `JunoConfigureRegistry` .NET custom action uses `SetSecurityDescriptorSddlForm`
-to set registry ACLs. Wine doesn't support this — the action returns 0 (failure),
-causing the entire install to roll back. `DISABLEROLLBACK=1` doesn't help because
-MSI logs the product as already-registered from the first attempt, causing subsequent
-runs to produce an empty log and exit.
-
-### link2ea:// approach with EA account
-EA App requires an EA account linked to your Steam account. `ea.com/signup` is
-unreliable. Even with an account, EA Desktop must be installed in the Wine prefix
-(see msiextract bypass below if needed). Bypassing the game exe directly is simpler.
-
-### msiextract bypass (if EA App files are needed for something else)
-If you need EA Desktop files in the prefix for another reason:
-```bash
-# Copy MSI out of container (appears in drive_c after first launch attempt)
-docker cp "$WOLF_CONTAINER:/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi" \
-    /tmp/ea_app.msi
-
-# Extract on host (bypasses JunoConfigureRegistry entirely)
-sudo apt-get install -y msitools
-mkdir -p /tmp/ea_app_extracted
-msiextract -C /tmp/ea_app_extracted /tmp/ea_app.msi
-
-PFXBASE="/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/Program Files/Electronic Arts/EA Desktop"
-docker exec "$WOLF_CONTAINER" bash -c "
-  [ -L '$PFXBASE/EA Desktop' ] && rm '$PFXBASE/EA Desktop'
-  mkdir -p '$PFXBASE/14.2.0.3345'
-  ln -s 14.2.0.3345 '$PFXBASE/EA Desktop'
-"
-docker cp "/tmp/ea_app_extracted/Electronic Arts/EA Desktop/EA Desktop/." \
-    "$WOLF_CONTAINER:$PFXBASE/14.2.0.3345/"
-```
+**The one irreducible manual step:** Linking your EA account to Steam (done once at ea.com,
+persists across reinstalls via EA's servers).
 
 ---
 
 ## Troubleshooting
 
-### Game exits in ~6 seconds, no popup
-Check wrapper log inside container:
+### "Origin is not installed" popup
+The game binary checks for Origin before calling link2ea://. This happens when:
+- The wrapper didn't run (check launch options are set)
+- The wrapper ran but regedit failed (check `tail /tmp/ea_install.log`)
+
+### `link2ea://` fails with ret 31 (SE_ERR_NOASSOC)
+`link2ea_fix.reg` wasn't imported. Check drive_c has the file and wrapper ran both regedits.
+
+### RPC_S_SERVER_UNAVAILABLE (0x800706ba) in wine log
+`ea_services.reg` wasn't imported or EALocalHostSvc failed to register. Check wrapper log.
+
+### Game exits immediately, no popup, no log
+Wrapper isn't being called. Config dir may not be chmod 555 or launch options missing.
+```bash
+docker exec "$WOLF_CONTAINER" stat "$CONFIG_DIR" | grep Access
+docker exec "$WOLF_CONTAINER" grep -A5 '"1237950"' "$CONFIG_FILE" | grep -i launch
+```
+
+### Collecting logs after a failure
 ```bash
 docker exec "$WOLF_CONTAINER" bash -c "
-  cat /tmp/ea_install.log | tail -20
-  find /home/retro/.steam/steam/steamapps/compatdata/1237950/ -name '*.log' \
-    -newer /tmp/ea_install.log 2>/dev/null | xargs tail -20 2>/dev/null
+    tail -20 /tmp/ea_install.log
+    echo '---'
+    grep -E '(err:|link2ea|origin|RPC)' /home/retro/steam-1237950.log | tail -20
 "
 ```
-
-### "Origin is not installed" popup
-Origin registry entries missing. Repeat step 4 and verify:
-```bash
-docker exec "$WOLF_CONTAINER" grep -A3 'Software\\\\Origin' \
-  '/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/system.reg'
-```
-
-### Wrapper never runs (Steam ignores launch options)
-Steam wrote config before chmod 555 was applied. Kill Steam, verify chmod 555 is set
-on the config directory, edit localconfig.vdf, then start Steam again.
-
-### localconfig.vdf gets overwritten on Steam shutdown
-`chmod 555` on the directory (not the file) prevents the atomic rename Steam uses.
-
-### wine64 segfaults outside Steam (exit 139)
-GE-Proton10's wine64 requires the sniper runtime. Never call it via `docker exec`.
 
 ---
 
@@ -289,9 +314,11 @@ GE-Proton10's wine64 requires the sniper runtime. Never call it via `docker exec
 | Path | Description |
 |------|-------------|
 | `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/` | SWBF2 Wine prefix |
-| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/system.reg` | Wine HKLM registry (plain text) |
-| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi` | EA App MSI (~227 MB, appears after first launch) |
-| `/home/retro/.steam/steam/steamapps/common/STAR WARS Battlefront II/starwarsbattlefrontii.exe` | Actual game binary |
-| `/home/retro/.steam/steam/userdata/<uid>/config/localconfig.vdf` | Steam per-user config (launch options) |
-| `/home/retro/ea_install.sh` | Launch wrapper script |
-| `/tmp/ea_install.log` | Wrapper log (inside container, resets on container restart) |
+| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/system.reg` | Wine HKLM registry |
+| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_app.msi` | EA App MSI (~227 MB) |
+| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/link2ea_fix.reg` | link2ea protocol handler reg |
+| `/home/retro/.steam/steam/steamapps/compatdata/1237950/pfx/drive_c/ea_services.reg` | EA service registrations |
+| `/home/retro/.steam/steam/steamapps/common/STAR WARS Battlefront II/` | Game files |
+| `/home/retro/.steam/steam/userdata/<uid>/config/localconfig.vdf` | Steam launch options |
+| `/home/retro/ea_install.sh` | Launch wrapper |
+| `/tmp/ea_install.log` | Wrapper log (resets on container restart) |
