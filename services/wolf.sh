@@ -1010,7 +1010,16 @@ _cache_ge_proton() {
 _apply_ea_fix() {
     local appid="$1"
     local steam_home reg acf container_was_running=0
-    steam_home=$(_steam_home)
+    # Search all Wolf Steam homes for the one that has this AppID's prefix.
+    # With multiple WolfSteam containers, head -1 picks the wrong one.
+    steam_home=""
+    while IFS= read -r candidate; do
+        if [ -f "$candidate/.steam/steam/steamapps/compatdata/$appid/pfx/system.reg" ]; then
+            steam_home="$candidate"
+            break
+        fi
+    done < <(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null)
+    [ -z "$steam_home" ] && steam_home=$(_steam_home)
     reg="$steam_home/.steam/steam/steamapps/compatdata/$appid/pfx/system.reg"
     acf="$steam_home/.steam/steam/steamapps/appmanifest_${appid}.acf"
 
