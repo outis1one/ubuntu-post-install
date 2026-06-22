@@ -89,7 +89,6 @@ else
 fi
 
 PFX_C="$STEAM_HOME/steamapps/compatdata/$APPID/pfx/drive_c"
-MSI="$PFX_C/ea_app.msi"
 
 # ── Step 1: verify Wine prefix exists ──────────────────────────────────────
 echo ""
@@ -99,106 +98,89 @@ if [ ! -d "$PFX_C" ]; then
     echo "Required before running this script:"
     echo "  1. In Steam: right-click SWBF2 → Properties → Compatibility"
     echo "     → Force GE-Proton10-34 (or later)"
-    echo "  2. Click Play on SWBF2 — wait ~10 seconds then close it"
+    echo "  2. Click Play on SWBF2 — wait ~30 seconds then close it"
     echo "  3. Re-run this script"
     exit 1
 fi
 echo "[1/6] Wine prefix: OK"
 
-# ── Step 2: locate ea_app.msi ──────────────────────────────────────────────
-# The MSI is bundled with the game files. Steam may also copy it to drive_c
-# when the install script runs. Check both locations.
-if [ ! -f "$MSI" ]; then
-    GAME_DIR=$(find "$STEAM_HOME/steamapps/common" -maxdepth 2 \
-        -name "ea_app.msi" 2>/dev/null | head -1)
-    if [ -n "$GAME_DIR" ]; then
-        echo "Found ea_app.msi in game files: $GAME_DIR"
-        MSI="$GAME_DIR"
-    fi
-fi
-if [ ! -f "$MSI" ]; then
-    # Also search anywhere under steamapps
-    MSI_FOUND=$(find "$STEAM_HOME/steamapps" -name "ea_app.msi" 2>/dev/null | head -1)
-    [ -n "$MSI_FOUND" ] && MSI="$MSI_FOUND"
-fi
-if [ ! -f "$MSI" ]; then
-    echo ""
-    echo "ERROR: ea_app.msi not found."
-    echo ""
-    echo "Launch SWBF2 once from Steam (with GE-Proton set in Compatibility),"
-    echo "wait ~10 seconds for it to attempt startup, then close it and re-run."
-    echo ""
-    echo "If you just installed the game, verify it downloaded fully in Steam."
-    exit 1
-fi
-MSI_SIZE=$(stat -c%s "$MSI")
-if [ "$MSI_SIZE" -lt 50000000 ]; then
-    echo "WARNING: ea_app.msi is only $MSI_SIZE bytes (expected ~227 MB)."
-    echo "It may still be downloading. Wait a moment and re-run."
-    exit 1
-fi
-echo "[2/6] ea_app.msi ($(( MSI_SIZE / 1048576 )) MB): OK ($MSI)"
+# ── Steps 2 & 3: ensure EA Desktop is in the Wine prefix ───────────────────
+# On native Linux Steam, EA App may self-install via EAappInstaller.exe when
+# SWBF2 is first launched. If Link2EA.exe is already present, skip extraction.
+EA_DEST_BASE="$PFX_C/Program Files/Electronic Arts/EA Desktop"
+LINK2EA=$(find "$EA_DEST_BASE" -name "Link2EA.exe" 2>/dev/null | head -1)
 
-# ── Step 3: extract MSI on the host ────────────────────────────────────────
-echo "[3/6] Extracting EA Desktop files from MSI (~30s)..."
-if ! command -v msiextract >/dev/null 2>&1; then
-    echo "msitools not found — installing..."
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get install -y msitools
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y msitools
-    elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --noconfirm msitools
-    else
-        echo "ERROR: Cannot auto-install msitools — package manager not recognised."
-        echo "Install msitools manually and re-run."
+if [ -n "$LINK2EA" ]; then
+    echo "[2/6] EA Desktop already installed: OK"
+    echo "    ($LINK2EA)"
+    echo "[3/6] Skipping MSI extraction — EA Desktop files already present"
+else
+    echo "[2/6] EA Desktop not found — searching for ea_app.msi..."
+    MSI=""
+    for _dir in \
+        "$PFX_C" \
+        "$STEAM_HOME/steamapps/common/STAR WARS Battlefront II" \
+        "$STEAM_HOME/steamapps/common" \
+        "$STEAM_HOME/steamapps"; do
+        _found=$(find "$_dir" -maxdepth 4 -name "ea_app.msi" 2>/dev/null | head -1)
+        if [ -n "$_found" ]; then MSI="$_found"; break; fi
+    done
+    if [ -z "$MSI" ]; then
+        echo ""
+        echo "ERROR: ea_app.msi not found and EA Desktop not installed."
+        echo ""
+        echo "Launch SWBF2 once from Steam with GE-Proton10-34 set in Compatibility."
+        echo "Let it run for 30+ seconds so EA App can install, then close it and re-run."
         exit 1
     fi
-fi
-EXTRACT_DIR="/tmp/ea_app_extracted_$$"
-rm -rf "$EXTRACT_DIR"
-mkdir -p "$EXTRACT_DIR"
-if ! msiextract -C "$EXTRACT_DIR" "$MSI" >/dev/null 2>&1; then
-    echo "ERROR: msiextract failed. Check that msitools is properly installed."
+    MSI_SIZE=$(stat -c%s "$MSI")
+    if [ "$MSI_SIZE" -lt 50000000 ]; then
+        echo "WARNING: ea_app.msi is only $MSI_SIZE bytes (expected ~227 MB). Re-run when download completes."
+        exit 1
+    fi
+    echo "    Found: $MSI ($(( MSI_SIZE / 1048576 )) MB)"
+
+    echo "[3/6] Extracting EA Desktop files from MSI (~30s)..."
+    if ! command -v msiextract >/dev/null 2>&1; then
+        echo "msitools not found — installing..."
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get install -y msitools
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y msitools
+        elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm msitools
+        else
+            echo "ERROR: Cannot auto-install msitools — install it manually and re-run."
+            exit 1
+        fi
+    fi
+    EXTRACT_DIR="/tmp/ea_app_extracted_$$"
     rm -rf "$EXTRACT_DIR"
-    exit 1
-fi
-EA_SRC=$(find "$EXTRACT_DIR" -maxdepth 5 \
-    -path "*/Electronic Arts/EA Desktop/EA Desktop" -type d 2>/dev/null | head -1)
-if [ -z "$EA_SRC" ] || [ ! -f "$EA_SRC/Link2EA.exe" ]; then
-    echo "ERROR: Link2EA.exe not found after extraction. MSI structure may have changed."
-    ls -la "$EXTRACT_DIR/Electronic Arts/EA Desktop/" 2>/dev/null || true
+    mkdir -p "$EXTRACT_DIR"
+    if ! msiextract -C "$EXTRACT_DIR" "$MSI" >/dev/null 2>&1; then
+        echo "ERROR: msiextract failed."; rm -rf "$EXTRACT_DIR"; exit 1
+    fi
+    EA_SRC=$(find "$EXTRACT_DIR" -maxdepth 5 \
+        -path "*/Electronic Arts/EA Desktop/EA Desktop" -type d 2>/dev/null | head -1)
+    if [ -z "$EA_SRC" ] || [ ! -f "$EA_SRC/Link2EA.exe" ]; then
+        echo "ERROR: Link2EA.exe not found after extraction."
+        rm -rf "$EXTRACT_DIR"; exit 1
+    fi
+    EA_VERSION="14.2.0.3345"
+    if [ -L "$EA_DEST_BASE/EA Desktop" ]; then
+        _linked=$(readlink "$EA_DEST_BASE/EA Desktop" 2>/dev/null || true)
+        [ -n "$_linked" ] && EA_VERSION="$_linked"
+    fi
+    EA_DEST="$EA_DEST_BASE/$EA_VERSION"
+    mkdir -p "$EA_DEST"
+    cp -r "$EA_SRC/." "$EA_DEST/"
+    rm -f "$EA_DEST_BASE/EA Desktop"
+    ln -sf "$EA_VERSION" "$EA_DEST_BASE/EA Desktop"
     rm -rf "$EXTRACT_DIR"
-    exit 1
+    LINK2EA=$(find "$EA_DEST_BASE" -name "Link2EA.exe" 2>/dev/null | head -1)
+    [ -z "$LINK2EA" ] && { echo "ERROR: Install failed — Link2EA.exe missing."; exit 1; }
+    echo "    EA Desktop $EA_VERSION installed"
 fi
-echo "    $(ls "$EA_SRC" | wc -l) files extracted including Link2EA.exe"
-
-# ── Step 4: copy EA Desktop files into Wine prefix ─────────────────────────
-echo "[4/6] Installing EA Desktop files into Wine prefix..."
-EA_DEST_BASE="$PFX_C/Program Files/Electronic Arts/EA Desktop"
-
-# Use the version from a broken symlink left by a failed install, or default.
-EA_VERSION="14.2.0.3345"
-if [ -L "$EA_DEST_BASE/EA Desktop" ]; then
-    _linked=$(readlink "$EA_DEST_BASE/EA Desktop" 2>/dev/null || true)
-    [ -n "$_linked" ] && EA_VERSION="$_linked"
-fi
-
-EA_DEST="$EA_DEST_BASE/$EA_VERSION"
-mkdir -p "$EA_DEST"
-cp -r "$EA_SRC/." "$EA_DEST/"
-
-# Remove any stale symlink, then create a clean one
-rm -f "$EA_DEST_BASE/EA Desktop"
-ln -sf "$EA_VERSION" "$EA_DEST_BASE/EA Desktop"
-
-if [ ! -f "$EA_DEST/Link2EA.exe" ]; then
-    echo "ERROR: Copy failed — Link2EA.exe not found at $EA_DEST/Link2EA.exe"
-    rm -rf "$EXTRACT_DIR"
-    exit 1
-fi
-echo "    EA Desktop $EA_VERSION installed"
-rm -rf "$EXTRACT_DIR"
 
 # ── Step 5: write .reg files and launch wrapper ─────────────────────────────
 echo "[5/6] Writing registry fix files and launch wrapper..."
