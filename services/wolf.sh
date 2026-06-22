@@ -959,6 +959,19 @@ WOLF_TZ=$(grep '^WOLF_TZ=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
 
 # Locate the Steam home under the Wolf state folder (born on first Steam launch).
 _steam_home() {
+    # Prefer the Steam home whose container is currently running.
+    # With multiple WolfSteam containers, head -1 picks the wrong one.
+    local candidate running_ids
+    running_ids=$(docker ps --format '{{.Names}}' | grep -i WolfSteam | sed 's/WolfSteam_//')
+    while IFS= read -r candidate; do
+        local cid
+        cid=$(basename "$(dirname "$candidate")")
+        if echo "$running_ids" | grep -qF "$cid"; then
+            echo "$candidate"
+            return 0
+        fi
+    done < <(find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null)
+    # Fallback: first found
     find "${WOLF_STATE_DIR:-/etc/wolf}" -maxdepth 2 -type d -name Steam 2>/dev/null | head -1
 }
 
