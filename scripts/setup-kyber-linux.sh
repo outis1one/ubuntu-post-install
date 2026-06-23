@@ -248,9 +248,149 @@ else
     fi
 fi
 
+# ── Install cmd shim + OAuth watcher ──────────────────────────────────────
+# Wine's built-in cmd.exe crashes (exit 0xC0000005) when Kyber calls:
+#   cmd /c start "" "<EA auth URL>"
+# We replace cmd.exe in the Kyber prefix with a tiny shim that writes the
+# URL to a known file, then a Linux-side watcher opens it with xdg-open.
+echo ""
+echo "[3/7] Installing cmd shim for OAuth login..."
+
+# The shim lives in the prefix's system32, not in Proton's global wine dir,
+# so it only affects Kyber and won't break other games.
+KYBER_SYS32="$KYBER_PFX/pfx/drive_c/windows/system32"
+CMD_REAL="$KYBER_SYS32/cmd-real.exe"
+CMD_SHIM="$KYBER_SYS32/cmd.exe"
+
+if [ -f "$CMD_REAL" ]; then
+    echo "  cmd shim already installed."
+else
+    # Need mingw-w64 to compile the shim
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+        echo "  Installing mingw-w64..."
+        apt-get install -y mingw-w64 >/dev/null 2>&1 || \
+        sudo apt-get install -y mingw-w64 >/dev/null 2>&1 || true
+    fi
+
+    if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+        SHIM_C="/tmp/kyber_cmd_shim_$$.c"
+        SHIM_EXE="/tmp/kyber_cmd_shim_$$.exe"
+        cat > "$SHIM_C" << 'CEOF'
+#include <windows.h>
+static void write_url(LPCWSTR url) {
+    HANDLE h = CreateFileW(L"C:\\kyber_oauth_url.txt",
+        GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    int n = WideCharToMultiByte(CP_UTF8, 0, url, -1, NULL, 0, NULL, NULL);
+    char *buf = (char*)HeapAlloc(GetProcessHeap(), 0, n + 1);
+    WideCharToMultiByte(CP_UTF8, 0, url, -1, buf, n, NULL, NULL);
+    DWORD w; WriteFile(h, buf, n - 1, &w, NULL);
+    HeapFree(GetProcessHeap(), 0, buf);
+    CloseHandle(h);
+}
+int WINAPI mainCRTStartup(void) {
+    int argc;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; i < argc - 1; i++) {
+        if (_wcsicmp(argv[i], L"/c") == 0 &&
+            _wcsicmp(argv[i+1], L"start") == 0) {
+            for (int j = i+2; j < argc; j++) {
+                if (argv[j][0] == L'h' || argv[j][0] == L'H') {
+                    write_url(argv[j]);
+                    LocalFree(argv);
+                    ExitProcess(0);
+                }
+            }
+        }
+    }
+    /* pass-through to original cmd */
+    WCHAR newcl[4096] = L"cmd-real.exe";
+    LPWSTR rest = GetCommandLineW();
+    while (*rest && *rest != L' ') rest++;
+    if ((lstrlenW(newcl) + lstrlenW(rest)) < 4090)
+        lstrcatW(newcl, rest);
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi;
+    CreateProcessW(NULL, newcl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    LocalFree(argv);
+    ExitProcess(code);
+}
+CEOF
+        x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
+            -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
+            -lkernel32 -lshell32 2>/dev/null \
+            && cp "$CMD_SHIM" "$CMD_REAL" \
+            && cp "$SHIM_EXE" "$CMD_SHIM" \
+            && echo "  cmd shim installed." \
+            || echo "  WARNING: cmd shim compile failed — login may not work."
+        rm -f "$SHIM_C" "$SHIM_EXE"
+    else
+        echo "  WARNING: mingw-w64 not found. Install it and re-run:"
+        echo "    sudo apt install mingw-w64"
+    fi
+fi
+
+# ── OAuth watcher ──────────────────────────────────────────────────────────
+echo ""
+echo "[4/7] Installing OAuth watcher (opens EA login in your browser)..."
+
+URL_FILE="$KYBER_PFX/pfx/drive_c/kyber_oauth_url.txt"
+WATCHER="$HOME/.local/bin/kyber-oauth-watcher.sh"
+mkdir -p "$HOME/.local/bin"
+
+cat > "$WATCHER" << WEOF
+#!/bin/bash
+# Watches for Kyber's OAuth URL and opens it in the system browser.
+URL_FILE="$URL_FILE"
+echo "[kyber-watcher] Started. Watching \$URL_FILE"
+rm -f "\$URL_FILE"
+while true; do
+    if [ -f "\$URL_FILE" ]; then
+        URL=\$(cat "\$URL_FILE")
+        rm -f "\$URL_FILE"
+        if [[ "\$URL" == http* ]]; then
+            echo "[kyber-watcher] Opening: \$URL"
+            xdg-open "\$URL"
+        fi
+    fi
+    sleep 0.5
+done
+WEOF
+chmod +x "$WATCHER"
+
+# Install as a systemd user service so it is always ready when Kyber runs
+SVCDIR="$HOME/.config/systemd/user"
+mkdir -p "$SVCDIR"
+cat > "$SVCDIR/kyber-oauth-watcher.service" << SEOF
+[Unit]
+Description=Kyber EA OAuth URL watcher
+After=graphical-session.target
+
+[Service]
+ExecStart=$WATCHER
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+SEOF
+
+if systemctl --user daemon-reload 2>/dev/null && \
+   systemctl --user enable --now kyber-oauth-watcher.service 2>/dev/null; then
+    echo "  Watcher service enabled and started."
+    echo "  (It will auto-start on login from now on.)"
+else
+    echo "  NOTE: systemd user service could not be enabled."
+    echo "  Start the watcher manually before clicking Login in Kyber:"
+    echo "    $WATCHER &"
+fi
+
 # ── Add Kyber as a non-Steam shortcut ──────────────────────────────────────
 echo ""
-echo "[3/5] Adding Kyber as a non-Steam shortcut..."
+echo "[5/7] Adding Kyber as a non-Steam shortcut..."
 
 STEAM_UID=$(ls "$STEAM_HOME/userdata/" 2>/dev/null | grep -E '^[0-9]+$' | head -1)
 if [ -z "$STEAM_UID" ]; then
@@ -329,7 +469,7 @@ fi
 
 # ── CompatToolMapping — force Proton Experimental for the Kyber shortcut ────
 echo ""
-echo "[4/5] Forcing Proton Experimental for the Kyber shortcut..."
+echo "[6/7] Forcing Proton Experimental for the Kyber shortcut..."
 if [ "${SKIP_STEAM_CFG:-0}" != "1" ]; then
     CFG_FILE="$STEAM_HOME/config/config.vdf"
     if [ -f "$CFG_FILE" ]; then
@@ -366,35 +506,35 @@ PYEOF
 fi
 
 echo ""
-echo "[5/5] Done."
+echo "[7/7] Done."
 echo ""
 echo "=== Kyber Setup Complete (native Linux) ==="
 echo ""
 echo "Next steps:"
 echo "  1. RESTART Steam so it picks up the new shortcut and compat mapping."
-echo "  2. Launch 'Kyber Launcher' from your Steam Library."
-echo "  3. Click Login. Kyber starts a temporary server on 127.0.0.1 and"
-echo "     calls xdg-open to open the EA login page in your system browser."
-echo "  4. Log in on the EA page (email / Steam / 2FA as usual)."
-echo "  5. EA redirects back to 127.0.0.1:<port>/?code=... — Kyber's"
-echo "     loopback server catches the auth code and login completes."
-echo "     The browser tab will show a plain 'OK' or a connection-refused"
-echo "     message once the code is consumed — that is normal."
+echo "  2. The OAuth watcher is already running in the background."
+echo "     (Confirm: systemctl --user status kyber-oauth-watcher)"
+echo "  3. Launch 'Kyber Launcher' from your Steam Library."
+echo "  4. Click Login. Kyber calls cmd /c start with the EA auth URL."
+echo "     The cmd shim intercepts it and writes it to a file. The watcher"
+echo "     picks it up and opens it in your browser via xdg-open."
+echo "  5. Log in on the EA page (email / Steam / 2FA as usual)."
+echo "  6. EA redirects to 127.0.0.1:<port>/?code=... — Kyber's loopback"
+echo "     server catches the auth code and login completes."
+echo "     The browser tab will show 'OK' or connection-refused — both normal."
 echo ""
 echo "Streaming from a headless box:"
 echo "  Use Steam Remote Play — install the Steam Link app on your client,"
-echo "  it discovers this host over your network. No Wolf, no Moonlight, no"
-echo "  VPN required for a single user."
+echo "  it discovers this host over your network."
 echo ""
-echo "If the EA login page never opens:"
-echo "  xdg-open failed to reach your desktop. Make sure a display is set:"
-echo "    export DISPLAY=:0  (or WAYLAND_DISPLAY=wayland-0, etc.)"
-echo "  Then relaunch Kyber from that terminal."
+echo "Troubleshooting:"
+echo "  Browser never opens after clicking Login:"
+echo "    Check watcher is running: systemctl --user status kyber-oauth-watcher"
+echo "    If not: $HOME/.local/bin/kyber-oauth-watcher.sh &"
 echo ""
-echo "If the browser opens but login redirects back to the EA sign-in page:"
-echo "  Kyber's loopback server timed out. Log in faster, or close and"
-echo "  reopen Kyber to get a fresh loopback server before clicking Login."
+echo "  Browser opens but login loops back to EA sign-in page:"
+echo "    Kyber's loopback server timed out. Close Kyber, reopen it,"
+echo "    then click Login and log in quickly."
 echo ""
-echo "If WebView2 errors appear inside Kyber (not the login flow):"
-echo "    find \"$KYBER_PFX/pfx/drive_c\" -iname msedgewebview2.exe"
-echo "  If missing, re-run the WebView2 install step shown above."
+echo "  'cmd shim' missing (mingw-w64 was not installed):"
+echo "    sudo apt install mingw-w64 && $0"
