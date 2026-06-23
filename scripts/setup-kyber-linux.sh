@@ -154,36 +154,48 @@ fi
 
 # ── Build Kyber Wine prefix and run the installer ──────────────────────────
 echo ""
-echo "[1/5] Creating Kyber Wine prefix and running the installer..."
+echo "[1/5] Installing Kyber into Wine prefix..."
 
 KYBER_PFX="$STEAM_HOME/steamapps/compatdata/$KYBER_COMPAT_ID"
-mkdir -p "$KYBER_PFX"
 
 export STEAM_COMPAT_DATA_PATH="$KYBER_PFX"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_HOME"
 export PROTON_NO_ESYNC=1
 
-# /S runs most NSIS/Inno installers silently. If Kyber's installer ignores it,
-# a GUI installer window appears — complete it normally (needs a display).
-"$PROTON_DIR/proton" run "$KYBER_INSTALLER" /S || \
-    "$PROTON_DIR/proton" run "$KYBER_INSTALLER" || true
-
-sleep 3
-
+# Check if Kyber is already installed — skip the installer if so.
 KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
-if [ -z "$KYBER_EXE_PATH" ]; then
-    echo ""
-    echo "WARNING: Kyber.exe not found after installation."
-    echo "  If a GUI installer appeared, make sure you completed it."
-    echo "  Default install path assumed; continuing."
-    KYBER_EXE_WIN='C:\Program Files\Kyber\Kyber.exe'
-    KYBER_START_DIR='C:\Program Files\Kyber\'
+if [ -n "$KYBER_EXE_PATH" ]; then
+    echo "  Kyber.exe already present — skipping installer."
 else
-    echo "  Kyber.exe: $KYBER_EXE_PATH"
+    mkdir -p "$KYBER_PFX"
+    # Kill any leftover Wine/Proton processes from a previous attempt.
+    pkill -9 -f "compatdata/$KYBER_COMPAT_ID" 2>/dev/null || true
+    sleep 1
+
+    echo "  Running installer (silent)..."
+    # /S = NSIS silent flag; if Kyber's installer ignores it a GUI appears.
+    "$PROTON_DIR/proton" run "$KYBER_INSTALLER" /S 2>/dev/null || \
+        "$PROTON_DIR/proton" run "$KYBER_INSTALLER" 2>/dev/null || true
+
+    sleep 5
+
+    KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
+    if [ -z "$KYBER_EXE_PATH" ]; then
+        echo ""
+        echo "WARNING: Kyber.exe not found after installation."
+        echo "  Default install path assumed; continuing."
+    fi
+fi
+
+# Resolve Windows-style paths for the shortcut
+if [ -n "$KYBER_EXE_PATH" ]; then
     rel=$(echo "$KYBER_EXE_PATH" | sed "s|.*/pfx/drive_c/||")
     KYBER_EXE_WIN="C:\\$(echo "$rel" | sed 's|/|\\|g')"
     dir_rel=$(dirname "$rel")
     KYBER_START_DIR="C:\\$(echo "$dir_rel" | sed 's|/|\\|g')\\"
+else
+    KYBER_EXE_WIN='C:\Program Files (x86)\KYBER Launcher\Kyber.exe'
+    KYBER_START_DIR='C:\Program Files (x86)\KYBER Launcher\'
 fi
 echo "  Windows path: $KYBER_EXE_WIN"
 
@@ -191,36 +203,48 @@ echo "  Windows path: $KYBER_EXE_WIN"
 echo ""
 echo "[2/5] Verifying WebView2 runtime in the Kyber prefix..."
 
-# The Evergreen runtime lives under one of these in the prefix once installed.
+# The Evergreen runtime lives here once installed.
 WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
 if [ -n "$WV2_FOUND" ]; then
     echo "  WebView2 runtime present:"
     echo "    $WV2_FOUND"
 else
-    echo "  WebView2 runtime NOT found — installing Evergreen bootstrapper..."
-    WV2_BOOT="/tmp/MicrosoftEdgeWebview2Setup_$$.exe"
-    # Microsoft Evergreen Standalone/Bootstrapper installer (stable channel)
-    WV2_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-    if curl -L --progress-bar -o "$WV2_BOOT" "$WV2_URL"; then
-        # /silent /install performs an unattended Evergreen runtime install.
-        "$PROTON_DIR/proton" run "$WV2_BOOT" /silent /install || true
-        rm -f "$WV2_BOOT"
-        sleep 3
-        WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
-        if [ -n "$WV2_FOUND" ]; then
-            echo "  WebView2 runtime installed:"
-            echo "    $WV2_FOUND"
-        else
-            echo "  WARNING: WebView2 install did not produce msedgewebview2.exe."
-            echo "  Kyber may fall back to cmd /c start and fail to log in."
-            echo "  Try installing it manually:"
-            echo "    STEAM_COMPAT_DATA_PATH=$KYBER_PFX \\"
-            echo "    STEAM_COMPAT_CLIENT_INSTALL_PATH=$STEAM_HOME \\"
-            echo "    \"$PROTON_DIR/proton\" run MicrosoftEdgeWebview2Setup.exe /silent /install"
-        fi
+    echo "  WebView2 runtime NOT found — installing..."
+
+    # Prefer winetricks if available — it handles the prefix env automatically
+    # and uses a cached offline installer so no Wine-internal network call needed.
+    if command -v winetricks >/dev/null 2>&1; then
+        echo "  Using winetricks to install webview2..."
+        WINEPREFIX="$KYBER_PFX/pfx" \
+        WINE="$PROTON_DIR/files/bin/wine64" \
+            winetricks -q webview2 || true
     else
-        echo "  WARNING: Could not download WebView2 bootstrapper."
-        echo "  Kyber bundles it too — its installer may have already placed it."
+        # Download the Evergreen STANDALONE (offline) installer — linkid=2135547.
+        # The bootstrapper (linkid=2124703) requires a second download from inside
+        # Wine which reliably fails. The standalone is ~150 MB but self-contained.
+        echo "  Downloading WebView2 standalone installer (~150 MB)..."
+        WV2_STANDALONE="/tmp/WebView2RuntimeInstaller_$$.exe"
+        WV2_URL="https://go.microsoft.com/fwlink/p/?LinkId=2135547"
+        if curl -L --progress-bar -o "$WV2_STANDALONE" "$WV2_URL" && [ -s "$WV2_STANDALONE" ]; then
+            "$PROTON_DIR/proton" run "$WV2_STANDALONE" /silent /install || true
+            rm -f "$WV2_STANDALONE"
+        else
+            echo "  WARNING: Could not download WebView2 standalone installer."
+            rm -f "$WV2_STANDALONE"
+        fi
+    fi
+
+    sleep 5
+    WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
+    if [ -n "$WV2_FOUND" ]; then
+        echo "  WebView2 runtime installed:"
+        echo "    $WV2_FOUND"
+    else
+        echo ""
+        echo "  WARNING: WebView2 runtime still not found after install attempt."
+        echo "  Install winetricks and re-run, or install manually:"
+        echo "    sudo apt install winetricks"
+        echo "    $0"
     fi
 fi
 
@@ -237,6 +261,15 @@ else
     SHORTCUTS_DIR="$STEAM_HOME/userdata/$STEAM_UID/config"
     SHORTCUTS_FILE="$SHORTCUTS_DIR/shortcuts.vdf"
     mkdir -p "$SHORTCUTS_DIR"
+    if [ -f "$SHORTCUTS_FILE" ] && [ ! -w "$SHORTCUTS_FILE" ]; then
+        echo "  Fixing permissions on shortcuts.vdf..."
+        chmod 644 "$SHORTCUTS_FILE" || {
+            echo "  WARNING: Cannot write $SHORTCUTS_FILE — run:"
+            echo "    chmod 644 $SHORTCUTS_FILE"
+            echo "  then re-run this script."
+            SKIP_STEAM_CFG=1
+        }
+    fi
     [ -f "$SHORTCUTS_FILE" ] && cp "$SHORTCUTS_FILE" "$SHORTCUTS_FILE.bak"
 
     python3 - "$SHORTCUTS_FILE" "$KYBER_APPID" "$KYBER_EXE_WIN" "$KYBER_START_DIR" << 'PYEOF'
