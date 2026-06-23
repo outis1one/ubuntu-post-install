@@ -231,6 +231,7 @@ EOF
         echo "  - Write $WOLF_DIR/docker-compose.yml and $WOLF_DIR/manage.sh"
         echo "  - Open Moonlight UFW ports: TCP ${WOLF_PORTS_TCP[*]} / UDP ${WOLF_PORTS_UDP[*]}"
         echo "  - Start Wolf and inject Steam + EmulationStation app profiles"
+        echo "  - Create bios/ + retroarch/cores/ on the game drive and pre-download RetroArch cores (~1.5 GB)"
         return 0
     fi
 
@@ -700,7 +701,8 @@ UDEV
              "$GAME_STORAGE_DIR/media" "$GAME_STORAGE_DIR/lutris" \
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators" \
-             "$GAME_STORAGE_DIR/steam-cache"
+             "$GAME_STORAGE_DIR/steam-cache" \
+             "$GAME_STORAGE_DIR/bios" "$GAME_STORAGE_DIR/retroarch/cores"
 
     # ── Wolf state folder on the game drive ───────────────────────────────────
     # This is the clean way to keep Steam (and everything else) off the OS
@@ -1299,7 +1301,10 @@ CATALOG = {
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/mnt/games/saves:rw',
                 f'{games}/media:/media:rw',
-                f'{games}/emulators:/mnt/games/emulators:rw'],
+                f'{games}/bios:/home/retro/bioses:rw',
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/emulators:/mnt/games/emulators:rw',
+                f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -1319,7 +1324,9 @@ CATALOG = {
         icon='https://games-on-whales.github.io/wildlife/apps/retroarch/assets/icon.png',
         image='ghcr.io/games-on-whales/retroarch:edge',
         mounts=[f'{games}/roms:/ROMs:rw',
-                f'{games}/saves:/mnt/games/saves:rw'],
+                f'{games}/saves:/mnt/games/saves:rw',
+                f'{games}/bios:/home/retro/bioses:rw',
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -1468,6 +1475,80 @@ if not added and not updated:
 PYEOF
         docker compose restart wolf
         echo "Wolf restarted. Apps will appear in Moonlight on next connection."
+        ;;
+    cores)
+        # Download libretro (RetroArch) cores so retro games launch on first run.
+        # ES-DE / RetroArch ship with NO cores; both ES-DE's bundled config and
+        # GoW's rom_launcher.sh call ~/.config/retroarch/cores/*.so. Cores live on
+        # the game drive (retroarch/cores/) and are bind-mounted into the ES-DE and
+        # RetroArch containers at ~/.config/retroarch/cores.
+        #
+        # Usage: ./manage.sh cores [all|common] [force]
+        #   all    - every core on the libretro buildbot (~1.5 GB) [default]
+        #   common - the ~30 cores GoW wires up + popular ES-DE defaults
+        #   force  - re-download cores already present (otherwise they're skipped)
+        GAME_DIR=$(grep '^GAME_STORAGE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2-)
+        if [ -z "$GAME_DIR" ]; then read -r -p "  Game storage path: " GAME_DIR; fi
+        if [ -z "$GAME_DIR" ]; then echo "No game storage path."; exit 1; fi
+        CORES_DIR="$GAME_DIR/retroarch/cores"
+        SCOPE="${2:-all}"
+        FORCE="${3:-}"
+        BASE="https://buildbot.libretro.com/nightly/linux/x86_64/latest"
+        mkdir -p "$CORES_DIR"
+
+        # 'common' = the cores GoW's rom_launcher.sh wires up, plus a few very
+        # common ES-DE Linux defaults (NES/PCE/NDS/C64/ZX Spectrum).
+        COMMON="opera mame puae stella a5200 prosystem virtualjaguar mednafen_lynx \
+flycast gambatte mgba picodrive genesis_plus_gx mupen64plus_next fbneo fceumm \
+nestopia mednafen_ngp ppsspp pcsx_rearmed mednafen_psx_hw mednafen_saturn snes9x \
+bsnes_hd_beta mednafen_vb mednafen_wswan mednafen_pce melonds desmume vice_x64 \
+fuse scummvm"
+
+        if [ "$SCOPE" = "common" ]; then
+            CORE_FILES=""
+            for c in $COMMON; do CORE_FILES="$CORE_FILES ${c}_libretro.so"; done
+        else
+            echo "Fetching full core list from libretro buildbot..."
+            # The directory autoindex and the .index text file both contain the
+            # literal <core>_libretro.so.zip filenames, so this grep works on
+            # either. Fall back to the common set if the index can't be read.
+            CORE_FILES=$(curl -fsSL "$BASE/" \
+                | grep -oE '[A-Za-z0-9_]+_libretro\.so\.zip' \
+                | sed 's/\.zip$//' | sort -u)
+            if [ -z "$CORE_FILES" ]; then
+                echo "Could not read the full core index — falling back to the common set."
+                CORE_FILES=""
+                for c in $COMMON; do CORE_FILES="$CORE_FILES ${c}_libretro.so"; done
+            fi
+        fi
+
+        _unzip_to() {   # $1=zip  $2=destdir  (unzip if present, else python3)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -o -q "$1" -d "$2"
+            else
+                python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$1" "$2"
+            fi
+        }
+
+        total=$(echo $CORE_FILES | wc -w); n=0; ok=0; skip=0; fail=0
+        for so in $CORE_FILES; do
+            n=$((n+1))
+            if [ -f "$CORES_DIR/$so" ] && [ "$FORCE" != "force" ]; then
+                skip=$((skip+1)); continue
+            fi
+            printf "\r  [%d/%d] %-34s" "$n" "$total" "$so"
+            tmp=$(mktemp)
+            if curl -fsSL -o "$tmp" "$BASE/$so.zip" && _unzip_to "$tmp" "$CORES_DIR" 2>/dev/null; then
+                ok=$((ok+1))
+            else
+                fail=$((fail+1))
+            fi
+            rm -f "$tmp"
+        done
+        echo ""
+        echo "RetroArch cores: $ok downloaded, $skip already present, $fail failed"
+        echo "  → $CORES_DIR"
+        [ "$fail" -gt 0 ] && echo "  Retry failed cores: ./manage.sh cores $SCOPE force"
         ;;
     reorder)
         # Interactively reorder the Moonlight tiles by reordering the
@@ -2379,7 +2460,7 @@ PYEOF
         cat > "$COMP_FILE" << 'COMPEOF'
 _manage_wolf_complete() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local commands="start stop restart logs status pin update apps reorder
+    local commands="start stop restart logs status pin update apps cores reorder
                     add-web ge-proton games setup-swbf2 fix-ea-game wait-ea-app
                     install-ea-app diagnose-ea fix-perms install-completion backup"
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -2433,6 +2514,7 @@ COMPEOF
         echo "  ./manage.sh pin                          - Show recent Moonlight pairing PIN link"
         echo "  ./manage.sh update                       - Pull latest Wolf image and restart"
         echo "  ./manage.sh apps                         - Add / update game launchers in Wolf"
+        echo "  ./manage.sh cores [all|common]           - Download/refresh RetroArch cores (retro ROMs)"
         echo "  ./manage.sh reorder                      - Reorder the Moonlight tile list"
         echo "  ./manage.sh add-web [name] [url]         - Add a URL shortcut tile (Firefox kiosk)"
         echo "  ./manage.sh ge-proton [version]          - Install GE-Proton (latest, or pin a version)"
@@ -2503,7 +2585,10 @@ CATALOG = {
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/mnt/games/saves:rw',
                 f'{games}/media:/media:rw',
-                f'{games}/emulators:/mnt/games/emulators:rw'],
+                f'{games}/bios:/home/retro/bioses:rw',
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/emulators:/mnt/games/emulators:rw',
+                f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -2523,7 +2608,9 @@ CATALOG = {
         icon='https://games-on-whales.github.io/wildlife/apps/retroarch/assets/icon.png',
         image='ghcr.io/games-on-whales/retroarch:edge',
         mounts=[f'{games}/roms:/ROMs:rw',
-                f'{games}/saves:/mnt/games/saves:rw'],
+                f'{games}/saves:/mnt/games/saves:rw',
+                f'{games}/bios:/home/retro/bioses:rw',
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -2749,10 +2836,23 @@ PYEOF
     echo ""
     echo "  ${GAME_STORAGE_DIR}/"
     echo "    roms/    → /ROMs                              (EmulationStation)"
+    echo "    bios/    → /home/retro/bioses                 (emulator BIOS/firmware)"
+    echo "    retroarch/cores/ → ~/.config/retroarch/cores  (libretro cores)"
     echo "    saves/   → /home/retro/.config/retroarch/saves (RetroArch saves)"
     echo "    media/   → /media                             (ES-DE scraped artwork)"
     echo "    wolf-state/ → Wolf state: Steam install, games, Proton prefixes,"
     echo "                  ES-DE settings, controller maps, config.toml"
+    echo ""
+    echo "── EMULATION (ES-DE) FIRST RUN ───────────────────────"
+    echo ""
+    echo "  • Drop ROMs in roms/<system>/   (e.g. roms/snes/, roms/genesis/)"
+    echo "  • Drop BIOS files in bios/       (PSX/Saturn/Dreamcast/Neo-Geo need them)"
+    echo "  • RetroArch cores are pre-downloaded — retro games launch immediately"
+    echo "  • Controllers auto-configure: ES-DE & RetroArch map Wolf's virtual pad"
+    echo "    via SDL, no manual input setup needed"
+    echo "  • Exit a game → ES-DE: Start+Select opens RetroArch menu → Quit,"
+    echo "    or the Wolf hotkey  START+UP+RB  /  Ctrl+Alt+Shift+W"
+    echo "  • Add / refresh cores later:  ./manage.sh cores"
     echo ""
     echo "  Wolf's entire state folder lives on the game drive, so Steam games"
     echo "  and everything else stay off the OS drive automatically."
@@ -2835,6 +2935,7 @@ cd $WOLF_DIR
 ./manage.sh status             # container status
 ./manage.sh update             # pull latest image and restart
 ./manage.sh apps               # add / update game launchers
+./manage.sh cores              # download/refresh RetroArch cores (retro ROMs)
 ./manage.sh reorder            # reorder the Moonlight tile list
 ./manage.sh add-web            # add a URL shortcut tile (Firefox kiosk)
 ./manage.sh ge-proton          # install GE-Proton (needed for EA games)
@@ -2892,8 +2993,10 @@ Two things live on the game drive (\`$GAME_STORAGE_DIR\`):
 
 **1. Shared media folders** — bind-mounted into app containers:
 - \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
+- \`bios/\`          → /home/retro/bioses (emulator BIOS/firmware — drop BIOS here)
+- \`retroarch/cores/\` → ~/.config/retroarch/cores (libretro cores, pre-downloaded)
 - \`saves/\`         → /mnt/games/saves (RetroArch saves & states)
-- \`emulators/\`     → /mnt/games/emulators (Azahar 3DS AppImage, etc.)
+- \`emulators/\`     → /mnt/games/emulators + ~/Applications (Azahar 3DS AppImage, etc.)
 
 **2. \`wolf-state/\`** — Wolf's entire state folder (\`WOLF_STATE_DIR\` in
 \`.env\`). This is the key to keeping games off the OS drive: it holds
@@ -2909,10 +3012,29 @@ Steam's home is born on the game drive, its installs, games, and Proton prefixes
 go there with nothing to configure — no \`libraryfolders.vdf\` seeding, no
 symlinks, no \`fix-perms\` dance.
 
+## Emulation (ES-DE) — first run
+ES-DE is usable the moment you launch it; only ROMs and BIOS are yours to add.
+
+- **ROMs**: drop files into \`roms/<system>/\` (e.g. \`roms/snes/\`, \`roms/genesis/\`).
+  Every standard system folder is pre-created.
+- **BIOS**: drop firmware into \`bios/\` (mounted at \`~/bioses\`). Required for
+  PSX, Saturn, Dreamcast, Neo-Geo, PC Engine CD, etc.
+- **RetroArch cores**: pre-downloaded into \`retroarch/cores/\` and mounted at
+  \`~/.config/retroarch/cores\`, so libretro games launch right away. Refresh or
+  expand the set with \`./manage.sh cores\` (\`all\` = full buildbot set,
+  \`common\` = mainstream systems, add \`force\` to re-download).
+- **Controllers**: auto-configured. ES-DE and RetroArch map Wolf's virtual pad
+  through SDL with no manual input setup. RPCS3 ships Wolf-specific bindings.
+  To remap inside ES-DE: Main menu → Input device settings → Configure
+  keyboard and controllers.
+- **Exit a game** back to ES-DE: Start+Select opens the RetroArch menu → Quit,
+  or use the Wolf hotkey START+UP+RB (Ctrl+Alt+Shift+W on a keyboard).
+
 ## 3DS emulation
 Azahar (open-source Citra fork) AppImage lives in \`emulators/\` → mounted at
-\`/mnt/games/emulators\`. Point ES-DE's 3DS system at it via Alternative
-Emulators if it isn't auto-detected. Re-download with:
+\`/mnt/games/emulators\` and \`~/Applications\` (where ES-DE's app finder looks).
+Point ES-DE's 3DS system at it via Alternative Emulators if it isn't
+auto-detected. Re-download with:
 \`\`\`bash
 cd $WOLF_DIR && ./manage.sh apps
 \`\`\`
@@ -2930,6 +3052,27 @@ Then reconnect from Moonlight.
 sudo ./setup.sh backup   # covers wolf-state/ saves and ES-DE settings
 \`\`\`
 MD
+
+    # ── Pre-download RetroArch cores (so ES-DE retro games launch first run) ──
+    # The GoW es-de/retroarch images ship with NO libretro cores — only the
+    # RetroArch frontend. Without cores, every libretro-based game (SNES, NES,
+    # Genesis, N64, PSX, GBA, ...) fails to launch. Cores download onto the game
+    # drive at retroarch/cores/ and are bind-mounted into the apps at
+    # ~/.config/retroarch/cores. Idempotent + resumable via ./manage.sh cores.
+    if echo "$_APP_KEYS" | grep -qwE 'esde|retroarch'; then
+        echo ""
+        local _get_cores=""
+        prompt_yn "Pre-download all RetroArch cores now (~1.5 GB) so retro games work on first launch? (y/n):" "y" _get_cores
+        if [[ "$_get_cores" =~ ^[Yy]$ ]]; then
+            log_info "Downloading RetroArch cores into $GAME_STORAGE_DIR/retroarch/cores (this can take a while)..."
+            bash "$WOLF_DIR/manage.sh" cores all \
+                || log_warning "Some cores failed — retry later with: cd $WOLF_DIR && ./manage.sh cores"
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$GAME_STORAGE_DIR/retroarch" 2>/dev/null || true
+            log_success "RetroArch cores ready — retro games launch on first run"
+        else
+            log_info "Skipped — fetch later with: cd $WOLF_DIR && ./manage.sh cores"
+        fi
+    fi
 
     # ── Pre-download GE-Proton ────────────────────────────────────────────────
     # GE-Proton is required for EA games (Battlefront II etc.) and needs to be
