@@ -59,8 +59,8 @@
 set -euo pipefail
 
 KYBER_INSTALLER="${1:-$HOME/Downloads/KyberLauncher.exe}"
-KYBER_COMPAT_ID="kyber"          # Wine prefix name under compatdata/
 KYBER_APPID="9900000001"         # non-Steam shortcut appid
+KYBER_COMPAT_ID="$KYBER_APPID"  # prefix dir must match appid for Steam to find it
 
 echo "=== Kyber Launcher — Native Linux Steam Setup ==="
 echo ""
@@ -157,6 +157,16 @@ echo ""
 echo "[1/7] Installing Kyber into Wine prefix..."
 
 KYBER_PFX="$STEAM_HOME/steamapps/compatdata/$KYBER_COMPAT_ID"
+OLD_PFX="$STEAM_HOME/steamapps/compatdata/kyber"
+
+# Migrate old 'kyber' prefix to the numeric appid directory Steam expects
+if [ -d "$OLD_PFX" ] && [ ! -d "$KYBER_PFX" ]; then
+    echo "  Migrating prefix: compatdata/kyber → compatdata/$KYBER_COMPAT_ID"
+    mv "$OLD_PFX" "$KYBER_PFX"
+elif [ -d "$OLD_PFX" ] && [ -d "$KYBER_PFX" ]; then
+    echo "  Removing old compatdata/kyber (numeric prefix already exists)..."
+    rm -rf "$OLD_PFX"
+fi
 
 export STEAM_COMPAT_DATA_PATH="$KYBER_PFX"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_HOME"
@@ -328,14 +338,23 @@ int WINAPI mainCRTStartup(void) {
     ExitProcess(code);
 }
 CEOF
-        x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
-            -mno-stack-arg-probe \
-            -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
-            -lkernel32 -lshell32 \
-            && cp "$CMD_SHIM" "$CMD_REAL" \
-            && cp "$SHIM_EXE" "$CMD_SHIM" \
-            && echo "  cmd shim installed." \
-            || echo "  WARNING: cmd shim compile failed — login may not work."
+        if x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
+                -mno-stack-arg-probe \
+                -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
+                -lkernel32 -lshell32; then
+            # If cmd.exe is a symlink, copy the real file out first,
+            # then remove the symlink so we replace only this prefix.
+            if [ -L "$CMD_SHIM" ]; then
+                cp "$(readlink -f "$CMD_SHIM")" "$CMD_REAL"
+                rm "$CMD_SHIM"
+            else
+                cp "$CMD_SHIM" "$CMD_REAL"
+            fi
+            cp "$SHIM_EXE" "$CMD_SHIM"
+            echo "  cmd shim installed ($(stat -c%s "$CMD_SHIM") bytes)."
+        else
+            echo "  WARNING: cmd shim compile failed — login may not work."
+        fi
         rm -f "$SHIM_C" "$SHIM_EXE"
     else
         echo "  WARNING: mingw-w64 not found. Install it and re-run:"
