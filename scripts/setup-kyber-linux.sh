@@ -191,36 +191,48 @@ echo "  Windows path: $KYBER_EXE_WIN"
 echo ""
 echo "[2/5] Verifying WebView2 runtime in the Kyber prefix..."
 
-# The Evergreen runtime lives under one of these in the prefix once installed.
+# The Evergreen runtime lives here once installed.
 WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
 if [ -n "$WV2_FOUND" ]; then
     echo "  WebView2 runtime present:"
     echo "    $WV2_FOUND"
 else
-    echo "  WebView2 runtime NOT found — installing Evergreen bootstrapper..."
-    WV2_BOOT="/tmp/MicrosoftEdgeWebview2Setup_$$.exe"
-    # Microsoft Evergreen Standalone/Bootstrapper installer (stable channel)
-    WV2_URL="https://go.microsoft.com/fwlink/p/?LinkId=2124703"
-    if curl -L --progress-bar -o "$WV2_BOOT" "$WV2_URL"; then
-        # /silent /install performs an unattended Evergreen runtime install.
-        "$PROTON_DIR/proton" run "$WV2_BOOT" /silent /install || true
-        rm -f "$WV2_BOOT"
-        sleep 3
-        WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
-        if [ -n "$WV2_FOUND" ]; then
-            echo "  WebView2 runtime installed:"
-            echo "    $WV2_FOUND"
-        else
-            echo "  WARNING: WebView2 install did not produce msedgewebview2.exe."
-            echo "  Kyber may fall back to cmd /c start and fail to log in."
-            echo "  Try installing it manually:"
-            echo "    STEAM_COMPAT_DATA_PATH=$KYBER_PFX \\"
-            echo "    STEAM_COMPAT_CLIENT_INSTALL_PATH=$STEAM_HOME \\"
-            echo "    \"$PROTON_DIR/proton\" run MicrosoftEdgeWebview2Setup.exe /silent /install"
-        fi
+    echo "  WebView2 runtime NOT found — installing..."
+
+    # Prefer winetricks if available — it handles the prefix env automatically
+    # and uses a cached offline installer so no Wine-internal network call needed.
+    if command -v winetricks >/dev/null 2>&1; then
+        echo "  Using winetricks to install webview2..."
+        WINEPREFIX="$KYBER_PFX/pfx" \
+        WINE="$PROTON_DIR/files/bin/wine64" \
+            winetricks -q webview2 || true
     else
-        echo "  WARNING: Could not download WebView2 bootstrapper."
-        echo "  Kyber bundles it too — its installer may have already placed it."
+        # Download the Evergreen STANDALONE (offline) installer — linkid=2135547.
+        # The bootstrapper (linkid=2124703) requires a second download from inside
+        # Wine which reliably fails. The standalone is ~150 MB but self-contained.
+        echo "  Downloading WebView2 standalone installer (~150 MB)..."
+        WV2_STANDALONE="/tmp/WebView2RuntimeInstaller_$$.exe"
+        WV2_URL="https://go.microsoft.com/fwlink/p/?LinkId=2135547"
+        if curl -L --progress-bar -o "$WV2_STANDALONE" "$WV2_URL" && [ -s "$WV2_STANDALONE" ]; then
+            "$PROTON_DIR/proton" run "$WV2_STANDALONE" /silent /install || true
+            rm -f "$WV2_STANDALONE"
+        else
+            echo "  WARNING: Could not download WebView2 standalone installer."
+            rm -f "$WV2_STANDALONE"
+        fi
+    fi
+
+    sleep 5
+    WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
+    if [ -n "$WV2_FOUND" ]; then
+        echo "  WebView2 runtime installed:"
+        echo "    $WV2_FOUND"
+    else
+        echo ""
+        echo "  WARNING: WebView2 runtime still not found after install attempt."
+        echo "  Install winetricks and re-run, or install manually:"
+        echo "    sudo apt install winetricks"
+        echo "    $0"
     fi
 fi
 
