@@ -3,43 +3,46 @@
 # native Linux Steam machine (headless or desktop) with Proton Experimental.
 #
 # Kyber is a community multiplayer client for Star Wars Battlefront II (2017)
-# after EA shut down the official servers. It is a Windows app (Flutter/Rust)
-# with an embedded Microsoft Edge WebView2 used for its EA OAuth login flow.
+# after EA shut down the official servers. It is a Windows app (Flutter/Rust).
 #
-# ── Why this is the RIGHT place to run Kyber ───────────────────────────────
+# ── How Kyber's EA login actually works ────────────────────────────────────
 #
-# Kyber's login redirects to a qrc:// URI (a Qt-internal resource scheme) that
-# only its OWN embedded WebView2 can intercept. WebView2 therefore MUST work.
+# Kyber uses the "Maxima" OAuth PKCE flow:
+#   1. Kyber starts a temporary HTTP server on 127.0.0.1 (dynamic port ~41413+)
+#   2. It calls  cmd /c start ""  "<EA auth URL>"  to open a browser
+#   3. You log in on the EA page; EA redirects to  127.0.0.1:PORT/?code=...
+#   4. Kyber's HTTP server catches the code and exchanges it for tokens
 #
-# Inside a Wolf / Games-on-Whales Docker container, WebView2 cannot start:
-# Proton wraps Wine in bubblewrap (bwrap), and nesting that inside Docker
-# blocks CLONE_NEWUSER, which WebView2's subprocess sandbox requires. The
-# result is endless login failures (see setup-kyber-wolf.sh for the gory
-# details and the fake-cmd.exe / Firefox workarounds that still cannot finish
-# the flow because no external browser can handle qrc://).
+# On native Linux, Wine's built-in cmd.exe passes http(s):// URLs to
+# xdg-open, which launches your system browser. Steam's pressure-vessel
+# (bwrap) sandbox does NOT block xdg-open on native Linux — xdg-open reaches
+# the host desktop and the browser opens normally.
 #
-# On NATIVE Linux Steam there is only a single bwrap layer (Proton's own),
-# which has enough namespace privilege for WebView2 to initialize. So here the
-# login flow works as designed: Kyber opens its built-in browser, you log in
-# to EA, EA redirects to qrc://, and Kyber's WebView2 catches the auth code.
+# After you approve the EA login page the browser is redirected to
+# 127.0.0.1:PORT (Kyber's loopback server). The browser hits that address,
+# Kyber receives the auth code, and login completes. No special shims needed.
 #
-# No fake cmd.exe. No Firefox. No URL watcher. None of that scaffolding is
-# needed here — it only existed to work around WebView2 being unable to start.
+# ── Why NOT to run Kyber inside Wolf / Games-on-Whales ─────────────────────
 #
-# ── Do you still need WebView2? YES ────────────────────────────────────────
+# Wolf runs Docker + Proton's bwrap nested. The double-sandbox blocks
+# CLONE_NEWUSER which breaks WebView2, AND the inner bwrap prevents
+# xdg-open from reaching the host display. Kyber's loopback redirect to
+# 127.0.0.1:PORT also fails inside the container network stack. Use native
+# Linux Steam instead — it's the supported path.
 #
-# WebView2 is not the problem — it is the solution. It is the only component
-# that can complete Kyber's EA OAuth login. This script makes sure the
-# WebView2 Evergreen RUNTIME (not just the bootstrapper stub) is actually
-# installed in Kyber's Wine prefix. If only the stub is present, Kyber falls
-# back to `cmd /c start <url>` and login fails even on native Linux.
+# ── WebView2 ───────────────────────────────────────────────────────────────
+#
+# WebView2 is NOT required for the login flow (Maxima handles that). This
+# script still installs the WebView2 Evergreen runtime because Kyber may use
+# it for in-app content rendering. Installing it causes no harm and prevents
+# any fallback-related error dialogs inside Kyber.
 #
 # ── Headless note ──────────────────────────────────────────────────────────
 #
-# On a headless GPU box you do not need Wolf to stream. Use Steam Remote Play:
-# install Steam, set up a virtual display so Steam has something to render to,
-# add Kyber + SWBF2, then connect with the Steam Link app from any device.
-# This script sets up a dummy/virtual X display if no display is detected.
+# On a headless GPU box use Steam Remote Play: install Steam, configure a
+# virtual/dummy display so Steam has something to render to, add Kyber +
+# SWBF2, then connect with the Steam Link app from any device.
+# This script warns if no display is detected at setup time.
 #
 # ── Prerequisites ──────────────────────────────────────────────────────────
 #   a. Steam installed and launched at least once (native, not Flatpak ideally
@@ -318,18 +321,28 @@ echo ""
 echo "Next steps:"
 echo "  1. RESTART Steam so it picks up the new shortcut and compat mapping."
 echo "  2. Launch 'Kyber Launcher' from your Steam Library."
-echo "  3. Click Login. Kyber's embedded WebView2 opens the EA login page."
-echo "  4. Log in to EA (Steam / email / 2FA as usual)."
-echo "  5. EA redirects to qrc://login_successful — WebView2 catches the code"
-echo "     INTERNALLY and completes the token exchange. No browser, no qrc"
-echo "     error, no manual step. This is the whole point of running natively."
+echo "  3. Click Login. Kyber starts a temporary server on 127.0.0.1 and"
+echo "     calls xdg-open to open the EA login page in your system browser."
+echo "  4. Log in on the EA page (email / Steam / 2FA as usual)."
+echo "  5. EA redirects back to 127.0.0.1:<port>/?code=... — Kyber's"
+echo "     loopback server catches the auth code and login completes."
+echo "     The browser tab will show a plain 'OK' or a connection-refused"
+echo "     message once the code is consumed — that is normal."
 echo ""
 echo "Streaming from a headless box:"
 echo "  Use Steam Remote Play — install the Steam Link app on your client,"
 echo "  it discovers this host over your network. No Wolf, no Moonlight, no"
 echo "  VPN required for a single user."
 echo ""
-echo "If login still falls back to a cmd error:"
-echo "  WebView2 didn't initialize. Confirm the runtime exists:"
+echo "If the EA login page never opens:"
+echo "  xdg-open failed to reach your desktop. Make sure a display is set:"
+echo "    export DISPLAY=:0  (or WAYLAND_DISPLAY=wayland-0, etc.)"
+echo "  Then relaunch Kyber from that terminal."
+echo ""
+echo "If the browser opens but login redirects back to the EA sign-in page:"
+echo "  Kyber's loopback server timed out. Log in faster, or close and"
+echo "  reopen Kyber to get a fresh loopback server before clicking Login."
+echo ""
+echo "If WebView2 errors appear inside Kyber (not the login flow):"
 echo "    find \"$KYBER_PFX/pfx/drive_c\" -iname msedgewebview2.exe"
 echo "  If missing, re-run the WebView2 install step shown above."
