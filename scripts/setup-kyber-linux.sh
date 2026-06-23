@@ -154,7 +154,7 @@ fi
 
 # ── Build Kyber Wine prefix and run the installer ──────────────────────────
 echo ""
-echo "[1/5] Installing Kyber into Wine prefix..."
+echo "[1/7] Installing Kyber into Wine prefix..."
 
 KYBER_PFX="$STEAM_HOME/steamapps/compatdata/$KYBER_COMPAT_ID"
 
@@ -201,7 +201,7 @@ echo "  Windows path: $KYBER_EXE_WIN"
 
 # ── Ensure WebView2 Evergreen runtime is installed ─────────────────────────
 echo ""
-echo "[2/5] Verifying WebView2 runtime in the Kyber prefix..."
+echo "[2/7] Verifying WebView2 runtime in the Kyber prefix..."
 
 # The Evergreen runtime lives here once installed.
 WV2_FOUND=$(find "$KYBER_PFX/pfx/drive_c" -iname "msedgewebview2.exe" 2>/dev/null | head -1)
@@ -280,6 +280,10 @@ else
         SHIM_EXE="/tmp/kyber_cmd_shim_$$.exe"
         cat > "$SHIM_C" << 'CEOF'
 #include <windows.h>
+/* ieq: case-insensitive wide string compare using only kernel32 */
+static int ieq(LPCWSTR a, LPCWSTR b) {
+    return CompareStringOrdinal(a, -1, b, -1, TRUE) == 2; /* CSTR_EQUAL==2 */
+}
 static void write_url(LPCWSTR url) {
     HANDLE h = CreateFileW(L"C:\\kyber_oauth_url.txt",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -295,8 +299,7 @@ int WINAPI mainCRTStartup(void) {
     int argc;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc - 1; i++) {
-        if (_wcsicmp(argv[i], L"/c") == 0 &&
-            _wcsicmp(argv[i+1], L"start") == 0) {
+        if (ieq(argv[i], L"/c") && ieq(argv[i+1], L"start")) {
             for (int j = i+2; j < argc; j++) {
                 if (argv[j][0] == L'h' || argv[j][0] == L'H') {
                     write_url(argv[j]);
@@ -324,7 +327,7 @@ int WINAPI mainCRTStartup(void) {
 CEOF
         x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
             -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
-            -lkernel32 -lshell32 2>/dev/null \
+            -lkernel32 -lshell32 \
             && cp "$CMD_SHIM" "$CMD_REAL" \
             && cp "$SHIM_EXE" "$CMD_SHIM" \
             && echo "  cmd shim installed." \
