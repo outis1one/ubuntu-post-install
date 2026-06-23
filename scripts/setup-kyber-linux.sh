@@ -85,14 +85,37 @@ STEAM_HOME=$(find_steam_home) || {
 }
 echo "Steam home: $STEAM_HOME"
 
-# ── Verify Kyber installer ─────────────────────────────────────────────────
+# ── Verify / download Kyber installer ─────────────────────────────────────
 if [ ! -f "$KYBER_INSTALLER" ]; then
     echo ""
-    echo "ERROR: Kyber installer not found at: $KYBER_INSTALLER"
-    echo ""
-    echo "Download KyberLauncher.exe from https://kyber.gg, then:"
-    echo "  $0 /path/to/KyberLauncher.exe"
-    exit 1
+    echo "Kyber installer not found at: $KYBER_INSTALLER"
+    echo "Attempting to download KyberLauncher.exe from kyber.gg..."
+    mkdir -p "$(dirname "$KYBER_INSTALLER")"
+    # Try to find the download link on kyber.gg, then fall back to known URLs.
+    echo "  Checking kyber.gg for the download link..."
+    KYBER_DL_URL=""
+    # Extract the first .exe href from the kyber.gg download page
+    _raw=$(curl -sL --max-time 15 "https://kyber.gg/download" 2>/dev/null || \
+           curl -sL --max-time 15 "https://kyber.gg" 2>/dev/null)
+    if [ -n "$_raw" ]; then
+        KYBER_DL_URL=$(echo "$_raw" | grep -oP 'https?://[^"'\''<>\s]+KyberLauncher\.exe' | head -1)
+    fi
+    # Known fallback locations (update these if kyber.gg changes hosting)
+    if [ -z "$KYBER_DL_URL" ]; then
+        KYBER_DL_URL="https://cdn.kyber.gg/builds/KyberLauncher.exe"
+    fi
+    echo "  Downloading from: $KYBER_DL_URL"
+    if curl -L --progress-bar -o "$KYBER_INSTALLER" "$KYBER_DL_URL" \
+            && [ -s "$KYBER_INSTALLER" ]; then
+        echo "Downloaded: $KYBER_INSTALLER"
+    else
+        echo ""
+        echo "ERROR: Automatic download failed."
+        echo "Download KyberLauncher.exe manually from https://kyber.gg, then:"
+        echo "  $0 /path/to/KyberLauncher.exe"
+        rm -f "$KYBER_INSTALLER"
+        exit 1
+    fi
 fi
 echo "Kyber installer: $KYBER_INSTALLER"
 
