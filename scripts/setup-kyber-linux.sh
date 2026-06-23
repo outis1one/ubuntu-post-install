@@ -268,8 +268,11 @@ else
     # Need mingw-w64 to compile the shim
     if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
         echo "  Installing mingw-w64..."
-        apt-get install -y mingw-w64 >/dev/null 2>&1 || \
-        sudo apt-get install -y mingw-w64 >/dev/null 2>&1 || true
+        sudo apt-get install -y mingw-w64 || {
+            echo "  WARNING: mingw-w64 install failed. Install manually:"
+            echo "    sudo apt install mingw-w64"
+            echo "  Then re-run this script."
+        }
     fi
 
     if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
@@ -423,21 +426,19 @@ def i(key, value):  # VDF int field
 shortcuts_file, appid_s, exe_win, start_dir = sys.argv[1:5]
 appid = int(appid_s)
 
-# Preserve existing shortcuts if the file already exists and is parseable.
-# For simplicity we append a new entry to a freshly built map; if a prior
-# Kyber entry exists we still work because Steam dedups on appid+exe.
 existing = b''
 idx = 0
 if os.path.exists(shortcuts_file):
     try:
         with open(shortcuts_file, 'rb') as f:
             raw = f.read()
-        # crude: keep raw inner entries between the outer "shortcuts" wrapper
-        # by stripping the leading \x00shortcuts\x00 and trailing \x08\x08
         head = b'\x00shortcuts\x00'
         if raw.startswith(head) and raw.endswith(b'\x08\x08'):
             existing = raw[len(head):-2]
-            # count existing entries' top-level index keys to avoid collision
+            # Skip if Kyber Launcher entry already present
+            if b'Kyber Launcher' in existing:
+                print("  Kyber Launcher already in shortcuts.vdf — skipping.")
+                sys.exit(0)
             idx = existing.count(b'\x01appid\x00')
     except Exception:
         existing = b''
