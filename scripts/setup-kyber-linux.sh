@@ -249,6 +249,15 @@ else
     SHORTCUTS_DIR="$STEAM_HOME/userdata/$STEAM_UID/config"
     SHORTCUTS_FILE="$SHORTCUTS_DIR/shortcuts.vdf"
     mkdir -p "$SHORTCUTS_DIR"
+    if [ -f "$SHORTCUTS_FILE" ] && [ ! -w "$SHORTCUTS_FILE" ]; then
+        echo "  Fixing permissions on shortcuts.vdf..."
+        chmod 644 "$SHORTCUTS_FILE" || {
+            echo "  WARNING: Cannot write $SHORTCUTS_FILE — run:"
+            echo "    chmod 644 $SHORTCUTS_FILE"
+            echo "  then re-run this script."
+            SKIP_STEAM_CFG=1
+        }
+    fi
     [ -f "$SHORTCUTS_FILE" ] && cp "$SHORTCUTS_FILE" "$SHORTCUTS_FILE.bak"
 
     python3 - "$SHORTCUTS_FILE" "$KYBER_APPID" "$KYBER_EXE_WIN" "$KYBER_START_DIR" << 'PYEOF'
