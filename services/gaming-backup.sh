@@ -9,6 +9,8 @@
 # Backs up the things you can't re-download — progress, saved games, user data:
 #   • Minecraft worlds / player data  (every <id>/data instance under $DOCKER_DIR)
 #   • Emulator saves & save states    ($GAME_STORAGE_DIR/saves)      [gaming box]
+#   • Emulator BIOS / firmware        ($GAME_STORAGE_DIR/bios)       [gaming box]
+#   • RetroArch shaders & overlays    ($GAME_STORAGE_DIR/retroarch)  [gaming box]
 #   • ES-DE scraped artwork           ($GAME_STORAGE_DIR/media)      [gaming box]
 #   • Steam user data & game saves    ($GAME_STORAGE_DIR/steam)      [gaming box]
 #   • Wolf state                      (/etc/wolf — config + profile_data) [gaming box]
@@ -190,6 +192,10 @@ install_gaming_backup() {
     local _a=""
     prompt_yn "  Back up emulator saves ($GAME_STORAGE_DIR/saves)? (y/N):" "n" _a
     local BACKUP_SAVES; BACKUP_SAVES=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
+    prompt_yn "  Back up emulator BIOS/firmware ($GAME_STORAGE_DIR/bios)? (y/N):" "n" _a
+    local BACKUP_BIOS; BACKUP_BIOS=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
+    prompt_yn "  Back up RetroArch shaders & overlays ($GAME_STORAGE_DIR/retroarch)? (y/N):" "n" _a
+    local BACKUP_RA_SHADERS; BACKUP_RA_SHADERS=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
     prompt_yn "  Back up Steam user data/saves (game installs excluded)? (y/N):" "n" _a
     local BACKUP_STEAM; BACKUP_STEAM=$([[ "$_a" =~ ^[Yy]$ ]] && echo yes || echo no)
     prompt_yn "  Back up ES-DE scraped artwork ($GAME_STORAGE_DIR/media)? (y/N):" "n" _a
@@ -293,6 +299,8 @@ MC_BASE_DIR="$MC_BASE_DIR"
 GAME_STORAGE_DIR="$GAME_STORAGE_DIR"
 WOLF_STATE_DIR="$WOLF_STATE_DIR"
 BACKUP_SAVES="$BACKUP_SAVES"   # \$GAME_STORAGE_DIR/saves
+BACKUP_BIOS="$BACKUP_BIOS"   # \$GAME_STORAGE_DIR/bios (emulator BIOS/firmware — user-provided)
+BACKUP_RA_SHADERS="$BACKUP_RA_SHADERS"   # \$GAME_STORAGE_DIR/retroarch/{shaders,overlays} (cores excluded — re-downloadable)
 BACKUP_STEAM="$BACKUP_STEAM"   # \$GAME_STORAGE_DIR/steam (game installs excluded by policy)
 BACKUP_MEDIA="$BACKUP_MEDIA"   # \$GAME_STORAGE_DIR/media (ES-DE scraped artwork)
 BACKUP_WOLF="$BACKUP_WOLF"     # /etc/wolf — config + profile_data
@@ -459,6 +467,8 @@ UNITEOF
     echo "  Backing up :"
     [ -n "$MC_BASE_DIR" ]        && echo "    • Minecraft worlds     $MC_BASE_DIR/*/data  (all instances)"
     [ "$BACKUP_SAVES" = yes ]    && echo "    • Emulator saves       $GAME_STORAGE_DIR/saves"
+    [ "$BACKUP_BIOS"  = yes ]    && echo "    • Emulator BIOS        $GAME_STORAGE_DIR/bios"
+    [ "$BACKUP_RA_SHADERS" = yes ] && echo "    • RA shaders/overlays  $GAME_STORAGE_DIR/retroarch/{shaders,overlays}"
     [ "$BACKUP_STEAM" = yes ]    && echo "    • Steam user data      $GAME_STORAGE_DIR/steam  (game installs excluded)"
     [ "$BACKUP_MEDIA" = yes ]    && echo "    • ES-DE scraped art    $GAME_STORAGE_DIR/media"
     [ "$BACKUP_WOLF"  = yes ]    && echo "    • Wolf state           $WOLF_STATE_DIR  (config + profile_data)"
