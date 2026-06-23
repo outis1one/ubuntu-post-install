@@ -85,14 +85,33 @@ STEAM_HOME=$(find_steam_home) || {
 }
 echo "Steam home: $STEAM_HOME"
 
-# ── Verify Kyber installer ─────────────────────────────────────────────────
+# ── Verify / download Kyber installer ─────────────────────────────────────
 if [ ! -f "$KYBER_INSTALLER" ]; then
     echo ""
-    echo "ERROR: Kyber installer not found at: $KYBER_INSTALLER"
-    echo ""
-    echo "Download KyberLauncher.exe from https://kyber.gg, then:"
-    echo "  $0 /path/to/KyberLauncher.exe"
-    exit 1
+    echo "Kyber installer not found at: $KYBER_INSTALLER"
+    echo "Downloading from kyber.gg API..."
+    mkdir -p "$(dirname "$KYBER_INSTALLER")"
+    KYBER_ZIP="/tmp/kyber-installer-$$.zip"
+    KYBER_DL_URL="https://api.prod.kyber.gg/download/kyber-installer-win64.zip"
+    if curl -L --progress-bar -o "$KYBER_ZIP" "$KYBER_DL_URL" && [ -s "$KYBER_ZIP" ]; then
+        # Extract the installer .exe from the zip
+        _exe=$(unzip -Z1 "$KYBER_ZIP" 2>/dev/null | grep -i '\.exe$' | head -1)
+        if [ -z "$_exe" ]; then
+            echo "ERROR: No .exe found inside the downloaded zip."
+            rm -f "$KYBER_ZIP"
+            exit 1
+        fi
+        unzip -p "$KYBER_ZIP" "$_exe" > "$KYBER_INSTALLER"
+        rm -f "$KYBER_ZIP"
+        echo "Extracted: $(basename "$_exe") → $KYBER_INSTALLER"
+    else
+        echo ""
+        echo "ERROR: Download failed."
+        echo "Download the zip manually from https://kyber.gg, extract the .exe, then:"
+        echo "  $0 /path/to/KyberLauncher.exe"
+        rm -f "$KYBER_ZIP"
+        exit 1
+    fi
 fi
 echo "Kyber installer: $KYBER_INSTALLER"
 
