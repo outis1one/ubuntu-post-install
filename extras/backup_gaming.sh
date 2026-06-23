@@ -120,6 +120,9 @@ if [ -n "${MC_BASE_DIR:-}" ]; then
     done
 fi
 [ "${BACKUP_SAVES:-no}" = yes ]  && snap "emulator-saves" "$GAME_STORAGE_DIR/saves"
+[ "${BACKUP_BIOS:-no}"  = yes ]  && snap "emulator-bios"  "$GAME_STORAGE_DIR/bios"
+[ "${BACKUP_RA_SHADERS:-no}" = yes ] && snap "retroarch-shaders"  "$GAME_STORAGE_DIR/retroarch/shaders"
+[ "${BACKUP_RA_SHADERS:-no}" = yes ] && snap "retroarch-overlays" "$GAME_STORAGE_DIR/retroarch/overlays"
 [ "${BACKUP_STEAM:-no}" = yes ]  && snap "steam-userdata" "$GAME_STORAGE_DIR/steam"
 [ "${BACKUP_MEDIA:-no}" = yes ]  && snap "es-de-media"    "$GAME_STORAGE_DIR/media"
 [ "${BACKUP_WOLF:-no}"  = yes ]  && snap "wolf-state"     "$WOLF_STATE_DIR"

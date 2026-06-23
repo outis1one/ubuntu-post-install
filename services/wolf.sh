@@ -231,7 +231,7 @@ EOF
         echo "  - Write $WOLF_DIR/docker-compose.yml and $WOLF_DIR/manage.sh"
         echo "  - Open Moonlight UFW ports: TCP ${WOLF_PORTS_TCP[*]} / UDP ${WOLF_PORTS_UDP[*]}"
         echo "  - Start Wolf and inject Steam + EmulationStation app profiles"
-        echo "  - Create bios/ + retroarch/cores/ on the game drive and pre-download RetroArch cores (~1.5 GB)"
+        echo "  - Create bios/ + retroarch/{cores,shaders,overlays}/ on the game drive and pre-download RetroArch cores (~1.5 GB)"
         return 0
     fi
 
@@ -702,7 +702,8 @@ UDEV
              "$GAME_STORAGE_DIR/firefox" "$GAME_STORAGE_DIR/minecraft" \
              "$GAME_STORAGE_DIR/kodi" "$GAME_STORAGE_DIR/emulators" \
              "$GAME_STORAGE_DIR/steam-cache" \
-             "$GAME_STORAGE_DIR/bios" "$GAME_STORAGE_DIR/retroarch/cores"
+             "$GAME_STORAGE_DIR/bios" "$GAME_STORAGE_DIR/retroarch/cores" \
+             "$GAME_STORAGE_DIR/retroarch/shaders" "$GAME_STORAGE_DIR/retroarch/overlays"
 
     # ── Wolf state folder on the game drive ───────────────────────────────────
     # This is the clean way to keep Steam (and everything else) off the OS
@@ -1303,6 +1304,8 @@ CATALOG = {
                 f'{games}/media:/media:rw',
                 f'{games}/bios:/home/retro/bioses:rw',
                 f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/retroarch/shaders:/home/retro/.config/retroarch/shaders:rw',
+                f'{games}/retroarch/overlays:/home/retro/.config/retroarch/overlays:rw',
                 f'{games}/emulators:/mnt/games/emulators:rw',
                 f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
@@ -1326,7 +1329,9 @@ CATALOG = {
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/mnt/games/saves:rw',
                 f'{games}/bios:/home/retro/bioses:rw',
-                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw'],
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/retroarch/shaders:/home/retro/.config/retroarch/shaders:rw',
+                f'{games}/retroarch/overlays:/home/retro/.config/retroarch/overlays:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -2587,6 +2592,8 @@ CATALOG = {
                 f'{games}/media:/media:rw',
                 f'{games}/bios:/home/retro/bioses:rw',
                 f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/retroarch/shaders:/home/retro/.config/retroarch/shaders:rw',
+                f'{games}/retroarch/overlays:/home/retro/.config/retroarch/overlays:rw',
                 f'{games}/emulators:/mnt/games/emulators:rw',
                 f'{games}/emulators:/home/retro/Applications:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
@@ -2610,7 +2617,9 @@ CATALOG = {
         mounts=[f'{games}/roms:/ROMs:rw',
                 f'{games}/saves:/mnt/games/saves:rw',
                 f'{games}/bios:/home/retro/bioses:rw',
-                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw'],
+                f'{games}/retroarch/cores:/home/retro/.config/retroarch/cores:rw',
+                f'{games}/retroarch/shaders:/home/retro/.config/retroarch/shaders:rw',
+                f'{games}/retroarch/overlays:/home/retro/.config/retroarch/overlays:rw'],
         env=STD_ENV, cap_add=STD_CAP, security_opt=[], ipc_mode='host',
         ulimits=[], privileged=False,
     ),
@@ -2837,7 +2846,9 @@ PYEOF
     echo "  ${GAME_STORAGE_DIR}/"
     echo "    roms/    → /ROMs                              (EmulationStation)"
     echo "    bios/    → /home/retro/bioses                 (emulator BIOS/firmware)"
-    echo "    retroarch/cores/ → ~/.config/retroarch/cores  (libretro cores)"
+    echo "    retroarch/cores/    → ~/.config/retroarch/cores    (libretro cores)"
+    echo "    retroarch/shaders/  → ~/.config/retroarch/shaders  (shaders/CRT filters — persist)"
+    echo "    retroarch/overlays/ → ~/.config/retroarch/overlays (bezels/overlays — persist)"
     echo "    saves/   → /home/retro/.config/retroarch/saves (RetroArch saves)"
     echo "    media/   → /media                             (ES-DE scraped artwork)"
     echo "    wolf-state/ → Wolf state: Steam install, games, Proton prefixes,"
@@ -2848,6 +2859,8 @@ PYEOF
     echo "  • Drop ROMs in roms/<system>/   (e.g. roms/snes/, roms/genesis/)"
     echo "  • Drop BIOS files in bios/       (PSX/Saturn/Dreamcast/Neo-Geo need them)"
     echo "  • RetroArch cores are pre-downloaded — retro games launch immediately"
+    echo "  • Shaders & overlays persist on the game drive — set up a CRT shader or"
+    echo "    bezels once and they survive new sessions and reinstalls"
     echo "  • Controllers auto-configure: ES-DE & RetroArch map Wolf's virtual pad"
     echo "    via SDL, no manual input setup needed"
     echo "  • Exit a game → ES-DE: Start+Select opens RetroArch menu → Quit,"
@@ -2995,6 +3008,8 @@ Two things live on the game drive (\`$GAME_STORAGE_DIR\`):
 - \`roms/<system>/\` → /ROMs (EmulationStation — drop ROMs here)
 - \`bios/\`          → /home/retro/bioses (emulator BIOS/firmware — drop BIOS here)
 - \`retroarch/cores/\` → ~/.config/retroarch/cores (libretro cores, pre-downloaded)
+- \`retroarch/shaders/\` → ~/.config/retroarch/shaders (shaders/CRT filters — persist)
+- \`retroarch/overlays/\` → ~/.config/retroarch/overlays (bezels/overlays — persist)
 - \`saves/\`         → /mnt/games/saves (RetroArch saves & states)
 - \`emulators/\`     → /mnt/games/emulators + ~/Applications (Azahar 3DS AppImage, etc.)
 
@@ -3023,6 +3038,13 @@ ES-DE is usable the moment you launch it; only ROMs and BIOS are yours to add.
   \`~/.config/retroarch/cores\`, so libretro games launch right away. Refresh or
   expand the set with \`./manage.sh cores\` (\`all\` = full buildbot set,
   \`common\` = mainstream systems, add \`force\` to re-download).
+- **Shaders & overlays**: \`retroarch/shaders/\` and \`retroarch/overlays/\` are
+  mounted at \`~/.config/retroarch/{shaders,overlays}\` and live on the game
+  drive, so anything you pull from the Online Updater or set in the Quick Menu
+  (Shaders / On-Screen Overlay) persists across sessions and survives a Wolf
+  reinstall — configure your CRT shader or bezels once. If RetroArch ever writes
+  them elsewhere, point Settings → Directory → Video Shader / Overlay at
+  \`~/.config/retroarch/shaders\` and \`~/.config/retroarch/overlays\`.
 - **Controllers**: auto-configured. ES-DE and RetroArch map Wolf's virtual pad
   through SDL with no manual input setup. RPCS3 ships Wolf-specific bindings.
   To remap inside ES-DE: Main menu → Input device settings → Configure
