@@ -310,11 +310,14 @@ int WINAPI mainCRTStartup(void) {
         }
     }
     /* pass-through to original cmd */
-    WCHAR newcl[4096] = L"cmd-real.exe";
     LPWSTR rest = GetCommandLineW();
     while (*rest && *rest != L' ') rest++;
-    if ((lstrlenW(newcl) + lstrlenW(rest)) < 4090)
-        lstrcatW(newcl, rest);
+    LPCWSTR prefix = L"cmd-real.exe";
+    int plen = lstrlenW(prefix), rlen = lstrlenW(rest);
+    LPWSTR newcl = (LPWSTR)HeapAlloc(GetProcessHeap(), 0,
+                       (plen + rlen + 2) * sizeof(WCHAR));
+    lstrcpyW(newcl, prefix);
+    lstrcatW(newcl, rest);
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi;
     CreateProcessW(NULL, newcl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
@@ -326,6 +329,7 @@ int WINAPI mainCRTStartup(void) {
 }
 CEOF
         x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
+            -mno-stack-arg-probe \
             -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
             -lkernel32 -lshell32 \
             && cp "$CMD_SHIM" "$CMD_REAL" \
