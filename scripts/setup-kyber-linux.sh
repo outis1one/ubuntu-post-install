@@ -154,36 +154,48 @@ fi
 
 # ── Build Kyber Wine prefix and run the installer ──────────────────────────
 echo ""
-echo "[1/5] Creating Kyber Wine prefix and running the installer..."
+echo "[1/5] Installing Kyber into Wine prefix..."
 
 KYBER_PFX="$STEAM_HOME/steamapps/compatdata/$KYBER_COMPAT_ID"
-mkdir -p "$KYBER_PFX"
 
 export STEAM_COMPAT_DATA_PATH="$KYBER_PFX"
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_HOME"
 export PROTON_NO_ESYNC=1
 
-# /S runs most NSIS/Inno installers silently. If Kyber's installer ignores it,
-# a GUI installer window appears — complete it normally (needs a display).
-"$PROTON_DIR/proton" run "$KYBER_INSTALLER" /S || \
-    "$PROTON_DIR/proton" run "$KYBER_INSTALLER" || true
-
-sleep 3
-
+# Check if Kyber is already installed — skip the installer if so.
 KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
-if [ -z "$KYBER_EXE_PATH" ]; then
-    echo ""
-    echo "WARNING: Kyber.exe not found after installation."
-    echo "  If a GUI installer appeared, make sure you completed it."
-    echo "  Default install path assumed; continuing."
-    KYBER_EXE_WIN='C:\Program Files\Kyber\Kyber.exe'
-    KYBER_START_DIR='C:\Program Files\Kyber\'
+if [ -n "$KYBER_EXE_PATH" ]; then
+    echo "  Kyber.exe already present — skipping installer."
 else
-    echo "  Kyber.exe: $KYBER_EXE_PATH"
+    mkdir -p "$KYBER_PFX"
+    # Kill any leftover Wine/Proton processes from a previous attempt.
+    pkill -9 -f "compatdata/$KYBER_COMPAT_ID" 2>/dev/null || true
+    sleep 1
+
+    echo "  Running installer (silent)..."
+    # /S = NSIS silent flag; if Kyber's installer ignores it a GUI appears.
+    "$PROTON_DIR/proton" run "$KYBER_INSTALLER" /S 2>/dev/null || \
+        "$PROTON_DIR/proton" run "$KYBER_INSTALLER" 2>/dev/null || true
+
+    sleep 5
+
+    KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
+    if [ -z "$KYBER_EXE_PATH" ]; then
+        echo ""
+        echo "WARNING: Kyber.exe not found after installation."
+        echo "  Default install path assumed; continuing."
+    fi
+fi
+
+# Resolve Windows-style paths for the shortcut
+if [ -n "$KYBER_EXE_PATH" ]; then
     rel=$(echo "$KYBER_EXE_PATH" | sed "s|.*/pfx/drive_c/||")
     KYBER_EXE_WIN="C:\\$(echo "$rel" | sed 's|/|\\|g')"
     dir_rel=$(dirname "$rel")
     KYBER_START_DIR="C:\\$(echo "$dir_rel" | sed 's|/|\\|g')\\"
+else
+    KYBER_EXE_WIN='C:\Program Files (x86)\KYBER Launcher\Kyber.exe'
+    KYBER_START_DIR='C:\Program Files (x86)\KYBER Launcher\'
 fi
 echo "  Windows path: $KYBER_EXE_WIN"
 
