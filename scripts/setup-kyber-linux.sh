@@ -173,7 +173,7 @@ export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_HOME"
 export PROTON_NO_ESYNC=1
 
 # Check if Kyber is already installed — skip the installer if so.
-KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
+KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -iname "kyber_launcher.exe" 2>/dev/null | head -1)
 if [ -n "$KYBER_EXE_PATH" ]; then
     echo "  Kyber.exe already present — skipping installer."
 else
@@ -189,7 +189,7 @@ else
 
     sleep 5
 
-    KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -name "Kyber.exe" 2>/dev/null | head -1)
+    KYBER_EXE_PATH=$(find "$KYBER_PFX/pfx" -iname "kyber_launcher.exe" 2>/dev/null | head -1)
     if [ -z "$KYBER_EXE_PATH" ]; then
         echo ""
         echo "WARNING: Kyber.exe not found after installation."
@@ -204,7 +204,7 @@ if [ -n "$KYBER_EXE_PATH" ]; then
     dir_rel=$(dirname "$rel")
     KYBER_START_DIR="C:\\$(echo "$dir_rel" | sed 's|/|\\|g')\\"
 else
-    KYBER_EXE_WIN='C:\Program Files (x86)\KYBER Launcher\Kyber.exe'
+    KYBER_EXE_WIN='C:\Program Files (x86)\KYBER Launcher\kyber_launcher.exe'
     KYBER_START_DIR='C:\Program Files (x86)\KYBER Launcher\'
 fi
 echo "  Windows path: $KYBER_EXE_WIN"
