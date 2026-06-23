@@ -89,31 +89,27 @@ echo "Steam home: $STEAM_HOME"
 if [ ! -f "$KYBER_INSTALLER" ]; then
     echo ""
     echo "Kyber installer not found at: $KYBER_INSTALLER"
-    echo "Attempting to download KyberLauncher.exe from kyber.gg..."
+    echo "Downloading from kyber.gg API..."
     mkdir -p "$(dirname "$KYBER_INSTALLER")"
-    # Try to find the download link on kyber.gg, then fall back to known URLs.
-    echo "  Checking kyber.gg for the download link..."
-    KYBER_DL_URL=""
-    # Extract the first .exe href from the kyber.gg download page
-    _raw=$(curl -sL --max-time 15 "https://kyber.gg/download" 2>/dev/null || \
-           curl -sL --max-time 15 "https://kyber.gg" 2>/dev/null)
-    if [ -n "$_raw" ]; then
-        KYBER_DL_URL=$(echo "$_raw" | grep -oP 'https?://[^"'\''<>\s]+KyberLauncher\.exe' | head -1)
-    fi
-    # Known fallback locations (update these if kyber.gg changes hosting)
-    if [ -z "$KYBER_DL_URL" ]; then
-        KYBER_DL_URL="https://cdn.kyber.gg/builds/KyberLauncher.exe"
-    fi
-    echo "  Downloading from: $KYBER_DL_URL"
-    if curl -L --progress-bar -o "$KYBER_INSTALLER" "$KYBER_DL_URL" \
-            && [ -s "$KYBER_INSTALLER" ]; then
-        echo "Downloaded: $KYBER_INSTALLER"
+    KYBER_ZIP="/tmp/kyber-installer-$$.zip"
+    KYBER_DL_URL="https://api.prod.kyber.gg/download/kyber-installer-win64.zip"
+    if curl -L --progress-bar -o "$KYBER_ZIP" "$KYBER_DL_URL" && [ -s "$KYBER_ZIP" ]; then
+        # Extract the installer .exe from the zip
+        _exe=$(unzip -Z1 "$KYBER_ZIP" 2>/dev/null | grep -i '\.exe$' | head -1)
+        if [ -z "$_exe" ]; then
+            echo "ERROR: No .exe found inside the downloaded zip."
+            rm -f "$KYBER_ZIP"
+            exit 1
+        fi
+        unzip -p "$KYBER_ZIP" "$_exe" > "$KYBER_INSTALLER"
+        rm -f "$KYBER_ZIP"
+        echo "Extracted: $(basename "$_exe") → $KYBER_INSTALLER"
     else
         echo ""
-        echo "ERROR: Automatic download failed."
-        echo "Download KyberLauncher.exe manually from https://kyber.gg, then:"
+        echo "ERROR: Download failed."
+        echo "Download the zip manually from https://kyber.gg, extract the .exe, then:"
         echo "  $0 /path/to/KyberLauncher.exe"
-        rm -f "$KYBER_INSTALLER"
+        rm -f "$KYBER_ZIP"
         exit 1
     fi
 fi
