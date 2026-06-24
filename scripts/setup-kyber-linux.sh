@@ -14,14 +14,16 @@
 #   4. Kyber's HTTP server catches the code and exchanges it for tokens
 #
 # Problem: Wine's cmd.exe crashes with STATUS_ACCESS_VIOLATION (0xC0000005)
-# when called as  cmd /c start "" "<URL>".  This blocks the login entirely.
+# when called with a long EA auth URL. This blocks login entirely.
 #
-# Fix: Windows Image File Execution Options (IFEO) lets us intercept any
-# cmd.exe launch at the registry level without touching system32/cmd.exe
-# (which Proton resets on every launch). We register a tiny shim that
-# captures the http URL, writes it to a known file, and exits 0. A Linux
-# watcher picks up the file and calls xdg-open to open the URL in the
-# system browser, completing the OAuth flow normally.
+# Fix: Replace Proton's own cmd.exe (files/lib/wine/x86_64-windows/cmd.exe)
+# with a tiny shim that captures any http URL from its command line, writes
+# it to C:\kyber_oauth_url.txt, and exits 0. A Linux-side watcher calls
+# xdg-open on that file to open the browser. Wine loads cmd.exe from Proton's
+# installation, not the prefix — prefix replacements, IFEO, and
+# WINEDLLOVERRIDES all have no effect, so Proton's copy must be replaced.
+#
+# After a Proton Experimental update, cmd.exe is restored; re-run this script.
 #
 # ── Why NOT to run Kyber inside Wolf / Games-on-Whales ─────────────────────
 #
@@ -259,124 +261,109 @@ else
     fi
 fi
 
-# ── Install cmd shim + IFEO registry hook ─────────────────────────────────
+# ── Install cmd shim ──────────────────────────────────────────────────────
 # Wine's built-in cmd.exe crashes (exit 0xC0000005) when Kyber calls:
 #   cmd /c start "" "<EA auth URL>"
 #
-# FIX: Use Windows "Image File Execution Options" (IFEO) to intercept any
-# cmd.exe launch at the registry level. IFEO survives Proton's prefix-setup
-# phase (which overwrites system32/cmd.exe on every game launch), because it
-# lives in the registry — not the filesystem.
+# Root cause: Wine loads cmd.exe from Proton's OWN installation directory
+#   files/lib/wine/x86_64-windows/cmd.exe
+# NOT from the prefix system32. Replacing the prefix copy, using IFEO registry
+# keys, or WINEDLLOVERRIDES all have no effect — Proton's copy always wins.
 #
-# Mechanism:
-#   HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\
-#     Image File Execution Options\cmd.exe  →  Debugger = C:\shim\kyber_cmd.exe
+# Fix: replace Proton's cmd.exe with a tiny shim that scans its command line
+# for an http URL, writes it to C:\kyber_oauth_url.txt, then exits 0. A
+# Linux-side watcher calls xdg-open on that URL to open the system browser.
+# The original is backed up as cmd.exe.bak next to it.
 #
-# Wine reads this key at CreateProcess time and runs our shim instead of
-# cmd.exe. The shim scans its arguments for an http URL, writes it to
-# C:\kyber_oauth_url.txt, and exits 0. A Linux-side watcher reads the file
-# and calls xdg-open to open the URL in the system browser.
-#
-# The shim is placed in drive_c/shim/ — a directory Proton never touches.
+# After a Proton update the shim will be overwritten; re-run this script.
 echo ""
-echo "[3/7] Installing cmd shim + IFEO registry hook for OAuth login..."
+echo "[3/7] Installing cmd shim for OAuth login..."
 
 SHIM_DIR="$KYBER_PFX/pfx/drive_c/shim"
 SHIM_EXE_PATH="$SHIM_DIR/kyber_cmd.exe"
-SYSTEM_REG="$KYBER_PFX/pfx/system.reg"
+PROTON_CMD="$PROTON_DIR/files/lib/wine/x86_64-windows/cmd.exe"
+PROTON_CMD_BAK="${PROTON_CMD}.bak"
 
-IFEO_ALREADY=0
-if grep -q "Image File Execution Options\\\\cmd.exe" "$SYSTEM_REG" 2>/dev/null; then
-    IFEO_ALREADY=1
-fi
+# Detect if Proton's cmd.exe is already our shim (small) or the original (large)
+PROTON_CMD_SIZE=$(stat -c%s "$PROTON_CMD" 2>/dev/null || echo 0)
 
-if [ -f "$SHIM_EXE_PATH" ] && [ "$IFEO_ALREADY" = "1" ]; then
-    echo "  cmd shim + IFEO already installed."
-else
-    # Compile the shim if not present or if it is the wrong file
-    # (a failed earlier run may have left Wine's cmd.exe there: 122231 bytes)
-    SHIM_SIZE=$(stat -c%s "$SHIM_EXE_PATH" 2>/dev/null || echo 0)
-    if [ "$SHIM_SIZE" -gt 100000 ] && [ -f "$SHIM_EXE_PATH" ]; then
-        echo "  Shim file looks wrong ($SHIM_SIZE bytes — expected ~10KB). Replacing..."
-        rm -f "$SHIM_EXE_PATH"
+compile_shim() {
+    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+        echo "  Installing mingw-w64..."
+        sudo apt-get install -y mingw-w64 || {
+            echo "  WARNING: mingw-w64 install failed — login may not work."
+            echo "    sudo apt install mingw-w64 && $0"
+            return 1
+        }
     fi
-
-    if [ ! -f "$SHIM_EXE_PATH" ]; then
-        if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-            echo "  Installing mingw-w64..."
-            sudo apt-get install -y mingw-w64 || {
-                echo "  WARNING: mingw-w64 install failed. Install manually:"
-                echo "    sudo apt install mingw-w64"
-                echo "  Then re-run this script."
-            }
-        fi
-
-        if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-            SHIM_C="/tmp/kyber_cmd_shim_$$.c"
-            SHIM_EXE_TMP="/tmp/kyber_cmd_shim_$$.exe"
-            cat > "$SHIM_C" << 'CEOF'
+    local SHIM_C="/tmp/kyber_cmd_shim_$$.c"
+    local SHIM_OUT="/tmp/kyber_cmd_shim_$$.exe"
+    cat > "$SHIM_C" << 'CEOF'
 #include <windows.h>
-static void write_url(LPCWSTR url) {
-    HANDLE h = CreateFileW(L"C:\\kyber_oauth_url.txt",
+static void write_url(const char *p, int len) {
+    HANDLE h = CreateFileA("C:\\kyber_oauth_url.txt",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
-    int n = WideCharToMultiByte(CP_UTF8, 0, url, -1, NULL, 0, NULL, NULL);
-    char *buf = (char*)HeapAlloc(GetProcessHeap(), 0, n + 1);
-    WideCharToMultiByte(CP_UTF8, 0, url, -1, buf, n, NULL, NULL);
-    DWORD w; WriteFile(h, buf, n - 1, &w, NULL);
-    HeapFree(GetProcessHeap(), 0, buf);
+    DWORD w; WriteFile(h, p, len, &w, NULL);
     CloseHandle(h);
 }
 int WINAPI mainCRTStartup(void) {
-    /* IFEO prepends our exe name before the real command line, so skip argv[0]
-       and argv[1] (the debuggee path Wine adds). Scan remaining args for URL. */
-    int argc;
-    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    for (int i = 1; i < argc; i++) {
-        LPCWSTR a = argv[i];
-        if ((a[0]=='h'||a[0]=='H') && (a[1]=='t'||a[1]=='T') &&
-            (a[2]=='t'||a[2]=='T') && (a[3]=='p'||a[3]=='P')) {
-            write_url(a);
-            LocalFree(argv);
+    const char *cl = GetCommandLineA();
+    while (*cl) {
+        if ((cl[0]=='h'||cl[0]=='H') && cl[1]=='t' && cl[2]=='t' && cl[3]=='p') {
+            const char *end = cl;
+            while (*end && *end != ' ' && *end != '"') end++;
+            write_url(cl, (int)(end - cl));
             ExitProcess(0);
         }
+        cl++;
     }
-    LocalFree(argv);
     ExitProcess(0);
 }
 CEOF
-            mkdir -p "$SHIM_DIR"
-            if x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
-                    -mno-stack-arg-probe \
-                    -e mainCRTStartup -o "$SHIM_EXE_TMP" "$SHIM_C" \
-                    -lkernel32 -lshell32; then
-                cp "$SHIM_EXE_TMP" "$SHIM_EXE_PATH"
-                echo "  Shim compiled and placed: $SHIM_EXE_PATH ($(stat -c%s "$SHIM_EXE_PATH") bytes)"
-            else
-                echo "  WARNING: cmd shim compile failed — login may not work."
-            fi
-            rm -f "$SHIM_C" "$SHIM_EXE_TMP"
-        else
-            echo "  WARNING: mingw-w64 not found. Install it and re-run:"
-            echo "    sudo apt install mingw-w64"
-        fi
+    mkdir -p "$SHIM_DIR"
+    if x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
+            -mno-stack-arg-probe \
+            -e mainCRTStartup -o "$SHIM_OUT" "$SHIM_C" \
+            -lkernel32; then
+        cp "$SHIM_OUT" "$SHIM_EXE_PATH"
+        echo "  Shim compiled: $(stat -c%s "$SHIM_EXE_PATH") bytes"
     else
-        echo "  Shim already compiled."
+        echo "  WARNING: cmd shim compile failed — login may not work."
+        rm -f "$SHIM_C" "$SHIM_OUT"
+        return 1
     fi
+    rm -f "$SHIM_C" "$SHIM_OUT"
+}
 
-    # Write IFEO registry key to system.reg
-    # system.reg uses \\ for path separators in key name brackets.
-    if [ "$IFEO_ALREADY" = "0" ] && [ -f "$SYSTEM_REG" ]; then
-        echo ""                     >> "$SYSTEM_REG"
-        echo '[Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\cmd.exe]' >> "$SYSTEM_REG"
-        echo '"Debugger"="C:\\shim\\kyber_cmd.exe"' >> "$SYSTEM_REG"
-        echo "  IFEO registry key written to system.reg."
-    elif [ ! -f "$SYSTEM_REG" ]; then
-        echo "  WARNING: system.reg not found — IFEO key not written."
-        echo "  The prefix may not exist yet. Run the installer first (step 1)."
+# Compile shim if missing or obviously wrong size (>100KB = real cmd.exe)
+SHIM_SIZE=$(stat -c%s "$SHIM_EXE_PATH" 2>/dev/null || echo 0)
+if [ "$SHIM_SIZE" -gt 100000 ]; then
+    echo "  Stale shim detected ($SHIM_SIZE bytes). Recompiling..."
+    rm -f "$SHIM_EXE_PATH"
+    SHIM_SIZE=0
+fi
+if [ "$SHIM_SIZE" -eq 0 ]; then
+    compile_shim || true
+fi
+
+# Replace Proton's cmd.exe if it is not already our shim
+if [ -f "$SHIM_EXE_PATH" ]; then
+    if [ "$PROTON_CMD_SIZE" -gt 100000 ]; then
+        # Original: back it up and replace
+        cp "$PROTON_CMD" "$PROTON_CMD_BAK" 2>/dev/null || true
+        chmod u+w "$PROTON_CMD"
+        cp "$SHIM_EXE_PATH" "$PROTON_CMD"
+        chmod u-w "$PROTON_CMD"
+        echo "  Proton cmd.exe replaced with shim."
+        echo "  (Backup: $PROTON_CMD_BAK)"
+        echo "  NOTE: Re-run this script after a Proton Experimental update."
     else
-        echo "  IFEO registry key already present."
+        echo "  Proton cmd.exe already replaced ($(stat -c%s "$PROTON_CMD") bytes)."
     fi
+else
+    echo "  WARNING: shim not compiled. Install mingw-w64 and re-run:"
+    echo "    sudo apt install mingw-w64 && $0"
 fi
 
 # ── OAuth watcher ──────────────────────────────────────────────────────────
@@ -582,3 +569,6 @@ echo "    then click Login and log in quickly."
 echo ""
 echo "  'cmd shim' missing (mingw-w64 was not installed):"
 echo "    sudo apt install mingw-w64 && $0"
+echo ""
+echo "  After a Proton Experimental update:"
+echo "    Re-run $0 to replace the restored cmd.exe with the shim again."
