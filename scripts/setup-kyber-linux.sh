@@ -293,7 +293,14 @@ fi
 if [ -f "$SHIM_EXE_PATH" ] && [ "$IFEO_ALREADY" = "1" ]; then
     echo "  cmd shim + IFEO already installed."
 else
-    # Compile the shim if not present
+    # Compile the shim if not present or if it is the wrong file
+    # (a failed earlier run may have left Wine's cmd.exe there: 122231 bytes)
+    SHIM_SIZE=$(stat -c%s "$SHIM_EXE_PATH" 2>/dev/null || echo 0)
+    if [ "$SHIM_SIZE" -gt 100000 ] && [ -f "$SHIM_EXE_PATH" ]; then
+        echo "  Shim file looks wrong ($SHIM_SIZE bytes — expected ~10KB). Replacing..."
+        rm -f "$SHIM_EXE_PATH"
+    fi
+
     if [ ! -f "$SHIM_EXE_PATH" ]; then
         if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
             echo "  Installing mingw-w64..."
@@ -361,8 +368,8 @@ CEOF
     # system.reg uses \\ for path separators in key name brackets.
     if [ "$IFEO_ALREADY" = "0" ] && [ -f "$SYSTEM_REG" ]; then
         echo ""                     >> "$SYSTEM_REG"
-        echo "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\cmd.exe]" >> "$SYSTEM_REG"
-        echo '"Debugger"="C:\\\\shim\\\\kyber_cmd.exe"' >> "$SYSTEM_REG"
+        echo '[Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\cmd.exe]' >> "$SYSTEM_REG"
+        echo '"Debugger"="C:\\shim\\kyber_cmd.exe"' >> "$SYSTEM_REG"
         echo "  IFEO registry key written to system.reg."
     elif [ ! -f "$SYSTEM_REG" ]; then
         echo "  WARNING: system.reg not found — IFEO key not written."
