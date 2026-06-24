@@ -13,14 +13,15 @@
 #   3. You log in on the EA page; EA redirects to  127.0.0.1:PORT/?code=...
 #   4. Kyber's HTTP server catches the code and exchanges it for tokens
 #
-# On native Linux, Wine's built-in cmd.exe passes http(s):// URLs to
-# xdg-open, which launches your system browser. Steam's pressure-vessel
-# (bwrap) sandbox does NOT block xdg-open on native Linux — xdg-open reaches
-# the host desktop and the browser opens normally.
+# Problem: Wine's cmd.exe crashes with STATUS_ACCESS_VIOLATION (0xC0000005)
+# when called as  cmd /c start "" "<URL>".  This blocks the login entirely.
 #
-# After you approve the EA login page the browser is redirected to
-# 127.0.0.1:PORT (Kyber's loopback server). The browser hits that address,
-# Kyber receives the auth code, and login completes. No special shims needed.
+# Fix: Windows Image File Execution Options (IFEO) lets us intercept any
+# cmd.exe launch at the registry level without touching system32/cmd.exe
+# (which Proton resets on every launch). We register a tiny shim that
+# captures the http URL, writes it to a known file, and exits 0. A Linux
+# watcher picks up the file and calls xdg-open to open the URL in the
+# system browser, completing the OAuth flow normally.
 #
 # ── Why NOT to run Kyber inside Wolf / Games-on-Whales ─────────────────────
 #
@@ -226,7 +227,7 @@ else
     if command -v winetricks >/dev/null 2>&1; then
         echo "  Using winetricks to install webview2..."
         WINEPREFIX="$KYBER_PFX/pfx" \
-        WINE="$PROTON_DIR/files/bin/wine64" \
+        WINE="$PROTON_DIR/files/lib/wine/x86_64-unix/wine64" \
             winetricks -q webview2 || true
     else
         # Download the Evergreen STANDALONE (offline) installer — linkid=2135547.
@@ -258,42 +259,56 @@ else
     fi
 fi
 
-# ── Install cmd shim + OAuth watcher ──────────────────────────────────────
+# ── Install cmd shim + IFEO registry hook ─────────────────────────────────
 # Wine's built-in cmd.exe crashes (exit 0xC0000005) when Kyber calls:
 #   cmd /c start "" "<EA auth URL>"
-# We replace cmd.exe in the Kyber prefix with a tiny shim that writes the
-# URL to a known file, then a Linux-side watcher opens it with xdg-open.
+#
+# FIX: Use Windows "Image File Execution Options" (IFEO) to intercept any
+# cmd.exe launch at the registry level. IFEO survives Proton's prefix-setup
+# phase (which overwrites system32/cmd.exe on every game launch), because it
+# lives in the registry — not the filesystem.
+#
+# Mechanism:
+#   HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\
+#     Image File Execution Options\cmd.exe  →  Debugger = C:\shim\kyber_cmd.exe
+#
+# Wine reads this key at CreateProcess time and runs our shim instead of
+# cmd.exe. The shim scans its arguments for an http URL, writes it to
+# C:\kyber_oauth_url.txt, and exits 0. A Linux-side watcher reads the file
+# and calls xdg-open to open the URL in the system browser.
+#
+# The shim is placed in drive_c/shim/ — a directory Proton never touches.
 echo ""
-echo "[3/7] Installing cmd shim for OAuth login..."
+echo "[3/7] Installing cmd shim + IFEO registry hook for OAuth login..."
 
-# The shim lives in the prefix's system32, not in Proton's global wine dir,
-# so it only affects Kyber and won't break other games.
-KYBER_SYS32="$KYBER_PFX/pfx/drive_c/windows/system32"
-CMD_REAL="$KYBER_SYS32/cmd-real.exe"
-CMD_SHIM="$KYBER_SYS32/cmd.exe"
+SHIM_DIR="$KYBER_PFX/pfx/drive_c/shim"
+SHIM_EXE_PATH="$SHIM_DIR/kyber_cmd.exe"
+SYSTEM_REG="$KYBER_PFX/pfx/system.reg"
 
-if [ -f "$CMD_REAL" ]; then
-    echo "  cmd shim already installed."
+IFEO_ALREADY=0
+if grep -q "Image File Execution Options\\\\cmd.exe" "$SYSTEM_REG" 2>/dev/null; then
+    IFEO_ALREADY=1
+fi
+
+if [ -f "$SHIM_EXE_PATH" ] && [ "$IFEO_ALREADY" = "1" ]; then
+    echo "  cmd shim + IFEO already installed."
 else
-    # Need mingw-w64 to compile the shim
-    if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        echo "  Installing mingw-w64..."
-        sudo apt-get install -y mingw-w64 || {
-            echo "  WARNING: mingw-w64 install failed. Install manually:"
-            echo "    sudo apt install mingw-w64"
-            echo "  Then re-run this script."
-        }
-    fi
+    # Compile the shim if not present
+    if [ ! -f "$SHIM_EXE_PATH" ]; then
+        if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            echo "  Installing mingw-w64..."
+            sudo apt-get install -y mingw-w64 || {
+                echo "  WARNING: mingw-w64 install failed. Install manually:"
+                echo "    sudo apt install mingw-w64"
+                echo "  Then re-run this script."
+            }
+        fi
 
-    if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-        SHIM_C="/tmp/kyber_cmd_shim_$$.c"
-        SHIM_EXE="/tmp/kyber_cmd_shim_$$.exe"
-        cat > "$SHIM_C" << 'CEOF'
+        if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+            SHIM_C="/tmp/kyber_cmd_shim_$$.c"
+            SHIM_EXE_TMP="/tmp/kyber_cmd_shim_$$.exe"
+            cat > "$SHIM_C" << 'CEOF'
 #include <windows.h>
-/* ieq: case-insensitive wide string compare using only kernel32 */
-static int ieq(LPCWSTR a, LPCWSTR b) {
-    return CompareStringOrdinal(a, -1, b, -1, TRUE) == 2; /* CSTR_EQUAL==2 */
-}
 static void write_url(LPCWSTR url) {
     HANDLE h = CreateFileW(L"C:\\kyber_oauth_url.txt",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -306,59 +321,54 @@ static void write_url(LPCWSTR url) {
     CloseHandle(h);
 }
 int WINAPI mainCRTStartup(void) {
+    /* IFEO prepends our exe name before the real command line, so skip argv[0]
+       and argv[1] (the debuggee path Wine adds). Scan remaining args for URL. */
     int argc;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    for (int i = 1; i < argc - 1; i++) {
-        if (ieq(argv[i], L"/c") && ieq(argv[i+1], L"start")) {
-            for (int j = i+2; j < argc; j++) {
-                if (argv[j][0] == L'h' || argv[j][0] == L'H') {
-                    write_url(argv[j]);
-                    LocalFree(argv);
-                    ExitProcess(0);
-                }
-            }
+    for (int i = 1; i < argc; i++) {
+        LPCWSTR a = argv[i];
+        if ((a[0]=='h'||a[0]=='H') && (a[1]=='t'||a[1]=='T') &&
+            (a[2]=='t'||a[2]=='T') && (a[3]=='p'||a[3]=='P')) {
+            write_url(a);
+            LocalFree(argv);
+            ExitProcess(0);
         }
     }
-    /* pass-through to original cmd */
-    LPWSTR rest = GetCommandLineW();
-    while (*rest && *rest != L' ') rest++;
-    LPCWSTR prefix = L"cmd-real.exe";
-    int plen = lstrlenW(prefix), rlen = lstrlenW(rest);
-    LPWSTR newcl = (LPWSTR)HeapAlloc(GetProcessHeap(), 0,
-                       (plen + rlen + 2) * sizeof(WCHAR));
-    lstrcpyW(newcl, prefix);
-    lstrcatW(newcl, rest);
-    STARTUPINFOW si = {sizeof(si)};
-    PROCESS_INFORMATION pi;
-    CreateProcessW(NULL, newcl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     LocalFree(argv);
-    ExitProcess(code);
+    ExitProcess(0);
 }
 CEOF
-        if x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
-                -mno-stack-arg-probe \
-                -e mainCRTStartup -o "$SHIM_EXE" "$SHIM_C" \
-                -lkernel32 -lshell32; then
-            # If cmd.exe is a symlink, copy the real file out first,
-            # then remove the symlink so we replace only this prefix.
-            if [ -L "$CMD_SHIM" ]; then
-                cp "$(readlink -f "$CMD_SHIM")" "$CMD_REAL"
-                rm "$CMD_SHIM"
+            mkdir -p "$SHIM_DIR"
+            if x86_64-w64-mingw32-gcc -O2 -ffreestanding -nostdlib \
+                    -mno-stack-arg-probe \
+                    -e mainCRTStartup -o "$SHIM_EXE_TMP" "$SHIM_C" \
+                    -lkernel32 -lshell32; then
+                cp "$SHIM_EXE_TMP" "$SHIM_EXE_PATH"
+                echo "  Shim compiled and placed: $SHIM_EXE_PATH ($(stat -c%s "$SHIM_EXE_PATH") bytes)"
             else
-                cp "$CMD_SHIM" "$CMD_REAL"
+                echo "  WARNING: cmd shim compile failed — login may not work."
             fi
-            cp "$SHIM_EXE" "$CMD_SHIM"
-            echo "  cmd shim installed ($(stat -c%s "$CMD_SHIM") bytes)."
+            rm -f "$SHIM_C" "$SHIM_EXE_TMP"
         else
-            echo "  WARNING: cmd shim compile failed — login may not work."
+            echo "  WARNING: mingw-w64 not found. Install it and re-run:"
+            echo "    sudo apt install mingw-w64"
         fi
-        rm -f "$SHIM_C" "$SHIM_EXE"
     else
-        echo "  WARNING: mingw-w64 not found. Install it and re-run:"
-        echo "    sudo apt install mingw-w64"
+        echo "  Shim already compiled."
+    fi
+
+    # Write IFEO registry key to system.reg
+    # system.reg uses \\ for path separators in key name brackets.
+    if [ "$IFEO_ALREADY" = "0" ] && [ -f "$SYSTEM_REG" ]; then
+        echo ""                     >> "$SYSTEM_REG"
+        echo "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Image File Execution Options\\\\cmd.exe]" >> "$SYSTEM_REG"
+        echo '"Debugger"="C:\\\\shim\\\\kyber_cmd.exe"' >> "$SYSTEM_REG"
+        echo "  IFEO registry key written to system.reg."
+    elif [ ! -f "$SYSTEM_REG" ]; then
+        echo "  WARNING: system.reg not found — IFEO key not written."
+        echo "  The prefix may not exist yet. Run the installer first (step 1)."
+    else
+        echo "  IFEO registry key already present."
     fi
 fi
 
