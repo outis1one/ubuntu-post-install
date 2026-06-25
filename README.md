@@ -137,3 +137,53 @@ then either:
 Tested on **Ubuntu 24.04 LTS** and **26.04 LTS**.
 Works on any Ubuntu LTS ≥ 22.04; non-LTS releases also work.
 The wizard shows the detected OS in the header and warns on unknown versions.
+
+## Gaming scripts
+
+Standalone scripts in `scripts/` for gaming setup — not part of the main
+wizard, run separately.
+
+### Star Wars Battlefront II (2017) + Kyber
+
+**`scripts/setup-swbf2-linux.sh`** — Configure SWBF2 on native Linux Steam
+(Proton, controller, performance tweaks).
+
+**`scripts/setup-kyber-linux.sh`** — Install the native Linux Kyber launcher.
+
+Kyber is the community multiplayer replacement for SWBF2 after EA shut down
+official servers in 2022. It went open-source (GPL) in January 2026.
+
+**The correct approach is a native Linux AppImage** — not Wine or Proton for
+the launcher itself. The AppImage is maintained at:
+https://github.com/simonlinuxcraft/kyber-linuxport-unofficial
+
+```bash
+chmod +x scripts/setup-kyber-linux.sh
+./scripts/setup-kyber-linux.sh
+```
+
+The script downloads the latest AppImage, installs a desktop entry, and
+creates a `kyber` command in `~/.local/bin`.
+
+**First run:**
+1. Click **EA Account** → log in with your EA credentials in the browser
+2. Click **Skip** on Nexus Mods (optional, only needed for mods)
+3. Browse servers on **HOME** or create one under **HOST**
+
+**Hosting a private server with bots:**
+- HOST → pick maps/modes → set a **name** and **PASSWORD** → Start Server
+- Share the name + password with friends; they search by name in HOME
+- SWBF2 fills empty slots with AI automatically — no separate bot setting
+
+**Requirements:**
+- SWBF2 (Steam AppID 1237950) installed with GE-Proton (recommended over
+  Proton Experimental for game stability)
+- glibc 2.38+ — Ubuntu 24.04+, Fedora 38+, SteamOS 3.7+
+- EA account (free) at ea.com
+
+**What does NOT work:**
+- Running the Windows `kyber_launcher.exe` under Wine/Proton: EA's auth
+  callback uses the `eadesktop://` URI scheme which has no Linux handler,
+  and Wine's cmd.exe crashes on long OAuth URLs anyway
+- Running Kyber inside Wolf/Games-on-Whales: the Docker double-sandbox
+  blocks the user namespace clone that Proton requires
