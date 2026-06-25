@@ -299,6 +299,7 @@ for a in data.get('assets', []):
     local SERVER_NAME MAX_PLAYERS
     prompt_text "Server name [Kyber Server]:" "Kyber Server" SERVER_NAME
     prompt_text "Max players [40]:" "40" MAX_PLAYERS
+    prompt_text "Server password (leave blank for public):" "" SERVER_PASSWORD
 
     # ── Write files ───────────────────────────────────────────────────────────
     local DIR="$DOCKER_DIR/kyber-server"
@@ -351,6 +352,8 @@ MAXIMA_CREDENTIALS=${EA_EMAIL}:${EA_PASSWORD}
 KYBER_TOKEN=${KYBER_TOKEN}
 KYBER_SERVER_NAME=${SERVER_NAME}
 KYBER_SERVER_MAX_PLAYERS=${MAX_PLAYERS}
+# Leave blank for a public server, or set a password to make it private
+KYBER_SERVER_PASSWORD=${SERVER_PASSWORD}
 # Leave blank until you have a base64-encoded map rotation string.
 # Build one in the Kyber client HOST tab, then base64-encode it:
 #   echo -n '<rotation-json>' | base64
