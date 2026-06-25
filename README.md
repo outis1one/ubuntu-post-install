@@ -173,6 +173,14 @@ creates a `kyber` command in `~/.local/bin`.
 
 Kyber does not launch the game itself — Steam must start it first.
 
+**If Kyber says "Game Not Found":**
+Click **SET GAME FOLDER** and point it to the SWBF2 install directory.
+Find it with:
+```bash
+find ~/.steam/steam/steamapps -name "starwarsbattlefrontii.exe" 2>/dev/null | head -1 | xargs dirname
+```
+Paste that path into the SET GAME FOLDER dialog.
+
 **First run (one-time setup):**
 1. Click **EA Account** → log in with your EA credentials in the browser
 2. Click **Skip** on Nexus Mods (optional, only needed for mods)
