@@ -166,12 +166,15 @@ The script downloads the latest AppImage, installs a desktop entry, and
 creates a `kyber` command in `~/.local/bin`.
 
 **Every time you want to play:**
-1. **Launch SWBF2 from Steam first** — let it fully load to the main menu
-2. Launch Kyber (`kyber` or from the app menu)
+1. Open **Steam** (must be running for library validation) — do NOT click Play on SWBF2
+2. Launch **Kyber** (`kyber` or from the app menu)
 3. In Kyber: join a server (HOME) or create one (HOST)
-4. Kyber connects to the already-running game instance
+4. Kyber/Maxima launches SWBF2 via its own bundled GE-Proton — wait 1-3 minutes
+5. If the SWBF2 window appears but won't focus: press **Alt+Tab** or click its
+   taskbar entry — this is normal when the game is launched by a wrapper process
 
-Kyber does not launch the game itself — Steam must start it first.
+Do NOT launch SWBF2 from Steam directly. If Steam's SWBF2 is already running
+when Kyber starts, kill it first — Kyber cannot inject into a Steam-launched instance.
 
 **If Kyber says "Game Not Found":**
 Click **SET GAME FOLDER** and point it to the SWBF2 install directory.
@@ -189,13 +192,24 @@ Paste that path into the SET GAME FOLDER dialog.
 **Hosting a private server with bots:**
 - HOST → pick maps/modes → set a **name** and **PASSWORD** → Start Server
 - Share the server name + password with friends; they search by name in HOME
-- SWBF2 fills empty slots with AI automatically — no separate bot setting needed
+- Bot count: in the HOST panel right side → **AUTOPLAYERS** section →
+  set **BOTS TEAM 1** and **BOTS TEAM 2** (e.g. 4 each) → click **UPDATE SERVER**
+- Bot difficulty: the **BOT DIFFICULTY** slider (RECRUIT → OFFICER → KNIGHT → MASTER)
+- After the game loads you can also update settings live and hit UPDATE SERVER again
 
 **Requirements:**
-- SWBF2 (Steam AppID 1237950) installed with GE-Proton (recommended over
-  Proton Experimental for game stability)
+- SWBF2 (Steam AppID 1237950) installed via Steam
+  (Kyber manages its own GE-Proton for launching the game)
 - glibc 2.38+ — Ubuntu 24.04+, Fedora 38+, SteamOS 3.7+
 - EA account (free) at ea.com
+- Unprivileged user namespaces enabled (Ubuntu 24.04 restricts these by default):
+  ```bash
+  sudo sysctl -w kernel.unprivileged_userns_clone=1
+  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+  ```
+  The setup script applies this automatically when run with sudo and saves it
+  to `/etc/sysctl.d/99-userns.conf` to persist across reboots.
+  Without this fix Kyber fails with: `bwrap: setting up uid map: Permission denied`
 
 **What does NOT work:**
 - Running the Windows `kyber_launcher.exe` under Wine/Proton: EA's auth
