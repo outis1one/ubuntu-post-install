@@ -165,15 +165,23 @@ chmod +x scripts/setup-kyber-linux.sh
 The script downloads the latest AppImage, installs a desktop entry, and
 creates a `kyber` command in `~/.local/bin`.
 
-**First run:**
+**Every time you want to play:**
+1. **Launch SWBF2 from Steam first** — let it fully load to the main menu
+2. Launch Kyber (`kyber` or from the app menu)
+3. In Kyber: join a server (HOME) or create one (HOST)
+4. Kyber connects to the already-running game instance
+
+Kyber does not launch the game itself — Steam must start it first.
+
+**First run (one-time setup):**
 1. Click **EA Account** → log in with your EA credentials in the browser
 2. Click **Skip** on Nexus Mods (optional, only needed for mods)
-3. Browse servers on **HOME** or create one under **HOST**
+3. EA login is cached — you stay logged in across sessions
 
 **Hosting a private server with bots:**
 - HOST → pick maps/modes → set a **name** and **PASSWORD** → Start Server
-- Share the name + password with friends; they search by name in HOME
-- SWBF2 fills empty slots with AI automatically — no separate bot setting
+- Share the server name + password with friends; they search by name in HOME
+- SWBF2 fills empty slots with AI automatically — no separate bot setting needed
 
 **Requirements:**
 - SWBF2 (Steam AppID 1237950) installed with GE-Proton (recommended over
