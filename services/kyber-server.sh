@@ -83,51 +83,22 @@ _kyber_detect_gpu() {
 }
 
 _kyber_get_token() {
-    local appimage_path="$1"
-    local extract_dir="/tmp/kyber-cli-extract"
+    local auth_toml="$ACTUAL_HOME/.local/share/maxima/auth.toml"
 
-    log_info "Extracting kyber_cli from AppImage..."
-    rm -rf "$extract_dir"
-    mkdir -p "$extract_dir"
-
-    # Run extraction as the actual user (AppImage needs user context)
-    sudo -u "$ACTUAL_USER" "$appimage_path" --appimage-extract-and-run \
-        squashfs-root 2>/dev/null || true
-    sudo -u "$ACTUAL_USER" bash -c \
-        "cd '$extract_dir' && '$appimage_path' --appimage-extract" \
-        2>/dev/null || true
-
-    local cli_bin
-    cli_bin=$(find "$extract_dir/squashfs-root" /tmp/squashfs-root \
-        -name "kyber_cli" -type f 2>/dev/null | head -1)
-
-    if [[ -z "$cli_bin" ]]; then
-        # Try running kyber_cli directly if AppImage mounts itself
-        cli_bin=$(find /tmp/.mount_Kyber* -name "kyber_cli" -type f 2>/dev/null | head -1)
+    # Best path: read token from auth.toml written by Kyber GUI login
+    if [[ -f "$auth_toml" ]]; then
+        local token
+        token=$(grep -oP '(?<=token\s=\s")[^"]+' "$auth_toml" 2>/dev/null \
+             || grep -oP "(?<=token = ')[^']+" "$auth_toml" 2>/dev/null \
+             || grep -oP 'token\s*=\s*\K\S+' "$auth_toml" 2>/dev/null | tr -d '"'"'" )
+        if [[ -n "$token" ]]; then
+            echo "$token"
+            return 0
+        fi
     fi
 
-    if [[ -z "$cli_bin" ]]; then
-        log_error "Could not extract kyber_cli from AppImage."
-        log_error "Run the Kyber AppImage manually, log in, then find your token in:"
-        log_error "  ~/.local/share/maxima/auth.toml"
-        return 1
-    fi
-
-    log_info "Found kyber_cli at: $cli_bin"
-    echo ""
-    log_info "A browser will open for EA login. Log in, then return here."
-    echo ""
-
-    local token
-    token=$(sudo -u "$ACTUAL_USER" "$cli_bin" get_token 2>/dev/null | tr -d '[:space:]')
-
-    if [[ -z "$token" ]]; then
-        log_error "kyber_cli get_token returned nothing."
-        log_error "Try running manually:  $cli_bin get_token"
-        return 1
-    fi
-
-    echo "$token"
+    # Fallback: nothing found
+    return 1
 }
 
 # ── Install function ───────────────────────────────────────────────────────────
@@ -264,21 +235,48 @@ for a in data.get('assets', []):
 
     # ── Get Kyber token ───────────────────────────────────────────────────────
     echo ""
-    log_info "Getting your Kyber server token..."
-    log_info "This opens a browser for EA login — log in, then return here."
-    echo ""
+    log_info "Looking for Kyber token in ~/.local/share/maxima/auth.toml..."
 
     local KYBER_TOKEN=""
-    KYBER_TOKEN=$(_kyber_get_token "$APPIMAGE_PATH")
+    KYBER_TOKEN=$(_kyber_get_token)
+
     if [[ -z "$KYBER_TOKEN" ]]; then
-        log_warning "Could not retrieve token automatically."
-        prompt_text "Paste your KYBER_TOKEN manually (or press Enter to skip):" "" KYBER_TOKEN
+        echo ""
+        log_warning "No EA token found — need to log in via Kyber AppImage."
+        log_info "Launching Kyber as $ACTUAL_USER — click 'EA Account' and log in, then close Kyber."
+        echo ""
+        read -r -p "  Press Enter to launch Kyber now..." _
+
+        # Launch AppImage as the actual user in the background
+        sudo -u "$ACTUAL_USER" DISPLAY="${DISPLAY:-:0}" \
+            XAUTHORITY="$ACTUAL_HOME/.Xauthority" \
+            "$APPIMAGE_PATH" &
+        local APPIMAGE_PID=$!
+
+        echo ""
+        log_info "Kyber is running (PID $APPIMAGE_PID)."
+        log_info "Click 'EA Account', log in via the browser, then close Kyber."
+        echo ""
+        read -r -p "  Press Enter once you have logged in and closed Kyber..." _
+
+        # Give Maxima a moment to flush auth.toml
+        sleep 2
+
+        # Kill AppImage if still running
+        kill "$APPIMAGE_PID" 2>/dev/null || true
+        wait "$APPIMAGE_PID" 2>/dev/null || true
+
+        KYBER_TOKEN=$(_kyber_get_token)
     fi
 
     if [[ -z "$KYBER_TOKEN" ]]; then
-        log_error "No Kyber token provided. Cannot continue."
-        log_error "Get it manually: run the Kyber AppImage, log in, then check"
-        log_error "  ~/.local/share/maxima/auth.toml"
+        echo ""
+        log_warning "Still no token found in auth.toml."
+        prompt_text "Paste your token manually (or press Enter to abort):" "" KYBER_TOKEN
+    fi
+
+    if [[ -z "$KYBER_TOKEN" ]]; then
+        log_error "No Kyber token provided — cannot continue."
         return 1
     fi
     log_success "Kyber token obtained."
@@ -426,6 +424,30 @@ MD
     echo "Server directory: $DIR"
     echo "Edit $DIR/.env to set map rotation or update credentials."
     echo "Token refresh: re-run this installer or update KYBER_TOKEN in .env manually."
+
+    # ── Offer to set up Kyber launcher if not already installed ──────────────
+    local BIN_LINK="$ACTUAL_HOME/.local/bin/kyber"
+    local DESKTOP_FILE="$ACTUAL_HOME/.local/share/applications/kyber-launcher.desktop"
+    if [[ ! -L "$BIN_LINK" ]] && [[ ! -f "$DESKTOP_FILE" ]]; then
+        echo ""
+        local _setup_launcher=""
+        prompt_yn "Set up Kyber launcher (desktop entry + 'kyber' command)? (y/n):" "y" _setup_launcher
+        if [[ "$_setup_launcher" =~ ^[Yy]$ ]]; then
+            if command -v install_kyber_launcher &>/dev/null; then
+                install_kyber_launcher
+            else
+                # Sourced standalone — call the other service file if present
+                local _launcher_sh
+                _launcher_sh="$(dirname "${BASH_SOURCE[0]}")/kyber-launcher.sh"
+                if [[ -f "$_launcher_sh" ]]; then
+                    source "$_launcher_sh"
+                    install_kyber_launcher
+                else
+                    log_warning "kyber-launcher.sh not found — run: sudo ./setup.sh kyber-launcher"
+                fi
+            fi
+        fi
+    fi
 }
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
