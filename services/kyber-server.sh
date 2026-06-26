@@ -353,7 +353,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ${SWBF2_PATH}:/mnt/battlefront:ro
+      - ${SWBF2_PATH}:/mnt/battlefront
       - ./logs:/logs${GPU_SECTION}${DEVICES_SECTION}${GROUP_ADD_SECTION}
 EOF
 
