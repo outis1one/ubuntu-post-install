@@ -14,6 +14,8 @@ services:
       - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
       - AI_PROVIDER=${AI_PROVIDER:-mock}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-dall-e-3}
+      - OPENAI_EDIT_MODEL=${OPENAI_EDIT_MODEL:-gpt-image-1}
       - STABILITY_API_KEY=${STABILITY_API_KEY:-}
       - REPLICATE_API_KEY=${REPLICATE_API_KEY:-}
       - INVOKEAI_URL=${INVOKEAI_URL:-}
