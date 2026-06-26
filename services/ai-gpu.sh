@@ -195,7 +195,7 @@ fi
 
 register_service ai-gpu utilities "GPU AI stack — InvokeAI image gen + Ollama/OpenWebUI LLM (6 GB VRAM)" 9090
 
-install_ai_gpu() {
+install_ai-gpu() {
     require_docker || return 1
     log_info "Installing AI GPU stack (InvokeAI + Ollama/OpenWebUI + portal)..."
     log_info "Requires: nvidia GPU with 6 GB+ VRAM, nvidia-container-toolkit installed."
@@ -681,4 +681,4 @@ MD
     echo ""
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_ai_gpu
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_ai-gpu

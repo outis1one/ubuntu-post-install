@@ -8,7 +8,8 @@
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Two deployment modes (chosen at install):
-#   Cloud  — no GPU; uses a cloud provider (OpenAI gpt-image / Replicate). Lightweight.
+#   Cloud  — no GPU; uses a cloud provider (OpenAI gpt-image / Replicate), or this
+#            box's own ai-stack service (InvokeAI/ComfyUI) if installed. Lightweight.
 #   GPU    — local inference via the app's own installer (NVIDIA, downloads ~13 GB).
 #
 # The app reads config from a .env the compose file interpolates
@@ -31,7 +32,7 @@ install_paintplus() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would copy vendored source $SRC_DIR -> $APP_DIR"
-        echo "[DRY-RUN] Would prompt for deployment mode (Cloud API / Local GPU)"
+        echo "[DRY-RUN] Would prompt for deployment mode (Cloud API incl. ai-stack InvokeAI/ComfyUI / Local GPU)"
         echo "[DRY-RUN] Would create .env (AI_PROVIDER, API key, SECRET_KEY)"
         echo "[DRY-RUN] Cloud: docker compose up -d --build | GPU: install-local-gpu.sh + bring-up-local-gpu.sh"
         echo "[DRY-RUN] Would offer Authelia SSO and configure Caddy (paintplus:8000, host port 3080)"
@@ -75,11 +76,14 @@ install_paintplus() {
     }
 
     local PP_PROVIDER="local_gpu"
+    local PP_USE_AI_STACK_NET=false
+    local AI_STACK_DIR="$DOCKER_DIR/ai-stack"
     if [[ "$PP_MODE" != "2" ]]; then
         echo ""
         log_info "Cloud provider:"
         log_info "  1) OpenAI     gpt-image editing. Key: https://platform.openai.com/api-keys"
         log_info "  2) Replicate  SDXL-inpaint / LaMa etc. Key: https://replicate.com/account/api-tokens"
+        [ -d "$AI_STACK_DIR" ] && log_info "  3) ai-stack   This box's local InvokeAI/ComfyUI — no key, no cloud cost."
         echo ""
         local _prov=""
         prompt_text "Provider [1=OpenAI]:" "1" _prov
@@ -89,6 +93,22 @@ install_paintplus() {
             prompt_text "Replicate API key (enter to set later):" "" _key
             if [ -n "$_key" ]; then _pp_set_env REPLICATE_API_KEY "$_key"
             else log_warning "No key entered — set REPLICATE_API_KEY in .env later"; fi
+        elif [[ "$_prov" == "3" ]] && [ -d "$AI_STACK_DIR" ]; then
+            echo ""
+            log_info "ai-stack backend:"
+            log_info "  1) InvokeAI   Best for Flux/SDXL. http://invokeai:9090"
+            log_info "  2) ComfyUI    Workflow API — same engine ai-stack's Open WebUI uses. http://comfyui:8188"
+            local _backend=""
+            prompt_text "Backend [1=InvokeAI]:" "1" _backend
+            if [[ "$_backend" == "2" ]]; then
+                PP_PROVIDER="comfyui"
+                _pp_set_env COMFYUI_URL "http://comfyui:8188"
+            else
+                PP_PROVIDER="invokeai"
+                _pp_set_env INVOKEAI_URL "http://invokeai:9090"
+            fi
+            PP_USE_AI_STACK_NET=true
+            log_warning "ai-stack must be running — PaintPlus reaches it over Docker networking, not localhost."
         else
             PP_PROVIDER="openai"
             prompt_text "OpenAI API key (enter to set later):" "" _key
@@ -156,6 +176,20 @@ OVR
         docker network connect "$SITE_CADDY_NET" paintplus 2>/dev/null || true
     fi
 
+    # Join ai-stack's network so PaintPlus can reach InvokeAI/ComfyUI by name
+    # (those containers publish to the host too, but "localhost" inside this
+    # container means itself, not the host — a shared Docker network is needed).
+    if [ "$PP_USE_AI_STACK_NET" = true ] && [[ "$START_PP" =~ ^[Yy]$ ]]; then
+        if docker network inspect ai-stack_default >/dev/null 2>&1; then
+            docker network connect ai-stack_default paintplus 2>/dev/null \
+                && log_success "Connected to ai-stack's network for the $PP_PROVIDER backend" \
+                || true
+        else
+            log_warning "ai-stack network not found (start ai-stack first) — once it's up, run:"
+            log_warning "  docker network connect ai-stack_default paintplus"
+        fi
+    fi
+
     # ── Auth + Caddy ──────────────────────────────────────────────────────────
     local EXTRA_BLOCK=""
     if [ -d "$DOCKER_DIR/authelia" ]; then
@@ -177,6 +211,7 @@ App docs: \`src/README.md\`. Based on EditmaskwithAI.
 - URL: http://localhost:3080
 - No built-in login — protect via Authelia SSO if exposed.
 - Provider: set \`AI_PROVIDER\` in \`src/.env\` (openai, replicate, local_gpu, stability, comfyui, invokeai).
+- \`comfyui\`/\`invokeai\` can point at this box's own \`ai-stack\` service — see below.
 
 ## Configure providers / keys
 Edit \`src/.env\` then restart (the compose file interpolates these — no env_file):
@@ -203,6 +238,21 @@ cd $APP_DIR
 \`\`\`
 GPU auto-selects models by VRAM (FLUX >=24 GB, SDXL 12-24 GB, SD 1.5 <2 GB).
 
+## ai-stack backend (no extra GPU download)
+If the \`ai-stack\` service is installed on this box, PaintPlus can use its
+InvokeAI/ComfyUI containers instead of the cloud or its own GPU installer —
+select it during install, or switch later:
+\`\`\`bash
+cd $APP_DIR
+nano .env        # AI_PROVIDER=invokeai (or comfyui), INVOKEAI_URL=http://invokeai:9090
+docker network connect ai-stack_default paintplus   # one-time, if not already joined
+docker compose up -d --build
+\`\`\`
+PaintPlus reaches those containers by Docker network name, not localhost —
+both must be on the same network (\`ai-stack_default\`, ai-stack's default).
+If a small GPU is shared with ai-stack's local chat, swap to images first:
+\`~/docker/ai-stack/gpu-mode.sh images\`.
+
 ## Update the app
 Re-run the PaintPlus installer (copies the latest vendored source over \`src/\`,
 keeping your \`src/.env\`), then rebuild:
@@ -213,12 +263,16 @@ cd $APP_DIR && docker compose up -d --build
 ## Caddy
 Reverse-proxied as \`paintplus:8000\` on \`${SITE_CADDY_NET:-caddy_net}\`. Cloud mode
 joins that network via \`src/docker-compose.override.yml\`; GPU mode is attached
-with \`docker network connect\` after start.
+with \`docker network connect\` after start. Same for the ai-stack backend —
+attached to \`ai-stack_default\` with \`docker network connect\` after start.
 MD
 
     echo ""
     echo "  URL:       http://localhost:3080"
     echo "  App dir:   $APP_DIR"
     echo "  Provider:  $PP_PROVIDER  (change AI_PROVIDER in $APP_DIR/.env)"
+    if [ "$PP_USE_AI_STACK_NET" = true ]; then
+        echo "  Backend:   ai-stack's $PP_PROVIDER container (Docker network ai-stack_default)"
+    fi
     echo ""
 }

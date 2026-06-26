@@ -207,7 +207,7 @@ fi
 
 register_service borg-backup backup "Encrypted backup of all Docker services via Borg"
 
-install_borg_backup() {
+install_borg-backup() {
     require_docker || return 1
 
     local DIR="$DOCKER_DIR/borg-backup"
@@ -660,4 +660,4 @@ SVCEOF
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_borg_backup
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_borg-backup

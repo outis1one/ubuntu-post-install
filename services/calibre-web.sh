@@ -181,7 +181,7 @@ fi
 
 register_service calibre-web media "Ebook library web UI with metadata editing (Calibre-Web)" 8083
 
-install_calibre_web() {
+install_calibre-web() {
     require_docker || return 1
     log_info "Installing Calibre-Web..."
 
@@ -295,4 +295,4 @@ MD
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_calibre_web
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_calibre-web
