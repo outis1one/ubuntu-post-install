@@ -26,6 +26,7 @@ command -v register_service &>/dev/null && \
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 _kyber_find_swbf2() {
+    # Check standard Steam paths first
     local candidates=(
         "$ACTUAL_HOME/.local/share/Steam/steamapps/common/STAR WARS Battlefront II"
         "$ACTUAL_HOME/.steam/steam/steamapps/common/STAR WARS Battlefront II"
@@ -37,6 +38,32 @@ _kyber_find_swbf2() {
             return 0
         fi
     done
+
+    # Search Steam library folders on mounted drives (libraryfolders.vdf lists them)
+    local vdf="$ACTUAL_HOME/.local/share/Steam/steamapps/libraryfolders.vdf"
+    if [[ -f "$vdf" ]]; then
+        while IFS= read -r line; do
+            local libpath
+            libpath=$(echo "$line" | grep -oP '"path"\s+"\K[^"]+')
+            [[ -z "$libpath" ]] && continue
+            local candidate="$libpath/steamapps/common/STAR WARS Battlefront II"
+            if [[ -f "$candidate/starwarsbattlefrontii.exe" ]]; then
+                echo "$candidate"
+                return 0
+            fi
+        done < "$vdf"
+    fi
+
+    # Last resort: find across /home and common mount points
+    local found
+    found=$(find "$ACTUAL_HOME" /mnt /media /run/media 2>/dev/null \
+        -name "starwarsbattlefrontii.exe" -not -path "*/wolf-state/*" \
+        -print -quit 2>/dev/null)
+    if [[ -n "$found" ]]; then
+        echo "$(dirname "$found")"
+        return 0
+    fi
+
     return 1
 }
 
