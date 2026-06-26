@@ -251,6 +251,17 @@ for a in data.get('assets', []):
         log_info "Kyber AppImage already present: $APPIMAGE_PATH"
     fi
 
+    # ── Fresh start option (clear cached EA auth) ────────────────────────────
+    local MAXIMA_DIR="$ACTUAL_HOME/.local/share/maxima"
+    if [[ -d "$MAXIMA_DIR" ]]; then
+        local _fresh=""
+        prompt_yn "Existing EA login found. Start fresh (clear cached auth)? (y/n):" "n" _fresh
+        if [[ "$_fresh" =~ ^[Yy]$ ]]; then
+            sudo -u "$ACTUAL_USER" rm -rf "$MAXIMA_DIR"
+            log_success "Cleared Maxima auth cache — EA login will be prompted fresh."
+        fi
+    fi
+
     # ── Get Kyber token ───────────────────────────────────────────────────────
     echo ""
     log_info "Getting your Kyber server token..."
@@ -347,13 +358,15 @@ services:
 EOF
 
     # Write .env with restricted permissions
+    # Values are single-quoted so special characters ($, !, &, etc.) are safe.
+    # Exception: single quotes inside a value would still break — avoid them.
     cat > "$DIR/.env" << EOF
-MAXIMA_CREDENTIALS=${EA_EMAIL}:${EA_PASSWORD}
-KYBER_TOKEN=${KYBER_TOKEN}
-KYBER_SERVER_NAME=${SERVER_NAME}
+MAXIMA_CREDENTIALS='${EA_EMAIL}:${EA_PASSWORD}'
+KYBER_TOKEN='${KYBER_TOKEN}'
+KYBER_SERVER_NAME='${SERVER_NAME}'
 KYBER_SERVER_MAX_PLAYERS=${MAX_PLAYERS}
 # Leave blank for a public server, or set a password to make it private
-KYBER_SERVER_PASSWORD=${SERVER_PASSWORD}
+KYBER_SERVER_PASSWORD='${SERVER_PASSWORD}'
 # Leave blank until you have a base64-encoded map rotation string.
 # Build one in the Kyber client HOST tab, then base64-encode it:
 #   echo -n '<rotation-json>' | base64
