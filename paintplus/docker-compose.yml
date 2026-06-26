@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: paintplus
+    ports:
+      - "3080:8000"
+    volumes:
+      - ./data:/app/data
+      - ./scripts:/scripts
+    environment:
+      - DATABASE_URL=sqlite:///./data/ai_photo_edit.db
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - AI_PROVIDER=${AI_PROVIDER:-mock}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - STABILITY_API_KEY=${STABILITY_API_KEY:-}
+      - REPLICATE_API_KEY=${REPLICATE_API_KEY:-}
+      - CORS_ORIGINS=*
+    # DNS servers for reliable external API access (Replicate, etc.)
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+volumes:
+  data:

@@ -1,0 +1,44 @@
+# =============================================================================
+# GPU / Local Diffusion dependencies
+# Install alongside requirements.txt when running with AI_PROVIDER=local_gpu
+#
+# Usage:
+#   pip install -r requirements.txt -r requirements.gpu.txt
+#
+# These are pre-installed in Dockerfile.gpu; optional in the standard image.
+# =============================================================================
+
+# HuggingFace Diffusers ecosystem
+# Pinned <0.29.0: diffusers 0.29.0 added torch.xpu (Intel GPU) which fails on
+# PyTorch 2.1.x with "AttributeError: module 'torch' has no attribute 'xpu'".
+# Upgrade the base image in Dockerfile.gpu to pytorch 2.4+ before lifting this pin.
+# (FLUX support requires diffusers>=0.29 + PyTorch>=2.4; SDXL/SD works fine here.)
+diffusers>=0.28.0,<0.29.0
+transformers>=4.36.0,<4.40.0
+accelerate>=0.27.0
+huggingface-hub>=0.23.0
+safetensors>=0.4.0
+
+# Required by SDXL pipelines
+invisible-watermark>=0.2.0
+omegaconf>=2.3.0
+
+# Required by FLUX (T5 text encoder tokenizer)
+sentencepiece>=0.2.0
+
+# xformers — reduces attention VRAM ~20-30%, often unlocks the next model tier
+# Must match your PyTorch+CUDA version; leave out if unsure.
+# Install post-container-start if needed:
+#   pip install xformers --index-url https://download.pytorch.org/whl/cu121
+# xformers
+
+# Background removal — BEN2 (default, clean cutouts/hair) + BiRefNet-HR
+# (high-res/print alternate). Both MIT-licensed. Verified against upstream
+# source: neither requires torch>=2.5 despite the BiRefNet repo's own
+# requirements.txt floor — that pin is for its training/eval scripts, not
+# the inference path used here. Weights download from HuggingFace on first
+# use (cached via the hf_cache bind mount, same as the diffusion models).
+ben2 @ git+https://github.com/PramaLLC/BEN2.git
+timm>=1.0.10
+einops>=0.6.0
+kornia>=0.7.0

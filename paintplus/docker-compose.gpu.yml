@@ -1,0 +1,148 @@
+# =============================================================================
+# EditmaskwithAI — GPU Docker Compose (NVIDIA CUDA)
+#
+# ── PREREQUISITES ─────────────────────────────────────────────────────────────
+#
+# 1. NVIDIA driver ≥ 525 installed on the host
+#    Check: nvidia-smi
+#
+# 2. nvidia-container-toolkit installed and configured:
+#    (Ubuntu/Debian)
+#      curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+#        | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-ctk.gpg
+#      curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+#        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-ctk.gpg] https://#g' \
+#        | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+#      sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+#      sudo nvidia-ctk runtime configure --runtime=docker
+#      sudo systemctl restart docker
+#
+#    (RHEL/Fedora/Rocky)
+#      sudo dnf install -y nvidia-container-toolkit
+#      sudo nvidia-ctk runtime configure --runtime=docker
+#      sudo systemctl restart docker
+#
+# 3. Verify GPU access in Docker:
+#    docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
+#
+# ── QUICK START ───────────────────────────────────────────────────────────────
+#
+#   docker compose -f docker-compose.gpu.yml up --build
+#   Then open: http://localhost:3080
+#
+# ── OLDER DOCKER SETUPS (docker-compose v1 / nvidia-docker2) ─────────────────
+#
+# If you installed nvidia-docker2 (older approach) instead of nvidia-container-toolkit,
+# replace the 'deploy:' block below with:
+#
+#   runtime: nvidia
+#   environment:
+#     - NVIDIA_VISIBLE_DEVICES=all
+#     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+#
+# ── GPU TIER AUTO-SELECTION ───────────────────────────────────────────────────
+#
+#   ≥16 GB VRAM  → SDXL (best quality)
+#    8–16 GB     → SDXL
+#    4–8 GB      → Stable Diffusion 2.x
+#    2–4 GB      → Stable Diffusion 1.5  (older GPUs: GTX 970/1060/RX 580)
+#    <2 GB       → SD 1.5 + CPU offload  (very slow — consider a remote provider)
+#
+# ── AMD ROCm ──────────────────────────────────────────────────────────────────
+#
+#   Swap the base image in Dockerfile.gpu:
+#     FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+#   → FROM rocm/pytorch:rocm6.0_ubuntu22.04_py3.9_pytorch_2.1.0
+#   Remove the 'driver: nvidia' line and add:  device_ids: ['0']
+#
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+      args:
+        # Increment BUILDID to force pip layers to re-run without full --no-cache:
+        #   BUILDID=$(date +%s) docker compose -f docker-compose.gpu.yml up --build
+        BUILDID: ${BUILDID:-1}
+    container_name: paintplus
+    ports:
+      - "${PORT:-3080}:8000"
+    volumes:
+      # Persistent project data
+      - ./data:/app/data
+      # HuggingFace model cache — bind mount so models can be pre-downloaded on the host.
+      # If container DNS is blocked, run ./prefetch-models.sh on the host first —
+      # it downloads BEN2/BiRefNet-HR (and optionally SDXL with --sdxl) straight
+      # into this directory, and the container picks them up on next start.
+      # To free disk space: rm -rf ./data/hf_cache
+      - ./data/hf_cache:/root/.cache/huggingface
+      # Scripts (for exec access)
+      - ./scripts:/scripts
+    environment:
+      # ── Local GPU (default for this compose) ────────────────────────────────
+      - AI_PROVIDER=${AI_PROVIDER:-local_gpu}
+      - AUTO_DOWNLOAD_MODELS=${AUTO_DOWNLOAD_MODELS:-true}
+
+      # ── Per-operation overrides (optional) ──────────────────────────────────
+      # Leave blank to use AI_PROVIDER for all operations.
+      # Example: use InvokeAI for inpaint, local GPU for everything else:
+      #   AI_PROVIDER_INPAINT=invokeai
+      - AI_PROVIDER_INPAINT=${AI_PROVIDER_INPAINT:-}
+      - AI_PROVIDER_TXT2IMG=${AI_PROVIDER_TXT2IMG:-}
+      - AI_PROVIDER_IMG2IMG=${AI_PROVIDER_IMG2IMG:-}
+      - AI_PROVIDER_OUTPAINT=${AI_PROVIDER_OUTPAINT:-}
+
+      # ── Remote/cloud providers (all optional) ────────────────────────────────
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-dall-e-3}
+      - REPLICATE_API_KEY=${REPLICATE_API_KEY:-}
+      - STABILITY_API_KEY=${STABILITY_API_KEY:-}
+
+      # ── InvokeAI / ComfyUI (running on another machine or container) ────────
+      - INVOKEAI_URL=${INVOKEAI_URL:-}
+      - INVOKEAI_DEFAULT_MODEL=${INVOKEAI_DEFAULT_MODEL:-flux-dev}
+      - COMFYUI_URL=${COMFYUI_URL:-}
+      - COMFYUI_DEFAULT_MODEL=${COMFYUI_DEFAULT_MODEL:-v1-5-pruned-emaonly.ckpt}
+
+      # ── HuggingFace model overrides (optional) ───────────────────────────────
+      # Override the auto-selected model for any operation:
+      #   HF_MODEL_INPAINT=your-org/your-model
+      - HF_MODEL_INPAINT=${HF_MODEL_INPAINT:-}
+      - HF_MODEL_TXT2IMG=${HF_MODEL_TXT2IMG:-}
+      - HF_MODEL_IMG2IMG=${HF_MODEL_IMG2IMG:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+
+      # ── App settings ─────────────────────────────────────────────────────────
+      - DATABASE_URL=sqlite:///./data/ai_photo_edit.db
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key-in-production}
+      - CORS_ORIGINS=*
+      - AUTO_DOWNLOAD_SAM=${AUTO_DOWNLOAD_SAM:-true}
+      - AUTO_DOWNLOAD_U2NET=${AUTO_DOWNLOAD_U2NET:-true}
+      - BG_REMOVAL_MODEL=${BG_REMOVAL_MODEL:-ben2}
+
+    # ── NVIDIA GPU passthrough ────────────────────────────────────────────────
+    # Requires nvidia-container-toolkit; see prerequisites at top of this file.
+    # For older nvidia-docker2 setups, replace this block with:
+    #   runtime: nvidia
+    #   environment:
+    #     - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # DNS: try host resolver first (works on most networks including corporate/VPN),
+    # fall back to Cloudflare then Google public resolvers.
+    # If all three fail (Errno -3), your firewall is blocking port 53 UDP from Docker.
+    # Fix on the host: sudo iptables -I DOCKER-USER -p udp --dport 53 -j ACCEPT
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+      - 8.8.4.4
+
+    restart: unless-stopped

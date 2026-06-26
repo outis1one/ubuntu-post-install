@@ -1,0 +1,122 @@
+# Caddy 2 Configuration for EditmaskwithAI
+# ==========================================
+#
+# SETUP INSTRUCTIONS:
+# 1. Replace 'your-subdomain.yourdomain.com' with your actual domain
+# 2. Make sure DNS CNAME record points to your server
+# 3. Ensure ports 80 and 443 are open (Caddy handles SSL automatically)
+# 4. The frontend runs on port 3080 by default (docker-compose)
+#
+# Common Issues:
+# - "Connection refused": Check if the frontend container is running
+# - "Bad gateway": Check if localhost:3080 is accessible
+# - "SSL error": Make sure ports 80/443 are open for Let's Encrypt
+
+# ============================================
+# OPTION 1: Domain with automatic HTTPS (recommended)
+# ============================================
+# Replace with your actual domain
+your-subdomain.yourdomain.com {
+    # Reverse proxy to frontend (nginx serves both frontend and proxies API)
+    reverse_proxy localhost:3080 {
+        # Health checks
+        health_uri /health
+        health_interval 30s
+        health_timeout 10s
+
+        # Headers for proper proxying
+        header_up Host {upstream_hostport}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Enable compression
+    encode gzip zstd
+
+    # Logging (optional - uncomment for debugging)
+    # log {
+    #     output file /var/log/caddy/access.log
+    #     format json
+    # }
+}
+
+# ============================================
+# OPTION 2: IP address or localhost (no HTTPS)
+# ============================================
+# Uncomment this block and comment out Option 1 if you don't have a domain
+# or want to test locally
+
+# :8080 {
+#     reverse_proxy localhost:3080 {
+#         header_up Host {upstream_hostport}
+#         header_up X-Real-IP {remote_host}
+#         header_up X-Forwarded-For {remote_host}
+#     }
+#     encode gzip zstd
+# }
+
+# ============================================
+# OPTION 3: Multiple subdomains
+# ============================================
+# If you want both www and non-www versions
+
+# yourdomain.com, www.yourdomain.com {
+#     reverse_proxy localhost:3080 {
+#         header_up Host {upstream_hostport}
+#         header_up X-Real-IP {remote_host}
+#         header_up X-Forwarded-For {remote_host}
+#         header_up X-Forwarded-Proto {scheme}
+#     }
+#     encode gzip zstd
+# }
+
+# ============================================
+# OPTION 4: Behind another reverse proxy (Cloudflare, etc.)
+# ============================================
+# Use this if Caddy is behind Cloudflare or another proxy
+
+# your-subdomain.yourdomain.com {
+#     # Trust proxy headers from upstream
+#     servers {
+#         trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+#     }
+#
+#     reverse_proxy localhost:3080 {
+#         header_up Host {upstream_hostport}
+#         header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+#         header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+#         header_up X-Forwarded-Proto {scheme}
+#     }
+#     encode gzip zstd
+# }
+
+# ============================================
+# TROUBLESHOOTING
+# ============================================
+#
+# 1. Check Caddy logs:
+#    docker logs caddy
+#    OR: journalctl -u caddy -f
+#
+# 2. Test backend connectivity:
+#    curl -I http://localhost:3080
+#
+# 3. Check DNS resolution:
+#    dig your-subdomain.yourdomain.com
+#    nslookup your-subdomain.yourdomain.com
+#
+# 4. Verify ports are open:
+#    sudo netstat -tlnp | grep -E ':(80|443|3080)'
+#
+# 5. Check firewall:
+#    sudo ufw status
+#    sudo iptables -L -n
+#
+# 6. For Let's Encrypt issues:
+#    - Ensure ports 80 and 443 are accessible from internet
+#    - Check if domain resolves to your server's IP
+#    - Try: caddy validate --config /path/to/Caddyfile
+#
+# 7. Force reload Caddy config:
+#    caddy reload --config /path/to/Caddyfile
