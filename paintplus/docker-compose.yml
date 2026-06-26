@@ -16,6 +16,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - STABILITY_API_KEY=${STABILITY_API_KEY:-}
       - REPLICATE_API_KEY=${REPLICATE_API_KEY:-}
+      - INVOKEAI_URL=${INVOKEAI_URL:-}
+      - INVOKEAI_DEFAULT_MODEL=${INVOKEAI_DEFAULT_MODEL:-flux-dev}
+      - COMFYUI_URL=${COMFYUI_URL:-}
+      - COMFYUI_DEFAULT_MODEL=${COMFYUI_DEFAULT_MODEL:-v1-5-pruned-emaonly.ckpt}
       - CORS_ORIGINS=*
     # DNS servers for reliable external API access (Replicate, etc.)
     dns:
