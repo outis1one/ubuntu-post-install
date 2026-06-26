@@ -43,11 +43,38 @@ install_kyber_launcher() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY-RUN] Would check glibc version (needs 2.38+)"
+        echo "[DRY-RUN] Would check for Steam and offer to install if missing"
         echo "[DRY-RUN] Would fix unprivileged user namespaces (bwrap requirement)"
         echo "[DRY-RUN] Would download latest Kyber AppImage from GitHub"
         echo "[DRY-RUN] Would install desktop entry and 'kyber' bin symlink"
         echo "[DRY-RUN] Would warn if no discrete GPU detected"
         return 0
+    fi
+
+    # ── Steam check ───────────────────────────────────────────────────────────
+    if ! command -v steam &>/dev/null && [[ ! -f "$ACTUAL_HOME/.steam/steam/steam.sh" ]]; then
+        log_warning "Steam is not installed. Kyber requires Steam to be running when you play."
+        local INSTALL_STEAM=""
+        prompt_yn "Install Steam now? (y/n):" "y" INSTALL_STEAM
+        if [[ "$INSTALL_STEAM" =~ ^[Yy]$ ]]; then
+            log_info "Installing Steam..."
+            # Enable multiarch (Steam is 32-bit)
+            dpkg --add-architecture i386 2>/dev/null || true
+            apt-get update -qq
+            apt-get install -y steam-installer \
+                || apt-get install -y steam \
+                || {
+                    log_error "Steam not found in apt. Install manually from https://store.steampowered.com/about/"
+                    log_warning "Continuing Kyber install — add Steam before playing."
+                }
+            log_success "Steam installed. Launch it once to complete setup, then sign in."
+            echo ""
+        else
+            log_warning "Skipping Steam install. Remember: Steam must be running when you launch Kyber."
+            echo ""
+        fi
+    else
+        log_info "Steam: found"
     fi
 
     local KYBER_REPO="simonlinuxcraft/kyber-linuxport-unofficial"
