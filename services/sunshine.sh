@@ -403,6 +403,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             eval "$_var='${_r:-$_def}'"
         }
 
+        write_readme() {
+            local _dir="$1"; shift
+            [[ "$DRY_RUN" == "true" ]] && return 0
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
+        }
+
         ACTUAL_USER="${SUDO_USER:-$USER}"
         ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
         DOCKER_DIR="$ACTUAL_HOME/docker"
