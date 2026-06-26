@@ -19,66 +19,6 @@
 # Map rotation is left blank by default; edit ~/docker/kyber-server/.env after install
 # and set KYBER_MAP_ROTATION to a base64-encoded rotation string (use the Kyber client
 # HOST tab to build a rotation, then base64-encode it).
-
-# ── Standalone bootstrap ──────────────────────────────────────────────────────
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
-
-    _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    _COMMON="$_SELF_DIR/../lib/common.sh"
-
-    if [[ -f "$_COMMON" ]]; then
-        source "$_COMMON"
-    else
-        log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
-        log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
-        log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
-        log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
-
-        require_docker() {
-            command -v docker &>/dev/null || {
-                log_error "Docker not found. Install it first:"
-                log_error "  curl -fsSL https://get.docker.com | sudo sh"
-                return 1
-            }
-            docker compose version &>/dev/null || {
-                log_error "Docker Compose plugin missing:"
-                log_error "  sudo apt-get install -y docker-compose-plugin"
-                return 1
-            }
-        }
-
-        ensure_docker_dir_ownership() {
-            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
-        }
-
-        prompt_text() {
-            local _q="$1" _def="$2" _var="$3" _r
-            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
-            read -r -p "  $_q " _r
-            eval "$_var='${_r:-$_def}'"
-        }
-
-        prompt_yn() {
-            local _q="$1" _def="$2" _var="$3" _r
-            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
-            read -r -p "  $_q " _r
-            eval "$_var='${_r:-$_def}'"
-        }
-
-        generate_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-32}"; }
-
-        ACTUAL_USER="${SUDO_USER:-$USER}"
-        ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
-        DOCKER_DIR="$ACTUAL_HOME/docker"
-        DRY_RUN="${DRY_RUN:-false}"
-        UNATTENDED="${UNATTENDED:-false}"
-    fi
-
-    install_kyber_server
-    exit $?
-fi
-
 # ── Registration ──────────────────────────────────────────────────────────────
 register_service kyber-server gaming "Kyber dedicated server for SWBF2 (2017) — headless, no GPU required"
 
@@ -414,3 +354,62 @@ MD
     echo "Edit $DIR/.env to set map rotation or update credentials."
     echo "Token refresh: re-run this installer or update KYBER_TOKEN in .env manually."
 }
+
+# ── Standalone bootstrap ──────────────────────────────────────────────────────
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
+
+    _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _COMMON="$_SELF_DIR/../lib/common.sh"
+
+    if [[ -f "$_COMMON" ]]; then
+        source "$_COMMON"
+    else
+        log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
+        log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
+        log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+        log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
+
+        require_docker() {
+            command -v docker &>/dev/null || {
+                log_error "Docker not found. Install it first:"
+                log_error "  curl -fsSL https://get.docker.com | sudo sh"
+                return 1
+            }
+            docker compose version &>/dev/null || {
+                log_error "Docker Compose plugin missing:"
+                log_error "  sudo apt-get install -y docker-compose-plugin"
+                return 1
+            }
+        }
+
+        ensure_docker_dir_ownership() {
+            chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
+        }
+
+        prompt_text() {
+            local _q="$1" _def="$2" _var="$3" _r
+            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
+            read -r -p "  $_q " _r
+            eval "$_var='${_r:-$_def}'"
+        }
+
+        prompt_yn() {
+            local _q="$1" _def="$2" _var="$3" _r
+            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
+            read -r -p "  $_q " _r
+            eval "$_var='${_r:-$_def}'"
+        }
+
+        generate_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-32}"; }
+
+        ACTUAL_USER="${SUDO_USER:-$USER}"
+        ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
+        DOCKER_DIR="$ACTUAL_HOME/docker"
+        DRY_RUN="${DRY_RUN:-false}"
+        UNATTENDED="${UNATTENDED:-false}"
+    fi
+
+    install_kyber_server
+    exit $?
+fi
