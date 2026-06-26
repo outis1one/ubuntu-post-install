@@ -89,7 +89,7 @@ fi
 
 register_service gaming-backup backup "Gaming saves backup (Minecraft worlds, emulator saves, Steam)"
 
-install_gaming_backup() {
+install_gaming-backup() {
     log_info "Setting up gaming saves backup (Kopia)..."
 
     # ── Repo-conventional paths ──────────────────────────────────────────────
@@ -497,4 +497,4 @@ UNITEOF
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_gaming_backup
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_gaming-backup

@@ -181,7 +181,7 @@ fi
 
 register_service stirling-pdf utilities "PDF toolkit — merge, split, compress, OCR (Stirling PDF)" 8070
 
-install_stirling_pdf() {
+install_stirling-pdf() {
     require_docker || return 1
     log_info "Installing Stirling PDF..."
 
@@ -313,4 +313,4 @@ MD
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_stirling_pdf
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_stirling-pdf
