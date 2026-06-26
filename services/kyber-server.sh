@@ -134,19 +134,43 @@ install_kyber_server() {
     if [[ -z "$SWBF2_PATH" ]]; then
         log_warning "SWBF2 not found in standard Steam paths."
         echo ""
-        echo "  The dedicated server mounts the game files read-only — no Steam or EA"
-        echo "  authentication needed at runtime. You can copy the game folder from"
-        echo "  another machine that has SWBF2 installed:"
+        echo "  The dedicated server mounts the game files read-only — no Steam or"
+        echo "  EA authentication needed at runtime. You can rsync the game folder"
+        echo "  from another machine that has SWBF2 installed via Steam."
         echo ""
-        echo "    rsync -av --progress \\"
-        echo "      '/path/to/STAR WARS Battlefront II/' \\"
-        echo "      user@thisserver:/home/user/swbf2/"
-        echo ""
-        prompt_text "Enter the full path to the SWBF2 game folder (or leave blank to abort):" "" SWBF2_PATH
-        if [[ -z "$SWBF2_PATH" ]]; then
-            log_error "No path provided — cannot continue without game files."
-            return 1
+
+        local _do_rsync=""
+        prompt_yn "Rsync SWBF2 files from a remote machine now? (y/n):" "y" _do_rsync
+        if [[ "$_do_rsync" =~ ^[Yy]$ ]]; then
+            local _remote_host _remote_user _remote_path _local_dest
+            prompt_text "Remote host (IP or hostname):" "" _remote_host
+            prompt_text "Remote username:" "$ACTUAL_USER" _remote_user
+            # Default Steam path on Linux
+            local _default_remote_path="/home/${_remote_user}/.local/share/Steam/steamapps/common/STAR WARS Battlefront II"
+            prompt_text "Remote SWBF2 path [${_default_remote_path}]:" "$_default_remote_path" _remote_path
+
+            _local_dest="$DOCKER_DIR/kyber-server/swbf2"
+            mkdir -p "$_local_dest"
+            ensure_docker_dir_ownership "$_local_dest"
+
+            log_info "Rsyncing from ${_remote_user}@${_remote_host}:${_remote_path}/ ..."
+            log_info "Destination: $_local_dest"
+            echo ""
+            rsync -av --progress \
+                "${_remote_user}@${_remote_host}:${_remote_path}/" \
+                "$_local_dest/" \
+                || { log_error "rsync failed — check SSH access and remote path."; return 1; }
+
+            SWBF2_PATH="$_local_dest"
+        else
+            echo ""
+            prompt_text "Enter the full local path to the SWBF2 folder (or leave blank to abort):" "" SWBF2_PATH
+            if [[ -z "$SWBF2_PATH" ]]; then
+                log_error "No path provided — cannot continue without game files."
+                return 1
+            fi
         fi
+
         if [[ ! -f "$SWBF2_PATH/starwarsbattlefrontii.exe" ]]; then
             log_error "starwarsbattlefrontii.exe not found in: $SWBF2_PATH"
             log_error "Make sure you pointed to the root of the SWBF2 install folder."
