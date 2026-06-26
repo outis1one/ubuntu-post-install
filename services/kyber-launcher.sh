@@ -29,38 +29,6 @@
 # automatically when run with sudo (required for setup.sh anyway).
 # Without the fix: bwrap: setting up uid map: Permission denied
 
-# ── Standalone bootstrap ──────────────────────────────────────────────────────
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
-
-    _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    _COMMON="$_SELF_DIR/../lib/common.sh"
-
-    if [[ -f "$_COMMON" ]]; then
-        source "$_COMMON"
-    else
-        log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
-        log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
-        log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
-        log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
-
-        prompt_yn() {
-            local _q="$1" _def="$2" _var="$3" _r
-            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
-            read -r -p "  $_q " _r
-            eval "$_var='${_r:-$_def}'"
-        }
-
-        ACTUAL_USER="${SUDO_USER:-$USER}"
-        ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
-        DRY_RUN="${DRY_RUN:-false}"
-        UNATTENDED="${UNATTENDED:-false}"
-    fi
-
-    install_kyber_launcher
-    exit $?
-fi
-
 # ── Registration ──────────────────────────────────────────────────────────────
 register_service kyber-launcher gaming "Kyber Launcher — native Linux AppImage for SWBF2 (2017) multiplayer (requires discrete GPU)"
 
@@ -229,3 +197,35 @@ EOF
     echo "  Troubleshooting — 'Origin Error: language not entitled':"
     echo "    See README.md Gaming section for the registry fix."
 }
+
+# ── Standalone bootstrap ──────────────────────────────────────────────────────
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    [[ "$(id -u)" == "0" ]] || { echo "Run with sudo: sudo bash $0"; exit 1; }
+
+    _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _COMMON="$_SELF_DIR/../lib/common.sh"
+
+    if [[ -f "$_COMMON" ]]; then
+        source "$_COMMON"
+    else
+        log_info()    { echo -e "\033[0;34m[INFO]\033[0m $*"; }
+        log_success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
+        log_warning() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+        log_error()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
+
+        prompt_yn() {
+            local _q="$1" _def="$2" _var="$3" _r
+            [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
+            read -r -p "  $_q " _r
+            eval "$_var='${_r:-$_def}'"
+        }
+
+        ACTUAL_USER="${SUDO_USER:-$USER}"
+        ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
+        DRY_RUN="${DRY_RUN:-false}"
+        UNATTENDED="${UNATTENDED:-false}"
+    fi
+
+    install_kyber_launcher
+    exit $?
+fi
