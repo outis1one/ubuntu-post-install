@@ -35,6 +35,7 @@ install_ai-stack() {
         echo "[DRY-RUN] Would optionally collect cloud LLM provider keys (Groq/DeepInfra/OpenAI/OpenRouter)"
         echo "[DRY-RUN] Would run the app installer local-ai-setup.sh (Docker/NVIDIA toolkit, VRAM-aware models, generates compose/.env, starts stack, registers systemd 'local-ai')"
         echo "[DRY-RUN] Would wire cloud providers into Open WebUI (OPENAI_API_BASE_URLS) preserving the local RAG connection"
+        echo "[DRY-RUN] Would write gpu-mode.sh and optionally enable the GPU switcher (one small GPU shared by Ollama and InvokeAI/ComfyUI)"
         echo "[DRY-RUN] Would attach Open WebUI to caddy_net and configure Caddy (open-webui:8080, host port 3000)"
         return 0
     fi
@@ -155,6 +156,66 @@ install_ai-stack() {
         log_warning "No generated docker-compose.yml yet — add ${CLOUD_NAMES[*]} via Open WebUI → Settings → Connections after first start."
     fi
 
+    # ── Optional GPU switcher ─────────────────────────────────────────────────
+    # One small GPU can't run local chat (Ollama) and local image-gen
+    # (InvokeAI/ComfyUI) at once. gpu-mode.sh time-shares it; the always-on
+    # services (Open WebUI, Gitea, RAG, MCP, Kiwix) are never touched. Cloud
+    # models need no swap. Open WebUI = chat/research/code+git; PaintPlus = images.
+    cat > "$AS_DIR/gpu-mode.sh" << 'GPUEOF'
+#!/usr/bin/env bash
+# gpu-mode.sh — time-share ONE small GPU between local LLM and local image-gen.
+#
+#   llm      Ollama up (Open WebUI local chat);  InvokeAI + ComfyUI stopped
+#   images   InvokeAI + ComfyUI up (PaintPlus local backend);  Ollama stopped
+#   status   show which GPU services run + VRAM use
+#
+# Only needed when one small GPU serves BOTH locally. Cloud models and the
+# always-on services (Open WebUI, Gitea, RAG, MCP, Kiwix) are unaffected.
+set -euo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LLM_SVCS=(ollama)
+IMG_SVCS=(invokeai comfyui)
+case "${1:-status}" in
+  llm)
+    docker compose stop "${IMG_SVCS[@]}" 2>/dev/null || true
+    docker compose up -d "${LLM_SVCS[@]}"
+    echo "GPU -> LLM: Ollama up, image-gen stopped. Open WebUI local models ready." ;;
+  images)
+    docker compose stop "${LLM_SVCS[@]}" 2>/dev/null || true
+    docker compose up -d "${IMG_SVCS[@]}"
+    echo "GPU -> Images: InvokeAI+ComfyUI up, Ollama stopped. PaintPlus local backend ready." ;;
+  status)
+    for s in "${LLM_SVCS[@]}" "${IMG_SVCS[@]}"; do
+      printf "  %-10s %s\n" "$s" "$(docker inspect -f '{{.State.Running}}' "$s" 2>/dev/null || echo absent)"
+    done
+    command -v nvidia-smi >/dev/null 2>&1 && \
+      nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader || true ;;
+  *) echo "Usage: gpu-mode.sh {llm|images|status}"; exit 1 ;;
+esac
+GPUEOF
+    chmod +x "$AS_DIR/gpu-mode.sh"
+
+    local SMALL_GPU=""
+    prompt_yn "Small local GPU shared between local chat and local image-gen? (sets up the GPU switcher) (y/n):" "n" SMALL_GPU
+    if [[ "$SMALL_GPU" =~ ^[Yy]$ ]]; then
+        if [ "$INSTALLER_RAN" = true ]; then
+            log_info "Small-GPU mode: handing the GPU to local chat (Ollama) and stopping image-gen."
+            (cd "$AS_DIR" && bash gpu-mode.sh llm) \
+                || log_warning "Could not set chat mode — run: $AS_DIR/gpu-mode.sh llm"
+        fi
+        echo ""
+        log_warning "SMALL-GPU MODE: only ONE of {local chat, local images} runs at a time."
+        log_warning "  Swap the GPU yourself when you change tasks:"
+        log_warning "    $AS_DIR/gpu-mode.sh images   # before generating locally in PaintPlus"
+        log_warning "    $AS_DIR/gpu-mode.sh llm       # back to local chat in Open WebUI"
+        log_warning "    $AS_DIR/gpu-mode.sh status    # see which is active"
+        log_warning "  (Cloud models work anytime and need no swap.)"
+        echo ""
+    else
+        log_info "GPU switcher written to $AS_DIR/gpu-mode.sh — use it if a small GPU ever needs to time-share."
+    fi
+    ensure_docker_dir_ownership "$AS_DIR"
+
     # ── Caddy (Open WebUI has built-in auth — no Authelia) ────────────────────
     # The generated compose doesn't join caddy_net, so attach the container by name.
     if [ -d "$DOCKER_DIR/caddy" ] && [ "$INSTALLER_RAN" = true ]; then
@@ -169,13 +230,33 @@ install_ai-stack() {
 Vendored app source copied here from the \`ai-stack\` service. Full app docs:
 \`README.md\` in this directory. Source: github.com/outis1one/local-ai
 
+## Roles
+- **Open WebUI** (chat, research, light coding) — local Ollama + any cloud providers
+  in one model dropdown; wired to your code via the RAG + MCP servers and Gitea.
+- **PaintPlus** (separate \`paintplus\` service) — the front end for all image work
+  (inpaint / upscale / generate). Point its \`AI_PROVIDER\` at a cloud API, or at this
+  stack's local \`comfyui\` / \`invokeai\` for local image-gen.
+- **Gitea + GitHub sync** — \`bash gitea-github-sync.sh\` mirrors repos both ways
+  (pull GitHub → local git, or push local → GitHub).
+- **RAG / MCP / Kiwix** — retrieve just the relevant context so you feed the model
+  less text (saves tokens), for both local and cloud models.
+- Web search uses **DuckDuckGo** (no SearXNG in this build).
+
+## GPU switcher (small local GPU only)
+One small GPU can't run local chat and local image-gen at once. Swap it:
+\`\`\`bash
+$AS_DIR/gpu-mode.sh images   # before generating locally in PaintPlus
+$AS_DIR/gpu-mode.sh llm       # back to local chat in Open WebUI
+$AS_DIR/gpu-mode.sh status    # see which is active
+\`\`\`
+Cloud models work anytime and need no swap.
+
 ## Service URLs
 | Service    | URL                       | Auth                |
 |------------|---------------------------|---------------------|
 | Open WebUI | http://localhost:3000     | built-in (first visit = admin) |
 | InvokeAI   | http://localhost:9090     | none                |
 | ComfyUI    | http://localhost:8188     | none                |
-| SearXNG    | http://localhost:8888     | none                |
 | Kiwix      | http://localhost:8181     | none                |
 | Gitea      | http://localhost:3001     | built-in            |
 | Portainer  | https://localhost:9443    | built-in            |
@@ -222,13 +303,15 @@ MD
     ensure_docker_dir_ownership "$AS_DIR"
 
     echo ""
-    echo "  Open WebUI:  http://localhost:3000   (chat — Ollama + RAG, built-in login)"
-    echo "  InvokeAI:    http://localhost:9090   ComfyUI:   http://localhost:8188"
-    echo "  SearXNG:     http://localhost:8888   Kiwix:     http://localhost:8181"
-    echo "  Gitea:       http://localhost:3001   Portainer: https://localhost:9443"
+    echo "  Open WebUI:  http://localhost:3000   (chat/research/code — Ollama + cloud, built-in login)"
+    echo "  InvokeAI:    http://localhost:9090   ComfyUI:   http://localhost:8188   (PaintPlus image backends)"
+    echo "  Kiwix:       http://localhost:8181   Gitea:     http://localhost:3001   Portainer: https://localhost:9443"
     echo "  App dir:     $AS_DIR   (app docs: README.md · deploy notes: POST-INSTALL-NOTES.md)"
     if [ ${#CLOUD_NAMES[@]} -gt 0 ]; then
         echo "  Cloud LLM:   ${CLOUD_NAMES[*]} (wired into Open WebUI)"
+    fi
+    if [[ "$SMALL_GPU" =~ ^[Yy]$ ]]; then
+        echo "  GPU switch:  $AS_DIR/gpu-mode.sh {images|llm|status}  (small-GPU mode ON)"
     fi
     echo ""
 }
