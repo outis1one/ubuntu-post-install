@@ -20,7 +20,8 @@
 # and set KYBER_MAP_ROTATION to a base64-encoded rotation string (use the Kyber client
 # HOST tab to build a rotation, then base64-encode it).
 # ── Registration ──────────────────────────────────────────────────────────────
-register_service kyber-server gaming "Kyber dedicated server for SWBF2 (2017) — headless, no GPU required"
+command -v register_service &>/dev/null && \
+    register_service kyber-server gaming "Kyber dedicated server for SWBF2 (2017) — headless, no GPU required"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -131,18 +132,26 @@ install_kyber_server() {
     SWBF2_PATH=$(_kyber_find_swbf2)
 
     if [[ -z "$SWBF2_PATH" ]]; then
+        log_warning "SWBF2 not found in standard Steam paths."
         echo ""
-        echo "  ╔══════════════════════════════════════════════════════════════╗"
-        echo "  ║  ERROR: Star Wars Battlefront II (2017) not found.          ║"
-        echo "  ║                                                              ║"
-        echo "  ║  Install it first:                                           ║"
-        echo "  ║    1. Install Steam: https://store.steampowered.com         ║"
-        echo "  ║    2. In Steam, install SWBF2 (AppID 1237950):              ║"
-        echo "  ║         steam://install/1237950                              ║"
-        echo "  ║    3. Re-run this installer once the download completes.     ║"
-        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo "  The dedicated server mounts the game files read-only — no Steam or EA"
+        echo "  authentication needed at runtime. You can copy the game folder from"
+        echo "  another machine that has SWBF2 installed:"
         echo ""
-        return 1
+        echo "    rsync -av --progress \\"
+        echo "      '/path/to/STAR WARS Battlefront II/' \\"
+        echo "      user@thisserver:/home/user/swbf2/"
+        echo ""
+        prompt_text "Enter the full path to the SWBF2 game folder (or leave blank to abort):" "" SWBF2_PATH
+        if [[ -z "$SWBF2_PATH" ]]; then
+            log_error "No path provided — cannot continue without game files."
+            return 1
+        fi
+        if [[ ! -f "$SWBF2_PATH/starwarsbattlefrontii.exe" ]]; then
+            log_error "starwarsbattlefrontii.exe not found in: $SWBF2_PATH"
+            log_error "Make sure you pointed to the root of the SWBF2 install folder."
+            return 1
+        fi
     fi
     log_success "Found SWBF2 at: $SWBF2_PATH"
 
