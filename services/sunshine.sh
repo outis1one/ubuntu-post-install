@@ -31,7 +31,8 @@
 # Moonlight shows it as a launchable app. The Kyber AppImage must already
 # be installed (run setup-kyber-linux.sh first).
 # ── Registration ──────────────────────────────────────────────────────────
-register_service sunshine homelab "Sunshine game streaming host for Moonlight clients (coexists with Wolf on offset ports)"
+command -v register_service &>/dev/null && \
+    register_service sunshine homelab "Sunshine game streaming host for Moonlight clients (coexists with Wolf on offset ports)"
 
 # ── Install function ──────────────────────────────────────────────────────
 install_sunshine() {

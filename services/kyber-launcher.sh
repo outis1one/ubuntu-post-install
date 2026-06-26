@@ -30,7 +30,8 @@
 # Without the fix: bwrap: setting up uid map: Permission denied
 
 # ── Registration ──────────────────────────────────────────────────────────────
-register_service kyber-launcher gaming "Kyber Launcher — native Linux AppImage for SWBF2 (2017) multiplayer (requires discrete GPU)"
+command -v register_service &>/dev/null && \
+    register_service kyber-launcher gaming "Kyber Launcher — native Linux AppImage for SWBF2 (2017) multiplayer (requires discrete GPU)"
 
 # ── Install function ──────────────────────────────────────────────────────────
 install_kyber_launcher() {
