@@ -4,21 +4,25 @@
 #
 # Kyber is a community multiplayer replacement for Star Wars Battlefront II (2017)
 # after EA shut down official servers in 2022. This installs the headless dedicated
-# server via the official Armchair Developers Docker image — no GPU required for the
-# server itself (GPU passthrough is added automatically if detected, for future use).
+# server via the official Armchair Developers Docker image.
+#
+# The container runs Wine Proton GE + Xvfb headlessly. Three requirements:
+#   - seccomp=unconfined  (Docker default blocks Wine/Proton system calls → page fault)
+#   - shm_size ≥ 256m     (Xvfb needs /dev/shm for MIT-SHM extension)
+#   - network_mode: host  (game traffic uses dynamic UDP ports)
 #
 # Prerequisites:
 #   - SWBF2 (Steam AppID 1237950) installed via Steam on this machine
 #   - Docker CE + Compose plugin
-#   - EA account that owns SWBF2
+#   - EA account that owns SWBF2 (alphanumeric password — special chars break auth)
 #   - Internet access to pull the Docker image and authenticate with Kyber
 #
 # The Kyber token is obtained via kyber_cli (extracted from the Linux port AppImage)
 # which opens a browser for EA OAuth. One-time step — the token never expires.
 #
-# Map rotation is left blank by default; edit ~/docker/kyber-server/.env after install
-# and set KYBER_MAP_ROTATION to a base64-encoded rotation string (use the Kyber client
-# HOST tab to build a rotation, then base64-encode it).
+# Map rotation format: KYBER_MAP_ROTATION = base64 of newline-separated lines,
+# each line: MODE;MAP_PATH   e.g. GalacticAssault;Levels/MP/Geonosis_01/Geonosis_01
+# The interactive builder below produces the correct format automatically.
 # ── Registration ──────────────────────────────────────────────────────────────
 command -v register_service &>/dev/null && \
     register_service kyber-server gaming "Kyber dedicated server for SWBF2 (2017) — headless, no GPU required"
@@ -67,21 +71,6 @@ _kyber_find_swbf2() {
     return 1
 }
 
-_kyber_detect_gpu() {
-    # Returns: nvidia | intel | amd | none
-    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
-        echo "nvidia"
-    elif [[ -e /dev/dri/renderD128 ]]; then
-        if lspci 2>/dev/null | grep -qi "Intel.*VGA\|VGA.*Intel"; then
-            echo "intel"
-        else
-            echo "amd"
-        fi
-    else
-        echo "none"
-    fi
-}
-
 _kyber_get_token() {
     local auth_toml="$ACTUAL_HOME/.local/share/maxima/auth.toml"
 
@@ -115,10 +104,10 @@ install_kyber_server() {
     # ── DRY RUN ───────────────────────────────────────────────────────────────
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY-RUN] Would auto-detect SWBF2 install path"
+        echo "[DRY-RUN] Would install libgamemode0:i386 if missing"
         echo "[DRY-RUN] Would download Kyber AppImage and extract kyber_cli"
         echo "[DRY-RUN] Would run kyber_cli get_token (opens browser)"
         echo "[DRY-RUN] Would prompt for EA credentials and server name"
-        echo "[DRY-RUN] Would detect GPU and add passthrough if found"
         echo "[DRY-RUN] Would write ~/docker/kyber-server/docker-compose.yml"
         echo "[DRY-RUN] Would write ~/docker/kyber-server/.env (chmod 600)"
         return 0
@@ -177,15 +166,16 @@ install_kyber_server() {
     fi
     log_success "Found SWBF2 at: $SWBF2_PATH"
 
-    # ── Detect GPU ────────────────────────────────────────────────────────────
-    local GPU_TYPE
-    GPU_TYPE=$(_kyber_detect_gpu)
-    case "$GPU_TYPE" in
-        nvidia) log_info "GPU detected: NVIDIA (will add GPU passthrough)" ;;
-        intel)  log_info "GPU detected: Intel (will add DRI device passthrough)" ;;
-        amd)    log_info "GPU detected: AMD (will add DRI device passthrough)" ;;
-        none)   log_info "No GPU detected — running CPU-only (fine for dedicated server)" ;;
-    esac
+    # ── libgamemode0:i386 ─────────────────────────────────────────────────────
+    # Wine Proton inside the container links against this; without it on the host
+    # the bind-mount of /proc may surface warnings. Install once on the host.
+    if ! dpkg -l libgamemode0:i386 &>/dev/null 2>&1; then
+        log_info "Installing libgamemode0:i386 (Wine/Proton dependency)..."
+        dpkg --add-architecture i386 2>/dev/null || true
+        apt-get update -qq 2>/dev/null || true
+        apt-get install -y libgamemode0:i386 2>/dev/null \
+            || log_warning "libgamemode0:i386 install failed — server may still work"
+    fi
 
     # ── Kyber AppImage / CLI ──────────────────────────────────────────────────
     local KYBER_REPO="simonlinuxcraft/kyber-linuxport-unofficial"
@@ -283,6 +273,9 @@ for a in data.get('assets', []):
 
     # ── EA credentials ────────────────────────────────────────────────────────
     echo ""
+    echo "  ⚠  EA password must contain only letters and numbers."
+    echo "     Special characters (!, @, #, \$, %, ^, &, *) cause auth failures."
+    echo ""
     local EA_EMAIL EA_PASSWORD
     prompt_text "EA account email:" "" EA_EMAIL
     if [[ -z "$EA_EMAIL" ]]; then
@@ -311,14 +304,11 @@ for a in data.get('assets', []):
     prompt_text "Server password (leave blank for public):" "" SERVER_PASSWORD
 
     # ── Map rotation ──────────────────────────────────────────────────────────
-    # Known map IDs decoded from maprotation.hive (the binary the Kyber client writes).
-    # Format: JSON array → base64 → KYBER_MAP_ROTATION env var.
+    # Format: base64 of "MODE;MAP_PATH\n" lines (parsed by Kyber CLI).
     local MAP_ROTATION_B64=""
     local _pick_maps=""
     prompt_yn "Configure map rotation now? (y/n):" "y" _pick_maps
     if [[ "$_pick_maps" =~ ^[Yy]$ ]]; then
-        echo ""
-        echo "  Available maps (Space = toggle, Enter when done):"
         echo ""
         # Map definitions: "Display Name|level_path|mode"
         local -a MAP_DEFS=(
@@ -368,25 +358,24 @@ for a in data.get('assets', []):
             done
         fi
 
-        # Build JSON array
-        local _json="["
-        local _first=1
+        # Build rotation: one "MODE;MAP_PATH" line per entry (newline-separated).
+        # The CLI base64-decodes this and splits on newlines, then on ';'.
+        local _lines=""
+        local _count=0
         for i in "${!MAP_DEFS[@]}"; do
             [[ "${SELECTED_FLAGS[$i]}" == "0" ]] && continue
             IFS='|' read -r _name _level _mode <<< "${MAP_DEFS[$i]}"
-            [[ "$_first" == "0" ]] && _json+=","
-            _json+="{\"map\":\"${_level}\",\"mode\":\"${_mode}\"}"
-            _first=0
+            _lines+="${_mode};${_level}"$'\n'
+            (( _count++ )) || true
             SELECTED_MAPS+=("$_name")
         done
-        _json+="]"
 
-        if [[ "$_first" == "1" ]]; then
+        if [[ $_count -eq 0 ]]; then
             log_warning "No maps selected — server will use its default rotation."
         else
-            MAP_ROTATION_B64=$(echo -n "$_json" | base64 -w 0)
+            MAP_ROTATION_B64=$(printf '%s' "$_lines" | base64 -w 0)
             echo ""
-            log_success "Map rotation configured (${#SELECTED_MAPS[@]} maps):"
+            log_success "Map rotation configured ($_count maps):"
             for m in "${SELECTED_MAPS[@]}"; do
                 echo "    • $m"
             done
@@ -399,33 +388,6 @@ for a in data.get('assets', []):
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
 
-    # Build GPU section for docker-compose
-    local GPU_SECTION=""
-    local DEVICES_SECTION=""
-    local GROUP_ADD_SECTION=""
-
-    case "$GPU_TYPE" in
-        nvidia)
-            GPU_SECTION="
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]"
-            ;;
-        intel|amd)
-            DEVICES_SECTION="
-    devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128"
-            GROUP_ADD_SECTION="
-    group_add:
-      - video
-      - render"
-            ;;
-    esac
-
     cat > "$DIR/docker-compose.yml" << EOF
 name: kyber-server
 services:
@@ -433,11 +395,17 @@ services:
     image: ghcr.io/armchairdevelopers/kyber-server:latest
     container_name: kyber-swbf2
     restart: unless-stopped
+    # host networking: game traffic uses dynamic UDP ports
+    network_mode: host
+    # seccomp=unconfined: Wine/Proton needs system calls blocked by Docker default
+    # shm_size: Xvfb requires /dev/shm (MIT-SHM extension) — 64 MB default is too small
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '256m'
     env_file: .env
     volumes:
       - ${SWBF2_PATH}:/mnt/battlefront
       - ./logs:/logs
-${GPU_SECTION}${DEVICES_SECTION}${GROUP_ADD_SECTION}
 EOF
 
     # Write .env with restricted permissions
@@ -450,9 +418,9 @@ KYBER_SERVER_NAME='${SERVER_NAME}'
 KYBER_SERVER_MAX_PLAYERS=${MAX_PLAYERS}
 # Leave blank for a public server, or set a password to make it private
 KYBER_SERVER_PASSWORD='${SERVER_PASSWORD}'
-# Map rotation: base64-encoded JSON array of {"map":"...","mode":"..."} objects.
+# Map rotation: base64 of newline-separated "MODE;MAP_PATH" lines.
 # Re-run the installer to rebuild, or encode manually:
-#   echo -n '[{"map":"Levels/MP/Geonosis_01/Geonosis_01","mode":"GalacticAssault"}]' | base64 -w0
+#   printf 'GalacticAssault;Levels/MP/Geonosis_01/Geonosis_01\nGalacticAssault;Levels/MP/Hoth_01/Hoth_01\n' | base64 -w0
 KYBER_MAP_ROTATION=${MAP_ROTATION_B64}
 EOF
     chmod 600 "$DIR/.env"
@@ -476,10 +444,11 @@ docker compose pull && docker compose up -d   # update
 
 ## Map rotation
 Edit `.env` and set `KYBER_MAP_ROTATION` to a base64-encoded rotation string.
-Build the rotation JSON in the Kyber client (HOST tab), then:
+Format: one `MODE;MAP_PATH` per line, e.g.:
 ```bash
-echo -n '<rotation-json>' | base64
+printf 'GalacticAssault;Levels/MP/Geonosis_01/Geonosis_01\nGalacticAssault;Levels/MP/Hoth_01/Hoth_01\n' | base64 -w0
 ```
+Paste the output as `KYBER_MAP_ROTATION=<value>` in `.env`, then restart.
 
 ## Token refresh
 If the Kyber token stops working, re-run the installer or:
