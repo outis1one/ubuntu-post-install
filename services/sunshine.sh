@@ -162,6 +162,17 @@ EOF
       "image-path": ""
     },
     {
+      "name": "SWBF2 Single Player",
+      "output": "",
+      "cmd": "steam steam://rungameid/1237950",
+      "exclude-global-prep-cmd": false,
+      "elevated": false,
+      "auto-detach": true,
+      "wait-all": true,
+      "exit-timeout": 5,
+      "image-path": ""
+    },
+    {
       "name": "Desktop",
       "output": "",
       "cmd": "",
@@ -183,6 +194,17 @@ EOF
 {
   "env": {},
   "apps": [
+    {
+      "name": "SWBF2 Single Player",
+      "output": "",
+      "cmd": "steam steam://rungameid/1237950",
+      "exclude-global-prep-cmd": false,
+      "elevated": false,
+      "auto-detach": true,
+      "wait-all": true,
+      "exit-timeout": 5,
+      "image-path": ""
+    },
     {
       "name": "Desktop",
       "output": "",
