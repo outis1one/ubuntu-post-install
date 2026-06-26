@@ -83,51 +83,22 @@ _kyber_detect_gpu() {
 }
 
 _kyber_get_token() {
-    local appimage_path="$1"
-    local extract_dir="/tmp/kyber-cli-extract"
+    local auth_toml="$ACTUAL_HOME/.local/share/maxima/auth.toml"
 
-    log_info "Extracting kyber_cli from AppImage..."
-    rm -rf "$extract_dir"
-    mkdir -p "$extract_dir"
-
-    # Run extraction as the actual user (AppImage needs user context)
-    sudo -u "$ACTUAL_USER" "$appimage_path" --appimage-extract-and-run \
-        squashfs-root 2>/dev/null || true
-    sudo -u "$ACTUAL_USER" bash -c \
-        "cd '$extract_dir' && '$appimage_path' --appimage-extract" \
-        2>/dev/null || true
-
-    local cli_bin
-    cli_bin=$(find "$extract_dir/squashfs-root" /tmp/squashfs-root \
-        -name "kyber_cli" -type f 2>/dev/null | head -1)
-
-    if [[ -z "$cli_bin" ]]; then
-        # Try running kyber_cli directly if AppImage mounts itself
-        cli_bin=$(find /tmp/.mount_Kyber* -name "kyber_cli" -type f 2>/dev/null | head -1)
+    # Best path: read token from auth.toml written by Kyber GUI login
+    if [[ -f "$auth_toml" ]]; then
+        local token
+        token=$(grep -oP '(?<=token\s=\s")[^"]+' "$auth_toml" 2>/dev/null \
+             || grep -oP "(?<=token = ')[^']+" "$auth_toml" 2>/dev/null \
+             || grep -oP 'token\s*=\s*\K\S+' "$auth_toml" 2>/dev/null | tr -d '"'"'" )
+        if [[ -n "$token" ]]; then
+            echo "$token"
+            return 0
+        fi
     fi
 
-    if [[ -z "$cli_bin" ]]; then
-        log_error "Could not extract kyber_cli from AppImage."
-        log_error "Run the Kyber AppImage manually, log in, then find your token in:"
-        log_error "  ~/.local/share/maxima/auth.toml"
-        return 1
-    fi
-
-    log_info "Found kyber_cli at: $cli_bin"
-    echo ""
-    log_info "A browser will open for EA login. Log in, then return here."
-    echo ""
-
-    local token
-    token=$(sudo -u "$ACTUAL_USER" "$cli_bin" get_token 2>/dev/null | tr -d '[:space:]')
-
-    if [[ -z "$token" ]]; then
-        log_error "kyber_cli get_token returned nothing."
-        log_error "Try running manually:  $cli_bin get_token"
-        return 1
-    fi
-
-    echo "$token"
+    # Fallback: nothing found
+    return 1
 }
 
 # ── Install function ───────────────────────────────────────────────────────────
@@ -264,21 +235,27 @@ for a in data.get('assets', []):
 
     # ── Get Kyber token ───────────────────────────────────────────────────────
     echo ""
-    log_info "Getting your Kyber server token..."
-    log_info "This opens a browser for EA login — log in, then return here."
-    echo ""
+    log_info "Looking for Kyber token in ~/.local/share/maxima/auth.toml..."
 
     local KYBER_TOKEN=""
-    KYBER_TOKEN=$(_kyber_get_token "$APPIMAGE_PATH")
+    KYBER_TOKEN=$(_kyber_get_token)
+
     if [[ -z "$KYBER_TOKEN" ]]; then
-        log_warning "Could not retrieve token automatically."
-        prompt_text "Paste your KYBER_TOKEN manually (or press Enter to skip):" "" KYBER_TOKEN
+        echo ""
+        log_warning "No token found. You need to log in via the Kyber AppImage first."
+        echo ""
+        echo "  ┌─────────────────────────────────────────────────────────────────┐"
+        echo "  │  1. Open a terminal as yourself (not sudo)                      │"
+        echo "  │  2. Run:  $APPIMAGE_PATH"
+        echo "  │  3. Click 'EA Account' and log in via the browser               │"
+        echo "  │  4. Close Kyber, then re-run this installer                     │"
+        echo "  └─────────────────────────────────────────────────────────────────┘"
+        echo ""
+        prompt_text "Or paste your token manually (from auth.toml) and press Enter:" "" KYBER_TOKEN
     fi
 
     if [[ -z "$KYBER_TOKEN" ]]; then
-        log_error "No Kyber token provided. Cannot continue."
-        log_error "Get it manually: run the Kyber AppImage, log in, then check"
-        log_error "  ~/.local/share/maxima/auth.toml"
+        log_error "No Kyber token provided — cannot continue."
         return 1
     fi
     log_success "Kyber token obtained."
