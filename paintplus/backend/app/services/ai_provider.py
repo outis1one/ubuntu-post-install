@@ -62,11 +62,21 @@ class AIProvider(ABC):
 
 
 class OpenAIProvider(AIProvider):
-    """OpenAI DALL-E 2 based image editing (NOTE: Lower quality than DALL-E 3)"""
+    """OpenAI image API — gpt-image-2 (generation + edits, same model/endpoint family)."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str = "gpt-image-2", edit_model: str = "gpt-image-2"):
         self.api_key = api_key
+        self.model = model
+        self.edit_model = edit_model
         self.base_url = "https://api.openai.com/v1"
+
+    async def _fetch_result(self, client: httpx.AsyncClient, item: dict) -> bytes:
+        # gpt-image-1/2 only ever return b64_json; dall-e-2/dall-e-3 default to a url.
+        if item.get('b64_json'):
+            return base64.b64decode(item['b64_json'])
+        image_response = await client.get(item['url'])
+        image_response.raise_for_status()
+        return image_response.content
 
     async def edit_image(
         self,
@@ -77,7 +87,7 @@ class OpenAIProvider(AIProvider):
         full_image_bytes: Optional[bytes] = None,
         model: Optional[str] = None
     ) -> bytes:
-        """Edit image using OpenAI DALL-E 2 (NOTE: Uses older model, lower quality)"""
+        """Edit image using OpenAI's images/edits endpoint"""
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             files = {
@@ -86,6 +96,7 @@ class OpenAIProvider(AIProvider):
             }
 
             data = {
+                'model': model or self.edit_model,
                 'prompt': prompt,
                 'n': 1,
                 'size': '1024x1024'  # Will be adjusted based on input
@@ -104,13 +115,7 @@ class OpenAIProvider(AIProvider):
 
             response.raise_for_status()
             result = response.json()
-
-            # Download the generated image
-            image_url = result['data'][0]['url']
-            image_response = await client.get(image_url)
-            image_response.raise_for_status()
-
-            return image_response.content
+            return await self._fetch_result(client, result['data'][0])
 
     async def text_to_image(
         self,
@@ -120,10 +125,11 @@ class OpenAIProvider(AIProvider):
         model: Optional[str] = None,
         negative_prompt: Optional[str] = None
     ) -> bytes:
-        """Generate image using OpenAI DALL-E"""
+        """Generate image using OpenAI's images/generations endpoint"""
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             data = {
+                'model': model or self.model,
                 'prompt': prompt,
                 'n': 1,
                 'size': f'{width}x{height}' if width == height else '1024x1024'
@@ -141,13 +147,7 @@ class OpenAIProvider(AIProvider):
 
             response.raise_for_status()
             result = response.json()
-
-            # Download the generated image
-            image_url = result['data'][0]['url']
-            image_response = await client.get(image_url)
-            image_response.raise_for_status()
-
-            return image_response.content
+            return await self._fetch_result(client, result['data'][0])
 
 
 class StabilityAIProvider(AIProvider):
@@ -518,7 +518,7 @@ def get_ai_provider(provider_name: Optional[str] = None, model: Optional[str] = 
     if provider == "openai":
         if not settings.openai_api_key:
             raise ValueError("OpenAI API key not configured")
-        return OpenAIProvider(settings.openai_api_key)
+        return OpenAIProvider(settings.openai_api_key, settings.openai_model, settings.openai_edit_model)
 
     elif provider == "stability":
         if not settings.stability_api_key:

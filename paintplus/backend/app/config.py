@@ -27,8 +27,8 @@ class Settings(BaseSettings):
 
     # Provider API Keys
     openai_api_key: str = ""
-    openai_model: str = "dall-e-3"          # text-to-image (generations endpoint)
-    openai_edit_model: str = "gpt-image-1"  # inpaint/img2img/outpaint (edits endpoint — dall-e-3 isn't supported there)
+    openai_model: str = "gpt-image-2"       # text-to-image (generations endpoint)
+    openai_edit_model: str = "gpt-image-2"  # inpaint/img2img/outpaint (edits endpoint)
     stability_api_key: str = ""
     replicate_api_key: str = ""
 

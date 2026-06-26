@@ -115,8 +115,8 @@ class Tools_ai_provider_settings_class {
             {
                 name: 'openai_model',
                 title: 'OpenAI model:',
-                value: ls_get('openai_model', 'dall-e-3'),
-                values: ['dall-e-3', 'dall-e-2'],
+                value: ls_get('openai_model', 'gpt-image-2'),
+                values: ['gpt-image-2', 'gpt-image-1'],
                 type: 'select',
             },
             // ── InvokeAI ──────────────────────────────────────────────
@@ -171,7 +171,7 @@ class Tools_ai_provider_settings_class {
         ls_set('provider_img2img',  params.provider_img2img  || '');
         ls_set('provider_outpaint', params.provider_outpaint || '');
         ls_set('openai_key',     params.openai_key || '');
-        ls_set('openai_model',   params.openai_model || 'dall-e-3');
+        ls_set('openai_model',   params.openai_model || 'gpt-image-2');
         ls_set('invokeai_url',   params.invokeai_url || '');
         ls_set('invokeai_model', params.invokeai_model || 'flux-dev');
         ls_set('comfyui_url',    params.comfyui_url || '');
@@ -187,7 +187,7 @@ class Tools_ai_provider_settings_class {
                 ai_provider_img2img:      params.provider_img2img  || '',
                 ai_provider_outpaint:     params.provider_outpaint || '',
                 openai_api_key:           params.openai_key || '',
-                openai_model:             params.openai_model || 'dall-e-3',
+                openai_model:             params.openai_model || 'gpt-image-2',
                 invokeai_url:             params.invokeai_url || '',
                 invokeai_default_model:   params.invokeai_model || 'flux-dev',
                 comfyui_url:              params.comfyui_url || '',
