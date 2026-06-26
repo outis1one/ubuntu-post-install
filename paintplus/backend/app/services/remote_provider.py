@@ -30,38 +30,44 @@ class RemoteAIProvider(ABC):
 class OpenAIRemoteProvider(RemoteAIProvider):
     """OpenAI image API — gpt-image-1 / dall-e-3."""
 
-    def __init__(self, api_key: str, model: str = "dall-e-3"):
+    def __init__(self, api_key: str, model: str = "dall-e-3", edit_model: str = "gpt-image-1"):
         self.api_key = api_key
         self.model = model
+        # dall-e-3 has no edits/inpaint support at all — edits need a model of their own.
+        self.edit_model = edit_model
         self.base_url = "https://api.openai.com/v1"
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    async def _fetch_result(self, client: httpx.AsyncClient, item: dict) -> bytes:
+        # gpt-image-1 only ever returns b64_json; dall-e-2/dall-e-3 default to a url.
+        if item.get("b64_json"):
+            return base64.b64decode(item["b64_json"])
+        img_r = await client.get(item["url"])
+        img_r.raise_for_status()
+        return img_r.content
+
     async def inpaint(self, image_bytes: bytes, mask_bytes: bytes, prompt: str, params: dict) -> bytes:
+        model = (params or {}).get("model") or self.edit_model
         async with httpx.AsyncClient(timeout=120.0) as client:
             files = {
                 "image": ("image.png", image_bytes, "image/png"),
                 "mask": ("mask.png", mask_bytes, "image/png"),
             }
-            data = {"prompt": prompt, "n": "1", "size": "1024x1024"}
+            data = {"model": model, "prompt": prompt, "n": "1", "size": "1024x1024"}
             r = await client.post(f"{self.base_url}/images/edits", files=files, data=data, headers=self._headers())
             r.raise_for_status()
-            url = r.json()["data"][0]["url"]
-            img_r = await client.get(url)
-            img_r.raise_for_status()
-            return img_r.content
+            return await self._fetch_result(client, r.json()["data"][0])
 
     async def txt2img(self, prompt: str, width: int, height: int, params: dict) -> bytes:
         size = f"{width}x{height}" if f"{width}x{height}" in {"256x256", "512x512", "1024x1024"} else "1024x1024"
+        model = (params or {}).get("model") or self.model
         async with httpx.AsyncClient(timeout=120.0) as client:
-            data = {"model": self.model, "prompt": prompt, "n": 1, "size": size}
+            data = {"model": model, "prompt": prompt, "n": 1, "size": size}
             r = await client.post(f"{self.base_url}/images/generations", json=data, headers=self._headers())
             r.raise_for_status()
-            url = r.json()["data"][0]["url"]
-            img_r = await client.get(url)
-            img_r.raise_for_status()
-            return img_r.content
+            return await self._fetch_result(client, r.json()["data"][0])
 
     async def img2img(self, image_bytes: bytes, prompt: str, strength: float, params: dict) -> bytes:
         # OpenAI doesn't have img2img natively — use edits with blank mask
@@ -416,7 +422,7 @@ def _build_provider(name: str) -> Optional[RemoteAIProvider]:
     if name == "openai":
         if not settings.openai_api_key:
             return None
-        return OpenAIRemoteProvider(settings.openai_api_key, settings.openai_model)
+        return OpenAIRemoteProvider(settings.openai_api_key, settings.openai_model, settings.openai_edit_model)
 
     if name == "invokeai":
         if not settings.invokeai_url:
