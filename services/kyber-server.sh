@@ -242,16 +242,37 @@ for a in data.get('assets', []):
 
     if [[ -z "$KYBER_TOKEN" ]]; then
         echo ""
-        log_warning "No token found. You need to log in via the Kyber AppImage first."
+        log_warning "No EA token found — need to log in via Kyber AppImage."
+        log_info "Launching Kyber as $ACTUAL_USER — click 'EA Account' and log in, then close Kyber."
         echo ""
-        echo "  ┌─────────────────────────────────────────────────────────────────┐"
-        echo "  │  1. Open a terminal as yourself (not sudo)                      │"
-        echo "  │  2. Run:  $APPIMAGE_PATH"
-        echo "  │  3. Click 'EA Account' and log in via the browser               │"
-        echo "  │  4. Close Kyber, then re-run this installer                     │"
-        echo "  └─────────────────────────────────────────────────────────────────┘"
+        read -r -p "  Press Enter to launch Kyber now..." _
+
+        # Launch AppImage as the actual user in the background
+        sudo -u "$ACTUAL_USER" DISPLAY="${DISPLAY:-:0}" \
+            XAUTHORITY="$ACTUAL_HOME/.Xauthority" \
+            "$APPIMAGE_PATH" &
+        local APPIMAGE_PID=$!
+
         echo ""
-        prompt_text "Or paste your token manually (from auth.toml) and press Enter:" "" KYBER_TOKEN
+        log_info "Kyber is running (PID $APPIMAGE_PID)."
+        log_info "Click 'EA Account', log in via the browser, then close Kyber."
+        echo ""
+        read -r -p "  Press Enter once you have logged in and closed Kyber..." _
+
+        # Give Maxima a moment to flush auth.toml
+        sleep 2
+
+        # Kill AppImage if still running
+        kill "$APPIMAGE_PID" 2>/dev/null || true
+        wait "$APPIMAGE_PID" 2>/dev/null || true
+
+        KYBER_TOKEN=$(_kyber_get_token)
+    fi
+
+    if [[ -z "$KYBER_TOKEN" ]]; then
+        echo ""
+        log_warning "Still no token found in auth.toml."
+        prompt_text "Paste your token manually (or press Enter to abort):" "" KYBER_TOKEN
     fi
 
     if [[ -z "$KYBER_TOKEN" ]]; then
