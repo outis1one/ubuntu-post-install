@@ -66,11 +66,11 @@ Update them any time with `sudo ./setup.sh configure`.
 | Group | Services |
 |-------|---------|
 | `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
-| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk` |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `sunshine` |
 | `utilities` | `actualbudget`, `ai-gpu`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
-| `gaming` | `drum-rhythm-game`, `js99er`, `minecraft`, `wolf`, `wolf-pair` |
+| `gaming` | `drum-rhythm-game`, `js99er`, `kyber-launcher`, `kyber-server`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `kdeconnect`, `silent-send`, `sync-cc` |
 | `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
 
@@ -184,6 +184,31 @@ find ~/.steam/steam/steamapps -name "starwarsbattlefrontii.exe" 2>/dev/null | he
 ```
 Paste that path into the SET GAME FOLDER dialog.
 
+**If Origin Error: "title installed in language not entitled to play":**
+Maxima's Wine prefix is missing locale registry keys — its setup commands fail silently on some systems. Fix:
+```bash
+cat > /tmp/swbf2_fix.reg << 'EOF'
+Windows Registry Editor Version 5.00
+[HKEY_LOCAL_MACHINE\Software\Origin Games\1035052]
+"locale"="en_US"
+"displayname"="STAR WARS Battlefront II"
+[HKEY_LOCAL_MACHINE\Software\Wow6432Node\Origin Games\1035052]
+"locale"="en_US"
+"displayname"="STAR WARS Battlefront II"
+[HKEY_LOCAL_MACHINE\Software\Electronic Arts\EA Desktop]
+"InstallSuccessful"="true"
+[HKEY_LOCAL_MACHINE\Software\Origin]
+"InstallSuccessful"="true"
+"ClientPath"="C:\\Windows\\System32\\conhost.exe"
+[HKEY_CURRENT_USER\Control Panel\International]
+"Locale"="00000409"
+"LocaleName"="en-US"
+"sLanguage"="ENU"
+EOF
+WINEPREFIX=~/.local/share/maxima/wine/prefix wine64 regedit /tmp/swbf2_fix.reg
+```
+Then restart Kyber and try again.
+
 **First run (one-time setup):**
 1. Click **EA Account** → log in with your EA credentials in the browser
 2. Click **Skip** on Nexus Mods (optional, only needed for mods)
@@ -210,6 +235,16 @@ Paste that path into the SET GAME FOLDER dialog.
   The setup script applies this automatically when run with sudo and saves it
   to `/etc/sysctl.d/99-userns.conf` to persist across reboots.
   Without this fix Kyber fails with: `bwrap: setting up uid map: Permission denied`
+
+**If SWBF2 crashes immediately when a level starts loading:**
+Likely a DXVK rendering issue, especially on integrated GPUs (Intel Iris Xe, etc.).
+Disable fullscreen and HDR in the game settings file — the game writes this on first run:
+```bash
+PROFILE=$(find ~/.local/share/maxima -name "ProfileOptions_profile" 2>/dev/null | head -1)
+sed -i 's/GstRender.FullscreenEnabled 1/GstRender.FullscreenEnabled 0/' "$PROFILE"
+sed -i 's/GstRender.EnableHDR 1/GstRender.EnableHDR 0/' "$PROFILE"
+```
+Then restart Kyber and try hosting/joining again.
 
 **What does NOT work:**
 - Running the Windows `kyber_launcher.exe` under Wine/Proton: EA's auth

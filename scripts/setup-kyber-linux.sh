@@ -91,6 +91,36 @@
 #   kernel.unprivileged_userns_clone = 1
 #   kernel.apparmor_restrict_unprivileged_userns = 0
 #
+# ── "Origin Error: title installed in language not entitled" ───────────────
+#
+# If Kyber launches SWBF2 but the game shows an Origin Error about language
+# entitlement, Maxima's Wine prefix is missing the Origin locale registry keys.
+# Maxima writes these via umu-run reg commands on first run, but they can fail
+# silently (exit code 1) leaving the keys absent.
+#
+# Fix: manually import the registry keys into Maxima's Wine prefix.
+# Create a file (e.g. /tmp/swbf2_fix.reg) with:
+#
+#   Windows Registry Editor Version 5.00
+#   [HKEY_LOCAL_MACHINE\Software\Origin Games\1035052]
+#   "locale"="en_US"
+#   "displayname"="STAR WARS Battlefront II"
+#   [HKEY_LOCAL_MACHINE\Software\Wow6432Node\Origin Games\1035052]
+#   "locale"="en_US"
+#   "displayname"="STAR WARS Battlefront II"
+#   [HKEY_LOCAL_MACHINE\Software\Electronic Arts\EA Desktop]
+#   "InstallSuccessful"="true"
+#   [HKEY_LOCAL_MACHINE\Software\Origin]
+#   "InstallSuccessful"="true"
+#   "ClientPath"="C:\\Windows\\System32\\conhost.exe"
+#   [HKEY_CURRENT_USER\Control Panel\International]
+#   "Locale"="00000409"
+#   "LocaleName"="en-US"
+#   "sLanguage"="ENU"
+#
+# Then import it:
+#   WINEPREFIX=~/.local/share/maxima/wine/prefix wine64 regedit /tmp/swbf2_fix.reg
+#
 # ── "Game Not Found" dialog ────────────────────────────────────────────────
 #
 # If Kyber shows "Game Not Found" after launching:
