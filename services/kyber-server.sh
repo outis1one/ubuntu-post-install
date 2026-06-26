@@ -310,6 +310,90 @@ for a in data.get('assets', []):
     prompt_text "Max players [40]:" "40" MAX_PLAYERS
     prompt_text "Server password (leave blank for public):" "" SERVER_PASSWORD
 
+    # ── Map rotation ──────────────────────────────────────────────────────────
+    # Known map IDs decoded from maprotation.hive (the binary the Kyber client writes).
+    # Format: JSON array → base64 → KYBER_MAP_ROTATION env var.
+    local MAP_ROTATION_B64=""
+    local _pick_maps=""
+    prompt_yn "Configure map rotation now? (y/n):" "y" _pick_maps
+    if [[ "$_pick_maps" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "  Available maps (Space = toggle, Enter when done):"
+        echo ""
+        # Map definitions: "Display Name|level_path|mode"
+        local -a MAP_DEFS=(
+            "Geonosis — Galactic Assault|Levels/MP/Geonosis_01/Geonosis_01|GalacticAssault"
+            "Kamino — Galactic Assault (ocean platform)|Levels/MP/Kamino_01/Kamino_01|GalacticAssault"
+            "Endor — Galactic Assault|Levels/MP/Endor_01/Endor_01|GalacticAssault"
+            "Tatooine — Galactic Assault|Levels/MP/Tatooine_01/Tatooine_01|GalacticAssault"
+            "Death Star II — Galactic Assault|Levels/MP/DeathStar02_01/DeathStar02_01|GalacticAssault"
+            "Starkiller Base — Galactic Assault|Levels/MP/StarKiller_01/StarKiller_01|GalacticAssault"
+            "Crait — Galactic Assault|Levels/MP/Crait_01/Crait_02|GalacticAssault"
+            "Hoth — Galactic Assault|Levels/MP/Hoth_01/Hoth_01|GalacticAssault"
+            "Fondor — Starfighter Assault (space)|Levels/Space/SB_Fondor_01/SB_Fondor_01|StarfighterAssault"
+            "Geonosis — Planetary Battles|Levels/MP/Geonosis_01/Geonosis_01|PlanetaryBattles"
+            "Kamino — Planetary Battles|Levels/MP/Kamino_01/Kamino_01|PlanetaryBattles"
+            "Endor — Planetary Battles|Levels/MP/Endor_01/Endor_01|PlanetaryBattles"
+        )
+
+        local -a SELECTED_MAPS=()
+        local -a SELECTED_FLAGS=()
+        for i in "${!MAP_DEFS[@]}"; do
+            SELECTED_FLAGS[$i]=0
+        done
+
+        # Simple numbered selection (no ncurses needed)
+        echo "  Enter map numbers separated by spaces (e.g. 1 2 3 4 5):"
+        echo ""
+        for i in "${!MAP_DEFS[@]}"; do
+            local _label
+            _label="${MAP_DEFS[$i]%%|*}"
+            printf "    %2d) %s\n" "$((i+1))" "$_label"
+        done
+        echo ""
+        local _map_choices=""
+        read -r -p "  Map numbers (Enter for all): " _map_choices
+
+        if [[ -z "$_map_choices" ]]; then
+            # Select all
+            for i in "${!MAP_DEFS[@]}"; do
+                SELECTED_FLAGS[$i]=1
+            done
+        else
+            for n in $_map_choices; do
+                local idx=$((n-1))
+                if [[ $idx -ge 0 ]] && [[ $idx -lt ${#MAP_DEFS[@]} ]]; then
+                    SELECTED_FLAGS[$idx]=1
+                fi
+            done
+        fi
+
+        # Build JSON array
+        local _json="["
+        local _first=1
+        for i in "${!MAP_DEFS[@]}"; do
+            [[ "${SELECTED_FLAGS[$i]}" == "0" ]] && continue
+            IFS='|' read -r _name _level _mode <<< "${MAP_DEFS[$i]}"
+            [[ "$_first" == "0" ]] && _json+=","
+            _json+="{\"map\":\"${_level}\",\"mode\":\"${_mode}\"}"
+            _first=0
+            SELECTED_MAPS+=("$_name")
+        done
+        _json+="]"
+
+        if [[ "$_first" == "1" ]]; then
+            log_warning "No maps selected — server will use its default rotation."
+        else
+            MAP_ROTATION_B64=$(echo -n "$_json" | base64 -w 0)
+            echo ""
+            log_success "Map rotation configured (${#SELECTED_MAPS[@]} maps):"
+            for m in "${SELECTED_MAPS[@]}"; do
+                echo "    • $m"
+            done
+        fi
+        echo ""
+    fi
+
     # ── Write files ───────────────────────────────────────────────────────────
     local DIR="$DOCKER_DIR/kyber-server"
     mkdir -p "$DIR"
@@ -352,7 +436,8 @@ services:
     env_file: .env
     volumes:
       - ${SWBF2_PATH}:/mnt/battlefront
-      - ./logs:/logs${GPU_SECTION}${DEVICES_SECTION}${GROUP_ADD_SECTION}
+      - ./logs:/logs
+${GPU_SECTION}${DEVICES_SECTION}${GROUP_ADD_SECTION}
 EOF
 
     # Write .env with restricted permissions
@@ -365,10 +450,10 @@ KYBER_SERVER_NAME='${SERVER_NAME}'
 KYBER_SERVER_MAX_PLAYERS=${MAX_PLAYERS}
 # Leave blank for a public server, or set a password to make it private
 KYBER_SERVER_PASSWORD='${SERVER_PASSWORD}'
-# Leave blank until you have a base64-encoded map rotation string.
-# Build one in the Kyber client HOST tab, then base64-encode it:
-#   echo -n '<rotation-json>' | base64
-KYBER_MAP_ROTATION=
+# Map rotation: base64-encoded JSON array of {"map":"...","mode":"..."} objects.
+# Re-run the installer to rebuild, or encode manually:
+#   echo -n '[{"map":"Levels/MP/Geonosis_01/Geonosis_01","mode":"GalacticAssault"}]' | base64 -w0
+KYBER_MAP_ROTATION=${MAP_ROTATION_B64}
 EOF
     chmod 600 "$DIR/.env"
     ensure_docker_dir_ownership "$DIR"
