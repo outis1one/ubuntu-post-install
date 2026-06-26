@@ -498,6 +498,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
         generate_password() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-32}"; }
 
+        write_readme() {
+            local _dir="$1"; shift
+            [[ "$DRY_RUN" == "true" ]] && return 0
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
+        }
+
         ACTUAL_USER="${SUDO_USER:-$USER}"
         ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
         DOCKER_DIR="$ACTUAL_HOME/docker"
