@@ -424,6 +424,30 @@ MD
     echo "Server directory: $DIR"
     echo "Edit $DIR/.env to set map rotation or update credentials."
     echo "Token refresh: re-run this installer or update KYBER_TOKEN in .env manually."
+
+    # ── Offer to set up Kyber launcher if not already installed ──────────────
+    local BIN_LINK="$ACTUAL_HOME/.local/bin/kyber"
+    local DESKTOP_FILE="$ACTUAL_HOME/.local/share/applications/kyber-launcher.desktop"
+    if [[ ! -L "$BIN_LINK" ]] && [[ ! -f "$DESKTOP_FILE" ]]; then
+        echo ""
+        local _setup_launcher=""
+        prompt_yn "Set up Kyber launcher (desktop entry + 'kyber' command)? (y/n):" "y" _setup_launcher
+        if [[ "$_setup_launcher" =~ ^[Yy]$ ]]; then
+            if command -v install_kyber_launcher &>/dev/null; then
+                install_kyber_launcher
+            else
+                # Sourced standalone — call the other service file if present
+                local _launcher_sh
+                _launcher_sh="$(dirname "${BASH_SOURCE[0]}")/kyber-launcher.sh"
+                if [[ -f "$_launcher_sh" ]]; then
+                    source "$_launcher_sh"
+                    install_kyber_launcher
+                else
+                    log_warning "kyber-launcher.sh not found — run: sudo ./setup.sh kyber-launcher"
+                fi
+            fi
+        fi
+    fi
 }
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
