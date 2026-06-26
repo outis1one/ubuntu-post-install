@@ -1,0 +1,164 @@
+[
+  {
+    "filename": "classic_realistic_blue.png",
+    "ppm_filename": "classic_realistic_blue.ppm",
+    "name": "Classic Realistic Eye - Blue",
+    "description": "A realistic style eye with blue iris color",
+    "tags": "eye,classic,realistic,blue,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_realistic_green.png",
+    "ppm_filename": "classic_realistic_green.ppm",
+    "name": "Classic Realistic Eye - Green",
+    "description": "A realistic style eye with green iris color",
+    "tags": "eye,classic,realistic,green,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_realistic_brown.png",
+    "ppm_filename": "classic_realistic_brown.ppm",
+    "name": "Classic Realistic Eye - Brown",
+    "description": "A realistic style eye with brown iris color",
+    "tags": "eye,classic,realistic,brown,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_realistic_hazel.png",
+    "ppm_filename": "classic_realistic_hazel.ppm",
+    "name": "Classic Realistic Eye - Hazel",
+    "description": "A realistic style eye with hazel iris color",
+    "tags": "eye,classic,realistic,hazel,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_realistic_grey.png",
+    "ppm_filename": "classic_realistic_grey.ppm",
+    "name": "Classic Realistic Eye - Grey",
+    "description": "A realistic style eye with grey iris color",
+    "tags": "eye,classic,realistic,grey,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_realistic_amber.png",
+    "ppm_filename": "classic_realistic_amber.ppm",
+    "name": "Classic Realistic Eye - Amber",
+    "description": "A realistic style eye with amber iris color",
+    "tags": "eye,classic,realistic,amber,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_blue.png",
+    "ppm_filename": "classic_anime_blue.ppm",
+    "name": "Classic Anime Eye - Blue",
+    "description": "A anime style eye with blue iris color",
+    "tags": "eye,classic,anime,blue,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_green.png",
+    "ppm_filename": "classic_anime_green.ppm",
+    "name": "Classic Anime Eye - Green",
+    "description": "A anime style eye with green iris color",
+    "tags": "eye,classic,anime,green,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_brown.png",
+    "ppm_filename": "classic_anime_brown.ppm",
+    "name": "Classic Anime Eye - Brown",
+    "description": "A anime style eye with brown iris color",
+    "tags": "eye,classic,anime,brown,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_hazel.png",
+    "ppm_filename": "classic_anime_hazel.ppm",
+    "name": "Classic Anime Eye - Hazel",
+    "description": "A anime style eye with hazel iris color",
+    "tags": "eye,classic,anime,hazel,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_grey.png",
+    "ppm_filename": "classic_anime_grey.ppm",
+    "name": "Classic Anime Eye - Grey",
+    "description": "A anime style eye with grey iris color",
+    "tags": "eye,classic,anime,grey,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_anime_amber.png",
+    "ppm_filename": "classic_anime_amber.ppm",
+    "name": "Classic Anime Eye - Amber",
+    "description": "A anime style eye with amber iris color",
+    "tags": "eye,classic,anime,amber,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_blue.png",
+    "ppm_filename": "classic_cartoon_blue.ppm",
+    "name": "Classic Cartoon Eye - Blue",
+    "description": "A cartoon style eye with blue iris color",
+    "tags": "eye,classic,cartoon,blue,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_green.png",
+    "ppm_filename": "classic_cartoon_green.ppm",
+    "name": "Classic Cartoon Eye - Green",
+    "description": "A cartoon style eye with green iris color",
+    "tags": "eye,classic,cartoon,green,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_brown.png",
+    "ppm_filename": "classic_cartoon_brown.ppm",
+    "name": "Classic Cartoon Eye - Brown",
+    "description": "A cartoon style eye with brown iris color",
+    "tags": "eye,classic,cartoon,brown,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_hazel.png",
+    "ppm_filename": "classic_cartoon_hazel.ppm",
+    "name": "Classic Cartoon Eye - Hazel",
+    "description": "A cartoon style eye with hazel iris color",
+    "tags": "eye,classic,cartoon,hazel,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_grey.png",
+    "ppm_filename": "classic_cartoon_grey.ppm",
+    "name": "Classic Cartoon Eye - Grey",
+    "description": "A cartoon style eye with grey iris color",
+    "tags": "eye,classic,cartoon,grey,medium",
+    "width": 200,
+    "height": 200
+  },
+  {
+    "filename": "classic_cartoon_amber.png",
+    "ppm_filename": "classic_cartoon_amber.ppm",
+    "name": "Classic Cartoon Eye - Amber",
+    "description": "A cartoon style eye with amber iris color",
+    "tags": "eye,classic,cartoon,amber,medium",
+    "width": 200,
+    "height": 200
+  }
+]

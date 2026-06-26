@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Brush body -->
+  <path d="M18 4L21 7L11 17H8V14L18 4Z"/>
+  <!-- Brush handle -->
+  <path d="M15.5 6.5L17.5 8.5"/>
+  <!-- AI sparkles/selection indicators -->
+  <circle cx="5" cy="5" r="1" fill="currentColor"/>
+  <circle cx="3" cy="9" r="0.75" fill="currentColor"/>
+  <circle cx="7" cy="3" r="0.75" fill="currentColor"/>
+  <!-- Selection dashes around brush tip -->
+  <path d="M6 15L4 17" stroke-dasharray="2,1"/>
+  <path d="M6 19L8 21" stroke-dasharray="2,1"/>
+  <path d="M10 19L12 21" stroke-dasharray="2,1"/>
+</svg>

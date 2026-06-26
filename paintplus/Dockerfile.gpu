@@ -1,0 +1,82 @@
+# =============================================================================
+# EditmaskwithAI — GPU Container (NVIDIA CUDA)
+#
+# Usage:
+#   docker compose -f docker-compose.gpu.yml up --build
+#
+# Requirements on host:
+#   - NVIDIA driver ≥ 525 (for CUDA 12.x)
+#   - nvidia-container-toolkit installed and configured
+#   - docker compose v2 (or docker-compose with GPU device support)
+#
+# AMD ROCm users: replace the pytorch base image with a ROCm variant, e.g.
+#   rocm/pytorch:latest   (and remove the nvidia-smi check below)
+# =============================================================================
+
+# ── Stage 1: Build miniPaint frontend ────────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: PyTorch CUDA runtime ────────────────────────────────────────────
+# pytorch/pytorch already includes torch + torchvision built for CUDA 12.1.
+# Using the runtime (not devel) image keeps the layer lean.
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    wget \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies — base + GPU extras
+# BUILDID forces pip layers to re-run when you need fresh packages without a full --no-cache:
+#   BUILDID=$(date +%s) docker compose -f docker-compose.gpu.yml up --build
+ARG BUILDID=1
+COPY backend/requirements.txt .
+COPY backend/requirements.gpu.txt .
+RUN echo "BUILDID=$BUILDID" && pip install --no-cache-dir -r requirements.txt
+RUN echo "BUILDID=$BUILDID" && pip install --no-cache-dir -r requirements.gpu.txt
+
+# Smoke-test rembg (model downloads on first use)
+RUN python -c "from rembg import remove; print('rembg OK')" \
+    || echo "WARNING: rembg unavailable — Remove Background disabled"
+
+# Smoke-test ben2 (weights download from HuggingFace on first use)
+RUN python -c "import ben2; print('ben2 OK')" \
+    || echo "WARNING: ben2 unavailable — Remove Background falls back to U2Net/rembg"
+
+# Copy backend application
+COPY backend/ .
+
+# Entrypoint
+COPY backend/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Scripts (SAM download, DB init, GPU setup, etc.)
+COPY scripts/ /scripts/
+RUN chmod +x /scripts/*.py 2>/dev/null || true
+
+# Copy built frontend from Stage 1
+COPY --from=frontend-build /frontend/index.html /app/static/
+COPY --from=frontend-build /frontend/dist        /app/static/dist
+COPY --from=frontend-build /frontend/images      /app/static/images
+COPY --from=frontend-build /frontend/src/css     /app/static/src/css
+
+# Persistent data directories
+RUN mkdir -p /app/data/projects /app/data/patches /app/data/models
+
+EXPOSE 8000
+ENTRYPOINT ["/entrypoint.sh"]

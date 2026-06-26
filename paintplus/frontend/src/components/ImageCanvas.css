@@ -1,0 +1,133 @@
+/* ImageCanvas fills the entire canvas wrapper */
+.canvas-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+}
+
+.canvas-container canvas {
+  display: block;
+}
+
+.canvas-controls {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  right: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.canvas-controls > * {
+  pointer-events: auto;
+}
+
+.clear-selection-btn {
+  background-color: #ff4444;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 4px;
+}
+
+.clear-selection-btn:hover {
+  background-color: #cc0000;
+}
+
+.selection-hint {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 0, 0, 0.8);
+  color: #0088ff;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  z-index: 10;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Clear selection button */
+.clear-selection-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background-color: #cc3333;
+  color: white;
+  padding: 6px 12px;
+  font-size: 11px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  z-index: 10;
+}
+
+.clear-selection-btn:hover {
+  background-color: #dd4444;
+}
+
+/* Zoom controls */
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background-color: rgba(0, 0, 0, 0.8);
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
+.zoom-controls button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 18px;
+  font-weight: bold;
+  background-color: #444;
+  color: white;
+  border: 1px solid #666;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.zoom-controls button:hover {
+  background-color: #555;
+}
+
+.zoom-level {
+  color: white;
+  font-size: 12px;
+  min-width: 45px;
+  text-align: center;
+}
+
+/* Tool mode indicator */
+.tool-mode-indicator {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(0, 120, 255, 0.9);
+  color: white;
+  padding: 10px 20px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 10;
+  white-space: nowrap;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
