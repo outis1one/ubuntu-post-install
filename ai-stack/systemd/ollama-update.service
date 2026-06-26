@@ -1,0 +1,10 @@
+[Unit]
+Description=Ollama model auto-updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/local-ai/ollama_update.sh
+StandardOutput=journal
+StandardError=journal

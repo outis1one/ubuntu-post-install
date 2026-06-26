@@ -1,0 +1,11 @@
+[Unit]
+Description=Monthly Ollama model update check
+Requires=ollama-update.service
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
