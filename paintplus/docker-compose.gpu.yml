@@ -96,8 +96,8 @@ services:
 
       # ── Remote/cloud providers (all optional) ────────────────────────────────
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_MODEL=${OPENAI_MODEL:-dall-e-3}
-      - OPENAI_EDIT_MODEL=${OPENAI_EDIT_MODEL:-gpt-image-1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-image-2}
+      - OPENAI_EDIT_MODEL=${OPENAI_EDIT_MODEL:-gpt-image-2}
       - REPLICATE_API_KEY=${REPLICATE_API_KEY:-}
       - STABILITY_API_KEY=${STABILITY_API_KEY:-}
 

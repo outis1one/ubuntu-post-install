@@ -65,7 +65,7 @@ BUILDID=$(date +%s) ./bring-up-local-gpu.sh
 | Provider | Setup | Cost | Quality |
 |---|---|---|---|
 | `local_gpu` | GPU machine + nvidia-container-toolkit | Free | Best (SDXL/FLUX auto-selected by VRAM) |
-| `openai` | `OPENAI_API_KEY=sk-...` | ~$0.02–0.04/image | DALL-E 3 |
+| `openai` | `OPENAI_API_KEY=sk-...` | ~$0.006–0.21/image | gpt-image-2 |
 | `replicate` | `REPLICATE_API_KEY=r8_...` | ~$0.002–0.03/image | Multiple models |
 | `invokeai` | InvokeAI running on another machine | Self-hosted | FLUX/SDXL |
 | `comfyui` | ComfyUI running on another machine | Self-hosted | Any model |

@@ -28,12 +28,11 @@ class RemoteAIProvider(ABC):
 
 
 class OpenAIRemoteProvider(RemoteAIProvider):
-    """OpenAI image API — gpt-image-1 / dall-e-3."""
+    """OpenAI image API — gpt-image-2 (generation + edits, same model/endpoint family)."""
 
-    def __init__(self, api_key: str, model: str = "dall-e-3", edit_model: str = "gpt-image-1"):
+    def __init__(self, api_key: str, model: str = "gpt-image-2", edit_model: str = "gpt-image-2"):
         self.api_key = api_key
         self.model = model
-        # dall-e-3 has no edits/inpaint support at all — edits need a model of their own.
         self.edit_model = edit_model
         self.base_url = "https://api.openai.com/v1"
 
@@ -41,7 +40,7 @@ class OpenAIRemoteProvider(RemoteAIProvider):
         return {"Authorization": f"Bearer {self.api_key}"}
 
     async def _fetch_result(self, client: httpx.AsyncClient, item: dict) -> bytes:
-        # gpt-image-1 only ever returns b64_json; dall-e-2/dall-e-3 default to a url.
+        # gpt-image-1/2 only ever return b64_json; dall-e-2/dall-e-3 default to a url.
         if item.get("b64_json"):
             return base64.b64decode(item["b64_json"])
         img_r = await client.get(item["url"])
