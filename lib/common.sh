@@ -170,14 +170,16 @@ require_docker() {
         return 0
     fi
 
-    # Official Docker convenience script — installs Docker CE + Compose plugin
-    if curl -fsSL https://get.docker.com | sh; then
-        if [ -n "$ACTUAL_USER" ] && [ "$ACTUAL_USER" != "root" ]; then
-            usermod -aG docker "$ACTUAL_USER" \
-                && log_info "Added $ACTUAL_USER to the docker group (re-login or run 'newgrp docker' to activate)"
-        fi
-        log_success "Docker installed ($(docker --version 2>/dev/null))"
-    else
+    # Official Docker convenience script — installs Docker CE + Compose plugin.
+    # DEBIAN_FRONTEND suppresses interactive apt hooks (needrestart etc.) that
+    # would block waiting on the piped stdin and cause a silent install failure.
+    export DEBIAN_FRONTEND=noninteractive
+    curl -fsSL https://get.docker.com | sh
+    local _rc=${PIPESTATUS[1]}
+    unset DEBIAN_FRONTEND
+    hash -r 2>/dev/null || true  # flush command hash so new binary is found
+
+    if [ "$_rc" -ne 0 ]; then
         log_error "Docker installation failed. Try manually: curl -fsSL https://get.docker.com | sh"
         return 1
     fi
@@ -186,6 +188,13 @@ require_docker() {
         log_error "Docker binary not found after install — something went wrong."
         return 1
     fi
+
+    if [ -n "$ACTUAL_USER" ] && [ "$ACTUAL_USER" != "root" ]; then
+        usermod -aG docker "$ACTUAL_USER" \
+            && log_info "Added $ACTUAL_USER to the docker group (re-login or run 'newgrp docker' to activate)"
+    fi
+
+    log_success "Docker installed ($(docker --version 2>/dev/null))"
 }
 
 # ── Command execution honoring dry-run ───────────────────────────────────────
