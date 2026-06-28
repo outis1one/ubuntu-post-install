@@ -19,6 +19,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# whiptail requires a valid TERM; when piped through bash (curl | bash) TERM
+# may be unset, causing raw-mode to fail and arrow keys to leak to the shell.
+export TERM="${TERM:-xterm-256color}"
+
 # Category display order (groups not listed here are appended alphabetically).
 CATEGORY_ORDER=(base homelab utilities media cameras gaming extras backup)
 # Service ordering hint within a category (lower = earlier). Default 50.
@@ -261,7 +265,7 @@ while true; do
         cat_items+=("DONE" "Finish and exit")
         CHOSEN_CAT=$(whiptail --title "Service Categories" --menu \
             "Pick a category (services you install come back here):" 22 70 14 \
-            "${cat_items[@]}" 3>&1 1>&2 2>&3) || break
+            "${cat_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || break
     else
         echo ""; echo "Categories:"; i=1
         for g in "${CATS[@]}"; do echo "  $i) $g"; i=$((i+1)); done
@@ -284,7 +288,7 @@ while true; do
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
             "Space to select, Enter to install. Already-installed are marked:" 22 78 14 \
-            "${svc_items[@]}" 3>&1 1>&2 2>&3) || continue
+            "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
