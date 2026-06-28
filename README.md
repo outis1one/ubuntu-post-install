@@ -76,6 +76,95 @@ Update them any time with `sudo ./setup.sh configure`.
 
 Run `./setup.sh --list` to see descriptions.
 
+<details>
+<summary>Copiable list of all services by category</summary>
+
+```
+base
+  base
+  glow
+
+homelab
+  caddy
+  crowdsec
+  authelia
+  homeassistant
+  asterisk
+  sunshine
+
+utilities
+  actualbudget
+  ai-gpu
+  ai-stack
+  archivebox
+  changedetection
+  ddclient
+  filebrowser
+  fmd
+  gatus
+  homebox
+  iopaint
+  joplin
+  koha
+  magicmirror
+  mail-archiver
+  mattermost
+  mealie
+  meshcentral
+  n8n
+  nextcloud
+  ntfy
+  onlyoffice
+  paintplus
+  portainer
+  rustdesk
+  stirling-pdf
+  syncthing
+  traccar
+  unifi
+  uptimekuma
+  vaultwarden
+  watchyourlan
+  watchtower
+  wg-easy
+
+media
+  arm
+  audiobookshelf
+  calibre-web
+  emby
+  immich
+  jellyfin
+  lyrion
+
+cameras
+  frigate
+  frigate-audio
+  frigate-notify
+  sky-cam
+
+gaming
+  drum-rhythm-game
+  js99er
+  kyber-launcher
+  kyber-server
+  minecraft
+  wolf
+  wolf-pair
+
+extras
+  kdeconnect
+  silent-send
+  sync-cc
+
+backup
+  backup
+  borg-backup
+  gaming-backup
+```
+
+</details>
+
 ## Layout
 
 ```
