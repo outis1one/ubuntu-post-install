@@ -66,6 +66,9 @@ load_site_config() {
     while IFS='=' read -r key val; do
         [[ "$key" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// }" ]] && continue
+        # Strip leading/trailing whitespace from both sides so hand-edited files work
+        key="${key#"${key%%[^[:space:]]*}"}"; key="${key%"${key##*[^[:space:]]}"}"
+        val="${val#"${val%%[^[:space:]]*}"}"; val="${val%"${val##*[^[:space:]]}"}"
         case "$key" in
             SITE_TZ)           SITE_TZ="$val"                              ;;
             SITE_DOMAIN)       SITE_DOMAIN="$val"                          ;;
@@ -328,10 +331,11 @@ configure_caddy_for_service() {
     # Domain prompt — pre-fill from SITE_DOMAIN when available
     echo ""
     local _default_domain=""
-    if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+    if [ -n "$SITE_DOMAIN" ]; then
         _default_domain="${DEFAULT_SUBDOMAIN}.${SITE_DOMAIN}"
         echo "  Default: $_default_domain"
     else
+        echo "  No base domain set — run: sudo ./setup.sh configure"
         echo "  Examples: ${DEFAULT_SUBDOMAIN}.example.com, ${DEFAULT_SUBDOMAIN}.yourdomain.com"
     fi
     echo ""
