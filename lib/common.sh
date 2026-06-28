@@ -184,7 +184,9 @@ require_docker() {
         return 1
     fi
 
-    if ! command -v docker &>/dev/null; then
+    # command -v may miss the binary if PATH is restricted under sudo; check
+    # the canonical apt install location as a fallback before giving up.
+    if ! command -v docker &>/dev/null && ! [ -x /usr/bin/docker ]; then
         log_error "Docker binary not found after install — something went wrong."
         return 1
     fi
@@ -194,7 +196,9 @@ require_docker() {
             && log_info "Added $ACTUAL_USER to the docker group (re-login or run 'newgrp docker' to activate)"
     fi
 
-    log_success "Docker installed ($(docker --version 2>/dev/null))"
+    local _docker_bin
+    _docker_bin="$(command -v docker 2>/dev/null || echo /usr/bin/docker)"
+    log_success "Docker installed ($("$_docker_bin" --version 2>/dev/null))"
 }
 
 # ── Command execution honoring dry-run ───────────────────────────────────────
