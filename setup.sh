@@ -231,7 +231,10 @@ if ! grep -q '^SITE_TZ=' "$DOCKER_DIR/.config" 2>/dev/null; then
     echo "  and Caddy network for every service — you type them once, not every time."
     OFFER_CONFIG=""
     prompt_yn "Configure site defaults now? (y/n):" "y" OFFER_CONFIG
-    [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ] && run_site_configure
+    if [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ]; then
+        run_site_configure
+        load_site_config   # reload so subsequent service prompts see the new values
+    fi
 fi
 
 # 4) Offer Caddy first (most services proxy through it).
