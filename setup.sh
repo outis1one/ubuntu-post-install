@@ -249,9 +249,33 @@ if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
     [ "$OFFER_CADDY" = "y" ] || [ "$OFFER_CADDY" = "Y" ] && run_service caddy
 fi
 
-# 5) Category menu loop: pick a category → checklist → install → back to menu.
+# 5) Installed-service summary — show status before every menu session.
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  INSTALLED SERVICES"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+_any_installed=false
+while IFS= read -r _g; do
+    _group_header_printed=false
+    while IFS= read -r _svc; do
+        if is_installed "$_svc"; then
+            if [ "$_group_header_printed" = false ]; then
+                printf "\n  %-12s\n" "${_g^^}"
+                _group_header_printed=true
+            fi
+            printf "    ✓ %-20s %s\n" "$_svc" "${SERVICE_DESC[$_svc]}"
+            _any_installed=true
+        fi
+    done < <(services_in_group "$_g")
+done < <(groups_present)
+[ "$_any_installed" = false ] && echo "  (none yet)"
+echo ""
+
+# 6) Category menu loop: pick a category → checklist → install → back to menu.
 have_whiptail=false
 command -v whiptail >/dev/null 2>&1 && have_whiptail=true
+# Ensure the terminal is in a clean state before handing control to whiptail.
+stty sane </dev/tty 2>/dev/null || true
 
 while true; do
     mapfile -t CATS < <(groups_present)

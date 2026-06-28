@@ -60,7 +60,7 @@ if [ -f "${SCRIPT_DIR}/setup.sh" ]; then
             && chown -R "${SUDO_USER:-$(id -un)}:" "$DEST" 2>/dev/null || true
         echo ""
     fi
-    exec bash "${SCRIPT_DIR}/setup.sh" </dev/tty
+    exec bash "${SCRIPT_DIR}/setup.sh" </dev/tty >/dev/tty 2>/dev/tty
 fi
 
 # ── Options 1 & 2: clone from GitHub ─────────────────────────────────────────
