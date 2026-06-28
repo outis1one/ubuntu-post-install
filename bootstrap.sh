@@ -48,9 +48,7 @@ echo ""
 
 # ── Option 3: already running from inside the repo ───────────────────────────
 # If setup.sh is sitting next to this script, we have everything we need.
-set +u
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")"
-set -u
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
 if [ -f "${SCRIPT_DIR}/setup.sh" ]; then
     echo "  Running from local copy at $SCRIPT_DIR"
     echo "  (No git or internet needed)"
