@@ -273,8 +273,11 @@ if ! grep -q '^CADDY_MODE=' "$DOCKER_DIR/.config" 2>/dev/null; then
     fi
 fi
 
-# 4) Offer Caddy first (most services proxy through it).
-if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy; then
+# 4) Offer Caddy first (most services proxy through it) — only when Caddy is
+#    (or will be) local to this box. Remote/none mode means Caddy lives
+#    elsewhere, so installing it here would be wrong.
+if [ -n "${SERVICE_GROUP[caddy]:-}" ] && ! is_installed caddy \
+    && [ "${CADDY_MODE:-local}" = "local" ]; then
     echo ""
     OFFER_CADDY=""
     prompt_yn "Install Caddy now? It's the reverse proxy most services use. (y/n):" "y" OFFER_CADDY
