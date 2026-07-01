@@ -9,7 +9,10 @@
 # Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- FRIGATE NVR ----).
 # Own ~/docker/frigate/ with a standalone docker-compose.yml + .env + config.yml.
 # Auto-enables /dev/dri/renderD128 for hardware detection (Intel/AMD) when present.
-# YOU MUST edit config/config.yml to add your camera RTSP streams before starting.
+# Interactively prompts for cameras — RTSP user/pass/IP go in .env as
+# FRIGATE_* vars, which config.yml references via Frigate's {FRIGATE_VAR}
+# substitution syntax so credentials never appear in the YAML directly.
+# Skip the camera prompts to get a starter config.yml to edit by hand.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 # Detected when the script is executed directly rather than sourced by setup.sh.
@@ -205,7 +208,8 @@ install_frigate() {
         echo "  - Create $FRIGATE_DIR with docker-compose.yml + .env + config/config.yml"
         echo "  - Auto-enable /dev/dri/renderD128 for GPU-assisted detection if present"
         echo "  - Expose ports 5000 (web), 8554 (RTSP restream), 8555 (WebRTC)"
-        echo "  - Write a starter config.yml — edit to add camera streams before starting"
+        echo "  - Prompt to add cameras interactively (RTSP creds go in .env)"
+        echo "    or write a starter config.yml if none are added"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
@@ -258,6 +262,8 @@ services:
     restart: unless-stopped
     privileged: true
     shm_size: "256mb"
+    env_file:
+      - .env
     environment:
       - TZ=$TZ_VAL
 $DEVICE_BLOCK
@@ -276,15 +282,117 @@ $DEVICE_BLOCK
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FRIGATE_COMPOSE
 
-    cat > .env << FRIGATE_ENV
-FRIGATE_MEDIA=$FRIGATE_MEDIA
-CADDY_NET=$SITE_CADDY_NET
-FRIGATE_ENV
-
     mkdir -p config
     mkdir -p "$FRIGATE_MEDIA"
 
-    cat > config/config.yml << 'FRIGATE_CONFIG'
+    # ── Camera wizard ────────────────────────────────────────────────────────
+    # Credentials/IPs go in .env as FRIGATE_* variables; Frigate substitutes
+    # any {FRIGATE_VAR} placeholder in config.yml from its container env at
+    # startup, so RTSP secrets never need to be typed into the YAML directly.
+    local GO2RTC_BLOCK="" CAMERAS_BLOCK="" ENV_CAM_VARS="" CAM_INDEX=0
+    while true; do
+        local ADD_CAM=""
+        if [ "$CAM_INDEX" -eq 0 ]; then
+            prompt_yn "Add a camera now? (y/n):" "y" ADD_CAM
+        else
+            prompt_yn "Add another camera? (y/n):" "n" ADD_CAM
+        fi
+        [[ "$ADD_CAM" =~ ^[Yy]$ ]] || break
+
+        local CAM_NAME=""
+        prompt_text "  Camera name (e.g. front_door):" "camera$((CAM_INDEX+1))" CAM_NAME
+        CAM_NAME="$(echo "$CAM_NAME" | tr '[:upper:] ' '[:lower:]_' | tr -cd 'a-z0-9_')"
+        CAM_NAME="${CAM_NAME:-camera$((CAM_INDEX+1))}"
+        local CAM_UPPER="${CAM_NAME^^}"
+
+        local CAM_IP=""
+        prompt_text "  ${CAM_NAME} RTSP IP address:" "" CAM_IP
+        local CAM_PORT=""
+        prompt_text "  ${CAM_NAME} RTSP port [554]:" "554" CAM_PORT
+        local CAM_USER=""
+        prompt_text "  ${CAM_NAME} RTSP username:" "admin" CAM_USER
+        local CAM_PASS=""
+        prompt_text "  ${CAM_NAME} RTSP password (blank = generate one):" "" CAM_PASS
+        [ -z "$CAM_PASS" ] && CAM_PASS="$(generate_password 20)"
+
+        local CAM_PATH=""
+        prompt_text "  ${CAM_NAME} RTSP path (use {sub} for main/sub-stream marker) [/cam/realmonitor?channel=1&subtype={sub}#backchannel=0]:" \
+            "/cam/realmonitor?channel=1&subtype={sub}#backchannel=0" CAM_PATH
+
+        local CAM_SUBSTREAM=""
+        prompt_yn "  Add a lower-res sub-stream for detection? (y/n):" "y" CAM_SUBSTREAM
+
+        local CAM_ENABLED=""
+        prompt_yn "  Enable ${CAM_NAME} immediately? (y/n):" "y" CAM_ENABLED
+        local CAM_NOTIFY=""
+        prompt_yn "  Enable notifications for ${CAM_NAME}? (y/n):" "n" CAM_NOTIFY
+
+        # First camera's credentials get no suffix (FRIGATE_RTSP_USER); each
+        # camera after that gets an index suffix (…USER1, …USER2, …) so
+        # cameras with different logins don't collide.
+        local IDX_SUFFIX=""
+        [ "$CAM_INDEX" -gt 0 ] && IDX_SUFFIX="$CAM_INDEX"
+        local VAR_USER="FRIGATE_RTSP_USER${IDX_SUFFIX}"
+        local VAR_PASS="FRIGATE_RTSP_PASSWORD${IDX_SUFFIX}"
+        local VAR_IP="FRIGATE_${CAM_UPPER}_IP"
+
+        ENV_CAM_VARS="${ENV_CAM_VARS}${VAR_USER}=${CAM_USER}
+${VAR_PASS}=${CAM_PASS}
+${VAR_IP}=${CAM_IP}
+"
+
+        local MAIN_PATH="${CAM_PATH//\{sub\}/0}"
+        local SUB_PATH="${CAM_PATH//\{sub\}/1}"
+
+        GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${CAM_NAME}:
+      - rtsp://{${VAR_USER}}:{${VAR_PASS}}@{${VAR_IP}}:${CAM_PORT}${MAIN_PATH}
+"
+        local INPUTS_BLOCK
+        if [[ "$CAM_SUBSTREAM" =~ ^[Yy]$ ]]; then
+            GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${CAM_NAME}_sub:
+      - rtsp://{${VAR_USER}}:{${VAR_PASS}}@{${VAR_IP}}:${CAM_PORT}${SUB_PATH}
+"
+            INPUTS_BLOCK="        - path: rtsp://127.0.0.1:8554/${CAM_NAME}
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/${CAM_NAME}_sub
+          input_args: preset-rtsp-restream
+          roles:
+            - detect"
+        else
+            INPUTS_BLOCK="        - path: rtsp://127.0.0.1:8554/${CAM_NAME}
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+            - record"
+        fi
+        GO2RTC_BLOCK="${GO2RTC_BLOCK}
+"
+
+        local ENABLED_VAL="false"; [[ "$CAM_ENABLED" =~ ^[Yy]$ ]] && ENABLED_VAL="true"
+        local NOTIFY_VAL="false"; [[ "$CAM_NOTIFY" =~ ^[Yy]$ ]] && NOTIFY_VAL="true"
+
+        CAMERAS_BLOCK="${CAMERAS_BLOCK}  ${CAM_NAME}:
+    enabled: ${ENABLED_VAL}
+    ffmpeg:
+      inputs:
+${INPUTS_BLOCK}
+    detect:
+      enabled: true
+      width: 640
+      height: 480
+      fps: 5
+    notifications:
+      enabled: ${NOTIFY_VAL}
+
+"
+        CAM_INDEX=$((CAM_INDEX+1))
+    done
+
+    if [ "$CAM_INDEX" -eq 0 ]; then
+        # No cameras entered — write a starter config the operator edits by hand.
+        cat > config/config.yml << 'FRIGATE_CONFIG'
 # Frigate Configuration — Docs: https://docs.frigate.video
 #
 # ⚠️  YOU MUST EDIT THIS FILE to add your cameras before starting Frigate.
@@ -319,6 +427,44 @@ snapshots:
   retain:
     default: 7
 FRIGATE_CONFIG
+    else
+        cat > config/config.yml << FRIGATE_CONFIG
+# Frigate Configuration — Docs: https://docs.frigate.video
+#
+# RTSP credentials/IPs come from .env — Frigate substitutes {FRIGATE_VAR}
+# placeholders below from the container's environment at startup.
+
+mqtt:
+  enabled: false   # Set to true and configure if you use Home Assistant
+
+go2rtc:
+  streams:
+${GO2RTC_BLOCK}
+cameras:
+${CAMERAS_BLOCK}
+detectors:
+  default:
+    type: cpu   # Change to 'edgetpu' for Coral TPU or 'openvino' for Intel GPU
+
+record:
+  enabled: true
+  retain:
+    days: 7
+    mode: motion
+
+snapshots:
+  enabled: true
+  retain:
+    default: 7
+FRIGATE_CONFIG
+    fi
+
+    cat > .env << FRIGATE_ENV
+FRIGATE_MEDIA=$FRIGATE_MEDIA
+CADDY_NET=$SITE_CADDY_NET
+${ENV_CAM_VARS}
+FRIGATE_ENV
+    chmod 600 .env
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
@@ -336,7 +482,8 @@ security cameras. Detects people, cars, animals, and more.
 - RTSP restream: port 8554
 - WebRTC: port 8555
 - Recordings: \`$FRIGATE_MEDIA\`
-- Config: \`config/config.yml\` — **add your camera RTSP streams here**
+- Config: \`config/config.yml\` — cameras configured during install ($CAM_INDEX added)
+- Credentials: \`.env\` — RTSP user/pass/IP per camera as FRIGATE_* variables
 
 ## Manage
 \`\`\`bash
@@ -347,8 +494,14 @@ docker compose logs -f    # logs
 docker compose pull && docker compose up -d   # update
 \`\`\`
 
+## Adding/editing cameras later
+Re-run the installer (\`sudo ./setup.sh frigate\`) to add more cameras through
+the same wizard, or edit \`config/config.yml\` and \`.env\` by hand — camera
+credentials in config.yml use Frigate's \`{FRIGATE_VAR}\` substitution syntax,
+resolved from \`.env\` at container startup.
+
 ## First steps
-1. Edit \`config/config.yml\` — add your camera RTSP URLs under \`cameras:\`
+1. Review \`config/config.yml\` — adjust detection zones, masks, retention
 2. Start Frigate: \`docker compose up -d\`
 3. Open http://localhost:5000 to view cameras and configure detection zones
 
@@ -359,17 +512,23 @@ docker compose pull && docker compose up -d   # update
 MD
 
     echo ""
-    log_warning "Edit config/config.yml to add your camera RTSP streams before starting."
+    local START_DEFAULT="n"
+    if [ "$CAM_INDEX" -eq 0 ]; then
+        log_warning "No cameras added — edit config/config.yml to add camera RTSP streams before starting."
+    else
+        log_success "$CAM_INDEX camera(s) configured."
+        START_DEFAULT="y"
+    fi
     echo ""
     local START_FRIGATE=""
-    prompt_yn "Start Frigate now anyway? (y/n):" "n" START_FRIGATE
+    prompt_yn "Start Frigate now? (y/n):" "$START_DEFAULT" START_FRIGATE
     if [ "$START_FRIGATE" = "y" ] || [ "$START_FRIGATE" = "Y" ]; then
         docker compose up -d && log_success "Frigate started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
     echo "  Access at:  http://localhost:5000"
-    echo "  Config:     $FRIGATE_DIR/config/config.yml  (add cameras here)"
+    echo "  Config:     $FRIGATE_DIR/config/config.yml"
     echo ""
 }
 
