@@ -197,61 +197,385 @@ fi
 
 register_service frigate cameras "AI-powered NVR — object detection on security cameras (Frigate)" 5000
 
+# ── Existing-config parsing (best-effort) ────────────────────────────────────
+# Populates the CAM_* arrays (declared by install_frigate) plus ENV_MAP by
+# reading an already-generated config.yml + .env. Only understands the shape
+# this installer itself writes; heavily hand-edited files may not parse
+# cleanly — the caller always offers a backup-and-fresh option as a fallback.
+_frigate_parse_existing() {
+    local cfg="$1" env="$2"
+    declare -gA ENV_MAP=()
+    local k v
+    while IFS='=' read -r k v; do
+        [[ "$k" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${k// /}" ]] && continue
+        ENV_MAP["$k"]="$v"
+    done < "$env"
+
+    local re_stream_key='^[[:space:]]{4}([a-z0-9_]+):[[:space:]]*$'
+    local re_rtsp_line='rtsp://\{([A-Za-z0-9_]+)\}:\{([A-Za-z0-9_]+)\}@\{([A-Za-z0-9_]+)\}:([0-9]+)(.*)$'
+    local re_cam_key='^[[:space:]]{2}([a-z0-9_]+):[[:space:]]*$'
+    local re_enabled='^[[:space:]]{4}enabled:[[:space:]]*(true|false)'
+    local re_notify_key='^[[:space:]]{4}notifications:'
+    local re_notify_val='^[[:space:]]{6}enabled:[[:space:]]*(true|false)'
+
+    declare -A _MAIN_OF=() _SUB_OF=() _PORT_OF=() _VU_OF=() _VP_OF=() _VI_OF=()
+    local _order=() _stream="" in_go2rtc=false line
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^go2rtc: ]]; then in_go2rtc=true; continue; fi
+        if $in_go2rtc && [[ "$line" =~ ^[a-zA-Z] ]]; then in_go2rtc=false; fi
+        $in_go2rtc || continue
+        if [[ "$line" =~ $re_stream_key ]]; then _stream="${BASH_REMATCH[1]}"; continue; fi
+        if [[ -n "$_stream" ]] && [[ "$line" =~ $re_rtsp_line ]]; then
+            local vu="${BASH_REMATCH[1]}" vp="${BASH_REMATCH[2]}" vi="${BASH_REMATCH[3]}"
+            local port="${BASH_REMATCH[4]}" suffix="${BASH_REMATCH[5]}"
+            if [[ "$_stream" == *_sub ]]; then
+                _SUB_OF["${_stream%_sub}"]="$suffix"
+            else
+                _MAIN_OF["$_stream"]="$suffix"; _PORT_OF["$_stream"]="$port"
+                _VU_OF["$_stream"]="$vu"; _VP_OF["$_stream"]="$vp"; _VI_OF["$_stream"]="$vi"
+                _order+=("$_stream")
+            fi
+            _stream=""
+        fi
+    done < "$cfg"
+
+    declare -A _ENABLED_OF=() _NOTIFY_OF=()
+    local cam="" in_cameras=false in_notify=false
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^cameras: ]]; then in_cameras=true; continue; fi
+        if $in_cameras && [[ "$line" =~ ^[a-zA-Z] ]]; then in_cameras=false; fi
+        $in_cameras || continue
+        if [[ "$line" =~ $re_cam_key ]]; then cam="${BASH_REMATCH[1]}"; in_notify=false; continue; fi
+        [[ -z "$cam" ]] && continue
+        if [[ "$line" =~ $re_notify_key ]]; then in_notify=true; continue; fi
+        if $in_notify && [[ "$line" =~ $re_notify_val ]]; then
+            _NOTIFY_OF["$cam"]="${BASH_REMATCH[1]}"; in_notify=false; continue
+        fi
+        if [[ "$line" =~ $re_enabled ]]; then _ENABLED_OF["$cam"]="${BASH_REMATCH[1]}"; fi
+    done < "$cfg"
+
+    CAM_NAME=() CAM_PORT=() CAM_VARUSER=() CAM_VARPASS=() CAM_VARIP=()
+    CAM_HASSUB=() CAM_MAIN_SUFFIX=() CAM_SUB_SUFFIX=() CAM_ENABLED=() CAM_NOTIFY=()
+    CAM_CRED_USER=() CAM_CRED_PASS=() CAM_CRED_IP=()
+    local name
+    for name in "${_order[@]}"; do
+        CAM_NAME+=("$name")
+        CAM_PORT+=("${_PORT_OF[$name]}")
+        CAM_VARUSER+=("${_VU_OF[$name]}")
+        CAM_VARPASS+=("${_VP_OF[$name]}")
+        CAM_VARIP+=("${_VI_OF[$name]}")
+        CAM_MAIN_SUFFIX+=("${_MAIN_OF[$name]}")
+        if [[ -n "${_SUB_OF[$name]:-}" ]]; then
+            CAM_HASSUB+=("true"); CAM_SUB_SUFFIX+=("${_SUB_OF[$name]}")
+        else
+            CAM_HASSUB+=("false"); CAM_SUB_SUFFIX+=("")
+        fi
+        CAM_ENABLED+=("${_ENABLED_OF[$name]:-false}")
+        CAM_NOTIFY+=("${_NOTIFY_OF[$name]:-false}")
+        CAM_CRED_USER+=("${ENV_MAP[${_VU_OF[$name]}]:-}")
+        CAM_CRED_PASS+=("${ENV_MAP[${_VP_OF[$name]}]:-}")
+        CAM_CRED_IP+=("${ENV_MAP[${_VI_OF[$name]}]:-}")
+    done
+}
+
+_frigate_backup_existing() {
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    local bdir="$FRIGATE_DIR/backup-$ts"
+    mkdir -p "$bdir"
+    [ -f config/config.yml ] && cp config/config.yml "$bdir/config.yml"
+    [ -f .env ] && cp .env "$bdir/.env"
+    [ -f docker-compose.yml ] && cp docker-compose.yml "$bdir/docker-compose.yml"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$bdir" 2>/dev/null || true
+    log_success "Backed up existing config to $bdir"
+}
+
+_frigate_clear_cameras() {
+    CAM_NAME=() CAM_PORT=() CAM_VARUSER=() CAM_VARPASS=() CAM_VARIP=()
+    CAM_HASSUB=() CAM_MAIN_SUFFIX=() CAM_SUB_SUFFIX=() CAM_ENABLED=() CAM_NOTIFY=()
+    CAM_CRED_USER=() CAM_CRED_PASS=() CAM_CRED_IP=()
+}
+
+_frigate_remove_by_index() {
+    local nums="$1"
+    declare -A to_remove=()
+    local n
+    for n in $nums; do to_remove["$((n-1))"]=1; done
+    local _NAME=() _PORT=() _VU=() _VP=() _VI=() _HS=() _MS=() _SS=() _EN=() _NO=() _CU=() _CP=() _CI=()
+    local i removed=0
+    for i in "${!CAM_NAME[@]}"; do
+        if [[ -n "${to_remove[$i]:-}" ]]; then removed=$((removed+1)); continue; fi
+        _NAME+=("${CAM_NAME[$i]}"); _PORT+=("${CAM_PORT[$i]}")
+        _VU+=("${CAM_VARUSER[$i]}"); _VP+=("${CAM_VARPASS[$i]}"); _VI+=("${CAM_VARIP[$i]}")
+        _HS+=("${CAM_HASSUB[$i]}"); _MS+=("${CAM_MAIN_SUFFIX[$i]}"); _SS+=("${CAM_SUB_SUFFIX[$i]}")
+        _EN+=("${CAM_ENABLED[$i]}"); _NO+=("${CAM_NOTIFY[$i]}")
+        _CU+=("${CAM_CRED_USER[$i]}"); _CP+=("${CAM_CRED_PASS[$i]}"); _CI+=("${CAM_CRED_IP[$i]}")
+    done
+    CAM_NAME=("${_NAME[@]}"); CAM_PORT=("${_PORT[@]}"); CAM_VARUSER=("${_VU[@]}"); CAM_VARPASS=("${_VP[@]}")
+    CAM_VARIP=("${_VI[@]}"); CAM_HASSUB=("${_HS[@]}"); CAM_MAIN_SUFFIX=("${_MS[@]}"); CAM_SUB_SUFFIX=("${_SS[@]}")
+    CAM_ENABLED=("${_EN[@]}"); CAM_NOTIFY=("${_NO[@]}"); CAM_CRED_USER=("${_CU[@]}")
+    CAM_CRED_PASS=("${_CP[@]}"); CAM_CRED_IP=("${_CI[@]}")
+    log_success "Removed $removed camera(s)."
+}
+
+# Presents the numbered menu once existing cameras were parsed. Sets
+# FRIGATE_SKIP_WIZARD=true when the operator chooses to leave everything
+# untouched; mutates the CAM_* arrays in place for backup/remove/add.
+_frigate_review_existing() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Existing Frigate cameras found                              ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    local i
+    for i in "${!CAM_NAME[@]}"; do
+        printf "  %d) %-16s enabled=%-5s substream=%-5s ip=%s\n" \
+            "$((i+1))" "${CAM_NAME[$i]}" "${CAM_ENABLED[$i]}" "${CAM_HASSUB[$i]}" "${CAM_CRED_IP[$i]:-<unknown>}"
+    done
+    echo ""
+    echo "  [1] Keep everything as-is (no changes)"
+    echo "  [2] Backup existing config and start fresh"
+    echo "  [3] Add more cameras (keep these)"
+    echo "  [4] Remove cameras (choose numbers, or 'all'), then optionally add more"
+    echo ""
+    local CHOICE=""
+    prompt_text "  Choice [1]:" "1" CHOICE
+    case "$CHOICE" in
+        2)
+            _frigate_backup_existing
+            _frigate_clear_cameras
+            FRIGATE_SKIP_WIZARD=false
+            ;;
+        4)
+            local REMOVE=""
+            prompt_text "  Remove which numbers (space-separated) or 'all':" "" REMOVE
+            if [ "$REMOVE" = "all" ]; then
+                _frigate_clear_cameras
+            elif [ -n "$REMOVE" ]; then
+                _frigate_remove_by_index "$REMOVE"
+            fi
+            FRIGATE_SKIP_WIZARD=false
+            ;;
+        3)
+            FRIGATE_SKIP_WIZARD=false
+            ;;
+        *)
+            FRIGATE_SKIP_WIZARD=true
+            ;;
+    esac
+}
+
+# Next unused credential-var suffix, treating "no suffix" as 0. Kept cameras
+# retain their existing var names untouched; new cameras never reuse one.
+_frigate_next_suffix_int() {
+    local max=-1 re='^FRIGATE_RTSP_USER([0-9]*)$' v n i
+    for i in "${!CAM_VARUSER[@]}"; do
+        v="${CAM_VARUSER[$i]}"
+        [[ "$v" =~ $re ]] || continue
+        n="${BASH_REMATCH[1]}"; [ -z "$n" ] && n=0
+        [ "$n" -gt "$max" ] && max="$n"
+    done
+    echo "$((max+1))"
+}
+
+# Prompts to add cameras one at a time, appending to the CAM_* arrays.
+_frigate_camera_wizard() {
+    while true; do
+        local ADD_CAM=""
+        if [ "${#CAM_NAME[@]}" -eq 0 ]; then
+            prompt_yn "Add a camera now? (y/n):" "y" ADD_CAM
+        else
+            prompt_yn "Add another camera? (y/n):" "n" ADD_CAM
+        fi
+        [[ "$ADD_CAM" =~ ^[Yy]$ ]] || break
+
+        local NC_NAME=""
+        prompt_text "  Camera name (e.g. front_door):" "camera$((${#CAM_NAME[@]}+1))" NC_NAME
+        NC_NAME="$(echo "$NC_NAME" | tr '[:upper:] ' '[:lower:]_' | tr -cd 'a-z0-9_')"
+        NC_NAME="${NC_NAME:-camera$((${#CAM_NAME[@]}+1))}"
+        local NC_UPPER="${NC_NAME^^}"
+
+        local NC_IP=""
+        prompt_text "  ${NC_NAME} RTSP IP address:" "" NC_IP
+        local NC_PORT=""
+        prompt_text "  ${NC_NAME} RTSP port [554]:" "554" NC_PORT
+        local NC_USER=""
+        prompt_text "  ${NC_NAME} RTSP username:" "admin" NC_USER
+        local NC_PASS=""
+        prompt_text "  ${NC_NAME} RTSP password (blank = generate one):" "" NC_PASS
+        [ -z "$NC_PASS" ] && NC_PASS="$(generate_password 20)"
+
+        local NC_PATH=""
+        prompt_text "  ${NC_NAME} RTSP path (use {sub} for main/sub-stream marker) [/cam/realmonitor?channel=1&subtype={sub}#backchannel=0]:" \
+            "/cam/realmonitor?channel=1&subtype={sub}#backchannel=0" NC_PATH
+
+        local NC_SUBSTREAM=""
+        prompt_yn "  Add a lower-res sub-stream for detection? (y/n):" "y" NC_SUBSTREAM
+
+        local NC_ENABLED=""
+        prompt_yn "  Enable ${NC_NAME} immediately? (y/n):" "y" NC_ENABLED
+        local NC_NOTIFY=""
+        prompt_yn "  Enable notifications for ${NC_NAME}? (y/n):" "n" NC_NOTIFY
+
+        local _suffix_int; _suffix_int="$(_frigate_next_suffix_int)"
+        local IDX_SUFFIX=""; [ "$_suffix_int" -gt 0 ] && IDX_SUFFIX="$_suffix_int"
+
+        CAM_NAME+=("$NC_NAME")
+        CAM_PORT+=("$NC_PORT")
+        CAM_VARUSER+=("FRIGATE_RTSP_USER${IDX_SUFFIX}")
+        CAM_VARPASS+=("FRIGATE_RTSP_PASSWORD${IDX_SUFFIX}")
+        CAM_VARIP+=("FRIGATE_${NC_UPPER}_IP")
+        if [[ "$NC_SUBSTREAM" =~ ^[Yy]$ ]]; then CAM_HASSUB+=("true"); else CAM_HASSUB+=("false"); fi
+        CAM_MAIN_SUFFIX+=("${NC_PATH//\{sub\}/0}")
+        CAM_SUB_SUFFIX+=("${NC_PATH//\{sub\}/1}")
+        if [[ "$NC_ENABLED" =~ ^[Yy]$ ]]; then CAM_ENABLED+=("true"); else CAM_ENABLED+=("false"); fi
+        if [[ "$NC_NOTIFY" =~ ^[Yy]$ ]]; then CAM_NOTIFY+=("true"); else CAM_NOTIFY+=("false"); fi
+        CAM_CRED_USER+=("$NC_USER")
+        CAM_CRED_PASS+=("$NC_PASS")
+        CAM_CRED_IP+=("$NC_IP")
+    done
+}
+
+# Builds GO2RTC_BLOCK / CAMERAS_BLOCK / ENV_CAM_VARS from the CAM_* arrays.
+_frigate_render_config() {
+    GO2RTC_BLOCK=""; CAMERAS_BLOCK=""; ENV_CAM_VARS=""
+    local i
+    for i in "${!CAM_NAME[@]}"; do
+        local nm="${CAM_NAME[$i]}" port="${CAM_PORT[$i]}"
+        local vu="${CAM_VARUSER[$i]}" vp="${CAM_VARPASS[$i]}" vi="${CAM_VARIP[$i]}"
+        local hassub="${CAM_HASSUB[$i]}" mainsuf="${CAM_MAIN_SUFFIX[$i]}" subsuf="${CAM_SUB_SUFFIX[$i]}"
+        local enabled="${CAM_ENABLED[$i]}" notify="${CAM_NOTIFY[$i]}"
+        local cu="${CAM_CRED_USER[$i]}" cp="${CAM_CRED_PASS[$i]}" ci="${CAM_CRED_IP[$i]}"
+
+        ENV_CAM_VARS="${ENV_CAM_VARS}${vu}=${cu}
+${vp}=${cp}
+${vi}=${ci}
+"
+        GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${nm}:
+      - rtsp://{${vu}}:{${vp}}@{${vi}}:${port}${mainsuf}
+"
+        local inputs_block
+        if [ "$hassub" = true ]; then
+            GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${nm}_sub:
+      - rtsp://{${vu}}:{${vp}}@{${vi}}:${port}${subsuf}
+"
+            inputs_block="        - path: rtsp://127.0.0.1:8554/${nm}
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+        - path: rtsp://127.0.0.1:8554/${nm}_sub
+          input_args: preset-rtsp-restream
+          roles:
+            - detect"
+        else
+            inputs_block="        - path: rtsp://127.0.0.1:8554/${nm}
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+            - record"
+        fi
+        GO2RTC_BLOCK="${GO2RTC_BLOCK}
+"
+        CAMERAS_BLOCK="${CAMERAS_BLOCK}  ${nm}:
+    enabled: ${enabled}
+    ffmpeg:
+      inputs:
+${inputs_block}
+    detect:
+      enabled: true
+      width: 640
+      height: 480
+      fps: 5
+    notifications:
+      enabled: ${notify}
+
+"
+    done
+}
+
 install_frigate() {
     require_docker || return 1
 
     local FRIGATE_DIR="$DOCKER_DIR/frigate"
-    local DEFAULT_MEDIA="$ACTUAL_HOME/frigate"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Frigate would:"
         echo "  - Create $FRIGATE_DIR with docker-compose.yml + .env + config/config.yml"
         echo "  - Auto-enable /dev/dri/renderD128 for GPU-assisted detection if present"
         echo "  - Expose ports 5000 (web), 8554 (RTSP restream), 8555 (WebRTC)"
+        echo "  - If already configured: show existing cameras and offer to keep,"
+        echo "    back up + start fresh, add more, or remove some"
         echo "  - Prompt to add cameras interactively (RTSP creds go in .env)"
         echo "    or write a starter config.yml if none are added"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
 
-    local FRIGATE_MEDIA=""
-    prompt_text "Path for recordings/snapshots [$DEFAULT_MEDIA]:" "$DEFAULT_MEDIA" FRIGATE_MEDIA
-    FRIGATE_MEDIA="${FRIGATE_MEDIA/#\~/$ACTUAL_HOME}"; FRIGATE_MEDIA="${FRIGATE_MEDIA%/}"
-
     mkdir -p "$FRIGATE_DIR"
     ensure_docker_dir_ownership "$FRIGATE_DIR"
     cd "$FRIGATE_DIR" || return 1
 
-    local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+    local CAM_NAME=() CAM_PORT=() CAM_VARUSER=() CAM_VARPASS=() CAM_VARIP=()
+    local CAM_HASSUB=() CAM_MAIN_SUFFIX=() CAM_SUB_SUFFIX=() CAM_ENABLED=() CAM_NOTIFY=()
+    local CAM_CRED_USER=() CAM_CRED_PASS=() CAM_CRED_IP=()
+    local FRIGATE_SKIP_WIZARD=false
+    declare -A ENV_MAP=()
 
-    # Hardware detection: include /dev/dri only when a render node exists
-    local DEVICE_BLOCK=""
-    if [ -e /dev/dri/renderD128 ]; then
-        DEVICE_BLOCK="    devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128"
-        log_success "Render node found — enabling hardware-accelerated detection"
-    else
-        log_warning "No /dev/dri/renderD128 — Frigate will use CPU detection."
+    if [ -f config/config.yml ] && [ -f .env ]; then
+        _frigate_parse_existing config/config.yml .env
+        if [ "${#CAM_NAME[@]}" -gt 0 ]; then
+            _frigate_review_existing
+        else
+            log_warning "Existing config.yml found but no cameras could be parsed from it."
+            local PROCEED_ANYWAY=""
+            prompt_yn "  Back up existing config and continue with the wizard? (y/n):" "y" PROCEED_ANYWAY
+            if [[ "$PROCEED_ANYWAY" =~ ^[Yy]$ ]]; then
+                _frigate_backup_existing
+            else
+                log_info "Leaving existing config untouched."
+                return 0
+            fi
+        fi
     fi
 
-    local _CADDY_NET_BLOCK=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
-        _CADDY_NET_BLOCK="    networks:
+    if [ "$FRIGATE_SKIP_WIZARD" = true ]; then
+        log_success "Keeping existing Frigate configuration unchanged ($DOCKER_DIR/frigate)."
+    else
+        local DEFAULT_MEDIA="${ENV_MAP[FRIGATE_MEDIA]:-$ACTUAL_HOME/frigate}"
+        local FRIGATE_MEDIA=""
+        prompt_text "Path for recordings/snapshots [$DEFAULT_MEDIA]:" "$DEFAULT_MEDIA" FRIGATE_MEDIA
+        FRIGATE_MEDIA="${FRIGATE_MEDIA/#\~/$ACTUAL_HOME}"; FRIGATE_MEDIA="${FRIGATE_MEDIA%/}"
+
+        local TZ_VAL; TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+
+        # Hardware detection: include /dev/dri only when a render node exists
+        local DEVICE_BLOCK=""
+        if [ -e /dev/dri/renderD128 ]; then
+            DEVICE_BLOCK="    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128"
+            log_success "Render node found — enabling hardware-accelerated detection"
+        else
+            log_warning "No /dev/dri/renderD128 — Frigate will use CPU detection."
+        fi
+
+        local _CADDY_NET_BLOCK=""
+        if [ -d "$DOCKER_DIR/caddy" ]; then
+            _CADDY_NET_BLOCK="    networks:
       - caddy_net
 "
-    fi
+        fi
 
-    local _CADDY_NET_SECTION=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
-        _CADDY_NET_SECTION="
+        local _CADDY_NET_SECTION=""
+        if [ -d "$DOCKER_DIR/caddy" ]; then
+            _CADDY_NET_SECTION="
 networks:
   caddy_net:
     external: true
     name: ${SITE_CADDY_NET:-caddy_net}
 "
-    fi
+        fi
 
-    cat > docker-compose.yml << FRIGATE_COMPOSE
+        cat > docker-compose.yml << FRIGATE_COMPOSE
 name: frigate
 
 services:
@@ -282,117 +606,18 @@ $DEVICE_BLOCK
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FRIGATE_COMPOSE
 
-    mkdir -p config
-    mkdir -p "$FRIGATE_MEDIA"
+        mkdir -p config
+        mkdir -p "$FRIGATE_MEDIA"
 
-    # ── Camera wizard ────────────────────────────────────────────────────────
-    # Credentials/IPs go in .env as FRIGATE_* variables; Frigate substitutes
-    # any {FRIGATE_VAR} placeholder in config.yml from its container env at
-    # startup, so RTSP secrets never need to be typed into the YAML directly.
-    local GO2RTC_BLOCK="" CAMERAS_BLOCK="" ENV_CAM_VARS="" CAM_INDEX=0
-    while true; do
-        local ADD_CAM=""
-        if [ "$CAM_INDEX" -eq 0 ]; then
-            prompt_yn "Add a camera now? (y/n):" "y" ADD_CAM
-        else
-            prompt_yn "Add another camera? (y/n):" "n" ADD_CAM
-        fi
-        [[ "$ADD_CAM" =~ ^[Yy]$ ]] || break
+        # Credentials/IPs go in .env as FRIGATE_* variables; Frigate substitutes
+        # any {FRIGATE_VAR} placeholder in config.yml from its container env at
+        # startup, so RTSP secrets never need to be typed into the YAML directly.
+        _frigate_camera_wizard
+        _frigate_render_config
 
-        local CAM_NAME=""
-        prompt_text "  Camera name (e.g. front_door):" "camera$((CAM_INDEX+1))" CAM_NAME
-        CAM_NAME="$(echo "$CAM_NAME" | tr '[:upper:] ' '[:lower:]_' | tr -cd 'a-z0-9_')"
-        CAM_NAME="${CAM_NAME:-camera$((CAM_INDEX+1))}"
-        local CAM_UPPER="${CAM_NAME^^}"
-
-        local CAM_IP=""
-        prompt_text "  ${CAM_NAME} RTSP IP address:" "" CAM_IP
-        local CAM_PORT=""
-        prompt_text "  ${CAM_NAME} RTSP port [554]:" "554" CAM_PORT
-        local CAM_USER=""
-        prompt_text "  ${CAM_NAME} RTSP username:" "admin" CAM_USER
-        local CAM_PASS=""
-        prompt_text "  ${CAM_NAME} RTSP password (blank = generate one):" "" CAM_PASS
-        [ -z "$CAM_PASS" ] && CAM_PASS="$(generate_password 20)"
-
-        local CAM_PATH=""
-        prompt_text "  ${CAM_NAME} RTSP path (use {sub} for main/sub-stream marker) [/cam/realmonitor?channel=1&subtype={sub}#backchannel=0]:" \
-            "/cam/realmonitor?channel=1&subtype={sub}#backchannel=0" CAM_PATH
-
-        local CAM_SUBSTREAM=""
-        prompt_yn "  Add a lower-res sub-stream for detection? (y/n):" "y" CAM_SUBSTREAM
-
-        local CAM_ENABLED=""
-        prompt_yn "  Enable ${CAM_NAME} immediately? (y/n):" "y" CAM_ENABLED
-        local CAM_NOTIFY=""
-        prompt_yn "  Enable notifications for ${CAM_NAME}? (y/n):" "n" CAM_NOTIFY
-
-        # First camera's credentials get no suffix (FRIGATE_RTSP_USER); each
-        # camera after that gets an index suffix (…USER1, …USER2, …) so
-        # cameras with different logins don't collide.
-        local IDX_SUFFIX=""
-        [ "$CAM_INDEX" -gt 0 ] && IDX_SUFFIX="$CAM_INDEX"
-        local VAR_USER="FRIGATE_RTSP_USER${IDX_SUFFIX}"
-        local VAR_PASS="FRIGATE_RTSP_PASSWORD${IDX_SUFFIX}"
-        local VAR_IP="FRIGATE_${CAM_UPPER}_IP"
-
-        ENV_CAM_VARS="${ENV_CAM_VARS}${VAR_USER}=${CAM_USER}
-${VAR_PASS}=${CAM_PASS}
-${VAR_IP}=${CAM_IP}
-"
-
-        local MAIN_PATH="${CAM_PATH//\{sub\}/0}"
-        local SUB_PATH="${CAM_PATH//\{sub\}/1}"
-
-        GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${CAM_NAME}:
-      - rtsp://{${VAR_USER}}:{${VAR_PASS}}@{${VAR_IP}}:${CAM_PORT}${MAIN_PATH}
-"
-        local INPUTS_BLOCK
-        if [[ "$CAM_SUBSTREAM" =~ ^[Yy]$ ]]; then
-            GO2RTC_BLOCK="${GO2RTC_BLOCK}    ${CAM_NAME}_sub:
-      - rtsp://{${VAR_USER}}:{${VAR_PASS}}@{${VAR_IP}}:${CAM_PORT}${SUB_PATH}
-"
-            INPUTS_BLOCK="        - path: rtsp://127.0.0.1:8554/${CAM_NAME}
-          input_args: preset-rtsp-restream
-          roles:
-            - record
-        - path: rtsp://127.0.0.1:8554/${CAM_NAME}_sub
-          input_args: preset-rtsp-restream
-          roles:
-            - detect"
-        else
-            INPUTS_BLOCK="        - path: rtsp://127.0.0.1:8554/${CAM_NAME}
-          input_args: preset-rtsp-restream
-          roles:
-            - detect
-            - record"
-        fi
-        GO2RTC_BLOCK="${GO2RTC_BLOCK}
-"
-
-        local ENABLED_VAL="false"; [[ "$CAM_ENABLED" =~ ^[Yy]$ ]] && ENABLED_VAL="true"
-        local NOTIFY_VAL="false"; [[ "$CAM_NOTIFY" =~ ^[Yy]$ ]] && NOTIFY_VAL="true"
-
-        CAMERAS_BLOCK="${CAMERAS_BLOCK}  ${CAM_NAME}:
-    enabled: ${ENABLED_VAL}
-    ffmpeg:
-      inputs:
-${INPUTS_BLOCK}
-    detect:
-      enabled: true
-      width: 640
-      height: 480
-      fps: 5
-    notifications:
-      enabled: ${NOTIFY_VAL}
-
-"
-        CAM_INDEX=$((CAM_INDEX+1))
-    done
-
-    if [ "$CAM_INDEX" -eq 0 ]; then
-        # No cameras entered — write a starter config the operator edits by hand.
-        cat > config/config.yml << 'FRIGATE_CONFIG'
+        if [ "${#CAM_NAME[@]}" -eq 0 ]; then
+            # No cameras entered — write a starter config the operator edits by hand.
+            cat > config/config.yml << 'FRIGATE_CONFIG'
 # Frigate Configuration — Docs: https://docs.frigate.video
 #
 # ⚠️  YOU MUST EDIT THIS FILE to add your cameras before starting Frigate.
@@ -427,8 +652,8 @@ snapshots:
   retain:
     default: 7
 FRIGATE_CONFIG
-    else
-        cat > config/config.yml << FRIGATE_CONFIG
+        else
+            cat > config/config.yml << FRIGATE_CONFIG
 # Frigate Configuration — Docs: https://docs.frigate.video
 #
 # RTSP credentials/IPs come from .env — Frigate substitutes {FRIGATE_VAR}
@@ -457,22 +682,22 @@ snapshots:
   retain:
     default: 7
 FRIGATE_CONFIG
-    fi
+        fi
 
-    cat > .env << FRIGATE_ENV
+        cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_MEDIA
 CADDY_NET=$SITE_CADDY_NET
 ${ENV_CAM_VARS}
 FRIGATE_ENV
-    chmod 600 .env
+        chmod 600 .env
 
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
-    log_success "Frigate configured at $FRIGATE_DIR"
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_DIR"
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
+        log_success "Frigate configured at $FRIGATE_DIR"
 
-    configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
+        configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
 
-    write_readme "$FRIGATE_DIR" << MD
+        write_readme "$FRIGATE_DIR" << MD
 # Frigate NVR
 
 AI-powered network video recorder with real-time object detection for
@@ -482,7 +707,7 @@ security cameras. Detects people, cars, animals, and more.
 - RTSP restream: port 8554
 - WebRTC: port 8555
 - Recordings: \`$FRIGATE_MEDIA\`
-- Config: \`config/config.yml\` — cameras configured during install ($CAM_INDEX added)
+- Config: \`config/config.yml\` — cameras configured during install (${#CAM_NAME[@]} total)
 - Credentials: \`.env\` — RTSP user/pass/IP per camera as FRIGATE_* variables
 
 ## Manage
@@ -495,10 +720,12 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## Adding/editing cameras later
-Re-run the installer (\`sudo ./setup.sh frigate\`) to add more cameras through
-the same wizard, or edit \`config/config.yml\` and \`.env\` by hand — camera
-credentials in config.yml use Frigate's \`{FRIGATE_VAR}\` substitution syntax,
-resolved from \`.env\` at container startup.
+Re-run the installer (\`sudo ./setup.sh frigate\`) — it detects your existing
+config.yml/.env and lets you keep everything as-is, back up and start fresh,
+add more cameras, or remove specific ones by number. Or edit
+\`config/config.yml\` and \`.env\` by hand — camera credentials in config.yml
+use Frigate's \`{FRIGATE_VAR}\` substitution syntax, resolved from \`.env\` at
+container startup.
 
 ## First steps
 1. Review \`config/config.yml\` — adjust detection zones, masks, retention
@@ -510,13 +737,14 @@ resolved from \`.env\` at container startup.
 - Google Coral TPU: set \`detectors.default.type: edgetpu\` + add USB device
 - Docs: https://docs.frigate.video/configuration/hardware_acceleration
 MD
+    fi
 
     echo ""
     local START_DEFAULT="n"
-    if [ "$CAM_INDEX" -eq 0 ]; then
+    if [ "${#CAM_NAME[@]}" -eq 0 ]; then
         log_warning "No cameras added — edit config/config.yml to add camera RTSP streams before starting."
     else
-        log_success "$CAM_INDEX camera(s) configured."
+        log_success "${#CAM_NAME[@]} camera(s) configured."
         START_DEFAULT="y"
     fi
     echo ""
