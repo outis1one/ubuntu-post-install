@@ -131,11 +131,6 @@ run_site_configure() {
     [ -z "$_cur_mode" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _cur_mode="remote"
     [ -z "$_cur_mode" ] && _cur_mode="local"
 
-    prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
-    prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
-    prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
-
-    echo ""
     echo "  Where does Caddy run?"
     echo "    [1] This machine  — Caddy installed here (default)"
     echo "    [2] Remote machine — different server, VPN node, or Netbird peer"
@@ -152,6 +147,17 @@ run_site_configure() {
         *) CADDY_MODE="local"  ;;
     esac
     CADDY_REMOTE_HOST=""   # clear legacy value; CADDY_MODE is authoritative now
+    echo ""
+
+    prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
+    prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
+
+    # Caddy Docker network only matters when Caddy runs locally — it's the
+    # shared bridge network services join to reach a local Caddy container
+    # by name. Remote/none Caddy proxies via localhost:PORT instead.
+    if [ "$CADDY_MODE" = "local" ]; then
+        prompt_text "  Caddy Docker network [${_cur_net}]:" "$_cur_net" SITE_CADDY_NET
+    fi
 
     export SITE_TZ SITE_DOMAIN SITE_CADDY_NET CADDY_MODE CADDY_REMOTE_HOST
     mkdir -p "$DOCKER_DIR"
