@@ -244,15 +244,41 @@ install_asterisk() {
     # ── Networking mode ───────────────────────────────────────────────────────
     echo ""
     echo "  Networking mode:"
-    echo "    1) LAN-only  — no domain, self-signed cert, works on local network/VPN only"
-    echo "    2) FQDN      — TLS + TURN relay, works from anywhere (requires public domain)"
+    echo "    1) FQDN (recommended) — TLS + TURN relay, every phone connects the"
+    echo "                            same way regardless of LAN/VLAN/remote"
+    echo "    2) LAN-only           — no domain, self-signed cert, local network/VPN only"
     local HA_NETMODE=""
     prompt_text "Choose [1]:" "1" HA_NETMODE
 
     local DOMAIN_NAME=""
-    if [[ "$HA_NETMODE" == "2" ]]; then
-        prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=skip]:" "" DOMAIN_NAME
+    if [[ "$HA_NETMODE" != "2" ]]; then
+        prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=fall back to LAN-only]:" "" DOMAIN_NAME
+        [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — proceeding in LAN-only mode."
     fi
+
+    # ── Local networks / VLANs ────────────────────────────────────────────────
+    # Feeds HAS_VLANS/VLAN_SUBNETS into .env, which the entrypoint reads to add
+    # extra local_net= entries in pjsip.conf so phones on those subnets get
+    # correct NAT/SDP handling (this is what fixes the "no sound" symptom for
+    # devices on a VLAN the server isn't itself attached to).
+    echo ""
+    echo "  Detecting networks this host can see..."
+    local DETECTED_NETS=""
+    DETECTED_NETS="$(ip -o -f inet addr show scope global 2>/dev/null \
+        | awk '{print $2, $4}' \
+        | grep -Ev '^(docker|br-|veth|tun|tap|wg)' \
+        | awk '{ split($2,a,"/"); split(a[1],o,"."); print o[1]"."o[2]"."o[3]".0/"a[2] }' \
+        | sort -u)"
+    if [[ -n "$DETECTED_NETS" ]]; then
+        echo "  This host is directly attached to:"
+        echo "$DETECTED_NETS" | sed 's/^/    /'
+    fi
+    echo "  Phones on OTHER VLANs (this server usually can't see those directly)"
+    echo "  still need to be listed here so their media is treated as local/trusted."
+    local VLAN_SUBNETS_VAL=""
+    prompt_text "VLAN/VPN subnets, space-separated CIDRs [blank=none]:" "" VLAN_SUBNETS_VAL
+    local HAS_VLANS_VAL="n"
+    [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
 
     # ── Secrets ───────────────────────────────────────────────────────────────
     local TURN_PASSWORD
@@ -280,6 +306,7 @@ services:
       - ./spool:/var/spool/asterisk
       - ./lib:/var/lib/asterisk
       - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
+CADDY_VOLUME_PLACEHOLDER
     env_file: .env
     restart: unless-stopped
     healthcheck:
@@ -316,6 +343,15 @@ services:
 
 EOF
 
+    # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
+    # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
+    # self-signed. No-op if Caddy isn't installed on this box.
+    if [[ -d "$DOCKER_DIR/caddy/data" ]]; then
+        sed -i "s#CADDY_VOLUME_PLACEHOLDER#      - ${DOCKER_DIR}/caddy/data:/caddy-data:ro#" docker-compose.yml
+    else
+        sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
+    fi
+
     # ── .env ──────────────────────────────────────────────────────────────────
     cat > .env << ENV
 # ── Domain ────────────────────────────────────────────────────
@@ -332,6 +368,12 @@ TURN_SERVER=${TURN_SERVER_VAL}
 # ── RTP port range ────────────────────────────────────────────
 RTP_START=10000
 RTP_END=20000
+
+# ── VLAN/VPN subnets ──────────────────────────────────────────
+# Extra local_net= entries for phones on networks this server isn't
+# itself attached to. Space-separated CIDRs.
+HAS_VLANS=${HAS_VLANS_VAL}
+VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 
 # ── Web admin ─────────────────────────────────────────────────
 WEB_ADMIN_PORT=8080
@@ -403,6 +445,34 @@ docker exec -it easy-asterisk easy-asterisk --help
 | TURN password   | see .env → TURN_PASSWORD             |
 
 Recommended softphones: Linphone, Zoiper, Bria, Grandstream Wave.
+
+For a phone to work the same way regardless of network (LAN, VLAN, remote,
+no VPN), register it against `<DOMAIN_NAME>:5061` over TLS — that's what
+FQDN mode is for. Plain UDP/TCP on 5060 still works for LAN-only devices,
+but only the FQDN+TLS path is location-independent.
+
+## VLANs / other subnets
+
+`.env` → `HAS_VLANS`/`VLAN_SUBNETS` lists extra networks (space-separated
+CIDRs) this server isn't itself attached to but that phones live on. These
+become `local_net=` entries in `pjsip.conf` so NAT/SDP handling is correct
+for those devices (missing entries here is the most common cause of calls
+connecting with no audio). To change this after install:
+
+```bash
+docker exec -it easy-asterisk easy-asterisk
+# Server Settings → Configure VLAN/VPN Subnets
+```
+
+## TLS certificate
+
+If Caddy is installed and already holds a Let's Encrypt cert for
+`DOMAIN_NAME` (i.e. there's a Caddyfile site block for that exact hostname),
+the container mounts Caddy's cert store read-only and the entrypoint syncs
+it in automatically on every start — and re-checks every 12h so renewals
+get picked up without a restart. No Caddyfile block for the domain, or no
+Caddy at all, falls back to a self-signed cert (phones must be configured
+to accept it).
 
 ## Web admin
 
