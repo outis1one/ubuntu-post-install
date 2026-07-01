@@ -31,7 +31,7 @@ install_base() {
     install_glow
 
     # ── Docker ───────────────────────────────────────────────────────────────
-    require_docker
+    require_docker || log_warning "Docker install failed — will retry after base setup"
 
     # ── OpenSSH server ───────────────────────────────────────────────────────
     _base_setup_ssh
