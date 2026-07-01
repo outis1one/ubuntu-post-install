@@ -169,26 +169,46 @@ require_docker() {
 
     log_info "Docker is not installed — installing now..."
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would install Docker CE and Docker Compose plugin via get.docker.com"
+        echo "[DRY-RUN] Would install Docker CE and Docker Compose plugin from Docker's apt repo"
         return 0
     fi
 
-    # Official Docker convenience script — installs Docker CE + Compose plugin.
-    # DEBIAN_FRONTEND suppresses interactive apt hooks (needrestart etc.) that
-    # would block waiting on the piped stdin and cause a silent install failure.
+    # Docker's official apt-repo steps (docs.docker.com/engine/install/ubuntu),
+    # run directly rather than via the get.docker.com convenience script.
+    # That script wraps every step in "sudo -E sh -c ..."; on minimal/cloud
+    # images that never installed the sudo package (common when operating as
+    # root with no separate sudo user), those internal sudo calls fail while
+    # the outer script still exits 0 — a silent no-op install. We're already
+    # root here, so there's no need for sudo at all.
     export DEBIAN_FRONTEND=noninteractive
-    curl -fsSL https://get.docker.com | sh
-    local _rc=${PIPESTATUS[1]}
-    unset DEBIAN_FRONTEND
-    hash -r 2>/dev/null || true  # flush command hash so new binary is found
 
-    if [ "$_rc" -ne 0 ]; then
-        log_error "Docker installation failed. Try manually: curl -fsSL https://get.docker.com | sh"
+    local _ok=true
+    apt-get update -qq || _ok=false
+    apt-get install -y -qq ca-certificates curl >/dev/null || _ok=false
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" -o /etc/apt/keyrings/docker.asc || _ok=false
+    chmod a+r /etc/apt/keyrings/docker.asc
+
+    local _arch _codename
+    _arch="$(dpkg --print-architecture)"
+    _codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+    echo "deb [arch=${_arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${_codename} stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+    apt-get update -qq || _ok=false
+    apt-get install -y -qq \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+        || _ok=false
+    systemctl enable --now docker.service || _ok=false
+
+    unset DEBIAN_FRONTEND
+    hash -r 2>/dev/null || true  # flush command hash so the new binary is found
+
+    if [ "$_ok" != true ]; then
+        log_error "Docker installation failed — see apt output above for the real error."
         return 1
     fi
 
-    # command -v may miss the binary if PATH is restricted under sudo; check
-    # the canonical apt install location as a fallback before giving up.
     if ! command -v docker &>/dev/null && ! [ -x /usr/bin/docker ]; then
         log_error "Docker binary not found after install — something went wrong."
         return 1
