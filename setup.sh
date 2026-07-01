@@ -113,25 +113,19 @@ list_services() {
 # ── Site defaults wizard ──────────────────────────────────────────────────────
 # Prompts for timezone, base domain, and Caddy network name; saves to .config.
 # Run directly:  sudo ./setup.sh configure
-run_site_configure() {
-    local _sys_tz; _sys_tz=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+# Asks only "where does Caddy run?" and saves it. Always runs unconditionally
+# (not gated behind a y/n) since every service's Caddy prompt depends on this.
+ask_caddy_location() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  Site defaults  ·  pre-filled into every service prompt     ║"
+    echo "║  Where does Caddy run?                                       ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "  These become the default answer each time a service asks for"
-    echo "  timezone, domain, etc.  Press Enter to keep the shown value."
-    echo ""
-    local _cur_tz="${SITE_TZ:-$_sys_tz}"
-    local _cur_dom="${SITE_DOMAIN:-}"
-    local _cur_net="${SITE_CADDY_NET:-caddy_net}"
     # Resolve current Caddy mode for display — handle legacy CADDY_REMOTE_HOST
     local _cur_mode="${CADDY_MODE:-}"
     [ -z "$_cur_mode" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _cur_mode="remote"
     [ -z "$_cur_mode" ] && _cur_mode="local"
 
-    echo "  Where does Caddy run?"
     echo "    [1] This machine  — Caddy installed here (default)"
     echo "    [2] Remote machine — different server, VPN node, or Netbird peer"
     echo "        (service installers save snippet files to ~/docker/caddy-snippets/)"
@@ -148,6 +142,29 @@ run_site_configure() {
     esac
     CADDY_REMOTE_HOST=""   # clear legacy value; CADDY_MODE is authoritative now
     echo ""
+
+    export CADDY_MODE CADDY_REMOTE_HOST
+    mkdir -p "$DOCKER_DIR"
+    save_site_config
+    log_success "Caddy mode saved: $CADDY_MODE"
+}
+
+# ── Site defaults wizard ──────────────────────────────────────────────────────
+# Prompts for timezone, base domain, and Caddy network name; saves to .config.
+# Run directly:  sudo ./setup.sh configure
+run_site_configure() {
+    local _sys_tz; _sys_tz=$(cat /etc/timezone 2>/dev/null || echo "UTC")
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Site defaults  ·  pre-filled into every service prompt     ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  These become the default answer each time a service asks for"
+    echo "  timezone, domain, etc.  Press Enter to keep the shown value."
+    echo ""
+    local _cur_tz="${SITE_TZ:-$_sys_tz}"
+    local _cur_dom="${SITE_DOMAIN:-}"
+    local _cur_net="${SITE_CADDY_NET:-caddy_net}"
 
     prompt_text "  Timezone [${_cur_tz}]:" "$_cur_tz" SITE_TZ
     prompt_text "  Base domain (e.g., example.com) [${_cur_dom:-<not set>}]:" "$_cur_dom" SITE_DOMAIN
@@ -237,16 +254,22 @@ if ! command -v docker &>/dev/null && ! [ -x /usr/bin/docker ]; then
     require_docker
 fi
 
-# 3) Offer site defaults wizard if .config has no SITE_TZ yet (first run).
-if ! grep -q '^SITE_TZ=' "$DOCKER_DIR/.config" 2>/dev/null; then
-    echo ""
-    echo "  No site defaults found. Setting them now pre-fills timezone, domain,"
-    echo "  and Caddy network for every service — you type them once, not every time."
-    OFFER_CONFIG=""
-    prompt_yn "Configure site defaults now? (y/n):" "y" OFFER_CONFIG
-    if [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ]; then
-        run_site_configure
-        load_site_config   # reload so subsequent service prompts see the new values
+# 3) Ask where Caddy runs (unconditional — every service's Caddy prompt
+#    depends on this), then only offer the timezone/domain/network wizard
+#    if Caddy is local to this box.
+if ! grep -q '^CADDY_MODE=' "$DOCKER_DIR/.config" 2>/dev/null; then
+    ask_caddy_location
+    load_site_config   # reload so subsequent prompts see CADDY_MODE
+
+    if [ "$CADDY_MODE" = "local" ]; then
+        echo "  Setting timezone/domain now pre-fills them for every service —"
+        echo "  you type them once, not every time."
+        OFFER_CONFIG=""
+        prompt_yn "Configure site defaults (timezone, domain, network) now? (y/n):" "y" OFFER_CONFIG
+        if [ "$OFFER_CONFIG" = "y" ] || [ "$OFFER_CONFIG" = "Y" ]; then
+            run_site_configure
+            load_site_config   # reload so subsequent service prompts see the new values
+        fi
     fi
 fi
 
