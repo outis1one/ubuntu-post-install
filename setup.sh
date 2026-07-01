@@ -222,10 +222,13 @@ else
     fi
 
     run_service base
-    if ! command -v docker >/dev/null 2>&1; then
-        log_warning "Docker is not installed. Containerized services need it."
-        echo "  Install with:  curl -fsSL https://get.docker.com | sh"
-    fi
+fi
+
+# Always ensure Docker is present — base may have been installed before Docker
+# was added to it, or a previous install may have failed.
+if ! command -v docker &>/dev/null && ! [ -x /usr/bin/docker ]; then
+    log_info "Docker not found — installing now..."
+    require_docker
 fi
 
 # 3) Offer site defaults wizard if .config has no SITE_TZ yet (first run).
