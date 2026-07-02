@@ -73,8 +73,38 @@ if [[ "$raw_cidr" =~ \.([0-9]+)/([0-9]+)$ ]]; then
     default_cidr="${raw_cidr%.*}.0/${BASH_REMATCH[2]}"
 fi
 
+# ── 4b. Sync Caddy-issued TLS cert (if the compose file shared it) ───────
+# If services/asterisk.sh mounted Caddy's data dir read-only at /caddy-data,
+# and Caddy already holds a real Let's Encrypt cert for our own DOMAIN_NAME
+# (e.g. because a matching site block exists in the Caddyfile), prefer that
+# over a self-signed cert — phones then get a CA-trusted TLS connection.
+CADDY_CERT_DIR="/caddy-data/caddy/certificates/acme-v02.api.letsencrypt.org-directory"
+sync_caddy_cert() {
+    [[ -n "${DOMAIN_NAME:-}" ]] || return 1
+    local src_crt="${CADDY_CERT_DIR}/${DOMAIN_NAME}/${DOMAIN_NAME}.crt"
+    local src_key="${CADDY_CERT_DIR}/${DOMAIN_NAME}/${DOMAIN_NAME}.key"
+    [[ -f "$src_crt" && -f "$src_key" ]] || return 1
+
+    if [[ -f /etc/asterisk/certs/server.crt ]] && cmp -s "$src_crt" /etc/asterisk/certs/server.crt; then
+        return 1   # already in sync
+    fi
+
+    mkdir -p /etc/asterisk/certs
+    cp "$src_crt" /etc/asterisk/certs/server.crt
+    cp "$src_key" /etc/asterisk/certs/server.key
+    chown asterisk:asterisk /etc/asterisk/certs/server.crt /etc/asterisk/certs/server.key
+    chmod 644 /etc/asterisk/certs/server.crt
+    chmod 600 /etc/asterisk/certs/server.key
+    return 0
+}
+
+if [[ -d "$CADDY_CERT_DIR" ]] && sync_caddy_cert; then
+    log_info "Synced Caddy-issued Let's Encrypt cert for ${DOMAIN_NAME} (CA-trusted, no self-signed warning)"
+fi
+
 # ── 5. Generate self-signed certs ──────────────────────────────
 # Regenerate if missing OR if existing cert lacks SANs (modern TLS clients require them)
+# Skipped entirely if the Caddy sync above just installed a real cert.
 regen_cert=false
 if [[ ! -f /etc/asterisk/certs/server.crt ]]; then
     regen_cert=true
@@ -279,6 +309,38 @@ EOF
     chown asterisk:asterisk /etc/asterisk/pjsip.conf
 fi
 
+# ── Ensure transport-udp/transport-tcp exist (same migration path as TLS) ──
+# Same scenario as above: a preserved/migrated pjsip.conf can be missing the
+# plain SIP transports entirely, silently, with no bind error — LAN/VLAN
+# devices registering without TLS then can never connect. Inject if absent.
+if [[ -f /etc/asterisk/pjsip.conf ]] && ! grep -q "^\[transport-udp\]" /etc/asterisk/pjsip.conf; then
+    log_info "transport-udp missing from pjsip.conf — adding UDP transport..."
+    cat >> /etc/asterisk/pjsip.conf << EOF
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+${nat_settings}
+
+EOF
+    chown asterisk:asterisk /etc/asterisk/pjsip.conf
+fi
+
+if [[ -f /etc/asterisk/pjsip.conf ]] && ! grep -q "^\[transport-tcp\]" /etc/asterisk/pjsip.conf; then
+    log_info "transport-tcp missing from pjsip.conf — adding TCP transport..."
+    cat >> /etc/asterisk/pjsip.conf << EOF
+
+[transport-tcp]
+type=transport
+protocol=tcp
+bind=0.0.0.0:5060
+${nat_settings}
+
+EOF
+    chown asterisk:asterisk /etc/asterisk/pjsip.conf
+fi
+
 # ── rtp.conf (always regenerated) ──
 # ICE is enabled so Asterisk participates in ICE negotiation with clients.
 # stunaddr/turnaddr are NOT set here because:
@@ -376,6 +438,20 @@ if [[ -f "$WEB_ADMIN_SCRIPT" ]]; then
     WEBADMIN_PORT="${WEB_ADMIN_PORT:-8080}" \
     WEBADMIN_AUTH_DISABLED="${WEB_ADMIN_AUTH_DISABLED:-false}" \
     python3 "$WEB_ADMIN_SCRIPT" &
+fi
+
+# ── 10b. Keep the Caddy-issued cert fresh across renewals ────────────────
+# Let's Encrypt certs renew every ~60-90 days without the container restarting.
+# Re-check periodically and hot-reload Asterisk when Caddy's copy changes.
+if [[ -d "$CADDY_CERT_DIR" ]]; then
+    (
+        while sleep 43200; do   # every 12h
+            if sync_caddy_cert; then
+                log_info "Caddy cert renewed for ${DOMAIN_NAME} — reloading Asterisk"
+                asterisk -rx "core reload" >/dev/null 2>&1 || true
+            fi
+        done
+    ) &
 fi
 
 # ── 11. Signal handling for clean shutdown ────────────────────
