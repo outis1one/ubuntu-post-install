@@ -224,6 +224,85 @@ require_docker() {
     log_success "Docker installed ($("$_docker_bin" --version 2>/dev/null))"
 }
 
+# ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────
+# Lets "ssh <alias>" connect directly to user@host without typing it out each
+# time — handy for VPN/NetBird peers with unmemorable IPs. Operates on the
+# ACTUAL_USER's config (not root's), since that's whose terminal runs ssh.
+ssh_config_path() { echo "$ACTUAL_HOME/.ssh/config"; }
+
+ssh_host_alias_exists() {
+    local alias="$1" cfg; cfg="$(ssh_config_path)"
+    [ -f "$cfg" ] && grep -qiE "^Host[[:space:]]+${alias}([[:space:]]|\$)" "$cfg"
+}
+
+add_ssh_host_alias() {
+    local alias="$1" hostname="$2" user="$3" port="${4:-22}"
+    local cfg; cfg="$(ssh_config_path)"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would add SSH alias '$alias' -> $user@$hostname:$port to $cfg"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$cfg")"
+    touch "$cfg"
+    chmod 700 "$(dirname "$cfg")"
+    chmod 600 "$cfg"
+
+    if ssh_host_alias_exists "$alias"; then
+        log_warning "Host alias '$alias' already exists in $cfg — skipping (remove it first to replace)."
+        return 1
+    fi
+
+    {
+        echo ""
+        echo "Host $alias"
+        echo "    HostName $hostname"
+        echo "    User $user"
+        [ "$port" != "22" ] && echo "    Port $port"
+    } >> "$cfg"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$(dirname "$cfg")" 2>/dev/null || true
+    log_success "Added SSH alias: ssh $alias  ->  $user@$hostname:$port"
+}
+
+list_ssh_host_aliases() {
+    local cfg; cfg="$(ssh_config_path)"
+    if [ ! -f "$cfg" ] || ! grep -qiE "^Host[[:space:]]+" "$cfg"; then
+        echo "  (none — $cfg has no Host entries yet)"
+        return 0
+    fi
+    grep -inE "^Host[[:space:]]+" "$cfg" | sed -E 's/^([0-9]+):Host[[:space:]]+/  \1) /'
+}
+
+remove_ssh_host_alias() {
+    local alias="$1" cfg; cfg="$(ssh_config_path)"
+    if [ ! -f "$cfg" ]; then
+        log_warning "No SSH config file found at $cfg"
+        return 1
+    fi
+    if ! ssh_host_alias_exists "$alias"; then
+        log_warning "Host alias '$alias' not found in $cfg"
+        return 1
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would remove SSH alias '$alias' from $cfg"
+        return 0
+    fi
+    local tmp; tmp="$(mktemp)"
+    awk -v alias="$alias" '
+        BEGIN { skip=0 }
+        tolower($1)=="host" && tolower($2)==tolower(alias) { skip=1; next }
+        skip==1 && /^Host[[:space:]]/ { skip=0 }
+        skip==1 && /^[[:space:]]*$/ { skip=0; next }
+        skip==1 { next }
+        { print }
+    ' "$cfg" > "$tmp"
+    mv "$tmp" "$cfg"
+    chmod 600 "$cfg"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$cfg" 2>/dev/null || true
+    log_success "Removed SSH alias: $alias"
+}
+
 # ── Command execution honoring dry-run ───────────────────────────────────────
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then

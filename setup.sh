@@ -87,6 +87,8 @@ is_installed() {
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
         sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
+        sky-cam-frigate) [ -d "$ACTUAL_HOME/sky-cam/.git" ] && [ -f "$ACTUAL_HOME/sky-cam/frigate-retime.sh" ] ;;
+        ssh-config) false ;;   # repeatable management tool, never shows [installed]
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
