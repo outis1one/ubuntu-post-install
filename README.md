@@ -49,23 +49,24 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 ## What the wizard does
 
 **First run:**
-1. Installs essential CLI packages (`net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`, `glow`)
-2. Checks for Docker CE + Compose plugin; prompts to install if missing
-3. Offers to set **site defaults** — timezone, base domain, Caddy Docker network —
-   so every service picks them up automatically instead of asking each time
-4. Offers to install Caddy (the reverse proxy most services use)
-5. Drops into a **category menu** — pick a group, tick services, install, repeat
+1. Installs essential CLI packages (`net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`, `glow`), Docker CE + Compose plugin, and `openssh-server` — offers to import SSH keys from GitHub/Launchpad (`ssh-import-id`), disable password login once a key is confirmed, and install NetBird
+2. Asks **where Caddy runs** — this machine, a remote machine/VPN peer, or none — before anything else, since every later service prompt depends on the answer
+3. If Caddy is local: offers to set **site defaults** — timezone, base domain, Caddy Docker network — so every service picks them up automatically instead of asking each time, then offers to install Caddy itself
+4. Drops into a **category menu** — pick a group, tick services, install, repeat
+5. Ends by dropping you into a fresh login shell so the `docker` group takes effect immediately (no manual `newgrp docker` or SSH reconnect needed)
 
-**Re-run:** skips steps 1–2 (already done), goes straight to the menu.
+**Re-run:** skips steps already completed, shows a summary of installed services, and goes straight to the menu.
 
 **Site defaults** are saved to `~/docker/.config` and pre-fill every service prompt.
-Update them any time with `sudo ./setup.sh configure`.
+Update them any time with `sudo ./setup.sh configure`. Remote/none Caddy mode
+skips the domain/timezone prompt entirely — service installers instead save
+a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 
 ## Services
 
 | Group | Services |
 |-------|---------|
-| `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo) |
+| `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import and optional password-auth lockdown; optional NetBird overlay network |
 | `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `sunshine` |
 | `utilities` | `actualbudget`, `ai-gpu`, `ai-stack`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `paintplus`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
