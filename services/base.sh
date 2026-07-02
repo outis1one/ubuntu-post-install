@@ -15,6 +15,7 @@ install_base() {
         echo "[DRY-RUN] Would offer SSH key import from GitHub/Launchpad"
         echo "[DRY-RUN] Would offer to disable SSH password auth"
         echo "[DRY-RUN] Would offer NetBird install with --allow-server-ssh"
+        echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
         return 0
     fi
 
@@ -38,6 +39,9 @@ install_base() {
 
     # ── NetBird ──────────────────────────────────────────────────────────────
     _base_setup_netbird
+
+    # ── SSH Host aliases ─────────────────────────────────────────────────────
+    _base_setup_ssh_aliases
 }
 
 _base_setup_ssh() {
@@ -122,6 +126,28 @@ _base_setup_netbird() {
     else
         log_info "Run when ready: netbird up${_up_args:+ $_up_args}"
     fi
+}
+
+_base_setup_ssh_aliases() {
+    local ADD_ALIAS=""
+    prompt_yn "Add an SSH Host alias now ('ssh myserver' instead of 'ssh user@1.2.3.4')? (y/n):" "n" ADD_ALIAS
+    [[ "$ADD_ALIAS" =~ ^[Yy]$ ]] || return 0
+
+    while true; do
+        local ALIAS_NAME="" ALIAS_HOST="" ALIAS_USER="" ALIAS_PORT=""
+        prompt_text "  Alias name (e.g. myserver):" "" ALIAS_NAME
+        if [ -z "$ALIAS_NAME" ]; then
+            log_warning "Alias name required — skipping."
+        else
+            prompt_text "  Hostname or IP to connect to (e.g. a NetBird peer IP):" "" ALIAS_HOST
+            prompt_text "  Remote username:" "$ACTUAL_USER" ALIAS_USER
+            prompt_text "  Port [22]:" "22" ALIAS_PORT
+            add_ssh_host_alias "$ALIAS_NAME" "$ALIAS_HOST" "$ALIAS_USER" "$ALIAS_PORT"
+        fi
+        local ADD_ANOTHER=""
+        prompt_yn "  Add another alias? (y/n):" "n" ADD_ANOTHER
+        [[ "$ADD_ANOTHER" =~ ^[Yy]$ ]] || break
+    done
 }
 
 # glow is also exposed as its own module so it can be (re)installed on its own.
