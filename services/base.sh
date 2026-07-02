@@ -11,6 +11,8 @@ install_base() {
         echo "[DRY-RUN] Would install core apt packages"
         echo "[DRY-RUN] Would install glow from Charm repo"
         echo "[DRY-RUN] Would install Docker CE + Compose plugin"
+        echo "[DRY-RUN] Would detect an NVIDIA GPU and offer to install the driver"
+        echo "    + NVIDIA Container Toolkit (for GPU-accelerated Docker services)"
         echo "[DRY-RUN] Would install/configure openssh-server"
         echo "[DRY-RUN] Would offer SSH key import from GitHub/Launchpad"
         echo "[DRY-RUN] Would offer to disable SSH password auth"
@@ -34,6 +36,9 @@ install_base() {
     # ── Docker ───────────────────────────────────────────────────────────────
     require_docker || log_warning "Docker install failed — will retry after base setup"
 
+    # ── NVIDIA GPU (driver + container toolkit) ─────────────────────────────
+    _base_setup_nvidia_gpu
+
     # ── OpenSSH server ───────────────────────────────────────────────────────
     _base_setup_ssh
 
@@ -42,6 +47,70 @@ install_base() {
 
     # ── SSH Host aliases ─────────────────────────────────────────────────────
     _base_setup_ssh_aliases
+}
+
+_base_setup_nvidia_gpu() {
+    # Only bother if an NVIDIA GPU is physically present — silent no-op otherwise.
+    command -v lspci >/dev/null 2>&1 || return 0
+    lspci | grep -iE '(VGA compatible controller|3D controller)' | grep -qi nvidia || return 0
+
+    log_info "NVIDIA GPU detected."
+
+    local _reboot_needed=false
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+        log_success "NVIDIA driver already active ($(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1))"
+    else
+        local INSTALL_DRIVER=""
+        prompt_yn "Install the recommended NVIDIA driver? Needed for GPU-accelerated Docker services (y/n):" "y" INSTALL_DRIVER
+        if [[ "$INSTALL_DRIVER" =~ ^[Yy]$ ]]; then
+            command -v ubuntu-drivers >/dev/null 2>&1 || run_cmd apt-get install -y ubuntu-drivers-common
+            log_info "Detected hardware and recommended driver:"
+            ubuntu-drivers devices || true
+            if run_cmd ubuntu-drivers autoinstall; then
+                log_warning "NVIDIA driver installed — a REBOOT is required before the GPU is usable."
+                _reboot_needed=true
+            else
+                log_warning "Driver autoinstall failed — install manually: sudo ubuntu-drivers autoinstall"
+                return 1
+            fi
+        else
+            log_info "Skipping — GPU-accelerated services (ai-gpu, wolf, etc.) need a driver first."
+            return 0
+        fi
+    fi
+
+    # NVIDIA Container Toolkit — lets Docker containers request the GPU
+    # (--gpus / device requests). Only useful once Docker is present.
+    if command -v docker >/dev/null 2>&1 && ! command -v nvidia-container-cli >/dev/null 2>&1; then
+        local INSTALL_TOOLKIT=""
+        prompt_yn "Install NVIDIA Container Toolkit so Docker services can use the GPU? (y/n):" "y" INSTALL_TOOLKIT
+        if [[ "$INSTALL_TOOLKIT" =~ ^[Yy]$ ]]; then
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+                | gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -sL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+                | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+                | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+            run_cmd apt-get update -y
+            if run_cmd apt-get install -y nvidia-container-toolkit; then
+                run_cmd nvidia-ctk runtime configure --runtime=docker
+                run_cmd systemctl restart docker
+                log_success "NVIDIA Container Toolkit installed and Docker configured for GPU access."
+            else
+                log_warning "NVIDIA Container Toolkit install failed — GPU-accelerated Docker services will need it manually."
+            fi
+        fi
+    fi
+
+    if [ "$_reboot_needed" = true ]; then
+        local REBOOT_NOW=""
+        prompt_yn "Reboot now to finish activating the NVIDIA driver? (y/n):" "n" REBOOT_NOW
+        if [[ "$REBOOT_NOW" =~ ^[Yy]$ ]]; then
+            log_info "Rebooting..."
+            reboot
+        else
+            log_warning "Remember to reboot before using GPU-accelerated services."
+        fi
+    fi
 }
 
 _base_setup_ssh() {
