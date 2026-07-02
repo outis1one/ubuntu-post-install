@@ -49,7 +49,7 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 ## What the wizard does
 
 **First run:**
-1. Installs essential CLI packages (`net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`, `glow`), Docker CE + Compose plugin, and `openssh-server` — offers to import SSH keys from GitHub/Launchpad (`ssh-import-id`), disable password login once a key is confirmed, and install NetBird
+1. Installs essential CLI packages (`net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`, `glow`), Docker CE + Compose plugin, and `openssh-server` — offers to import SSH keys from GitHub/Launchpad (`ssh-import-id`), disable password login once a key is confirmed, install NetBird, and add SSH Host aliases (see [SSH Host aliases](#ssh-host-aliases))
 2. Asks **where Caddy runs** — this machine, a remote machine/VPN peer, or none — before anything else, since every later service prompt depends on the answer
 3. If Caddy is local: offers to set **site defaults** — timezone, base domain, Caddy Docker network — so every service picks them up automatically instead of asking each time, then offers to install Caddy itself
 4. Drops into a **category menu** — pick a group, tick services, install, repeat
@@ -66,13 +66,13 @@ a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 
 | Group | Services |
 |-------|---------|
-| `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import and optional password-auth lockdown; optional NetBird overlay network |
+| `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import, optional password-auth lockdown, and SSH Host aliases; optional NetBird overlay network |
 | `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `sunshine` |
 | `utilities` | `actualbudget`, `ai-gpu`, `ai-stack`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `paintplus`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `drum-rhythm-game`, `js99er`, `kyber-launcher`, `kyber-server`, `minecraft`, `wolf`, `wolf-pair` |
-| `extras` | `kdeconnect`, `silent-send`, `sync-cc` |
+| `extras` | `kdeconnect`, `silent-send`, `ssh-config`, `sync-cc` |
 | `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
 
 Run `./setup.sh --list` to see descriptions.
@@ -156,6 +156,7 @@ gaming
 extras
   kdeconnect
   silent-send
+  ssh-config
   sync-cc
 
 backup
@@ -187,6 +188,31 @@ docker compose logs -f      # logs
 docker compose pull && docker compose up -d   # update
 docker compose down         # stop
 ```
+
+## SSH Host aliases
+
+`~/.ssh/config` lets you `ssh <alias>` instead of typing `ssh user@1.2.3.4`
+every time — especially handy once machines are reachable over a VPN/NetBird
+overlay network where the IP is easy to forget:
+
+```
+Host myserver
+    HostName 100.x.x.x
+    User someuser
+    Port 22
+```
+
+Three ways to manage these entries:
+
+- **During `base` install** — after SSH key import, the wizard offers to add
+  one or more aliases interactively
+- **Any time** — `sudo ./setup.sh ssh-config` lists, adds, or removes aliases
+  without touching anything else
+- **By hand** — edit `~/.ssh/config` directly; it's a plain OpenSSH client
+  config file, nothing generated or templated beyond the `Host` block itself
+
+Aliases are written to the invoking user's own config (not root's), since
+that's whose terminal actually runs `ssh`.
 
 ## Installing from a USB thumb drive
 
