@@ -7,11 +7,19 @@
 # (Docker must already be installed when run standalone)
 #
 # NON-DOCKER module. sky-cam produces:
-#   • Daily sunrise clip — speed-adjusted video, uploaded to Mattermost
+#   • Daily sunrise clip — speed-adjusted video (+ optional audio), uploaded to Mattermost
 #   • Four Seasons timelapse — daily clips sized to Vivaldi movements' music
 #   • Full-day timelapse — fixed-fps timelapse of every captured image
 #   • Moon-track timelapse — moon tracked & cropped each visible night
 #   • Monthly moon-phase close-ups — NASA Dial-a-Moon images posted to MM
+#
+# No motionEye or any NVR required — sky-cam's own capture.sh connects
+# directly to each camera's RTSP stream and grabs frames itself
+# (CAM_RTSP_<cam> in .env is the only thing capture.sh and the optional
+# sunrise-audio/ambient-audio recorders need). This installer prompts for
+# that per camera, so install.sh can generate every applicable systemd
+# timer/service (capture, watchdog, sunrise, audio, ambient, moon jobs,
+# per-camera seasons clips) in one pass.
 #
 # Source: https://github.com/outis1one/sky-cam (cloned via bootstrap.sh)
 # Installs systemd user timers via sky-cam's install.sh.
@@ -89,9 +97,12 @@ install_sky-cam() {
         echo "  - Install: ffmpeg bc fonts-dejavu curl python3-pip"
         echo "  - pip install: suntime pytz requests skyfield Pillow numpy scipy"
         echo "  - Clone sky-cam to $SKYCAM_DIR via bootstrap.sh"
-        echo "  - Edit sky-cam.conf with your location and camera names"
-        echo "  - Copy .env.example → .env and set Mattermost credentials"
-        echo "  - Run ./install.sh to register systemd user timers"
+        echo "  - Prompt for each camera's RTSP URL -> CAM_RTSP_<cam> in .env"
+        echo "    (capture.sh connects directly - no motionEye or other NVR needed)"
+        echo "  - Prompt for sunrise audio / optional ambient audio library"
+        echo "  - Prompt for Mattermost (mattermost_url/access_token/channel_id) + ntfy"
+        echo "  - Patch sky-cam.conf: cameras, audio toggles, per-camera seasons schedule"
+        echo "  - Run ./install.sh to register every applicable systemd timer/service"
         return 0
     fi
 
@@ -142,31 +153,84 @@ install_sky-cam() {
 
     echo ""
     echo "  Camera names are short identifiers, e.g.:  east north south west"
-    echo "  These names must match the directories where your camera images are saved."
+    echo "  capture.sh creates BASE_DIR/<camera-name>/ itself — no pre-existing folders needed."
     echo ""
     prompt_text "  Camera names (space-separated) [east]:" "east" CAMERAS_LIST
     prompt_text "  Sunrise camera (faces east) [east]:" "east" SUNRISE_CAM
 
     echo ""
-    echo "  BASE_DIR is where your camera images live."
-    echo "  Each camera should have a sub-folder: BASE_DIR/<camera-name>/"
+    echo "  BASE_DIR is where captured images/videos are written. Leave default unless"
+    echo "  you want them on a separate drive or network mount."
     local DEFAULT_BASE="$ACTUAL_HOME/sky-cam/data"
     prompt_text "  Image base directory [$DEFAULT_BASE]:" "$DEFAULT_BASE" BASE_DIR
     [ -z "$BASE_DIR" ] && BASE_DIR="$DEFAULT_BASE"
 
-    # Prompt for Mattermost credentials
+    # ── Camera RTSP connections ───────────────────────────────────────────────
+    # capture.sh IS the motionEye replacement — it needs each camera's RTSP URL
+    # directly. This is the one variable every downstream script depends on
+    # (capture.sh for frames, sunrise-audio-capture.sh/ambient-record.sh for audio).
     echo ""
-    log_info "Mattermost webhook (for automated uploads)"
-    echo "  sky-cam posts sunrise clips and moon photos to a Mattermost channel."
-    echo "  Create an incoming webhook in Mattermost: Settings → Integrations → Webhooks"
-    echo "  (Leave blank to skip — add to $SKYCAM_DIR/.env later)"
+    log_info "Camera RTSP connections"
+    echo "  Find each camera's RTSP URL in its web UI (usually Network → Video → RTSP)"
+    echo "  or its manual. Format: rtsp://username:password@camera-ip:554/stream-path"
+    echo "  If the password has special characters, sky-cam's url-encode-password.py"
+    echo "  can encode it for you (run after cloning, before pasting the URL below)."
+    echo "  Leave blank to skip a camera for now — add CAM_RTSP_<cam> to .env later."
     echo ""
-    local MM_WEBHOOK="" MM_CHANNEL=""
-    if [ "$UNATTENDED" != true ]; then
-        read -p "  Mattermost webhook URL [Enter to skip]: " MM_WEBHOOK
-        if [ -n "$MM_WEBHOOK" ]; then
-            prompt_text "  Mattermost channel name [sky-cam]:" "sky-cam" MM_CHANNEL
+    local CAM_RTSP_ENV="" _cam _rtsp
+    for _cam in $CAMERAS_LIST; do
+        _rtsp=""
+        prompt_text "  ${_cam} RTSP URL:" "" _rtsp
+        if [ -n "$_rtsp" ]; then
+            CAM_RTSP_ENV="${CAM_RTSP_ENV}CAM_RTSP_${_cam}=${_rtsp}
+"
+        else
+            log_warning "No RTSP URL for ${_cam} — capture won't start until CAM_RTSP_${_cam} is set in .env"
         fi
+    done
+
+    # ── Sunrise audio ─────────────────────────────────────────────────────────
+    echo ""
+    echo "  If the sunrise camera has a mic, sky-cam records natural audio centred"
+    echo "  on the actual sunrise moment and mixes it into the video."
+    local AUDIO_MIC=""
+    prompt_yn "  Does ${SUNRISE_CAM} have a working microphone? (y/n):" "y" AUDIO_MIC
+
+    # ── Ambient audio library (optional fallback) ─────────────────────────────
+    echo ""
+    echo "  Optional: continuously record an ambient sound library (birds/rain/wind)"
+    echo "  as a fallback for the sunrise video on days with no dedicated recording."
+    local AMBIENT="" AMBIENT_CAMS_LIST=""
+    prompt_yn "  Enable the ambient audio library? (y/n):" "n" AMBIENT
+    if [[ "$AMBIENT" =~ ^[Yy]$ ]]; then
+        prompt_text "  Camera(s) to record ambient audio from (space-separated) [${SUNRISE_CAM}]:" \
+            "$SUNRISE_CAM" AMBIENT_CAMS_LIST
+    fi
+
+    # ── Mattermost (file uploads) ─────────────────────────────────────────────
+    # sunrise2mm.py reads mattermost_url / access_token / channel_id (lowercase,
+    # bot/PAT REST-API upload) — NOT an incoming webhook. Incoming webhooks can't
+    # attach binary files, so a webhook URL alone would silently never upload.
+    echo ""
+    log_info "Mattermost (uploads sunrise clips + moon photos)"
+    echo "  Needs a token that can post in the target channel — Mattermost System"
+    echo "  Console → Integrations → Bot Accounts, or a user's own Personal Access"
+    echo "  Token (Account Settings → Security → Personal Access Tokens)."
+    echo "  (Leave the URL blank to skip — add to $SKYCAM_DIR/.env later)"
+    echo ""
+    local MM_URL="" MM_TOKEN="" MM_CHANNEL_ID=""
+    read -p "  Mattermost URL (e.g. https://mattermost.example.com) [Enter to skip]: " MM_URL
+    if [ -n "$MM_URL" ]; then
+        prompt_text "  Access token:" "" MM_TOKEN
+        prompt_text "  Channel ID (for sunrise/moon uploads):" "" MM_CHANNEL_ID
+    fi
+
+    # ── ntfy push notifications (optional, separate from Mattermost) ─────────
+    echo ""
+    local NTFY="" NTFY_TOPIC_URL=""
+    prompt_yn "  Enable ntfy.sh push notifications for job status/failures? (y/n):" "n" NTFY
+    if [[ "$NTFY" =~ ^[Yy]$ ]]; then
+        prompt_text "  ntfy topic URL (e.g. https://ntfy.sh/your-topic):" "" NTFY_TOPIC_URL
     fi
 
     # ── Write .env ───────────────────────────────────────────────────────────
@@ -179,24 +243,65 @@ install_sky-cam() {
         echo "LONGITUDE=${LONGITUDE:-0.0000}"
         echo "TIMEZONE=${TIMEZONE:-America/New_York}"
         echo "BASE_DIR=${BASE_DIR}"
-        if [ -n "$MM_WEBHOOK" ]; then
-            echo "MM_WEBHOOK_URL=${MM_WEBHOOK}"
-            echo "MM_CHANNEL=${MM_CHANNEL:-sky-cam}"
+        echo ""
+        echo "# Per-camera RTSP — capture.sh connects directly (replaces motionEye)."
+        printf '%s' "$CAM_RTSP_ENV"
+        echo ""
+        if [ -n "$MM_URL" ]; then
+            echo "mattermost_url=${MM_URL}"
+            echo "access_token=${MM_TOKEN}"
+            echo "channel_id=${MM_CHANNEL_ID}"
         else
-            echo "# MM_WEBHOOK_URL=https://mattermost.yourdomain.com/hooks/your-webhook-id"
-            echo "# MM_CHANNEL=sky-cam"
+            echo "# mattermost_url=https://mattermost.yourdomain.com"
+            echo "# access_token=your-bot-or-personal-access-token"
+            echo "# channel_id=your-channel-id"
+        fi
+        if [ -n "$NTFY_TOPIC_URL" ]; then
+            echo "NTFY_URL=${NTFY_TOPIC_URL}"
         fi
     } > "$SKYCAM_DIR/.env"
     chmod 600 "$SKYCAM_DIR/.env"
 
-    # ── Patch sky-cam.conf with cameras and basic settings ───────────────────
+    # ── Patch sky-cam.conf ────────────────────────────────────────────────────
     local CONF="$SKYCAM_DIR/sky-cam.conf"
     if [ -f "$CONF" ]; then
-        log_info "Patching sky-cam.conf with location and camera names..."
-        # Build CAMERAS=(...) line
+        log_info "Patching sky-cam.conf with location, cameras, audio, and schedules..."
         local CAM_ARRAY="(${CAMERAS_LIST})"
         sed -i "s|^CAMERAS=.*|CAMERAS=${CAM_ARRAY}|" "$CONF"
         sed -i "s|^SUNRISE_CAM=.*|SUNRISE_CAM=${SUNRISE_CAM:-east}|" "$CONF"
+
+        if [[ "$AUDIO_MIC" =~ ^[Yy]$ ]]; then
+            sed -i "s|^AUDIO_ENABLED=.*|AUDIO_ENABLED=true|" "$CONF"
+        else
+            sed -i "s|^AUDIO_ENABLED=.*|AUDIO_ENABLED=false|" "$CONF"
+        fi
+
+        if [[ "$AMBIENT" =~ ^[Yy]$ ]]; then
+            sed -i "s|^AMBIENT_ENABLED=.*|AMBIENT_ENABLED=true|" "$CONF"
+            sed -i "s|^AMBIENT_CAMS=.*|AMBIENT_CAMS=(${AMBIENT_CAMS_LIST})|" "$CONF"
+        fi
+
+        if [ -n "$NTFY_TOPIC_URL" ]; then
+            sed -i "s|^NTFY_ENABLED=.*|NTFY_ENABLED=true|" "$CONF"
+        fi
+
+        # Every configured camera needs its own seasons schedule — stock
+        # sky-cam.conf only ships defaults for east/north/south, staggered
+        # 30 min apart starting at 01:00 (upstream's own spacing advice).
+        local _idx=0
+        for _cam in $CAMERAS_LIST; do
+            local _total_min=$(( 60 + _idx * 30 ))
+            local _hh=$(( (_total_min / 60) % 24 ))
+            local _mm=$(( _total_min % 60 ))
+            local _sched; _sched="$(printf '%02d:%02d:00' "$_hh" "$_mm")"
+            if grep -q "^SCHEDULE_SEASONS_${_cam}=" "$CONF"; then
+                sed -i "s|^SCHEDULE_SEASONS_${_cam}=.*|SCHEDULE_SEASONS_${_cam}=${_sched}|" "$CONF"
+            else
+                echo "SCHEDULE_SEASONS_${_cam}=${_sched}" >> "$CONF"
+            fi
+            _idx=$((_idx+1))
+        done
+
         log_success "sky-cam.conf updated"
     else
         log_warning "sky-cam.conf not found — check $SKYCAM_DIR"
@@ -226,25 +331,32 @@ install_sky-cam() {
     echo "  sky-cam installed"
     echo "═══════════════════════════════════════════════════════"
     echo ""
-    echo "  Location: $SKYCAM_DIR"
-    echo "  Data:     $BASE_DIR"
-    echo "  Cameras:  $CAMERAS_LIST"
-    echo "  Timezone: ${TIMEZONE:-America/New_York}"
+    echo "  Location:  $SKYCAM_DIR"
+    echo "  Data:      $BASE_DIR"
+    echo "  Cameras:   $CAMERAS_LIST"
+    echo "  Timezone:  ${TIMEZONE:-America/New_York}"
+    echo "  Audio:     $([ "$AUDIO_MIC" = "y" ] || [ "$AUDIO_MIC" = "Y" ] && echo "sunrise mic enabled" || echo "disabled")"
+    echo "  Ambient:   $([[ "$AMBIENT" =~ ^[Yy]$ ]] && echo "enabled ($AMBIENT_CAMS_LIST)" || echo "disabled")"
+    echo "  Mattermost: $([ -n "$MM_URL" ] && echo "configured" || echo "not configured")"
+    echo "  ntfy:      $([ -n "$NTFY_TOPIC_URL" ] && echo "configured" || echo "not configured")"
     echo ""
     echo "  Next steps:"
     echo "   1. Review $SKYCAM_DIR/sky-cam.conf"
-    echo "      — SCRIPT_DIR, MUSIC_DIR, schedules, encoding settings"
+    echo "      — MUSIC_DIR, encoding settings, moon-job thresholds"
     echo "   2. Put your Vivaldi Four Seasons audio files in:"
     echo "      $SKYCAM_DIR/music/"
     echo "      (filenames and expected MUSIC_DIR path are in sky-cam.conf)"
-    echo "   3. Verify systemd timers:"
+    echo "   3. Confirm frames are landing:"
+    echo "      systemctl --user status sky-cam-capture-${SUNRISE_CAM}.service"
+    echo "      ls $BASE_DIR/${SUNRISE_CAM}/\$(date +%Y-%m-%d)/"
+    echo "   4. Verify all timers:"
     echo "      systemctl --user list-timers 'sky-cam-*'"
-    echo "   4. Credentials → $SKYCAM_DIR/.env"
     echo ""
     echo "  To test the sunrise script manually:"
     echo "    cd $SKYCAM_DIR && ./daily_sunrise_video.sh"
     echo ""
     echo "  Logs:"
+    echo "    journalctl --user -u sky-cam-capture-${SUNRISE_CAM}.service -f"
     echo "    journalctl --user -u sky-cam-sunrise.service -f"
     echo ""
 }
