@@ -363,3 +363,16 @@ done
 
 echo ""
 log_success "Done. Re-run 'sudo ./setup.sh' any time to add more."
+
+# If Docker was installed this session (or already was), the invoking user
+# was added to the docker group — but group membership only takes effect in
+# a new login shell, not the one that ran sudo. Drop into a fresh login
+# shell as that user so 'docker' works immediately without reconnecting SSH.
+if [ -n "${SUDO_USER:-}" ] && [ "$UNATTENDED" != true ] \
+    && getent group docker >/dev/null 2>&1 \
+    && id -nG "$SUDO_USER" 2>/dev/null | grep -qw docker \
+    && [ -t 0 ]; then
+    echo ""
+    log_info "Refreshing shell as $SUDO_USER so the docker group takes effect..."
+    exec su - "$SUDO_USER"
+fi
