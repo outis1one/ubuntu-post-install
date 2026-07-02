@@ -1,43 +1,38 @@
 #!/bin/bash
-# services/sky-cam-frigate.sh — Automated sky / timelapse camera scripts,
-# sourced from Frigate recordings instead of raw JPEG image folders.
+# services/sky-cam-frigate.sh — Automated sky / timelapse camera scripts
+# (sky-cam), configured to source frames from Frigate instead of a camera's
+# RTSP stream directly.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
 #   sudo bash sky-cam-frigate.sh
 # (Docker must already be installed when run standalone; Frigate should
-# already be configured — see services/frigate.sh — with continuous
-# recording enabled for the cameras you want timelapses from.)
+# already be configured with the cameras you want — see services/frigate.sh.)
 #
-# NON-DOCKER module. Duplicate of sky-cam.sh, adapted so the timelapse
-# source is Frigate's recordings (via its HTTP export API) rather than a
-# directory of per-frame JPEGs dropped by motionEye. Produces the same
-# outputs sky-cam always has:
-#   • Daily sunrise clip — speed-adjusted video, uploaded to Mattermost
-#   • Four Seasons timelapse — daily clips sized to Vivaldi movements' music
-#   • Full-day timelapse — fixed-length timelapse of the day's recording
-#   • Moon-track timelapse — moon tracked & cropped each visible night
-#   • Monthly moon-phase close-ups — NASA Dial-a-Moon images posted to MM
+# NON-DOCKER module — this is the exact same upstream sky-cam project as
+# services/sky-cam.sh (same clone, same scripts, same systemd timers). The
+# only difference is what CAM_RTSP_<cam> points to in .env:
+#
+#   sky-cam.sh          CAM_RTSP_<cam> = the camera's own RTSP URL directly
+#   sky-cam-frigate.sh  CAM_RTSP_<cam> = Frigate's go2rtc restream for that
+#                       camera (rtsp://<frigate-host>:8554/<cam>)
+#
+# Why this is the only change needed: sky-cam's capture.sh is itself a
+# from-scratch RTSP frame-grabber that "replaces MotionEye or any NVR" (its
+# own header comment) — it pulls one JPEG frame every CAPTURE_INTERVAL
+# seconds from whatever CAM_RTSP_<cam> points to and writes it to
+# BASE_DIR/<cam>/YYYY-MM-DD/HH-MM-SS.jpg. Every other script in the pipeline
+# (4-seasons.sh, montage-mvt.sh, year-end-join.sh, moon-track.sh,
+# moon-phase-monthly.sh, daily_sunrise_video.sh) only ever reads JPEGs/audio
+# already sitting in BASE_DIR — none of them know or care whether the camera
+# was reached directly or through Frigate's restream. Pointing capture.sh at
+# Frigate's go2rtc endpoint instead of the camera means Frigate stays the
+# single RTSP client against the camera (recording + detection), and sky-cam
+# becomes a second, cheap consumer of Frigate's already-open stream — no
+# upstream sky-cam script edits required.
 #
 # Source: https://github.com/outis1one/sky-cam (cloned via bootstrap.sh)
-# Installs systemd user timers via sky-cam's install.sh.
-#
-# Frigate integration: since Frigate stores recordings in its own rolling
-# storage rather than per-frame JPEGs, this installer wires up a
-# frigate-retime.sh helper (dropped alongside the cloned sky-cam scripts)
-# that:
-#   1. Requests a coarse timelapse export from Frigate's API for a given
-#      start/end window (Frigate stitches its continuous-recording segments
-#      together for you — no manual concatenation needed).
-#   2. ffprobes the exported clip's *actual* duration (never trusts the
-#      requested export speed — hardware-accelerated exports can silently
-#      fall back to realtime).
-#   3. Computes the exact speed factor needed to hit a target duration
-#      (e.g. a Vivaldi movement's runtime) and re-encodes once with
-#      `setpts=PTS/factor`, hard-clipped with `-t <target>` and the music
-#      muxed in.
-# The daily/moon/four-seasons timer scripts call this helper instead of
-# assembling JPEGs directly.
+# Installs systemd user timers via sky-cam's own install.sh.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 # Detected when the script is executed directly rather than sourced by setup.sh.
@@ -102,94 +97,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service sky-cam-frigate cameras "Automated sky / timelapse camera scripts sourced from Frigate recordings (sky-cam + Frigate)"
+register_service sky-cam-frigate cameras "Automated sky / timelapse camera scripts sourced from Frigate's restream instead of RTSP directly (sky-cam + Frigate)"
 
-# Writes $SKYCAM_DIR/frigate-retime.sh — see header comment in that file for
-# the export/measure/retime algorithm. Not part of the upstream sky-cam repo,
-# so it's safe from being clobbered by `git pull` there (different filename).
-_write_frigate_retime_helper() {
-    local dir="$1"
-    cat > "$dir/frigate-retime.sh" << 'RETIME'
-#!/bin/bash
-# frigate-retime.sh — Export a Frigate timelapse for a time window and
-# re-time it to hit an exact target duration (e.g. a music track's length).
-#
-# Frigate's export API only offers fixed-speed presets (e.g. timelapse_25x),
-# so two source windows of different real-world length come out at
-# different durations. To land on an exact target (a Vivaldi movement's
-# runtime, a fixed "full day" length, etc.) this script:
-#   1. Requests a coarse export from Frigate covering start..end.
-#   2. Measures what actually came out with ffprobe — never trusts the
-#      requested speed, since hardware-accelerated exports can silently
-#      fall back to realtime.
-#   3. Computes the exact speed factor to hit the target and re-encodes
-#      once with setpts=PTS/factor, hard-clipped to the target length.
-#
-# Usage:
-#   frigate-retime.sh <camera> <start_unix> <end_unix> <target_seconds> \
-#       <output.mp4> [audio_file]
-#
-# Requires FRIGATE_URL and FRIGATE_EXPORT_DIR in the environment (sky-cam's
-# .env sets these — source it before calling, or run via sky-cam's timers
-# which already do).
-set -euo pipefail
-
-CAMERA="${1:?camera name required}"
-START="${2:?start unix timestamp required}"
-END="${3:?end unix timestamp required}"
-TARGET="${4:?target duration in seconds required}"
-OUT="${5:?output path required}"
-AUDIO="${6:-}"
-
-: "${FRIGATE_URL:?Set FRIGATE_URL (e.g. http://localhost:5000)}"
-: "${FRIGATE_EXPORT_DIR:?Set FRIGATE_EXPORT_DIR (host path to Frigate's media/exports)}"
-
-NAME="skycam_$(date +%s)_$$"
-
-log() { echo "[frigate-retime] $*"; }
-
-# 1. Kick off a coarse timelapse export covering the window. Frigate
-#    stitches together whatever continuous-recording segments fall in
-#    start..end — no manual concatenation needed on our end.
-log "Requesting export for ${CAMERA} ${START}..${END} (name=${NAME})"
-curl -fsS -H "Content-Type: application/json" -X POST \
-    -d "{\"playback\": \"timelapse_25x\", \"name\": \"${NAME}\"}" \
-    "${FRIGATE_URL}/api/export/${CAMERA}/start/${START}/end/${END}" > /dev/null
-
-# 2. Wait for the export file to land in Frigate's media volume on disk.
-COARSE=""
-for _ in $(seq 1 120); do
-    COARSE="$(find "$FRIGATE_EXPORT_DIR" -maxdepth 1 -iname "*${NAME}*.mp4" -print -quit 2>/dev/null || true)"
-    [ -n "$COARSE" ] && break
-    sleep 5
-done
-[ -n "$COARSE" ] || { log "ERROR: export ${NAME} never appeared in ${FRIGATE_EXPORT_DIR}"; exit 1; }
-log "Coarse export ready: $COARSE"
-
-# 3. Measure the actual duration — this is what makes the retime exact
-#    regardless of what speed Frigate actually delivered.
-ACTUAL_SECONDS="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$COARSE")"
-log "Coarse export duration: ${ACTUAL_SECONDS}s — target: ${TARGET}s"
-
-# 4. Compute the speed factor and re-encode once, hard-clipped to target.
-FACTOR="$(echo "$ACTUAL_SECONDS / $TARGET" | bc -l)"
-log "Speed factor: ${FACTOR}x"
-
-if [ -n "$AUDIO" ]; then
-    ffmpeg -y -i "$COARSE" -i "$AUDIO" \
-        -filter:v "setpts=PTS/${FACTOR}" -r 30 \
-        -map 0:v -map 1:a -shortest -t "$TARGET" \
-        -c:v libx264 -c:a aac "$OUT"
-else
-    ffmpeg -y -i "$COARSE" \
-        -filter:v "setpts=PTS/${FACTOR}" -r 30 -t "$TARGET" \
-        -an -c:v libx264 "$OUT"
-fi
-
-rm -f "$COARSE"
-log "Wrote $OUT"
-RETIME
-    chmod +x "$dir/frigate-retime.sh"
+# Prints space-separated camera names parsed from an existing Frigate
+# config.yml's top-level `cameras:` block. Best-effort only — same 2-space
+# indent assumption services/frigate.sh's own parser relies on.
+_skycam_frigate_detect_cameras() {
+    local cfg="$1"
+    [ -f "$cfg" ] || return 0
+    awk '
+        /^cameras:/ { in_cams=1; next }
+        in_cams && /^[a-zA-Z]/ { in_cams=0 }
+        in_cams && /^  [a-z0-9_]+:[[:space:]]*$/ { gsub(/[: ]/, ""); print }
+    ' "$cfg" | tr '\n' ' '
 }
 
 install_sky-cam-frigate() {
@@ -199,10 +119,11 @@ install_sky-cam-frigate() {
         echo "[DRY-RUN] sky-cam-frigate would:"
         echo "  - Install: ffmpeg bc fonts-dejavu curl python3-pip"
         echo "  - pip install: suntime pytz requests skyfield Pillow numpy scipy"
-        echo "  - Clone sky-cam to $SKYCAM_DIR via bootstrap.sh (shared with sky-cam.sh)"
-        echo "  - Drop frigate-retime.sh into $SKYCAM_DIR (export + exact-duration retime helper)"
-        echo "  - Detect an existing Frigate install (\$DOCKER_DIR/frigate/.env) for URL/export dir defaults"
-        echo "  - Write FRIGATE_URL / FRIGATE_EXPORT_DIR / camera names into .env"
+        echo "  - Clone sky-cam to $SKYCAM_DIR via bootstrap.sh (same repo as sky-cam.sh)"
+        echo "  - Detect cameras from an existing Frigate config.yml, if present"
+        echo "  - Write CAM_RTSP_<cam>=rtsp://<frigate-host>:8554/<cam> into .env"
+        echo "    (Frigate's go2rtc restream, instead of the camera's own RTSP URL)"
+        echo "  - Edit sky-cam.conf with your location and camera names"
         echo "  - Copy .env.example → .env and set Mattermost credentials"
         echo "  - Run ./install.sh to register systemd user timers"
         return 0
@@ -213,8 +134,9 @@ install_sky-cam-frigate() {
     echo "║  sky-cam + Frigate — Sky & Timelapse Camera System   ║"
     echo "╚═══════════════════════════════════════════════════════╝"
     echo ""
-    log_info "This variant sources footage from Frigate's recordings via its"
-    log_info "export API, instead of a folder of per-frame JPEGs."
+    log_info "This is the same sky-cam project as services/sky-cam.sh — the only"
+    log_info "difference is CAM_RTSP_<cam> points at Frigate's restream instead of"
+    log_info "the camera directly, so Frigate stays the single RTSP client per camera."
     echo ""
 
     # ── System packages ──────────────────────────────────────────────────────
@@ -245,30 +167,20 @@ install_sky-cam-frigate() {
     fi
 
     # ── Frigate detection ────────────────────────────────────────────────────
-    local FRIGATE_ENV="$DOCKER_DIR/frigate/.env"
-    local DEFAULT_FRIGATE_URL="http://localhost:5000"
-    local DEFAULT_EXPORT_DIR=""
-    if [ -f "$FRIGATE_ENV" ]; then
-        log_success "Found existing Frigate install at $DOCKER_DIR/frigate"
-        local _frigate_media
-        _frigate_media="$(grep -E '^FRIGATE_MEDIA=' "$FRIGATE_ENV" | head -1 | cut -d= -f2-)"
-        [ -n "$_frigate_media" ] && DEFAULT_EXPORT_DIR="$_frigate_media/exports"
+    local FRIGATE_CFG="$DOCKER_DIR/frigate/config/config.yml"
+    local DEFAULT_CAMS="east"
+    local FRIGATE_HOST="127.0.0.1"
+    if [ -f "$FRIGATE_CFG" ]; then
+        log_success "Found existing Frigate config at $DOCKER_DIR/frigate"
+        local _detected
+        _detected="$(_skycam_frigate_detect_cameras "$FRIGATE_CFG")"
+        [ -n "$_detected" ] && DEFAULT_CAMS="$_detected"
     else
-        log_warning "No Frigate install found at $DOCKER_DIR/frigate — run services/frigate.sh first,"
-        log_warning "or enter its URL/export path manually below."
+        log_warning "No Frigate config found at $DOCKER_DIR/frigate — run services/frigate.sh first"
+        log_warning "if Frigate isn't configured yet. Camera names below must match Frigate's"
+        log_warning "config.yml camera keys once it is, or capture.sh will connect to nothing."
     fi
 
-    echo ""
-    log_info "Frigate connection"
-    local FRIGATE_URL="" FRIGATE_EXPORT_DIR=""
-    prompt_text "  Frigate URL [$DEFAULT_FRIGATE_URL]:" "$DEFAULT_FRIGATE_URL" FRIGATE_URL
-    prompt_text "  Frigate export directory on this host [${DEFAULT_EXPORT_DIR:-required}]:" \
-        "$DEFAULT_EXPORT_DIR" FRIGATE_EXPORT_DIR
-    if [ -z "$FRIGATE_EXPORT_DIR" ]; then
-        log_warning "No export directory set — frigate-retime.sh will fail until FRIGATE_EXPORT_DIR is set in .env"
-    fi
-
-    # ── Essential configuration ──────────────────────────────────────────────
     echo ""
     log_info "Location and camera configuration"
     echo "  sky-cam needs your GPS coordinates and timezone to calculate"
@@ -282,10 +194,18 @@ install_sky-cam-frigate() {
 
     echo ""
     echo "  Camera names must match the camera keys configured in Frigate's"
-    echo "  config.yml (services/frigate.sh), e.g.:  east north south west"
+    echo "  config.yml (services/frigate.sh)."
     echo ""
-    prompt_text "  Frigate camera names (space-separated) [east]:" "east" CAMERAS_LIST
-    prompt_text "  Sunrise camera (faces east) [east]:" "east" SUNRISE_CAM
+    prompt_text "  Camera names (space-separated) [$DEFAULT_CAMS]:" "$DEFAULT_CAMS" CAMERAS_LIST
+    local _default_sunrise; _default_sunrise="$(awk '{print $1}' <<< "$CAMERAS_LIST")"
+    prompt_text "  Sunrise camera (faces east) [$_default_sunrise]:" "$_default_sunrise" SUNRISE_CAM
+
+    echo ""
+    log_info "Frigate connection"
+    echo "  sky-cam's capture.sh runs directly on this host and connects to"
+    echo "  Frigate's go2rtc RTSP restream (port 8554) instead of the camera."
+    echo ""
+    prompt_text "  Frigate host [$FRIGATE_HOST]:" "$FRIGATE_HOST" FRIGATE_HOST
 
     # Prompt for Mattermost credentials
     echo ""
@@ -312,11 +232,13 @@ install_sky-cam-frigate() {
         echo "LONGITUDE=${LONGITUDE:-0.0000}"
         echo "TIMEZONE=${TIMEZONE:-America/New_York}"
         echo ""
-        echo "# Frigate is the recording source for this variant — see"
-        echo "# frigate-retime.sh for how clips are exported and re-timed to an"
-        echo "# exact target duration (e.g. a music movement's runtime)."
-        echo "FRIGATE_URL=${FRIGATE_URL:-$DEFAULT_FRIGATE_URL}"
-        echo "FRIGATE_EXPORT_DIR=${FRIGATE_EXPORT_DIR}"
+        echo "# Frigate's go2rtc restream stands in for each camera's direct RTSP"
+        echo "# URL — Frigate stays the only RTSP client against the camera itself."
+        for _cam in $CAMERAS_LIST; do
+            local _var; _var="CAM_RTSP_${_cam}"
+            echo "${_var}=rtsp://${FRIGATE_HOST}:8554/${_cam}"
+        done
+        echo ""
         if [ -n "$MM_WEBHOOK" ]; then
             echo "MM_WEBHOOK_URL=${MM_WEBHOOK}"
             echo "MM_CHANNEL=${MM_CHANNEL:-sky-cam}"
@@ -333,16 +255,11 @@ install_sky-cam-frigate() {
         log_info "Patching sky-cam.conf with location and camera names..."
         local CAM_ARRAY="(${CAMERAS_LIST})"
         sed -i "s|^CAMERAS=.*|CAMERAS=${CAM_ARRAY}|" "$CONF"
-        sed -i "s|^SUNRISE_CAM=.*|SUNRISE_CAM=${SUNRISE_CAM:-east}|" "$CONF"
+        sed -i "s|^SUNRISE_CAM=.*|SUNRISE_CAM=${SUNRISE_CAM}|" "$CONF"
         log_success "sky-cam.conf updated"
     else
         log_warning "sky-cam.conf not found — check $SKYCAM_DIR"
     fi
-
-    # ── Frigate export/retime helper ─────────────────────────────────────────
-    log_info "Writing frigate-retime.sh helper to $SKYCAM_DIR..."
-    _write_frigate_retime_helper "$SKYCAM_DIR"
-    log_success "frigate-retime.sh installed"
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$SKYCAM_DIR" 2>/dev/null || true
 
@@ -363,28 +280,23 @@ install_sky-cam-frigate() {
     echo "═══════════════════════════════════════════════════════"
     echo ""
     echo "  Location:    $SKYCAM_DIR"
-    echo "  Frigate URL: ${FRIGATE_URL:-$DEFAULT_FRIGATE_URL}"
-    echo "  Export dir:  ${FRIGATE_EXPORT_DIR:-<not set>}"
+    echo "  Frigate:     rtsp://${FRIGATE_HOST}:8554/<camera>"
     echo "  Cameras:     $CAMERAS_LIST"
     echo "  Timezone:    ${TIMEZONE:-America/New_York}"
     echo ""
     echo "  Next steps:"
-    echo "   1. Review $SKYCAM_DIR/sky-cam.conf — schedules, encoding settings"
-    echo "   2. sky-cam's own timer scripts still assemble from JPEGs by default;"
-    echo "      point the ones you want Frigate-backed (daily sunrise, four"
-    echo "      seasons, full-day, moon-track) at frigate-retime.sh — see its"
-    echo "      header comment for the exact usage/args."
-    echo "   3. Put your Vivaldi Four Seasons audio files in:"
+    echo "   1. Review $SKYCAM_DIR/sky-cam.conf"
+    echo "      — schedules, encoding settings, moon-job thresholds"
+    echo "   2. Put your Vivaldi Four Seasons audio files in:"
     echo "      $SKYCAM_DIR/music/"
-    echo "   4. Verify systemd timers:"
+    echo "   3. Confirm frames are landing:"
+    echo "      systemctl --user status sky-cam-capture-${SUNRISE_CAM}.service"
+    echo "      ls $SKYCAM_DIR/data/${SUNRISE_CAM}/\$(date +%Y-%m-%d)/"
+    echo "   4. Verify all timers:"
     echo "      systemctl --user list-timers 'sky-cam-*'"
-    echo "   5. Credentials → $SKYCAM_DIR/.env"
-    echo ""
-    echo "  Test the export/retime helper manually:"
-    echo "    cd $SKYCAM_DIR && source .env && ./frigate-retime.sh east \\"
-    echo "      \$(date -d 'today 06:00' +%s) \$(date -d 'today 08:00' +%s) 30 test.mp4"
     echo ""
     echo "  Logs:"
+    echo "    journalctl --user -u sky-cam-capture-${SUNRISE_CAM}.service -f"
     echo "    journalctl --user -u sky-cam-sunrise.service -f"
     echo ""
 }
