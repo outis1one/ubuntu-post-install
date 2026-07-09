@@ -103,6 +103,7 @@ install_sky-cam() {
         echo "  - Prompt for Mattermost (mattermost_url/access_token/channel_id) + ntfy"
         echo "  - Patch sky-cam.conf: cameras, audio toggles, per-camera seasons schedule"
         echo "  - Run ./install.sh to register every applicable systemd timer/service"
+        echo "  - Add retry-on-failure drop-ins (3x, 60s apart) to sunrise/seasons/moon jobs"
         return 0
     fi
 
@@ -325,6 +326,51 @@ install_sky-cam() {
         log_warning "install.sh not found in $SKYCAM_DIR — run it manually after review"
     fi
 
+    # ── Resilience: retry-on-failure for the daily/nightly oneshot jobs ──────
+    # install.sh generates sunrise/seasons/moon jobs as Type=oneshot with only
+    # OnFailure=notify (no retry) — a transient ffmpeg/network blip fails the
+    # whole day's job with just an alert. Drop-in overrides add bounded
+    # auto-restart without touching install.sh's generated units directly
+    # (those get overwritten every time install.sh re-runs, e.g. after editing
+    # sky-cam.conf, so any hand-edit there would silently vanish next time).
+    # systemd only fires OnFailure once retries are exhausted, so this doesn't
+    # spam a notification per attempt — just one, after 3 tries.
+    local UNIT_DIR="$ACTUAL_HOME/.config/systemd/user"
+    if [ -d "$UNIT_DIR" ]; then
+        log_info "Adding retry-on-failure to sunrise/seasons/moon jobs..."
+        local _retry_units=("sky-cam-sunrise" "sky-cam-sunrise-upload" "sky-cam-moon-track" "sky-cam-moon-phase")
+        [[ "$AUDIO_MIC" =~ ^[Yy]$ ]] && _retry_units+=("sky-cam-audio-capture")
+        for _cam in $CAMERAS_LIST; do
+            _retry_units+=("sky-cam-seasons-${_cam}")
+        done
+
+        local _unit _patched=0
+        for _unit in "${_retry_units[@]}"; do
+            if [ -f "$UNIT_DIR/${_unit}.service" ]; then
+                mkdir -p "$UNIT_DIR/${_unit}.service.d"
+                cat > "$UNIT_DIR/${_unit}.service.d/override.conf" << 'EOF'
+[Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Restart=on-failure
+RestartSec=60
+EOF
+                _patched=$((_patched+1))
+            fi
+        done
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UNIT_DIR" 2>/dev/null || true
+
+        if [ "$_patched" -gt 0 ]; then
+            sudo -u "$ACTUAL_USER" bash -c '
+                export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+                systemctl --user daemon-reload
+            ' && log_success "${_patched} job(s) will retry up to 3x (60s apart) before alerting" \
+              || log_warning "daemon-reload failed — run manually: systemctl --user daemon-reload"
+        fi
+    fi
+
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""
     echo "═══════════════════════════════════════════════════════"
@@ -339,6 +385,7 @@ install_sky-cam() {
     echo "  Ambient:   $([[ "$AMBIENT" =~ ^[Yy]$ ]] && echo "enabled ($AMBIENT_CAMS_LIST)" || echo "disabled")"
     echo "  Mattermost: $([ -n "$MM_URL" ] && echo "configured" || echo "not configured")"
     echo "  ntfy:      $([ -n "$NTFY_TOPIC_URL" ] && echo "configured" || echo "not configured")"
+    echo "  Retries:   sunrise/seasons/moon jobs retry up to 3x (60s apart) before alerting"
     echo ""
     echo "  Next steps:"
     echo "   1. Review $SKYCAM_DIR/sky-cam.conf"
