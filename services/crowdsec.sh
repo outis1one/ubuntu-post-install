@@ -102,6 +102,7 @@ install_crowdsec() {
         echo "[DRY-RUN] Would ensure /var/log/caddy exists for log acquisition"
         echo "[DRY-RUN] Would install collections: sshd, linux, caddy, base-http-scenarios"
         echo "[DRY-RUN] Would write Caddy acquisition /etc/crowdsec/acquis.d/caddy.yaml"
+        echo "[DRY-RUN] Would install crowdsecurity/asterisk + write an acquisition if asterisk-do is installed"
         echo "[DRY-RUN] Would optionally wire ntfy ban alerts into the default profile"
         echo "[DRY-RUN] Would enable + restart crowdsec and crowdsec-firewall-bouncer"
         echo "[DRY-RUN] Would write $DOCS_DIR/README.md (docs-only folder)"
@@ -155,6 +156,34 @@ labels:
         fi
     else
         echo "  ✓ Caddy acquisition already exists"
+    fi
+
+    # ── 5b. SIP brute-force/enumeration protection, if asterisk-do is installed
+    # (services/asterisk-do.sh patches Asterisk to log security events — auth
+    # failures, registration scanning — to $EA_DIR/logs/full. The plain LAN
+    # asterisk.sh doesn't emit that file yet, so it's intentionally not
+    # detected here.)
+    local ASTERISK_LOG_DIR="$DOCKER_DIR/asterisk-do/logs"
+    if [ -d "$ASTERISK_LOG_DIR" ]; then
+        echo "  Detected asterisk-do — installing SIP brute-force/enumeration protection..."
+        sudo cscli collections install crowdsecurity/asterisk 2>/dev/null || \
+            echo "  ⚠ crowdsecurity/asterisk collection may already be installed"
+
+        local ASTERISK_ACQUIS="/etc/crowdsec/acquis.d/asterisk-do.yaml"
+        if [ ! -f "$ASTERISK_ACQUIS" ]; then
+            local ASTERISK_ACQUIS_CONTENT="filenames:
+  - $ASTERISK_LOG_DIR/full
+  - $ASTERISK_LOG_DIR/full.*
+labels:
+  type: asterisk"
+            if echo "$ASTERISK_ACQUIS_CONTENT" | sudo tee "$ASTERISK_ACQUIS" > /dev/null; then
+                echo "  ✓ Created Asterisk acquisition ($ASTERISK_ACQUIS)"
+            else
+                echo "  ⚠ Failed to create Asterisk acquisition - create it manually"
+            fi
+        else
+            echo "  ✓ Asterisk acquisition already exists"
+        fi
     fi
 
     # ── 6. Geo-blocking + reputation (the capability fail2ban/Authelia lack) ─
@@ -233,7 +262,8 @@ install. The real configuration lives under `/etc/crowdsec`.
 
 ## What it does
 
-- Detects malicious behaviour (SSH brute force, web scans, etc.) by parsing logs.
+- Detects malicious behaviour (SSH brute force, web scans, SIP brute
+  force/enumeration if `asterisk-do` is installed) by parsing logs.
 - Bans offending IPs via the **firewall bouncer** (iptables/nftables).
 - Pulls **community IP reputation** blocklists so known-bad IPs are blocked
   before they ever touch your services.
@@ -255,6 +285,9 @@ sudo cscli collections list             # installed detection collections
 - Log acquisition (what to watch): `/etc/crowdsec/acquis.d/`
   - Caddy access logs: `/etc/crowdsec/acquis.d/caddy.yaml`
     (`/var/log/caddy/*.log` — Caddy writes JSON access logs there)
+  - Asterisk SIP auth events (if `asterisk-do` is installed):
+    `/etc/crowdsec/acquis.d/asterisk-do.yaml`
+    (`~/docker/asterisk-do/logs/full` — auth failures, registration scans)
 - Notifications: `/etc/crowdsec/notifications/`
   - ntfy ban alerts (if enabled): `/etc/crowdsec/notifications/ntfy.yaml`,
     wired into `/etc/crowdsec/profiles.yaml`

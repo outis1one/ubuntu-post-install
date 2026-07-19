@@ -275,6 +275,20 @@ install_asterisk-do() {
     chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
               ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh
 
+    # ── Persist security-level logging to a file ──────────────────────────────
+    # Vendor's logger.conf only sends the "security" level (auth failures, SIP
+    # brute-force attempts) to the console — that's Docker's stdout, not a file
+    # CrowdSec/fail2ban can tail. Patch our copy of entrypoint.sh (not the
+    # shared vendor/ source) so it also writes those events to
+    # /var/log/asterisk/full, which is bind-mounted to $EA_DIR/logs/full — a
+    # host path services/crowdsec.sh can point its Asterisk acquisition at.
+    if grep -q '^console => notice,warning,error,security$' ./docker/entrypoint.sh; then
+        sed -i '/^console => notice,warning,error,security$/a full => notice,warning,error,security' \
+            ./docker/entrypoint.sh
+    else
+        log_warning "entrypoint.sh logger.conf template changed upstream — security events won't be logged to a file. Update the sed patch in this installer."
+    fi
+
     # ── DigitalOcean droplet detection ────────────────────────────────────────
     # A droplet's own public IP/ID are readable, unauthenticated, from the
     # link-local metadata service — no API token needed for this part.
@@ -657,6 +671,14 @@ MD
     echo "  Web admin:   http://${PUBLIC_IP:-localhost}:8080"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
     echo "  Script:      docker exec -it easy-asterisk-do easy-asterisk --help"
+    echo ""
+    if command -v cscli &>/dev/null; then
+        log_info "CrowdSec is already installed — rerun it to add SIP brute-force protection for this install:"
+        log_info "  sudo ./setup.sh crowdsec"
+    else
+        log_info "Install CrowdSec (services/crowdsec.sh) for SIP brute-force/enumeration protection —"
+        log_info "  it auto-detects this install and wires up the crowdsecurity/asterisk collection."
+    fi
     echo ""
 }
 
