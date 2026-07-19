@@ -206,7 +206,7 @@ install_asterisk-do() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
-        echo "[DRY-RUN] Would offer optional extras: authelia, ntfy, watchtower, wg-easy, backup"
+        echo "[DRY-RUN] Would offer optional extras: authelia, ntfy, watchtower, wg-easy, netbird, backup"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
@@ -281,6 +281,9 @@ install_asterisk-do() {
         echo "                Asterisk itself is built locally, so OS security patches"
         echo "                still need a manual 'docker compose up -d --build'"
         echo "    wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
+        echo "    netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
+        echo "                home machine can reach each other without port-forwarding —"
+        echo "                pairs with 'backup' below"
         echo "    backup      Borg backup of ~/docker/* to a local machine or remote host —"
         echo "                config/data backup, NOT a full droplet image, instead of"
         echo "                DigitalOcean's paid Droplet Backups"
@@ -616,6 +619,26 @@ ENV
         cd "$EA_DIR" || return 1   # install_watchtower cd's into ~/docker/watchtower
     fi
 
+    # ── NetBird: mesh VPN + optional built-in SSH server ───────────────────────
+    # _base_setup_netbird lives in services/base.sh (not its own register_service
+    # entry — it's a helper base.sh calls on first run), but it's a plain
+    # function like any other once sourced, so it's callable here the same way.
+    # Doesn't cd anywhere, so no directory restore needed after it. Its own
+    # prompt already defaults "enable NetBird's built-in SSH server" to yes —
+    # that's the piece that lets 'backup' below reach a home machine without
+    # port-forwarding, IF the home machine also joins the same NetBird network
+    # (a separate, manual step on that machine — this only sets up this droplet).
+    if [[ "$EXTRAS" == *netbird* ]]; then
+        if command -v netbird &>/dev/null; then
+            log_info "NetBird is already installed on this droplet."
+        elif declare -F _base_setup_netbird &>/dev/null; then
+            _base_setup_netbird
+        else
+            log_warning "NetBird setup not found, and this looks like a standalone copy of asterisk-do.sh."
+            log_warning "Grab the full repo to auto-install it, or run services/base.sh yourself."
+        fi
+    fi
+
     # ── Backup: config/data to a local machine or remote host ─────────────────
     # Not a full droplet image — it's ~/docker/* (this PBX's config, extensions,
     # CDRs, and every other installed service here) via Borg, which supports
@@ -623,7 +646,8 @@ ENV
     # DigitalOcean's paid Droplet Backups: point it at your own machine instead
     # of paying DO to store snapshots. Disaster recovery then becomes "fresh
     # droplet, rerun this installer, restore from the Borg repo" rather than
-    # restoring a multi-GB disk image.
+    # restoring a multi-GB disk image. Pair with 'netbird' above so the SSH
+    # remote target is a private mesh IP instead of needing a port-forward.
     if [[ "$EXTRAS" == *backup* ]] && declare -F install_borg-backup &>/dev/null; then
         install_borg-backup
         cd "$EA_DIR" || return 1   # install_borg-backup cd's into ~/docker/borg-backup
@@ -735,6 +759,15 @@ be added later by running \`sudo ./setup.sh <name>\` from the repo.
   firewall layers, so reconfiguring the PBX requires being on the VPN —
   done manually, not automatically, since a firewall mistake there can lock
   you out.
+- **netbird** — mesh VPN (via \`services/base.sh\`'s \`_base_setup_netbird\`
+  helper). Its own prompt defaults to enabling NetBird's **built-in SSH
+  server** (\`--allow-server-ssh\`) on this droplet. Install NetBird on a
+  home machine too (separately, outside this installer — same
+  \`curl -fsSL https://pkgs.netbird.io/install.sh | sh\`, then
+  \`netbird up --setup-key <key> --allow-server-ssh\`) and join it to the
+  same network, and the two machines get a private mesh IP to reach each
+  other over — no router port-forwarding, no public SSH exposure on either
+  end. That mesh IP is what \`backup\` below should target.
 - **backup** — Borg backup of \`~/docker/*\` (this PBX's config, extensions,
   CDRs, and every other service on this droplet) to a **local path or a
   remote host over SSH** (\`user@host:/path\`) — see \`services/borg-backup.sh\`.
@@ -742,10 +775,9 @@ be added later by running \`sudo ./setup.sh <name>\` from the repo.
   at your own machine and pay nothing extra to DO. It is **not** a full
   droplet disk image — disaster recovery is "fresh droplet, rerun this
   installer, restore the Borg repo," which is faster and more portable than
-  restoring a multi-GB snapshot. Pointing it at a home machine that isn't
-  reachable by a stable public IP works best over a mesh VPN (this repo's
-  optional NetBird overlay, set up via \`services/base.sh\`) rather than
-  port-forwarding SSH on a home router.
+  restoring a multi-GB snapshot. If the destination is a home machine
+  without a stable public IP, install \`netbird\` (above) first and use its
+  mesh IP as the SSH host instead of port-forwarding a home router.
 
 ## Manage
 
