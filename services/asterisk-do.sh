@@ -637,18 +637,75 @@ ENV
             fi
         fi
 
-        # Reconstruct the subdomain-only fragment so configure_caddy_for_service's
-        # own "<subdomain>.${SITE_DOMAIN}" default lands exactly on $DOMAIN_NAME —
-        # pressing Enter at its domain prompt then just works.
-        local _CADDY_SUBDOMAIN="asterisk"
-        if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$DOMAIN_NAME" == *".${SITE_DOMAIN}" ]]; then
-            _CADDY_SUBDOMAIN="${DOMAIN_NAME%.${SITE_DOMAIN}}"
-        fi
+        # Deliberately NOT using configure_caddy_for_service here. That helper
+        # asks for its own domain, defaulting to "<subdomain>.${SITE_DOMAIN}" —
+        # which only lands on $DOMAIN_NAME if SITE_DOMAIN happens to be set to
+        # match, and silently shows a useless blank/wrong default otherwise
+        # (real-world confirmed: SITE_DOMAIN is never set when this service is
+        # run by name, e.g. `sudo ./setup.sh asterisk-do`, since that skips
+        # setup.sh's own site-defaults wizard entirely). There is exactly one
+        # correct domain for this site block — $DOMAIN_NAME — so it's written
+        # directly, with no domain prompt to get wrong.
+        echo ""
+        local WANT_CADDY_PROXY=""
+        prompt_yn "Reverse-proxy the web admin at https://${DOMAIN_NAME}/ via Caddy? (also gets Asterisk a trusted TLS cert for SIP instead of self-signed) (y/n):" "y" WANT_CADDY_PROXY
+        if [[ "$WANT_CADDY_PROXY" =~ ^[Yy]$ ]]; then
+            local _CADDY_MODE="local"
+            [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -n "${CADDY_REMOTE_HOST:-}" ]] && _CADDY_MODE="remote"
 
-        log_info "Reverse-proxying the web admin at https://${DOMAIN_NAME}/ — this is also what gets"
-        log_info "Asterisk a trusted TLS cert for SIP instead of a self-signed one."
-        log_info "When prompted for a domain next, use exactly: ${DOMAIN_NAME}"
-        configure_caddy_for_service "Asterisk Web Admin" "8080" "$_CADDY_SUBDOMAIN" "$EXTRA_BLOCK"
+            local _SITE_BLOCK
+            _SITE_BLOCK="$(cat << CADDY_BLOCK
+
+# Asterisk Web Admin
+${DOMAIN_NAME} {
+    reverse_proxy localhost:8080
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${DOMAIN_NAME}.log
+        format json
+    }
+${EXTRA_BLOCK}
+}
+CADDY_BLOCK
+)"
+
+            if [[ "$_CADDY_MODE" == "local" ]]; then
+                local _CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
+                local _CADDY_BACKUP="$_CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)"
+                if [[ -f "$_CADDYFILE" ]]; then
+                    cp "$_CADDYFILE" "$_CADDY_BACKUP"
+                else
+                    touch "$_CADDYFILE"
+                fi
+                if grep -q "^${DOMAIN_NAME}" "$_CADDYFILE" 2>/dev/null; then
+                    log_warning "${DOMAIN_NAME} already in Caddyfile — leaving the existing entry alone."
+                else
+                    printf '%s\n' "$_SITE_BLOCK" >> "$_CADDYFILE"
+                    log_success "Added ${DOMAIN_NAME} to Caddyfile (backup: $(basename "$_CADDY_BACKUP"))"
+                    docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                    if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                        log_success "Web admin accessible at: https://${DOMAIN_NAME}"
+                    else
+                        log_warning "Reload failed — check: docker logs caddy"
+                        log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                    fi
+                fi
+            else
+                local _SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
+                mkdir -p "$_SNIPPET_DIR"
+                printf '%s\n' "$_SITE_BLOCK" > "$_SNIPPET_DIR/asterisk-do.caddy"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk-do.caddy" 2>/dev/null || true
+                log_success "Snippet saved: $_SNIPPET_DIR/asterisk-do.caddy"
+                log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk-do.caddy caddy-host:~/caddy-snippets/"
+            fi
+        fi
     fi
 
     # ── CrowdSec: SIP brute-force/enumeration protection ──────────────────────
