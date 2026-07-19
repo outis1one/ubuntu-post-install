@@ -204,7 +204,8 @@ install_asterisk() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
-        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8081, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
+        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
         return 0
     fi
 
@@ -359,6 +360,25 @@ EOF
         sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
     fi
 
+    # ── Pick a free port for the web admin ─────────────────────────────────────
+    # Hardcoding a single number gets fragile fast once several services share
+    # a host — CrowdSec's own LAPI already collides with 8080 by default (its
+    # own upstream default, confirmed against its real config.yaml). Scan
+    # instead: start at 8081 and take the first port nothing is listening on,
+    # capped so a pathological box can't spin this forever.
+    local WEB_ADMIN_PORT_VAL=8081
+    local _port_scan_limit=$((WEB_ADMIN_PORT_VAL + 100))
+    while ss -tlnH "sport = :${WEB_ADMIN_PORT_VAL}" 2>/dev/null | grep -q . \
+          && [[ "$WEB_ADMIN_PORT_VAL" -lt "$_port_scan_limit" ]]; do
+        WEB_ADMIN_PORT_VAL=$((WEB_ADMIN_PORT_VAL + 1))
+    done
+    if [[ "$WEB_ADMIN_PORT_VAL" -ge "$_port_scan_limit" ]]; then
+        log_warning "No free port found in 8081-${_port_scan_limit} — falling back to 8081 anyway."
+        WEB_ADMIN_PORT_VAL=8081
+    elif [[ "$WEB_ADMIN_PORT_VAL" != 8081 ]]; then
+        log_info "Port 8081 was already taken — web admin will use ${WEB_ADMIN_PORT_VAL} instead."
+    fi
+
     # ── .env ──────────────────────────────────────────────────────────────────
     cat > .env << ENV
 # ── Domain ────────────────────────────────────────────────────
@@ -383,7 +403,11 @@ HAS_VLANS=${HAS_VLANS_VAL}
 VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 
 # ── Web admin ─────────────────────────────────────────────────
-WEB_ADMIN_PORT=8081
+# Picked automatically at install time (first free port starting at 8081) —
+# see WEB_ADMIN_PORT_VAL in services/asterisk.sh if this ever needs to
+# change again; don't hand-edit without also updating Caddy's Caddyfile and
+# any firewall rules to match.
+WEB_ADMIN_PORT=${WEB_ADMIN_PORT_VAL}
 WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
@@ -394,7 +418,7 @@ ENV
         ufw allow 5060/udp
         ufw allow 5060/tcp
         ufw allow 5061/tcp
-        ufw allow 8081/tcp
+        ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
         ufw allow 8088/tcp
         ufw allow 8089/tcp
         ufw allow 3478/udp
@@ -415,7 +439,7 @@ ENV
             sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
         fi
     fi
-    configure_caddy_for_service "Asterisk Web Admin" "8081" "asterisk" "$EXTRA_BLOCK"
+    configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << 'MD'
@@ -484,7 +508,10 @@ to accept it).
 ## Web admin
 
 Access the Easy Asterisk web interface at http://<host-ip>:8081
-or via your configured reverse-proxy domain.
+or via your configured reverse-proxy domain. (8081 is the default; if that
+port was already taken by something else on this box, the installer picked
+the next free one instead — check WEB_ADMIN_PORT in .env for the actual
+value.)
 
 ## Data directories (all inside ~/docker/asterisk/, included in backup)
 
@@ -502,7 +529,7 @@ or via your configured reverse-proxy domain.
 |---------------|----------|----------------------------------|
 | 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
 | 5061          | TCP      | SIP over TLS                     |
-| 8081          | TCP      | Easy Asterisk web admin          |
+| 8081          | TCP      | Easy Asterisk web admin (default — see .env) |
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
@@ -530,7 +557,7 @@ MD
         echo "  TURN server: (none — LAN/VPN only)"
     fi
     echo "  SIP port:    5061 (TLS) / 5060 (UDP)"
-    echo "  Web admin:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8081"
+    echo "  Web admin:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${WEB_ADMIN_PORT_VAL}"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
     echo "  Script:      docker exec -it easy-asterisk easy-asterisk --help"
     echo ""
