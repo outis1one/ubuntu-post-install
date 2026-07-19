@@ -205,11 +205,14 @@ install_asterisk-do() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
+        echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
         echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8080, 8088, 8089, 3478, 10000-20000, 49152-49252"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
+        echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
+        echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
         return 0
     fi
 
@@ -239,6 +242,24 @@ install_asterisk-do() {
         else
             log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
             log_warning "Consider a bigger droplet, or free up disk before installing."
+        fi
+    fi
+
+    # ── Bring in Caddy automatically, if this is a full repo checkout ─────────
+    # Caddy is a separate service (services/caddy.sh); asterisk-do only
+    # *integrates* with it (reused certs, reverse-proxied admin) unless
+    # offered here. setup.sh sources every services/*.sh file up front, so
+    # install_caddy already exists in-process when running through the
+    # wizard — a standalone single-file run doesn't have it, so that case
+    # gets a manual pointer instead.
+    if [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
+        if declare -F install_caddy &>/dev/null; then
+            local WANT_CADDY=""
+            prompt_yn "Caddy not detected — install it now for a trusted TLS cert + reverse proxy? (y/n):" "y" WANT_CADDY
+            [[ "$WANT_CADDY" =~ ^[Yy]$ ]] && install_caddy
+        else
+            log_warning "Caddy not detected, and this looks like a standalone copy of asterisk-do.sh."
+            log_warning "Grab the full repo to auto-install it, or run services/caddy.sh yourself."
         fi
     fi
 
@@ -312,8 +333,13 @@ install_asterisk-do() {
     echo ""
     echo "  Point a DNS A record at this droplet before continuing:"
     echo "    <subdomain>.${SITE_DOMAIN:-example.com}  A  ${PUBLIC_IP:-<droplet public IP>}"
+    echo ""
+    echo "  This one FQDN covers everything below — SIP registration, the web"
+    echo "  admin, and (via Caddy) the TLS cert Asterisk needs for SIP. There's"
+    echo "  no separate \"admin domain\" to pick later — whatever you enter here"
+    echo "  is what your SIP client (e.g. Sipnetic) will register against."
     local DOMAIN_NAME=""
-    prompt_text "FQDN for this PBX [blank=self-signed cert, IP-only access]:" "" DOMAIN_NAME
+    prompt_text "FQDN for this PBX, e.g. sip.yourdomain.com [blank=self-signed cert, IP-only access]:" "" DOMAIN_NAME
     [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — using a self-signed cert; phones must trust it manually."
 
     # ── Secrets ───────────────────────────────────────────────────────────────
@@ -482,18 +508,54 @@ ENV
         printf '    %s\n' "${DO_FW_RULES[@]}"
     fi
 
-    # ── Caddy reverse proxy for web admin ─────────────────────────────────────
-    local EXTRA_BLOCK=""
-    if [ -d "$DOCKER_DIR/authelia" ]; then
-        local _use_auth=""
-        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
-        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
-            EXTRA_BLOCK="    import authelia"
-            # Disable built-in auth since Authelia handles it
-            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+    # ── Caddy: reverse-proxy the web admin on the SAME FQDN used for SIP ──────
+    # Caddy only holds a cert for domains it's actively serving. If the web
+    # admin were proxied on a different "admin" subdomain, Caddy would obtain
+    # a cert for THAT domain instead — the sync earlier would never find one
+    # matching $DOMAIN_NAME, and SIP TLS would silently stay self-signed. So
+    # there's no separate domain prompt: this always targets $DOMAIN_NAME.
+    if [[ -z "$DOMAIN_NAME" ]]; then
+        log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:8080 (nothing for Caddy to do)."
+    elif [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
+        log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:8080, SIP TLS stays self-signed."
+    else
+        local EXTRA_BLOCK=""
+        if [ -d "$DOCKER_DIR/authelia" ]; then
+            local _use_auth=""
+            prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
+            if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
+                EXTRA_BLOCK="    import authelia"
+                # Disable built-in auth since Authelia handles it
+                sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+            fi
         fi
+
+        # Reconstruct the subdomain-only fragment so configure_caddy_for_service's
+        # own "<subdomain>.${SITE_DOMAIN}" default lands exactly on $DOMAIN_NAME —
+        # pressing Enter at its domain prompt then just works.
+        local _CADDY_SUBDOMAIN="asterisk"
+        if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$DOMAIN_NAME" == *".${SITE_DOMAIN}" ]]; then
+            _CADDY_SUBDOMAIN="${DOMAIN_NAME%.${SITE_DOMAIN}}"
+        fi
+
+        log_info "Reverse-proxying the web admin at https://${DOMAIN_NAME}/ — this is also what gets"
+        log_info "Asterisk a trusted TLS cert for SIP instead of a self-signed one."
+        log_info "When prompted for a domain next, use exactly: ${DOMAIN_NAME}"
+        configure_caddy_for_service "Asterisk Web Admin" "8080" "$_CADDY_SUBDOMAIN" "$EXTRA_BLOCK"
     fi
-    configure_caddy_for_service "Asterisk Web Admin" "8080" "asterisk" "$EXTRA_BLOCK"
+
+    # ── CrowdSec: SIP brute-force/enumeration protection ──────────────────────
+    if command -v cscli &>/dev/null; then
+        log_info "CrowdSec is already installed — rerun it to pick up SIP protection for this install:"
+        log_info "  sudo ./setup.sh crowdsec"
+    elif declare -F install_crowdsec &>/dev/null; then
+        local WANT_CS=""
+        prompt_yn "CrowdSec not detected — install it now for SSH + SIP intrusion prevention? (y/n):" "y" WANT_CS
+        [[ "$WANT_CS" =~ ^[Yy]$ ]] && install_crowdsec
+    else
+        log_warning "CrowdSec not detected, and this looks like a standalone copy of asterisk-do.sh."
+        log_warning "Grab the full repo to auto-install it, or run services/crowdsec.sh yourself."
+    fi
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << MD
@@ -535,11 +597,13 @@ and supported longer (through 2031) if you'd rather track the newer LTS.
 Before running this installer, point an A record at the droplet's public IP:
 
 \`\`\`
-asterisk.yourdomain.com   A   <droplet public IP>
+sip.yourdomain.com   A   <droplet public IP>
 \`\`\`
 
 The installer reads the droplet's public IP itself (via the DigitalOcean
-metadata service) and shows it to you during setup.
+metadata service) and shows it to you during setup. This one FQDN is used
+for SIP, the web admin, and the TLS cert — there's no separate domain to
+plan for the admin panel.
 
 ## Security
 
@@ -622,13 +686,15 @@ users: Linphone or Zoiper cover the same ground.)
 
 ## TLS certificate
 
-If Caddy is installed and already holds a Let's Encrypt cert for
-\`DOMAIN_NAME\` (i.e. there's a Caddyfile site block for that exact hostname),
-the container mounts Caddy's cert store read-only and the entrypoint syncs
-it in automatically on every start — and re-checks every 12h so renewals
-get picked up without a restart. No Caddyfile block for the domain, or no
-Caddy at all, falls back to a self-signed cert (phones must be configured
-to accept it).
+Caddy is what actually talks to Let's Encrypt — Asterisk never does ACME
+itself. The installer always reverse-proxies the web admin on the exact
+same FQDN used for SIP (never a separate "admin" domain), specifically
+because that's what makes Caddy hold a cert matching \`DOMAIN_NAME\`. The
+container then mounts Caddy's cert store read-only and the entrypoint syncs
+that cert in automatically on every start — and re-checks every 12h so
+renewals get picked up without a restart. No Caddy on the box, or no FQDN
+set at all, falls back to a self-signed cert (phones must be configured to
+accept it manually).
 
 ## Web admin
 
@@ -671,13 +737,13 @@ MD
     echo "  Web admin:   http://${PUBLIC_IP:-localhost}:8080"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
     echo "  Script:      docker exec -it easy-asterisk-do easy-asterisk --help"
-    echo ""
-    if command -v cscli &>/dev/null; then
-        log_info "CrowdSec is already installed — rerun it to add SIP brute-force protection for this install:"
-        log_info "  sudo ./setup.sh crowdsec"
-    else
-        log_info "Install CrowdSec (services/crowdsec.sh) for SIP brute-force/enumeration protection —"
-        log_info "  it auto-detects this install and wires up the crowdsecurity/asterisk collection."
+    if [[ -n "$DOMAIN_NAME" ]] && [[ -d "$DOCKER_DIR/caddy" ]]; then
+        echo ""
+        log_info "If Caddy was just installed in this same run, it may still be obtaining the"
+        log_info "Let's Encrypt cert for ${DOMAIN_NAME} — Asterisk only checks for it at startup"
+        log_info "and then every 12h. If SIP TLS still shows self-signed after a couple of"
+        log_info "minutes, pick it up immediately with:"
+        log_info "  docker compose -f $EA_DIR/docker-compose.yml restart asterisk"
     fi
     echo ""
 }
