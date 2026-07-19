@@ -214,8 +214,28 @@ install_asterisk-do() {
         echo "[DRY-RUN] Would open 51820/udp (not 51821) if wg-easy was selected"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
         echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
+        echo "[DRY-RUN] Would offer local OR remote Authelia to protect the web admin"
         echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
+        echo "[DRY-RUN] Would offer to run base setup first if not already done (full repo only)"
         return 0
+    fi
+
+    # ── Bring in base first, if this is a genuinely fresh box ─────────────────
+    # Naming a service directly (sudo ./setup.sh asterisk-do) skips setup.sh's
+    # own first-run base step — essential packages, SSH key import, disabling
+    # password auth. That's a real gap on a fresh droplet: everything below
+    # still works without it, but the SSH-hardening part of this setup's
+    # security story wouldn't actually have happened. Same marker setup.sh
+    # itself uses to detect base (command -v ncdu).
+    if ! command -v ncdu &>/dev/null; then
+        if declare -F install_base &>/dev/null; then
+            local WANT_BASE=""
+            prompt_yn "Base setup not detected (essential packages, SSH hardening) — run it first? (y/n):" "y" WANT_BASE
+            [[ "$WANT_BASE" =~ ^[Yy]$ ]] && install_base
+        else
+            log_warning "Base setup not detected, and this looks like a standalone copy of asterisk-do.sh."
+            log_warning "Run services/base.sh yourself first, or grab the full repo."
+        fi
     fi
 
     # ── Swap file (insurance for low-RAM droplets, e.g. the $4/mo 512MB plan) ──
@@ -580,6 +600,31 @@ ENV
                 # Disable built-in auth since Authelia handles it
                 sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
             fi
+        else
+            # No local Authelia — offer one running elsewhere (e.g. a homelab).
+            # There's no shared "(authelia)" Caddy snippet to import in that
+            # case (authelia.sh only writes one when installing locally), so
+            # this builds the same forward_auth block inline, targeting the
+            # remote instance directly instead of the local "authelia:9091"
+            # container reference.
+            local _use_remote_auth=""
+            prompt_yn "Protect the web admin with a remote Authelia instance (e.g. on a homelab)? (y/n):" "n" _use_remote_auth
+            if [[ "$_use_remote_auth" =~ ^[Yy]$ ]]; then
+                local _remote_authelia=""
+                prompt_text "  Remote Authelia address — a bare host:port over a private network (e.g. a NetBird mesh IP:9091), or a full https:// URL if it's on its own public domain+TLS:" "" _remote_authelia
+                if [[ -n "$_remote_authelia" ]]; then
+                    EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+    }"
+                    sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+                    log_info "Using remote Authelia at ${_remote_authelia}."
+                    log_info "Verify it's reachable from this droplet before relying on it — e.g.:"
+                    log_info "  curl -I ${_remote_authelia}"
+                else
+                    log_info "No address entered — skipping Authelia protection."
+                fi
+            fi
         fi
 
         # Reconstruct the subdomain-only fragment so configure_caddy_for_service's
@@ -740,9 +785,16 @@ plan for the admin panel.
 Offered during install (space-separated at the "Install:" prompt); can also
 be added later by running \`sudo ./setup.sh <name>\` from the repo.
 
-- **authelia** — SSO/2FA in front of the web admin. Needs Caddy. Once
-  installed, re-running \`asterisk-do\` will offer to protect the web admin
-  with it.
+- **authelia** — SSO/2FA in front of the web admin. Needs Caddy locally to
+  install here. If it's already installed (locally or picked up by
+  re-running \`asterisk-do\`), that instance protects the web admin
+  automatically. **No local Authelia?** The web-admin step separately offers
+  a **remote Authelia** option instead — point it at an instance already
+  running elsewhere (e.g. a homelab) via a bare \`host:port\` over a private
+  network (a NetBird mesh IP works well here) or a full \`https://\` URL if
+  it has its own public domain+TLS. Every web-admin page load then does a
+  round trip to that address, so if it's unreachable, the panel fails closed
+  — SIP/calling on this droplet is unaffected either way, only the admin UI.
 - **ntfy** — self-hosted push notifications. Useful as a destination for
   CrowdSec ban alerts (\`services/crowdsec.sh\` prompts for an ntfy URL —
   point it at this instance instead of the public ntfy.sh if you'd rather

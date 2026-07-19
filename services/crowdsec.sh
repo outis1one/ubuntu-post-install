@@ -104,6 +104,7 @@ install_crowdsec() {
         echo "[DRY-RUN] Would write Caddy acquisition /etc/crowdsec/acquis.d/caddy.yaml"
         echo "[DRY-RUN] Would install crowdsecurity/asterisk + write an acquisition if asterisk-do is installed"
         echo "[DRY-RUN] Would optionally wire ntfy ban alerts into the default profile"
+        echo "[DRY-RUN] Would optionally register with a remote/central LAPI and disable the local one"
         echo "[DRY-RUN] Would enable + restart crowdsec and crowdsec-firewall-bouncer"
         echo "[DRY-RUN] Would write $DOCS_DIR/README.md (docs-only folder)"
         return 0
@@ -235,20 +236,79 @@ headers:
         fi
     fi
 
-    # ── 8. Restart services to apply ─────────────────────────────────────────
-    local RESTART_CS=""
-    prompt_yn "Restart CrowdSec to apply changes? (y/n):" "y" RESTART_CS
-    if [ "$RESTART_CS" = "y" ] || [ "$RESTART_CS" = "Y" ]; then
-        sudo systemctl enable crowdsec 2>/dev/null || true
-        if sudo systemctl restart crowdsec; then
-            echo "  ✓ CrowdSec restarted successfully"
-            sudo systemctl enable crowdsec-firewall-bouncer 2>/dev/null || true
-            sudo systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
-            sleep 2
-            sudo cscli metrics 2>/dev/null | head -20 || true
+    # ── 7b. Optional: point this agent at a remote/central LAPI ──────────────
+    # CrowdSec's real multi-server support: parsers/scenarios/bouncer still
+    # run locally (banning only works where traffic actually arrives), but
+    # the decision database (LAPI) can live on one central machine instead
+    # of every box running its own. Useful if you already have CrowdSec on
+    # a homelab and don't want a second LAPI+SQLite DB on this droplet.
+    echo ""
+    local USE_REMOTE_LAPI="" _REMOTE_LAPI_PENDING=""
+    prompt_yn "Point this agent at a remote/central LAPI instead of running its own (e.g. one already on a homelab)? (y/n):" "n" USE_REMOTE_LAPI
+    if [ "$USE_REMOTE_LAPI" = "y" ] || [ "$USE_REMOTE_LAPI" = "Y" ]; then
+        echo ""
+        echo "  This registers this machine and disables its local API server."
+        echo "  The registration is PENDING until approved on the central LAPI"
+        echo "  machine — that approval step can't be automated from here."
+        echo ""
+        local LAPI_URL="" LAPI_MACHINE=""
+        prompt_text "  Central LAPI URL (e.g. http://homelab-ip:8080):" "" LAPI_URL
+        prompt_text "  Machine name to register as:" "$(hostname)" LAPI_MACHINE
+        if [ -n "$LAPI_URL" ]; then
+            if sudo cscli lapi register -u "$LAPI_URL" --machine "$LAPI_MACHINE"; then
+                echo "  ✓ Registered with $LAPI_URL as '$LAPI_MACHINE'"
+
+                # Disable the local API server (remove the 'api.server:' block
+                # from config.yaml) now that this agent forwards to the
+                # central one instead. Backed up first — this is a direct
+                # edit to CrowdSec's core config.
+                local CS_CONFIG="/etc/crowdsec/config.yaml"
+                local CS_BACKUP="$CS_CONFIG.backup.$(date +%Y%m%d-%H%M%S)"
+                sudo cp "$CS_CONFIG" "$CS_BACKUP"
+                sudo awk '
+                    /^  server:/ { skip=1; next }
+                    skip && /^([a-zA-Z]|  [a-zA-Z])/ { skip=0 }
+                    !skip { print }
+                ' "$CS_CONFIG" | sudo tee "$CS_CONFIG.new" > /dev/null \
+                    && sudo mv "$CS_CONFIG.new" "$CS_CONFIG"
+                echo "  ✓ Local API server disabled in config.yaml (backup: $(basename "$CS_BACKUP"))"
+                echo ""
+                echo "  ⚠ Not usable yet — on the CENTRAL LAPI machine, run:"
+                echo "      sudo cscli machines validate $LAPI_MACHINE"
+                echo "    Then restart this agent: sudo systemctl restart crowdsec"
+                echo "    If it fails to start afterward, restore the backup and check logs:"
+                echo "      sudo cp $CS_BACKUP $CS_CONFIG && sudo systemctl restart crowdsec"
+                _REMOTE_LAPI_PENDING="y"
+            else
+                echo "  ⚠ cscli lapi register failed — keeping the local LAPI. See:"
+                echo "    sudo cscli lapi register -u $LAPI_URL --machine $LAPI_MACHINE"
+            fi
         else
-            echo "  ⚠ Failed to restart CrowdSec"
-            echo "  Check logs: sudo journalctl -u crowdsec -n 50"
+            echo "  No URL entered — keeping the local LAPI."
+        fi
+    fi
+
+    # ── 8. Restart services to apply ─────────────────────────────────────────
+    if [ "$_REMOTE_LAPI_PENDING" = "y" ]; then
+        echo ""
+        echo "  Skipping the restart below — it would fail until the machine is"
+        echo "  validated on the central LAPI (see above). Restart manually after:"
+        echo "    sudo systemctl restart crowdsec"
+    else
+        local RESTART_CS=""
+        prompt_yn "Restart CrowdSec to apply changes? (y/n):" "y" RESTART_CS
+        if [ "$RESTART_CS" = "y" ] || [ "$RESTART_CS" = "Y" ]; then
+            sudo systemctl enable crowdsec 2>/dev/null || true
+            if sudo systemctl restart crowdsec; then
+                echo "  ✓ CrowdSec restarted successfully"
+                sudo systemctl enable crowdsec-firewall-bouncer 2>/dev/null || true
+                sudo systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+                sleep 2
+                sudo cscli metrics 2>/dev/null | head -20 || true
+            else
+                echo "  ⚠ Failed to restart CrowdSec"
+                echo "  Check logs: sudo journalctl -u crowdsec -n 50"
+            fi
         fi
     fi
 
@@ -292,6 +352,21 @@ sudo cscli collections list             # installed detection collections
   - ntfy ban alerts (if enabled): `/etc/crowdsec/notifications/ntfy.yaml`,
     wired into `/etc/crowdsec/profiles.yaml`
 - Bouncer config: `/etc/crowdsec/bouncers/`
+- Remote/central LAPI (if enabled): `/etc/crowdsec/local_api_credentials.yaml`
+  points at the remote URL; the local API server block is removed from
+  `/etc/crowdsec/config.yaml` (backed up as `config.yaml.backup.<timestamp>`
+  next to it before editing). Parsers, scenarios, and the firewall bouncer
+  still run locally regardless — only the decision database is centralized.
+
+## Multi-server (remote LAPI) notes
+
+- On THIS machine: `sudo cscli lapi register -u <url> --machine <name>`
+  registers and disables the local API server.
+- On the CENTRAL machine: `sudo cscli machines validate <name>` approves it —
+  not automated, since that's a different box.
+- Check registration status here: `sudo cscli lapi status`
+- Revert: restore the `config.yaml` backup and
+  `sudo systemctl restart crowdsec`.
 
 ## Geo + reputation notes
 
