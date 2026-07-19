@@ -512,10 +512,20 @@ CADDY_BLOCK
         echo "  ✓ Configuration added to Caddyfile"
         echo "  Reloading Caddy configuration..."
         docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+        # The template Caddyfile ships with "admin off" (security hardening —
+        # no local API attack surface), so `caddy reload` never works here;
+        # it depends on that same admin endpoint. Try it anyway in case a
+        # box has admin enabled, but fall back to a full container restart
+        # (brief availability gap for everything Caddy fronts, but reliable
+        # regardless of the admin setting) rather than leaving the change
+        # sitting unapplied on disk.
         if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
             echo "  ✓ $SERVICE_NAME is now accessible at: https://$SERVICE_DOMAIN"
+        elif docker restart caddy &>/dev/null; then
+            echo "  ✓ Caddy restarted to apply changes (reload API is disabled by default)"
+            echo "  ✓ $SERVICE_NAME should be accessible at: https://$SERVICE_DOMAIN"
         else
-            echo "  ⚠ Failed to reload Caddy. Check: docker logs caddy"
+            echo "  ⚠ Failed to reload or restart Caddy. Check: docker logs caddy"
             echo "  You can restore from backup: $BACKUP_FILE"
         fi
 
@@ -533,7 +543,7 @@ CADDY_BLOCK
         echo "    scp $SNIPPET_FILE caddy-host:~/caddy-snippets/"
         echo "    # then on the Caddy machine:"
         echo "    cat ~/caddy-snippets/${DEFAULT_SUBDOMAIN}.caddy >> /path/to/Caddyfile"
-        echo "    docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+        echo "    docker restart caddy   # reload API is disabled by default; a restart is what applies it"
         echo ""
         echo "  Or rsync all snippets at once:"
         echo "    rsync -av $SNIPPET_DIR/ caddy-host:~/caddy-snippets/"

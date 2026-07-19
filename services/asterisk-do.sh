@@ -145,11 +145,17 @@ CBLOCK
                 printf '%s\n' "$_site_block" >> "$_caddyfile"
                 log_success "Added $_domain to Caddyfile"
                 docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                # The template Caddyfile ships with "admin off", so `caddy
+                # reload` (which needs that same admin API) never actually
+                # works here. Try it anyway, fall back to a restart.
                 if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
                     log_success "$_name accessible at: https://$_domain"
+                elif docker restart caddy &>/dev/null; then
+                    log_success "Caddy restarted to apply changes (reload API is disabled by default)"
+                    log_success "$_name should be accessible at: https://$_domain"
                 else
-                    log_warning "Reload failed — check: docker logs caddy"
-                    log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                    log_warning "Reload/restart failed — check: docker logs caddy"
+                    log_info "Manual fix: docker restart caddy"
                 fi
             else
                 local _snippet_dir="$DOCKER_DIR/caddy-snippets"
@@ -721,11 +727,18 @@ CADDY_BLOCK
                     printf '%s\n' "$_SITE_BLOCK" >> "$_CADDYFILE"
                     log_success "Added ${DOMAIN_NAME} to Caddyfile (backup: $(basename "$_CADDY_BACKUP"))"
                     docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                    # The template Caddyfile ships with "admin off", so
+                    # `caddy reload` (which needs that same admin API) never
+                    # actually works here. Try it anyway, fall back to a
+                    # restart — confirmed necessary on a real deployment.
                     if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
                         log_success "Web admin accessible at: https://${DOMAIN_NAME}"
+                    elif docker restart caddy &>/dev/null; then
+                        log_success "Caddy restarted to apply changes (reload API is disabled by default)"
+                        log_success "Web admin should be accessible at: https://${DOMAIN_NAME}"
                     else
-                        log_warning "Reload failed — check: docker logs caddy"
-                        log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                        log_warning "Reload/restart failed — check: docker logs caddy"
+                        log_info "Manual fix: docker restart caddy"
                     fi
                 fi
             else
