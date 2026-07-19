@@ -206,10 +206,12 @@ install_asterisk-do() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
+        echo "[DRY-RUN] Would offer optional extras: authelia, ntfy, watchtower, wg-easy, backup"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
         echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8080, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would open 51820/udp (not 51821) if wg-easy was selected"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
         echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
         echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
@@ -260,6 +262,36 @@ install_asterisk-do() {
         else
             log_warning "Caddy not detected, and this looks like a standalone copy of asterisk-do.sh."
             log_warning "Grab the full repo to auto-install it, or run services/caddy.sh yourself."
+        fi
+    fi
+
+    # ── Optional extras ─────────────────────────────────────────────────────
+    # One prompt instead of five separate yes/no interruptions. Each is
+    # dispatched at the point later in this function where it actually makes
+    # sense (Authelia needs Caddy's state, which we just resolved above;
+    # wg-easy needs its own firewall rules alongside the others; backup makes
+    # most sense last). Only offered in full-repo mode, same reasoning as Caddy.
+    local EXTRAS=""
+    if declare -F install_authelia &>/dev/null; then
+        echo ""
+        echo "  Optional extras (space-separated, blank = skip all):"
+        echo "    authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
+        echo "    ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
+        echo "    watchtower  auto-updates pulled images — only helps coturn here;"
+        echo "                Asterisk itself is built locally, so OS security patches"
+        echo "                still need a manual 'docker compose up -d --build'"
+        echo "    wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
+        echo "    backup      Borg backup of ~/docker/* to a local machine or remote host —"
+        echo "                config/data backup, NOT a full droplet image, instead of"
+        echo "                DigitalOcean's paid Droplet Backups"
+        prompt_text "Install:" "" EXTRAS
+    fi
+
+    if [[ "$EXTRAS" == *authelia* ]] && declare -F install_authelia &>/dev/null; then
+        if [[ -d "$DOCKER_DIR/caddy" ]]; then
+            install_authelia
+        else
+            log_warning "Skipping Authelia — it needs Caddy, which isn't installed."
         fi
     fi
 
@@ -458,6 +490,22 @@ ENV
         ufw allow 3478/tcp
         ufw allow 10000:20000/udp
         ufw allow 49152:49252/udp
+    fi
+
+    # ── wg-easy: install now so its firewall rule lands with the others ───────
+    # Only the VPN port (51820/udp) goes on the public firewall — WireGuard's
+    # handshake is designed to be internet-facing. The web UI (51821) does
+    # NOT get opened publicly: it's a full account-management panel for the
+    # VPN, so it's reached via SSH tunnel instead (documented in the README).
+    if [[ "$EXTRAS" == *wg-easy* ]] && declare -F install_wg-easy &>/dev/null; then
+        install_wg-easy
+        cd "$EA_DIR" || return 1   # install_wg-easy cd's into ~/docker/wg-easy
+        if command -v ufw &>/dev/null; then
+            ufw allow 51820/udp
+        fi
+    fi
+
+    if command -v ufw &>/dev/null; then
         log_success "UFW rules added."
     fi
 
@@ -474,6 +522,7 @@ ENV
         "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
     )
+    [[ "$EXTRAS" == *wg-easy* ]] && DO_FW_RULES+=("protocol:udp,ports:51820,address:0.0.0.0/0,address:::/0")
 
     echo ""
     if [[ -n "$DROPLET_ID" ]] && command -v doctl &>/dev/null && doctl account get &>/dev/null; then
@@ -557,6 +606,29 @@ ENV
         log_warning "Grab the full repo to auto-install it, or run services/crowdsec.sh yourself."
     fi
 
+    # ── ntfy / watchtower (independent extras, selected earlier) ──────────────
+    if [[ "$EXTRAS" == *ntfy* ]] && declare -F install_ntfy &>/dev/null; then
+        install_ntfy
+        cd "$EA_DIR" || return 1   # install_ntfy cd's into ~/docker/ntfy
+    fi
+    if [[ "$EXTRAS" == *watchtower* ]] && declare -F install_watchtower &>/dev/null; then
+        install_watchtower
+        cd "$EA_DIR" || return 1   # install_watchtower cd's into ~/docker/watchtower
+    fi
+
+    # ── Backup: config/data to a local machine or remote host ─────────────────
+    # Not a full droplet image — it's ~/docker/* (this PBX's config, extensions,
+    # CDRs, and every other installed service here) via Borg, which supports
+    # local paths or user@host:/path SSH remotes. That's the alternative to
+    # DigitalOcean's paid Droplet Backups: point it at your own machine instead
+    # of paying DO to store snapshots. Disaster recovery then becomes "fresh
+    # droplet, rerun this installer, restore from the Borg repo" rather than
+    # restoring a multi-GB disk image.
+    if [[ "$EXTRAS" == *backup* ]] && declare -F install_borg-backup &>/dev/null; then
+        install_borg-backup
+        cd "$EA_DIR" || return 1   # install_borg-backup cd's into ~/docker/borg-backup
+    fi
+
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << MD
 # Easy Asterisk PBX + coturn — DigitalOcean droplet edition
@@ -619,11 +691,11 @@ plan for the admin panel.
     manually in the DO console (Networking → Firewalls).
   - **UFW** — host-level, configured automatically by this installer as a
     second layer. Keep both in sync; don't let them contradict each other.
-- Consider adding \`crowdsec\` (services/crowdsec.sh, also in this repo) for
-  intrusion-prevention against SIP brute-force/scanning, which is constant
-  background noise on any public SIP port.
-- Consider DO's automated backups/snapshots for the droplet so a bad config
-  change or compromise is a quick rollback.
+- **CrowdSec** — SIP brute-force/enumeration protection (\`crowdsecurity/asterisk\`
+  collection). Offered automatically during install if not already present;
+  see \`services/crowdsec.sh\`.
+- DO's paid Droplet Backups is one option for a rollback path — the
+  \`backup\` extra below is the alternative used here.
 
 ### Ports (open on both the Cloud Firewall and UFW)
 
@@ -637,6 +709,43 @@ plan for the admin panel.
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
 | 49152–49252   | UDP      | TURN relay media ports           |
+| 51820         | UDP      | WireGuard VPN, only if \`wg-easy\` was selected |
+
+## Optional extras
+
+Offered during install (space-separated at the "Install:" prompt); can also
+be added later by running \`sudo ./setup.sh <name>\` from the repo.
+
+- **authelia** — SSO/2FA in front of the web admin. Needs Caddy. Once
+  installed, re-running \`asterisk-do\` will offer to protect the web admin
+  with it.
+- **ntfy** — self-hosted push notifications. Useful as a destination for
+  CrowdSec ban alerts (\`services/crowdsec.sh\` prompts for an ntfy URL —
+  point it at this instance instead of the public ntfy.sh if you'd rather
+  keep alerts off a third party).
+- **watchtower** — auto-updates pulled Docker images daily. Only helps
+  \`coturn\` here — Asterisk's image is built locally from a Dockerfile, so
+  Watchtower has no registry tag to check against. Keep Asterisk patched
+  with an occasional \`docker compose up -d --build\`.
+- **wg-easy** — WireGuard VPN. Only its VPN port (51820/udp) is opened on
+  the public firewall; the web UI (51821) is deliberately **not** exposed —
+  reach it via SSH tunnel: \`ssh -L 51821:localhost:51821 user@<droplet-ip>\`,
+  then browse \`http://localhost:51821\`. A natural next step once it's
+  installed: restrict the web admin (8080) to the VPN subnet only, on both
+  firewall layers, so reconfiguring the PBX requires being on the VPN —
+  done manually, not automatically, since a firewall mistake there can lock
+  you out.
+- **backup** — Borg backup of \`~/docker/*\` (this PBX's config, extensions,
+  CDRs, and every other service on this droplet) to a **local path or a
+  remote host over SSH** (\`user@host:/path\`) — see \`services/borg-backup.sh\`.
+  This is the alternative to DigitalOcean's paid Droplet Backups: point it
+  at your own machine and pay nothing extra to DO. It is **not** a full
+  droplet disk image — disaster recovery is "fresh droplet, rerun this
+  installer, restore the Borg repo," which is faster and more portable than
+  restoring a multi-GB snapshot. Pointing it at a home machine that isn't
+  reachable by a stable public IP works best over a mesh VPN (this repo's
+  optional NetBird overlay, set up via \`services/base.sh\`) rather than
+  port-forwarding SSH on a home router.
 
 ## Manage
 
