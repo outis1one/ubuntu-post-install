@@ -204,7 +204,7 @@ install_asterisk() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
-        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8080, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8081, 8088, 8089, 3478, 10000-20000, 49152-49252"
         return 0
     fi
 
@@ -383,7 +383,7 @@ HAS_VLANS=${HAS_VLANS_VAL}
 VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 
 # ── Web admin ─────────────────────────────────────────────────
-WEB_ADMIN_PORT=8080
+WEB_ADMIN_PORT=8081
 WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
@@ -394,7 +394,7 @@ ENV
         ufw allow 5060/udp
         ufw allow 5060/tcp
         ufw allow 5061/tcp
-        ufw allow 8080/tcp
+        ufw allow 8081/tcp
         ufw allow 8088/tcp
         ufw allow 8089/tcp
         ufw allow 3478/udp
@@ -415,7 +415,7 @@ ENV
             sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
         fi
     fi
-    configure_caddy_for_service "Asterisk Web Admin" "8080" "asterisk" "$EXTRA_BLOCK"
+    configure_caddy_for_service "Asterisk Web Admin" "8081" "asterisk" "$EXTRA_BLOCK"
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << 'MD'
@@ -483,7 +483,7 @@ to accept it).
 
 ## Web admin
 
-Access the Easy Asterisk web interface at http://<host-ip>:8080
+Access the Easy Asterisk web interface at http://<host-ip>:8081
 or via your configured reverse-proxy domain.
 
 ## Data directories (all inside ~/docker/asterisk/, included in backup)
@@ -502,7 +502,7 @@ or via your configured reverse-proxy domain.
 |---------------|----------|----------------------------------|
 | 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
 | 5061          | TCP      | SIP over TLS                     |
-| 8080          | TCP      | Easy Asterisk web admin          |
+| 8081          | TCP      | Easy Asterisk web admin          |
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
@@ -530,7 +530,7 @@ MD
         echo "  TURN server: (none — LAN/VPN only)"
     fi
     echo "  SIP port:    5061 (TLS) / 5060 (UDP)"
-    echo "  Web admin:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8080"
+    echo "  Web admin:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):8081"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
     echo "  Script:      docker exec -it easy-asterisk easy-asterisk --help"
     echo ""

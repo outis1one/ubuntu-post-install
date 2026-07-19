@@ -210,7 +210,7 @@ install_asterisk-do() {
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
-        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8080, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8081, 8088, 8089, 3478, 10000-20000, 49152-49252"
         echo "[DRY-RUN] Would open 51820/udp (not 51821) if wg-easy was selected"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
         echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
@@ -512,7 +512,7 @@ HAS_VLANS=n
 VLAN_SUBNETS=
 
 # ── Web admin ─────────────────────────────────────────────────
-WEB_ADMIN_PORT=8080
+WEB_ADMIN_PORT=8081
 WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
@@ -523,7 +523,7 @@ ENV
         ufw allow 5060/udp
         ufw allow 5060/tcp
         ufw allow 5061/tcp
-        ufw allow 8080/tcp
+        ufw allow 8081/tcp
         ufw allow 8088/tcp
         ufw allow 8089/tcp
         ufw allow 3478/udp
@@ -555,7 +555,7 @@ ENV
         "protocol:tcp,ports:5060,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:5060,address:0.0.0.0/0,address:::/0"
         "protocol:tcp,ports:5061,address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:8080,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:8081,address:0.0.0.0/0,address:::/0"
         "protocol:tcp,ports:8088-8089,address:0.0.0.0/0,address:::/0"
         "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
@@ -604,9 +604,9 @@ ENV
     # matching $DOMAIN_NAME, and SIP TLS would silently stay self-signed. So
     # there's no separate domain prompt: this always targets $DOMAIN_NAME.
     if [[ -z "$DOMAIN_NAME" ]]; then
-        log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:8080 (nothing for Caddy to do)."
+        log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:8081 (nothing for Caddy to do)."
     elif [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
-        log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:8080, SIP TLS stays self-signed."
+        log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:8081, SIP TLS stays self-signed."
     else
         local EXTRA_BLOCK=""
         if [ -d "$DOCKER_DIR/authelia" ]; then
@@ -665,7 +665,7 @@ ENV
 
 # Asterisk Web Admin
 ${DOMAIN_NAME} {
-    reverse_proxy localhost:8080
+    reverse_proxy localhost:8081
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -847,7 +847,7 @@ plan for the admin panel.
 | 22            | TCP      | SSH (keep this open or you're locked out) |
 | 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
 | 5061          | TCP      | SIP over TLS                     |
-| 8080          | TCP      | Easy Asterisk web admin          |
+| 8081          | TCP      | Easy Asterisk web admin          |
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
@@ -881,7 +881,7 @@ be added later by running \`sudo ./setup.sh <name>\` from the repo.
   the public firewall; the web UI (51821) is deliberately **not** exposed —
   reach it via SSH tunnel: \`ssh -L 51821:localhost:51821 user@<droplet-ip>\`,
   then browse \`http://localhost:51821\`. A natural next step once it's
-  installed: restrict the web admin (8080) to the VPN subnet only, on both
+  installed: restrict the web admin (8081) to the VPN subnet only, on both
   firewall layers, so reconfiguring the PBX requires being on the VPN —
   done manually, not automatically, since a firewall mistake there can lock
   you out.
@@ -965,7 +965,7 @@ accept it manually).
 
 ## Web admin
 
-Access the Easy Asterisk web interface at http://<droplet-ip>:8080
+Access the Easy Asterisk web interface at http://<droplet-ip>:8081
 or via your configured reverse-proxy domain.
 
 ## Data directories (all inside ~/docker/asterisk-do/, included in backup)
@@ -1001,7 +1001,7 @@ MD
     fi
     echo "  Public IP:   ${PUBLIC_IP:-unknown}"
     echo "  SIP port:    5061 (TLS) / 5060 (UDP)"
-    echo "  Web admin:   http://${PUBLIC_IP:-localhost}:8080"
+    echo "  Web admin:   http://${PUBLIC_IP:-localhost}:8081"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
     echo "  Script:      docker exec -it easy-asterisk-do easy-asterisk --help"
     if [[ -n "$DOMAIN_NAME" ]] && [[ -d "$DOCKER_DIR/caddy" ]]; then
