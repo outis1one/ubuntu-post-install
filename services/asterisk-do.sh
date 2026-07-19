@@ -341,6 +341,8 @@ install_asterisk-do() {
     _SELF_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local VENDOR_DIR="$_SELF_DIR_LOCAL/../vendor/easy-asterisk"
 
+    mkdir -p scripts
+
     if [[ -d "$VENDOR_DIR" ]]; then
         log_info "Copying vendor files from $VENDOR_DIR ..."
         cp "$VENDOR_DIR/Dockerfile"                    ./Dockerfile
@@ -348,6 +350,8 @@ install_asterisk-do() {
         cp "$VENDOR_DIR/docker/coturn-entrypoint.sh"   ./docker/coturn-entrypoint.sh
         cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk.sh
         cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk-v0.10.0.sh
+        cp "$VENDOR_DIR/scripts/vpn-diagnostics.sh"    ./scripts/vpn-diagnostics.sh
+        cp "$VENDOR_DIR/scripts/dns-whitelist.sh"      ./scripts/dns-whitelist.sh
     else
         log_info "Vendor directory not found — downloading from GitHub ..."
         local GH_RAW="https://raw.githubusercontent.com/DeadDork/easy-asterisk/main"
@@ -355,11 +359,14 @@ install_asterisk-do() {
         curl -fsSL "$GH_RAW/docker/entrypoint.sh"              -o ./docker/entrypoint.sh
         curl -fsSL "$GH_RAW/docker/coturn-entrypoint.sh"       -o ./docker/coturn-entrypoint.sh
         curl -fsSL "$GH_RAW/easy-asterisk-v0.10.0.sh"          -o ./easy-asterisk.sh
+        curl -fsSL "$GH_RAW/scripts/vpn-diagnostics.sh"        -o ./scripts/vpn-diagnostics.sh
+        curl -fsSL "$GH_RAW/scripts/dns-whitelist.sh"          -o ./scripts/dns-whitelist.sh
         cp ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh
     fi
 
     chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
-              ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh
+              ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh \
+              ./scripts/vpn-diagnostics.sh ./scripts/dns-whitelist.sh
 
     # ── Persist security-level logging to a file ──────────────────────────────
     # Vendor's logger.conf only sends the "security" level (auth failures, SIP
