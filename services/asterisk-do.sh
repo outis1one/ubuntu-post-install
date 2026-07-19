@@ -204,12 +204,42 @@ install_asterisk-do() {
     local EA_DIR="$DOCKER_DIR/asterisk-do"
 
     if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
         echo "[DRY-RUN] Would open UFW ports: 5060, 5061, 8080, 8088, 8089, 3478, 10000-20000, 49152-49252"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
         return 0
+    fi
+
+    # ── Swap file (insurance for low-RAM droplets, e.g. the $4/mo 512MB plan) ──
+    # DigitalOcean doesn't provision swap by default. Docker + Asterisk + coturn
+    # fit in 512MB-1GB at idle with little headroom; a swapfile absorbs spikes
+    # (apt/image pulls, log bursts, a few concurrent calls) instead of the
+    # kernel OOM-killing a container or the box going unresponsive over SSH.
+    local TOTAL_RAM_MB
+    TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    if [[ "$TOTAL_RAM_MB" -gt 0 && "$TOTAL_RAM_MB" -le 2048 ]] && ! swapon --show | grep -q .; then
+        local FREE_DISK_MB SWAP_MB=2048
+        FREE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+        if [[ "$FREE_DISK_MB" -gt $((SWAP_MB + 2048)) ]]; then
+            local ADD_SWAP=""
+            prompt_yn "No swap detected on this ${TOTAL_RAM_MB}MB-RAM droplet — add a ${SWAP_MB}MB swapfile? (y/n):" "y" ADD_SWAP
+            if [[ "$ADD_SWAP" =~ ^[Yy]$ ]]; then
+                fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none
+                chmod 600 /swapfile
+                mkswap /swapfile >/dev/null
+                swapon /swapfile
+                grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+                grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+                sysctl -w vm.swappiness=10 >/dev/null 2>&1
+                log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
+            fi
+        else
+            log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
+            log_warning "Consider a bigger droplet, or free up disk before installing."
+        fi
     fi
 
     mkdir -p "$EA_DIR"
@@ -464,15 +494,23 @@ instead.
 
 Asterisk + coturn is light for a handful of SIP extensions and personal use.
 
-| Plan                          | vCPU | RAM  | Good for                              |
-|--------------------------------|------|------|----------------------------------------|
-| Basic (regular), 1 GB           | 1    | 1 GB | Minimum — a few extensions, light use  |
-| **Basic (regular), 2 GB — recommended** | 1    | 2 GB | Comfortable headroom for Docker + a handful of concurrent calls |
-| Basic (regular), 4 GB           | 2    | 4 GB | Several simultaneous calls, conference bridges, transcoding |
+| Plan                          | vCPU | RAM   | Good for                              |
+|--------------------------------|------|-------|----------------------------------------|
+| Basic (regular), \$4/mo          | 1    | 512 MB | Works — this installer adds a 2GB swapfile automatically to cover it. Fine for a couple of extensions and light personal use. |
+| **Basic (regular), \$6/mo — recommended** | 1    | 1 GB  | More headroom, still gets an automatic swapfile |
+| Basic (regular), \$12/mo         | 1    | 2 GB  | Comfortable — no swap needed, a handful of concurrent calls |
+| Basic (regular), \$24/mo         | 2    | 4 GB  | Several simultaneous calls, conference bridges, transcoding |
 
-25–50 GB SSD (the smallest included disk) is plenty — this stack is not
-storage-heavy. Any DO region close to where the phones actually are is fine;
-SIP/RTP care about latency more than raw bandwidth.
+10 GB SSD (the \$4/mo plan's disk) is enough — this stack isn't storage-heavy,
+and the swapfile only takes 2GB of it. Any DO region close to where the
+phones actually are is fine; SIP/RTP care about latency more than raw
+bandwidth.
+
+**Swap:** DigitalOcean doesn't provision swap by default, and Docker +
+Asterisk + coturn leave little headroom at 512MB–1GB RAM. This installer
+detects RAM ≤2GB with no existing swap and offers to add a 2GB swapfile
+automatically (persisted in \`/etc/fstab\`) — it's what makes the \$4/mo plan
+viable instead of risking an OOM kill under load.
 
 **OS image:** Ubuntu 24.04 LTS (supported through April 2029) is the safe,
 battle-tested choice for Docker + coturn. Ubuntu 26.04 LTS is also available
