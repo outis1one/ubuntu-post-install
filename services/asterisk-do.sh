@@ -216,7 +216,26 @@ install_asterisk-do() {
         echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
         echo "[DRY-RUN] Would offer local OR remote Authelia to protect the web admin"
         echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
+        echo "[DRY-RUN] Would offer to run base setup first if not already done (full repo only)"
         return 0
+    fi
+
+    # ── Bring in base first, if this is a genuinely fresh box ─────────────────
+    # Naming a service directly (sudo ./setup.sh asterisk-do) skips setup.sh's
+    # own first-run base step — essential packages, SSH key import, disabling
+    # password auth. That's a real gap on a fresh droplet: everything below
+    # still works without it, but the SSH-hardening part of this setup's
+    # security story wouldn't actually have happened. Same marker setup.sh
+    # itself uses to detect base (command -v ncdu).
+    if ! command -v ncdu &>/dev/null; then
+        if declare -F install_base &>/dev/null; then
+            local WANT_BASE=""
+            prompt_yn "Base setup not detected (essential packages, SSH hardening) — run it first? (y/n):" "y" WANT_BASE
+            [[ "$WANT_BASE" =~ ^[Yy]$ ]] && install_base
+        else
+            log_warning "Base setup not detected, and this looks like a standalone copy of asterisk-do.sh."
+            log_warning "Run services/base.sh yourself first, or grab the full repo."
+        fi
     fi
 
     # ── Swap file (insurance for low-RAM droplets, e.g. the $4/mo 512MB plan) ──
