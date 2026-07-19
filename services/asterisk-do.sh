@@ -206,7 +206,7 @@ install_asterisk-do() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
-        echo "[DRY-RUN] Would offer optional extras: authelia, ntfy, watchtower, wg-easy, netbird, backup"
+        echo "[DRY-RUN] Would offer optional extras as a numbered, comma-separated menu (1-6)"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
@@ -292,22 +292,32 @@ install_asterisk-do() {
     # wg-easy needs its own firewall rules alongside the others; backup makes
     # most sense last). Only offered in full-repo mode, same reasoning as Caddy.
     local EXTRAS=""
+    local _EXTRA_NAMES=(authelia ntfy watchtower wg-easy netbird backup)
     if declare -F install_authelia &>/dev/null; then
         echo ""
-        echo "  Optional extras (space-separated, blank = skip all):"
-        echo "    authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
-        echo "    ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
-        echo "    watchtower  auto-updates pulled images — only helps coturn here;"
-        echo "                Asterisk itself is built locally, so OS security patches"
-        echo "                still need a manual 'docker compose up -d --build'"
-        echo "    wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
-        echo "    netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
-        echo "                home machine can reach each other without port-forwarding —"
-        echo "                pairs with 'backup' below"
-        echo "    backup      Borg backup of ~/docker/* to a local machine or remote host —"
-        echo "                config/data backup, NOT a full droplet image, instead of"
-        echo "                DigitalOcean's paid Droplet Backups"
-        prompt_text "Install:" "" EXTRAS
+        echo "  Optional extras — enter numbers, comma-separated (blank = skip all):"
+        echo "    1) authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
+        echo "    2) ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
+        echo "    3) watchtower  auto-updates pulled images — only helps coturn here;"
+        echo "                   Asterisk itself is built locally, so OS security patches"
+        echo "                   still need a manual 'docker compose up -d --build'"
+        echo "    4) wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
+        echo "    5) netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
+        echo "                   home machine can reach each other without port-forwarding —"
+        echo "                   pairs with 'backup' below (skipped automatically if already installed)"
+        echo "    6) backup      Borg backup of ~/docker/* to a local machine or remote host —"
+        echo "                   config/data backup, NOT a full droplet image, instead of"
+        echo "                   DigitalOcean's paid Droplet Backups"
+        echo "  Example: 5,6"
+        local EXTRAS_NUM=""
+        prompt_text "Install:" "" EXTRAS_NUM
+        local _IFS_OLD="$IFS" _n
+        IFS=','
+        for _n in $EXTRAS_NUM; do
+            _n="${_n//[[:space:]]/}"
+            [[ "$_n" =~ ^[1-6]$ ]] && EXTRAS+=" ${_EXTRA_NAMES[$((_n-1))]}"
+        done
+        IFS="$_IFS_OLD"
     fi
 
     if [[ "$EXTRAS" == *authelia* ]] && declare -F install_authelia &>/dev/null; then
