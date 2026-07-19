@@ -206,7 +206,7 @@ install_asterisk-do() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
-        echo "[DRY-RUN] Would offer optional extras: authelia, ntfy, watchtower, wg-easy, netbird, backup"
+        echo "[DRY-RUN] Would offer optional extras as a numbered, comma-separated menu (1-6)"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
@@ -292,22 +292,32 @@ install_asterisk-do() {
     # wg-easy needs its own firewall rules alongside the others; backup makes
     # most sense last). Only offered in full-repo mode, same reasoning as Caddy.
     local EXTRAS=""
+    local _EXTRA_NAMES=(authelia ntfy watchtower wg-easy netbird backup)
     if declare -F install_authelia &>/dev/null; then
         echo ""
-        echo "  Optional extras (space-separated, blank = skip all):"
-        echo "    authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
-        echo "    ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
-        echo "    watchtower  auto-updates pulled images — only helps coturn here;"
-        echo "                Asterisk itself is built locally, so OS security patches"
-        echo "                still need a manual 'docker compose up -d --build'"
-        echo "    wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
-        echo "    netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
-        echo "                home machine can reach each other without port-forwarding —"
-        echo "                pairs with 'backup' below"
-        echo "    backup      Borg backup of ~/docker/* to a local machine or remote host —"
-        echo "                config/data backup, NOT a full droplet image, instead of"
-        echo "                DigitalOcean's paid Droplet Backups"
-        prompt_text "Install:" "" EXTRAS
+        echo "  Optional extras — enter numbers, comma-separated (blank = skip all):"
+        echo "    1) authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
+        echo "    2) ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
+        echo "    3) watchtower  auto-updates pulled images — only helps coturn here;"
+        echo "                   Asterisk itself is built locally, so OS security patches"
+        echo "                   still need a manual 'docker compose up -d --build'"
+        echo "    4) wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
+        echo "    5) netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
+        echo "                   home machine can reach each other without port-forwarding —"
+        echo "                   pairs with 'backup' below (skipped automatically if already installed)"
+        echo "    6) backup      Borg backup of ~/docker/* to a local machine or remote host —"
+        echo "                   config/data backup, NOT a full droplet image, instead of"
+        echo "                   DigitalOcean's paid Droplet Backups"
+        echo "  Example: 5,6"
+        local EXTRAS_NUM=""
+        prompt_text "Install:" "" EXTRAS_NUM
+        local _IFS_OLD="$IFS" _n
+        IFS=','
+        for _n in $EXTRAS_NUM; do
+            _n="${_n//[[:space:]]/}"
+            [[ "$_n" =~ ^[1-6]$ ]] && EXTRAS+=" ${_EXTRA_NAMES[$((_n-1))]}"
+        done
+        IFS="$_IFS_OLD"
     fi
 
     if [[ "$EXTRAS" == *authelia* ]] && declare -F install_authelia &>/dev/null; then
@@ -627,18 +637,75 @@ ENV
             fi
         fi
 
-        # Reconstruct the subdomain-only fragment so configure_caddy_for_service's
-        # own "<subdomain>.${SITE_DOMAIN}" default lands exactly on $DOMAIN_NAME —
-        # pressing Enter at its domain prompt then just works.
-        local _CADDY_SUBDOMAIN="asterisk"
-        if [[ -n "${SITE_DOMAIN:-}" ]] && [[ "$DOMAIN_NAME" == *".${SITE_DOMAIN}" ]]; then
-            _CADDY_SUBDOMAIN="${DOMAIN_NAME%.${SITE_DOMAIN}}"
-        fi
+        # Deliberately NOT using configure_caddy_for_service here. That helper
+        # asks for its own domain, defaulting to "<subdomain>.${SITE_DOMAIN}" —
+        # which only lands on $DOMAIN_NAME if SITE_DOMAIN happens to be set to
+        # match, and silently shows a useless blank/wrong default otherwise
+        # (real-world confirmed: SITE_DOMAIN is never set when this service is
+        # run by name, e.g. `sudo ./setup.sh asterisk-do`, since that skips
+        # setup.sh's own site-defaults wizard entirely). There is exactly one
+        # correct domain for this site block — $DOMAIN_NAME — so it's written
+        # directly, with no domain prompt to get wrong.
+        echo ""
+        local WANT_CADDY_PROXY=""
+        prompt_yn "Reverse-proxy the web admin at https://${DOMAIN_NAME}/ via Caddy? (also gets Asterisk a trusted TLS cert for SIP instead of self-signed) (y/n):" "y" WANT_CADDY_PROXY
+        if [[ "$WANT_CADDY_PROXY" =~ ^[Yy]$ ]]; then
+            local _CADDY_MODE="local"
+            [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -n "${CADDY_REMOTE_HOST:-}" ]] && _CADDY_MODE="remote"
 
-        log_info "Reverse-proxying the web admin at https://${DOMAIN_NAME}/ — this is also what gets"
-        log_info "Asterisk a trusted TLS cert for SIP instead of a self-signed one."
-        log_info "When prompted for a domain next, use exactly: ${DOMAIN_NAME}"
-        configure_caddy_for_service "Asterisk Web Admin" "8080" "$_CADDY_SUBDOMAIN" "$EXTRA_BLOCK"
+            local _SITE_BLOCK
+            _SITE_BLOCK="$(cat << CADDY_BLOCK
+
+# Asterisk Web Admin
+${DOMAIN_NAME} {
+    reverse_proxy localhost:8080
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${DOMAIN_NAME}.log
+        format json
+    }
+${EXTRA_BLOCK}
+}
+CADDY_BLOCK
+)"
+
+            if [[ "$_CADDY_MODE" == "local" ]]; then
+                local _CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
+                local _CADDY_BACKUP="$_CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)"
+                if [[ -f "$_CADDYFILE" ]]; then
+                    cp "$_CADDYFILE" "$_CADDY_BACKUP"
+                else
+                    touch "$_CADDYFILE"
+                fi
+                if grep -q "^${DOMAIN_NAME}" "$_CADDYFILE" 2>/dev/null; then
+                    log_warning "${DOMAIN_NAME} already in Caddyfile — leaving the existing entry alone."
+                else
+                    printf '%s\n' "$_SITE_BLOCK" >> "$_CADDYFILE"
+                    log_success "Added ${DOMAIN_NAME} to Caddyfile (backup: $(basename "$_CADDY_BACKUP"))"
+                    docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+                    if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                        log_success "Web admin accessible at: https://${DOMAIN_NAME}"
+                    else
+                        log_warning "Reload failed — check: docker logs caddy"
+                        log_info "Manual reload: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+                    fi
+                fi
+            else
+                local _SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
+                mkdir -p "$_SNIPPET_DIR"
+                printf '%s\n' "$_SITE_BLOCK" > "$_SNIPPET_DIR/asterisk-do.caddy"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk-do.caddy" 2>/dev/null || true
+                log_success "Snippet saved: $_SNIPPET_DIR/asterisk-do.caddy"
+                log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk-do.caddy caddy-host:~/caddy-snippets/"
+            fi
+        fi
     fi
 
     # ── CrowdSec: SIP brute-force/enumeration protection ──────────────────────

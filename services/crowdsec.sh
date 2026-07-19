@@ -196,11 +196,31 @@ labels:
     echo "      https://app.crowdsec.net/"
 
     # ── 7. Optional: push ban alerts to ntfy ─────────────────────────────────
+    echo ""
     local CS_NTFY=""
     prompt_yn "Send CrowdSec ban alerts to an ntfy topic? (y/n):" "n" CS_NTFY
     if [ "$CS_NTFY" = "y" ] || [ "$CS_NTFY" = "Y" ]; then
+        # Prefer a locally-installed ntfy's own base-url as the default, if one
+        # exists and actually looks configured (not still the placeholder
+        # domain ntfy.sh writes when no SITE_DOMAIN was set at its own install
+        # time). Otherwise, nudge toward a hosted instance elsewhere (e.g. a
+        # homelab) instead of silently defaulting to the public ntfy.sh.
+        local _ntfy_default="https://ntfy.sh/crowdsec-alerts"
+        if [ -f "$DOCKER_DIR/ntfy/config/server.yml" ]; then
+            local _local_base_url
+            _local_base_url="$(grep -oP '(?<=base-url: ")[^"]+' "$DOCKER_DIR/ntfy/config/server.yml" 2>/dev/null || true)"
+            if [ -n "$_local_base_url" ] && [ "$_local_base_url" != "https://ntfy.example.com" ]; then
+                _ntfy_default="${_local_base_url}/crowdsec-alerts"
+                echo "  Detected a configured local ntfy instance at $_local_base_url — using it as the default."
+            fi
+        fi
+        if [ "$_ntfy_default" = "https://ntfy.sh/crowdsec-alerts" ]; then
+            echo "  No configured ntfy instance detected on this box. If you have one hosted"
+            echo "  elsewhere (e.g. a homelab), enter its topic URL below instead of the public"
+            echo "  ntfy.sh default — e.g. https://ntfy.your-homelab.com/crowdsec-alerts"
+        fi
         local CS_NTFY_URL=""
-        prompt_text "  ntfy topic URL (e.g. https://ntfy.sh/my-crowdsec):" "https://ntfy.sh/crowdsec-alerts" CS_NTFY_URL
+        prompt_text "  ntfy topic URL:" "$_ntfy_default" CS_NTFY_URL
         sudo mkdir -p /etc/crowdsec/notifications
         local NTFY_FILE="/etc/crowdsec/notifications/ntfy.yaml"
         local NTFY_CONTENT="type: http
