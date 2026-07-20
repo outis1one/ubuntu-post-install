@@ -4340,6 +4340,7 @@ def delete_device(extension):
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
         subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Device deleted"
     return False, "Device not found"
 
@@ -4413,6 +4414,7 @@ def rename_device(extension, new_name):
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
         subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Device renamed"
     return False, "Device not found"
 
@@ -4525,6 +4527,7 @@ def change_device_category(extension, new_category):
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
         subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Category changed"
     return False, "Device not found"
 
@@ -4774,6 +4777,7 @@ qualify_frequency=30
 
     subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
     subprocess.run(['chown', 'asterisk:asterisk', PJSIP_CONF], capture_output=True)
+    subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
 
     return True, {'extension': extension, 'password': password, 'name': name}
 
@@ -6925,5 +6929,15 @@ main() {
     load_config
     show_main_menu
 }
+
+# Non-interactive entry point used by the web admin (Python) after any
+# device/room change — regenerates extensions.conf's [intercom] context
+# and reloads it. Without this, PJSIP endpoints register fine but calls
+# between them fail with "extension not found" since nothing else ever
+# rebuilds the dialplan after the initial container boot.
+if [[ "${1:-}" == "--rebuild-dialplan" ]]; then
+    rebuild_dialplan quiet
+    exit 0
+fi
 
 main "$@"
