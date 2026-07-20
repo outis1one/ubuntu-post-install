@@ -503,23 +503,11 @@ WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
 
-    # ── UFW firewall rules ────────────────────────────────────────────────────
-    if command -v ufw &>/dev/null; then
-        log_info "Opening UFW ports for Asterisk + coturn..."
-        ufw allow 5060/udp
-        ufw allow 5060/tcp
-        ufw allow 5061/tcp
-        ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
-        ufw allow 8088/tcp
-        ufw allow 8089/tcp
-        ufw allow 3478/udp
-        ufw allow 3478/tcp
-        ufw allow 10000:20000/udp
-        ufw allow 49152:49252/udp
-        log_success "UFW rules added."
-    fi
-
     # ── Caddy reverse proxy for web admin ─────────────────────────────────────
+    # Decided before the firewall rules below so they can be scoped
+    # correctly: if a local Caddy ends up fronting the web admin, there's no
+    # reason to also expose it on the LAN — Caddy already reaches it over
+    # the host's internal network (host.docker.internal).
     local EXTRA_BLOCK=""
     if [ -d "$DOCKER_DIR/authelia" ]; then
         local _use_auth=""
@@ -531,6 +519,28 @@ ENV
         fi
     fi
     configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
+
+    # ── UFW firewall rules ────────────────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        log_info "Opening UFW ports for Asterisk + coturn..."
+        ufw allow 5060/udp
+        ufw allow 5060/tcp
+        ufw allow 5061/tcp
+        if [[ "$CADDY_SERVICE_CONFIGURED" == true && "$CADDY_SERVICE_MODE" == "local" ]]; then
+            ufw delete allow "${WEB_ADMIN_PORT_VAL}/tcp" 2>/dev/null || true
+            ufw_allow_from_caddy_net "${WEB_ADMIN_PORT_VAL}"
+        else
+            ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
+        fi
+        ufw allow 8088/tcp
+        ufw allow 8089/tcp
+        ufw allow 3478/udp
+        ufw allow 3478/tcp
+        ufw allow 10000:20000/udp
+        ufw allow 49152:49252/udp
+        ensure_ufw_enabled
+        log_success "UFW rules added."
+    fi
 
     # ── README ────────────────────────────────────────────────────────────────
     write_readme "$EA_DIR" << 'MD'

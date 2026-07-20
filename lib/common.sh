@@ -244,6 +244,55 @@ ensure_caddy_network() {
         && log_info "Created Docker network ${_net} (needed by Caddy-fronted services)"
 }
 
+# Enables UFW if it isn't already active. Call this AFTER the caller has
+# already added its own `ufw allow` rules for whatever it needs — this only
+# flips UFW from inactive to active, it doesn't add rules for the calling
+# service itself.
+#
+# Always allows SSH first, using the sshd_config port if it's non-default —
+# getting this wrong and then enabling UFW would lock out the very SSH
+# session most people are running this script from. If UFW is already
+# active, this is a no-op (assumed already handled correctly).
+ensure_ufw_enabled() {
+    command -v ufw &>/dev/null || return 0
+    [ "$DRY_RUN" = true ] && return 0
+    ufw status 2>/dev/null | grep -q "Status: active" && return 0
+
+    local _ssh_port
+    _ssh_port="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null \
+        | tail -1 | awk '{print $2}')"
+    _ssh_port="${_ssh_port:-22}"
+
+    ufw allow "${_ssh_port}/tcp" comment 'SSH' >/dev/null 2>&1
+    ufw --force enable >/dev/null 2>&1
+    log_success "UFW enabled (SSH on port ${_ssh_port} allowed first, so this won't lock you out)."
+}
+
+# Scopes a UFW allow rule to just the caddy_net bridge subnet instead of
+# every interface. Needed for any port that only needs to be reachable from
+# a *locally* Caddy-fronted service (via host.docker.internal) — a plain
+# `ufw delete allow <port>` closes it everywhere, but Caddy's own request to
+# host.docker.internal is still ordinary INPUT-chain traffic as far as UFW
+# is concerned, arriving over the caddy_net bridge, not the internet. UFW
+# rules apply to all interfaces unless scoped like this, so closing the
+# port outright also silently breaks Caddy.
+ufw_allow_from_caddy_net() {
+    local _port="$1" _proto="${2:-tcp}"
+    command -v ufw &>/dev/null || return 0
+    [ "$DRY_RUN" = true ] && return 0
+
+    local _subnet
+    _subnet="$(docker network inspect "${SITE_CADDY_NET:-caddy_net}" \
+        --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)"
+    if [ -n "$_subnet" ]; then
+        ufw allow from "$_subnet" to any port "$_port" proto "$_proto" comment 'Caddy internal only' >/dev/null 2>&1
+        log_info "Port ${_port}/${_proto} reachable only from Caddy's internal network (${_subnet}), not the public internet."
+    else
+        log_warning "Could not determine ${SITE_CADDY_NET:-caddy_net}'s subnet — port ${_port}/${_proto} stays closed."
+        log_warning "If Caddy can't reach it: ufw allow from <caddy_net-subnet> to any port ${_port} proto ${_proto}"
+    fi
+}
+
 # ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────
 # Lets "ssh <alias>" connect directly to user@host without typing it out each
 # time — handy for VPN/NetBird peers with unmemorable IPs. Operates on the
@@ -435,6 +484,16 @@ write_readme() {
 configure_caddy_for_service() {
     local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
 
+    # Out-params (not `local` — callers read these after the call returns) so
+    # a caller can tell whether Caddy actually ended up fronting the service
+    # and, if so, whether that's a local container (reachable only over the
+    # host's internal network) or a remote machine (needs to reach this host
+    # over the network — usually its public IP). Services that also open a
+    # host firewall for the same port use this to skip that when Caddy is
+    # already the only intended way in, instead of leaving both routes open.
+    CADDY_SERVICE_CONFIGURED=false
+    CADDY_SERVICE_MODE=""
+
     # Derive the proxy upstream and a port number for display messages.
     # Plain number  → host.docker.internal:PORT  (host-network or legacy
     #                 services — Caddy itself runs in its own container on
@@ -552,11 +611,16 @@ CADDY_BLOCK
             local OVERWRITE=""
             prompt_yn "Overwrite existing configuration? (y/n):" "n" OVERWRITE
             if [ "$OVERWRITE" != "y" ] && [ "$OVERWRITE" != "Y" ]; then
-                echo "  Keeping existing configuration."; return 0
+                echo "  Keeping existing configuration."
+                CADDY_SERVICE_CONFIGURED=true
+                CADDY_SERVICE_MODE="local"
+                return 0
             fi
             sed -i "/^${SERVICE_DOMAIN}/,/^}/d" "$CADDYFILE"
         fi
 
+        CADDY_SERVICE_CONFIGURED=true
+        CADDY_SERVICE_MODE="local"
         echo "  Adding $SERVICE_NAME configuration to Caddyfile..."
         printf '%s\n' "$_SITE_BLOCK" >> "$CADDYFILE"
 
@@ -582,6 +646,8 @@ CADDY_BLOCK
 
     # ── Remote Caddy: write snippet file ─────────────────────────────────────
     else
+        CADDY_SERVICE_CONFIGURED=true
+        CADDY_SERVICE_MODE="remote"
         local SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
         local SNIPPET_FILE="$SNIPPET_DIR/${DEFAULT_SUBDOMAIN}.caddy"
         mkdir -p "$SNIPPET_DIR"
