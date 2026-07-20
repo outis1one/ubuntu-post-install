@@ -4116,6 +4116,7 @@ import json
 import subprocess
 import os
 import re
+import time
 import base64
 import hashlib
 import html
@@ -6134,7 +6135,25 @@ class WebAdminHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
 def main():
-    with socketserver.TCPServer(("", PORT), WebAdminHandler) as httpd:
+    # A container recreate under network_mode: host depends on the *previous*
+    # container's web admin process actually dying before the port is free —
+    # there's no Docker-managed port mapping to instantly release it like
+    # there would be in bridge mode. A fast recreate-right-after-recreate can
+    # briefly race that teardown. Retry instead of crashing on the first
+    # failure, which otherwise means the web admin silently never comes up.
+    httpd = None
+    last_err = None
+    for attempt in range(10):
+        try:
+            httpd = socketserver.TCPServer(("", PORT), WebAdminHandler)
+            break
+        except OSError as e:
+            last_err = e
+            print(f"Port {PORT} not free yet ({e}), retrying...")
+            time.sleep(2)
+    if httpd is None:
+        raise last_err
+    with httpd:
         print(f"Easy Asterisk Web Admin running on port {PORT}")
         httpd.serve_forever()
 
