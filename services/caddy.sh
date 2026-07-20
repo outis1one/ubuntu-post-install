@@ -268,7 +268,7 @@ services:
     labels:
       - "io.podman.annotations.label/crowdsec.enable=true"
     # Lets Caddyfile blocks reach services that use network_mode: host
-    # (e.g. asterisk/asterisk-do) via "host.docker.internal:PORT" — Caddy
+    # (e.g. asterisk/asterisk-digital-ocean) via "host.docker.internal:PORT" — Caddy
     # itself is on the caddy_net bridge network below, so plain "localhost"
     # in a site block resolves to Caddy's own container, not the host.
     extra_hosts:

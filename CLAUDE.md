@@ -302,7 +302,7 @@ vendor-copy or `docker-compose.yml`-generation logic is more than a few
 lines, factor it into a helper function so the fresh-install path and the
 update path share one copy instead of drifting apart — see
 `_asterisk_do_refresh_vendor_files`/`_asterisk_do_write_compose` in
-`services/asterisk-do.sh` (and their `_asterisk_*` counterparts in
+`services/asterisk-digital-ocean.sh` (and their `_asterisk_*` counterparts in
 `services/asterisk.sh`) for the reference pattern.
 
 `cancel` must leave the install completely untouched — it's the default for
@@ -338,7 +338,7 @@ it, so as long as your `install_<name>()` calls `require_docker` before
 `docker compose up` (it always should), the network is guaranteed to exist
 regardless of whether Caddy itself has been installed yet.
 
-**`network_mode: host` services (e.g. `asterisk`/`asterisk-do`) don't join
+**`network_mode: host` services (e.g. `asterisk`/`asterisk-digital-ocean`) don't join
 `caddy_net` at all** — Caddy reaching them (or anything else on the host
 network) needs `host.docker.internal:PORT` in the Caddyfile, not
 `localhost:PORT` or a container name. Caddy's own compose file

@@ -1,11 +1,12 @@
 #!/bin/bash
-# services/asterisk-do.sh — Easy Asterisk PBX + coturn, tuned for a public
-# DigitalOcean droplet (public-IP FQDN by default, DO Cloud Firewall setup,
-# no LAN/VLAN prompts). For a home/LAN box use services/asterisk.sh instead.
+# services/asterisk-digital-ocean.sh — Easy Asterisk PBX + coturn, tuned for a
+# public DigitalOcean droplet (public-IP FQDN by default, DO Cloud Firewall
+# setup, no LAN/VLAN prompts). For a home/LAN box use services/asterisk.sh
+# instead.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on a fresh droplet:
-#   sudo bash asterisk-do.sh
+#   sudo bash asterisk-digital-ocean.sh
 # (Docker must already be installed when run standalone)
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
@@ -220,7 +221,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service asterisk-do homelab "Easy Asterisk PBX + coturn, tuned for a public DigitalOcean droplet" 5061
+register_service asterisk-digital-ocean homelab "Easy Asterisk PBX + coturn, tuned for a public DigitalOcean droplet" 5061
 
 # ── Shared: vendor file refresh ────────────────────────────────────────────
 # Called from both a fresh install and an "update in place" run, so a single
@@ -339,11 +340,11 @@ EOF
     fi
 }
 
-install_asterisk-do() {
+install_asterisk-digital-ocean() {
     require_docker || return 1
     log_info "Installing Easy Asterisk PBX + coturn (DigitalOcean droplet edition)..."
 
-    local EA_DIR="$DOCKER_DIR/asterisk-do"
+    local EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
@@ -534,7 +535,7 @@ VLAN_SUBNETS=
 
 # ── Web admin ─────────────────────────────────────────────────
 # Picked automatically at install time (first free port starting at 8081) —
-# see WEB_ADMIN_PORT_VAL in services/asterisk-do.sh if this ever needs to
+# see WEB_ADMIN_PORT_VAL in services/asterisk-digital-ocean.sh if this ever needs to
 # change again; don't hand-edit without also updating Caddy's Caddyfile and
 # both firewall layers to match.
 WEB_ADMIN_PORT=${WEB_ADMIN_PORT_VAL}
@@ -590,12 +591,12 @@ ENV
             prompt_yn "Create a DigitalOcean Cloud Firewall for this droplet via doctl now? (y/n):" "y" DO_FW
             if [[ "$DO_FW" =~ ^[Yy]$ ]]; then
                 if doctl compute firewall create \
-                    --name "asterisk-do" \
+                    --name "asterisk-digital-ocean" \
                     --droplet-ids "$DROPLET_ID" \
                     --inbound-rules "$(IFS=' '; echo "${DO_FW_RULES[*]}")" \
                     --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,ports:0,address:0.0.0.0/0,address:::/0" \
                     &>/dev/null; then
-                    log_success "Cloud Firewall 'asterisk-do' created and attached (SSH/22 included so you don't get locked out)."
+                    log_success "Cloud Firewall 'asterisk-digital-ocean' created and attached (SSH/22 included so you don't get locked out)."
                     log_info "Verify it in the DO console — adjust the SSH rule if you use a non-default SSH port."
                 else
                     log_warning "doctl firewall create failed — add the rules manually (see README)."
@@ -660,7 +661,7 @@ ENV
         # which only lands on $DOMAIN_NAME if SITE_DOMAIN happens to be set to
         # match, and silently shows a useless blank/wrong default otherwise
         # (real-world confirmed: SITE_DOMAIN is never set when this service is
-        # run by name, e.g. `sudo ./setup.sh asterisk-do`, since that skips
+        # run by name, e.g. `sudo ./setup.sh asterisk-digital-ocean`, since that skips
         # setup.sh's own site-defaults wizard entirely). There is exactly one
         # correct domain for this site block — $DOMAIN_NAME — so it's written
         # directly, with no domain prompt to get wrong.
@@ -734,10 +735,10 @@ CADDY_BLOCK
             else
                 local _SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
                 mkdir -p "$_SNIPPET_DIR"
-                printf '%s\n' "$_SITE_BLOCK" > "$_SNIPPET_DIR/asterisk-do.caddy"
-                chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk-do.caddy" 2>/dev/null || true
-                log_success "Snippet saved: $_SNIPPET_DIR/asterisk-do.caddy"
-                log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk-do.caddy caddy-host:~/caddy-snippets/"
+                printf '%s\n' "$_SITE_BLOCK" > "$_SNIPPET_DIR/asterisk-digital-ocean.caddy"
+                chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk-digital-ocean.caddy" 2>/dev/null || true
+                log_success "Snippet saved: $_SNIPPET_DIR/asterisk-digital-ocean.caddy"
+                log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk-digital-ocean.caddy caddy-host:~/caddy-snippets/"
             fi
         fi
     fi
@@ -745,15 +746,15 @@ CADDY_BLOCK
     # ── CrowdSec note ──────────────────────────────────────────────────────────
     # Not installed here — select it separately from the whiptail menu, or
     # `sudo ./setup.sh crowdsec`. Its own installer (services/crowdsec.sh)
-    # auto-detects an asterisk-do install and wires up SIP brute-force
-    # protection on its own, in either install order.
+    # auto-detects an asterisk-digital-ocean install and wires up SIP
+    # brute-force protection on its own, in either install order.
     if command -v cscli &>/dev/null; then
         log_info "CrowdSec is already installed — rerun it to pick up SIP protection for this install:"
         log_info "  sudo ./setup.sh crowdsec"
     else
         log_info "CrowdSec not installed. Recommended for SSH + SIP intrusion prevention on a public"
         log_info "droplet — install it separately (whiptail menu, or 'sudo ./setup.sh crowdsec')."
-        log_info "It auto-detects this asterisk-do install and wires up SIP protection on its own."
+        log_info "It auto-detects this asterisk-digital-ocean install and wires up SIP protection on its own."
     fi
 
     # ── README ────────────────────────────────────────────────────────────────
@@ -821,7 +822,7 @@ plan for the admin panel.
 - **CrowdSec** — SIP brute-force/enumeration protection (\`crowdsecurity/asterisk\`
   collection). Not installed by this script — install it separately (whiptail
   menu, or \`sudo ./setup.sh crowdsec\`); its own installer auto-detects this
-  asterisk-do install and wires up SIP protection regardless of install order.
+  asterisk-digital-ocean install and wires up SIP protection regardless of install order.
 - DO's paid Droplet Backups, or \`services/borg-backup.sh\` installed
   separately, are both options for a rollback path.
 
@@ -919,7 +920,7 @@ accept it manually).
 Access the Easy Asterisk web interface at http://<droplet-ip>:${WEB_ADMIN_PORT_VAL}
 or via your configured reverse-proxy domain.
 
-## Data directories (all inside ~/docker/asterisk-do/, included in backup)
+## Data directories (all inside ~/docker/asterisk-digital-ocean/, included in backup)
 
 | Directory            | Contents                        |
 |-----------------------|----------------------------------|
@@ -967,4 +968,4 @@ MD
 }
 
 # Run immediately when executed directly (deferred until after function definition)
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_asterisk-do
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_asterisk-digital-ocean
