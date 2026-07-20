@@ -347,19 +347,14 @@ install_asterisk-do() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would add a swapfile if RAM <= 2048MB and none exists"
-        echo "[DRY-RUN] Would offer to install Caddy if not already present (full repo only)"
-        echo "[DRY-RUN] Would offer optional extras as a numbered, comma-separated menu (1-6)"
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
         echo "[DRY-RUN] Would detect droplet public IP via DO metadata service"
         echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
         echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
-        echo "[DRY-RUN] Would open 51820/udp (not 51821) if wg-easy was selected"
         echo "[DRY-RUN] Would offer to create a DigitalOcean Cloud Firewall via doctl"
-        echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP (needed for cert sync)"
-        echo "[DRY-RUN] Would offer local OR remote Authelia to protect the web admin"
-        echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
-        echo "[DRY-RUN] Would offer to run base setup first if not already done (full repo only)"
+        echo "[DRY-RUN] Would reverse-proxy the web admin on the SAME FQDN used for SIP if Caddy is already installed (needed for cert sync)"
+        echo "[DRY-RUN] Would offer local OR remote Authelia to protect the web admin, if either is already available"
         echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if $EA_DIR already exists"
         return 0
     fi
@@ -415,24 +410,6 @@ install_asterisk-do() {
         esac
     fi
 
-    # ── Bring in base first, if this is a genuinely fresh box ─────────────────
-    # Naming a service directly (sudo ./setup.sh asterisk-do) skips setup.sh's
-    # own first-run base step — essential packages, SSH key import, disabling
-    # password auth. That's a real gap on a fresh droplet: everything below
-    # still works without it, but the SSH-hardening part of this setup's
-    # security story wouldn't actually have happened. Same marker setup.sh
-    # itself uses to detect base (command -v ncdu).
-    if ! command -v ncdu &>/dev/null; then
-        if declare -F install_base &>/dev/null; then
-            local WANT_BASE=""
-            prompt_yn "Base setup not detected (essential packages, SSH hardening) — run it first? (y/n):" "y" WANT_BASE
-            [[ "$WANT_BASE" =~ ^[Yy]$ ]] && install_base
-        else
-            log_warning "Base setup not detected, and this looks like a standalone copy of asterisk-do.sh."
-            log_warning "Run services/base.sh yourself first, or grab the full repo."
-        fi
-    fi
-
     # ── Swap file (insurance for low-RAM droplets, e.g. the $4/mo 512MB plan) ──
     # DigitalOcean doesn't provision swap by default. Docker + Asterisk + coturn
     # fit in 512MB-1GB at idle with little headroom; a swapfile absorbs spikes
@@ -459,67 +436,6 @@ install_asterisk-do() {
         else
             log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
             log_warning "Consider a bigger droplet, or free up disk before installing."
-        fi
-    fi
-
-    # ── Bring in Caddy automatically, if this is a full repo checkout ─────────
-    # Caddy is a separate service (services/caddy.sh); asterisk-do only
-    # *integrates* with it (reused certs, reverse-proxied admin) unless
-    # offered here. setup.sh sources every services/*.sh file up front, so
-    # install_caddy already exists in-process when running through the
-    # wizard — a standalone single-file run doesn't have it, so that case
-    # gets a manual pointer instead.
-    if [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
-        if declare -F install_caddy &>/dev/null; then
-            local WANT_CADDY=""
-            prompt_yn "Caddy not detected — install it now for a trusted TLS cert + reverse proxy? (y/n):" "y" WANT_CADDY
-            [[ "$WANT_CADDY" =~ ^[Yy]$ ]] && install_caddy
-        else
-            log_warning "Caddy not detected, and this looks like a standalone copy of asterisk-do.sh."
-            log_warning "Grab the full repo to auto-install it, or run services/caddy.sh yourself."
-        fi
-    fi
-
-    # ── Optional extras ─────────────────────────────────────────────────────
-    # One prompt instead of five separate yes/no interruptions. Each is
-    # dispatched at the point later in this function where it actually makes
-    # sense (Authelia needs Caddy's state, which we just resolved above;
-    # wg-easy needs its own firewall rules alongside the others; backup makes
-    # most sense last). Only offered in full-repo mode, same reasoning as Caddy.
-    local EXTRAS=""
-    local _EXTRA_NAMES=(authelia ntfy watchtower wg-easy netbird backup)
-    if declare -F install_authelia &>/dev/null; then
-        echo ""
-        echo "  Optional extras — enter numbers, comma-separated (blank = skip all):"
-        echo "    1) authelia    SSO/2FA in front of the web admin (needs Caddy, above)"
-        echo "    2) ntfy        self-hosted push notifications (e.g. CrowdSec ban alerts)"
-        echo "    3) watchtower  auto-updates pulled images — only helps coturn here;"
-        echo "                   Asterisk itself is built locally, so OS security patches"
-        echo "                   still need a manual 'docker compose up -d --build'"
-        echo "    4) wg-easy     WireGuard VPN — lets you lock the web admin to VPN-only later"
-        echo "    5) netbird     Mesh VPN + optional built-in SSH server, so this droplet and a"
-        echo "                   home machine can reach each other without port-forwarding —"
-        echo "                   pairs with 'backup' below (skipped automatically if already installed)"
-        echo "    6) backup      Borg backup of ~/docker/* to a local machine or remote host —"
-        echo "                   config/data backup, NOT a full droplet image, instead of"
-        echo "                   DigitalOcean's paid Droplet Backups"
-        echo "  Example: 5,6"
-        local EXTRAS_NUM=""
-        prompt_text "Install:" "" EXTRAS_NUM
-        local _IFS_OLD="$IFS" _n
-        IFS=','
-        for _n in $EXTRAS_NUM; do
-            _n="${_n//[[:space:]]/}"
-            [[ "$_n" =~ ^[1-6]$ ]] && EXTRAS+=" ${_EXTRA_NAMES[$((_n-1))]}"
-        done
-        IFS="$_IFS_OLD"
-    fi
-
-    if [[ "$EXTRAS" == *authelia* ]] && declare -F install_authelia &>/dev/null; then
-        if [[ -d "$DOCKER_DIR/caddy" ]]; then
-            install_authelia
-        else
-            log_warning "Skipping Authelia — it needs Caddy, which isn't installed."
         fi
     fi
 
@@ -641,19 +557,6 @@ ENV
         ufw allow 49152:49252/udp
     fi
 
-    # ── wg-easy: install now so its firewall rule lands with the others ───────
-    # Only the VPN port (51820/udp) goes on the public firewall — WireGuard's
-    # handshake is designed to be internet-facing. The web UI (51821) does
-    # NOT get opened publicly: it's a full account-management panel for the
-    # VPN, so it's reached via SSH tunnel instead (documented in the README).
-    if [[ "$EXTRAS" == *wg-easy* ]] && declare -F install_wg-easy &>/dev/null; then
-        install_wg-easy
-        cd "$EA_DIR" || return 1   # install_wg-easy cd's into ~/docker/wg-easy
-        if command -v ufw &>/dev/null; then
-            ufw allow 51820/udp
-        fi
-    fi
-
     if command -v ufw &>/dev/null; then
         log_success "UFW rules added."
     fi
@@ -671,7 +574,6 @@ ENV
         "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
     )
-    [[ "$EXTRAS" == *wg-easy* ]] && DO_FW_RULES+=("protocol:udp,ports:51820,address:0.0.0.0/0,address:::/0")
 
     echo ""
     if [[ -n "$DROPLET_ID" ]] && command -v doctl &>/dev/null && doctl account get &>/dev/null; then
@@ -840,61 +742,18 @@ CADDY_BLOCK
         fi
     fi
 
-    # ── CrowdSec: SIP brute-force/enumeration protection ──────────────────────
+    # ── CrowdSec note ──────────────────────────────────────────────────────────
+    # Not installed here — select it separately from the whiptail menu, or
+    # `sudo ./setup.sh crowdsec`. Its own installer (services/crowdsec.sh)
+    # auto-detects an asterisk-do install and wires up SIP brute-force
+    # protection on its own, in either install order.
     if command -v cscli &>/dev/null; then
         log_info "CrowdSec is already installed — rerun it to pick up SIP protection for this install:"
         log_info "  sudo ./setup.sh crowdsec"
-    elif declare -F install_crowdsec &>/dev/null; then
-        local WANT_CS=""
-        prompt_yn "CrowdSec not detected — install it now for SSH + SIP intrusion prevention? (y/n):" "y" WANT_CS
-        [[ "$WANT_CS" =~ ^[Yy]$ ]] && install_crowdsec
     else
-        log_warning "CrowdSec not detected, and this looks like a standalone copy of asterisk-do.sh."
-        log_warning "Grab the full repo to auto-install it, or run services/crowdsec.sh yourself."
-    fi
-
-    # ── ntfy / watchtower (independent extras, selected earlier) ──────────────
-    if [[ "$EXTRAS" == *ntfy* ]] && declare -F install_ntfy &>/dev/null; then
-        install_ntfy
-        cd "$EA_DIR" || return 1   # install_ntfy cd's into ~/docker/ntfy
-    fi
-    if [[ "$EXTRAS" == *watchtower* ]] && declare -F install_watchtower &>/dev/null; then
-        install_watchtower
-        cd "$EA_DIR" || return 1   # install_watchtower cd's into ~/docker/watchtower
-    fi
-
-    # ── NetBird: mesh VPN + optional built-in SSH server ───────────────────────
-    # _base_setup_netbird lives in services/base.sh (not its own register_service
-    # entry — it's a helper base.sh calls on first run), but it's a plain
-    # function like any other once sourced, so it's callable here the same way.
-    # Doesn't cd anywhere, so no directory restore needed after it. Its own
-    # prompt already defaults "enable NetBird's built-in SSH server" to yes —
-    # that's the piece that lets 'backup' below reach a home machine without
-    # port-forwarding, IF the home machine also joins the same NetBird network
-    # (a separate, manual step on that machine — this only sets up this droplet).
-    if [[ "$EXTRAS" == *netbird* ]]; then
-        if command -v netbird &>/dev/null; then
-            log_info "NetBird is already installed on this droplet."
-        elif declare -F _base_setup_netbird &>/dev/null; then
-            _base_setup_netbird
-        else
-            log_warning "NetBird setup not found, and this looks like a standalone copy of asterisk-do.sh."
-            log_warning "Grab the full repo to auto-install it, or run services/base.sh yourself."
-        fi
-    fi
-
-    # ── Backup: config/data to a local machine or remote host ─────────────────
-    # Not a full droplet image — it's ~/docker/* (this PBX's config, extensions,
-    # CDRs, and every other installed service here) via Borg, which supports
-    # local paths or user@host:/path SSH remotes. That's the alternative to
-    # DigitalOcean's paid Droplet Backups: point it at your own machine instead
-    # of paying DO to store snapshots. Disaster recovery then becomes "fresh
-    # droplet, rerun this installer, restore from the Borg repo" rather than
-    # restoring a multi-GB disk image. Pair with 'netbird' above so the SSH
-    # remote target is a private mesh IP instead of needing a port-forward.
-    if [[ "$EXTRAS" == *backup* ]] && declare -F install_borg-backup &>/dev/null; then
-        install_borg-backup
-        cd "$EA_DIR" || return 1   # install_borg-backup cd's into ~/docker/borg-backup
+        log_info "CrowdSec not installed. Recommended for SSH + SIP intrusion prevention on a public"
+        log_info "droplet — install it separately (whiptail menu, or 'sudo ./setup.sh crowdsec')."
+        log_info "It auto-detects this asterisk-do install and wires up SIP protection on its own."
     fi
 
     # ── README ────────────────────────────────────────────────────────────────
@@ -960,10 +819,11 @@ plan for the admin panel.
   - **UFW** — host-level, configured automatically by this installer as a
     second layer. Keep both in sync; don't let them contradict each other.
 - **CrowdSec** — SIP brute-force/enumeration protection (\`crowdsecurity/asterisk\`
-  collection). Offered automatically during install if not already present;
-  see \`services/crowdsec.sh\`.
-- DO's paid Droplet Backups is one option for a rollback path — the
-  \`backup\` extra below is the alternative used here.
+  collection). Not installed by this script — install it separately (whiptail
+  menu, or \`sudo ./setup.sh crowdsec\`); its own installer auto-detects this
+  asterisk-do install and wires up SIP protection regardless of install order.
+- DO's paid Droplet Backups, or \`services/borg-backup.sh\` installed
+  separately, are both options for a rollback path.
 
 ### Ports (open on both the Cloud Firewall and UFW)
 
@@ -977,58 +837,24 @@ plan for the admin panel.
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
 | 49152–49252   | UDP      | TURN relay media ports           |
-| 51820         | UDP      | WireGuard VPN, only if \`wg-easy\` was selected |
 
-## Optional extras
+## Other services (installed separately, not by this script)
 
-Offered during install (space-separated at the "Install:" prompt); can also
-be added later by running \`sudo ./setup.sh <name>\` from the repo.
+This installer only sets up Asterisk + coturn. Everything else — Caddy,
+CrowdSec, Authelia, ntfy, watchtower, wg-easy, NetBird, Borg backup — is a
+normal service in this repo: pick it from the whiptail menu, or run
+\`sudo ./setup.sh <name>\` directly. A few integrate automatically with this
+install if already present, no extra config needed:
 
-- **authelia** — SSO/2FA in front of the web admin. Needs Caddy locally to
-  install here. If it's already installed (locally or picked up by
-  re-running \`asterisk-do\`), that instance protects the web admin
-  automatically. **No local Authelia?** The web-admin step separately offers
-  a **remote Authelia** option instead — point it at an instance already
-  running elsewhere (e.g. a homelab) via a bare \`host:port\` over a private
-  network (a NetBird mesh IP works well here) or a full \`https://\` URL if
-  it has its own public domain+TLS. Every web-admin page load then does a
-  round trip to that address, so if it's unreachable, the panel fails closed
-  — SIP/calling on this droplet is unaffected either way, only the admin UI.
-- **ntfy** — self-hosted push notifications. Useful as a destination for
-  CrowdSec ban alerts (\`services/crowdsec.sh\` prompts for an ntfy URL —
-  point it at this instance instead of the public ntfy.sh if you'd rather
-  keep alerts off a third party).
-- **watchtower** — auto-updates pulled Docker images daily. Only helps
-  \`coturn\` here — Asterisk's image is built locally from a Dockerfile, so
-  Watchtower has no registry tag to check against. Keep Asterisk patched
-  with an occasional \`docker compose up -d --build\`.
-- **wg-easy** — WireGuard VPN. Only its VPN port (51820/udp) is opened on
-  the public firewall; the web UI (51821) is deliberately **not** exposed —
-  reach it via SSH tunnel: \`ssh -L 51821:localhost:51821 user@<droplet-ip>\`,
-  then browse \`http://localhost:51821\`. A natural next step once it's
-  installed: restrict the web admin (${WEB_ADMIN_PORT_VAL}) to the VPN subnet only, on both
-  firewall layers, so reconfiguring the PBX requires being on the VPN —
-  done manually, not automatically, since a firewall mistake there can lock
-  you out.
-- **netbird** — mesh VPN (via \`services/base.sh\`'s \`_base_setup_netbird\`
-  helper). Its own prompt defaults to enabling NetBird's **built-in SSH
-  server** (\`--allow-server-ssh\`) on this droplet. Install NetBird on a
-  home machine too (separately, outside this installer — same
-  \`curl -fsSL https://pkgs.netbird.io/install.sh | sh\`, then
-  \`netbird up --setup-key <key> --allow-server-ssh\`) and join it to the
-  same network, and the two machines get a private mesh IP to reach each
-  other over — no router port-forwarding, no public SSH exposure on either
-  end. That mesh IP is what \`backup\` below should target.
-- **backup** — Borg backup of \`~/docker/*\` (this PBX's config, extensions,
-  CDRs, and every other service on this droplet) to a **local path or a
-  remote host over SSH** (\`user@host:/path\`) — see \`services/borg-backup.sh\`.
-  This is the alternative to DigitalOcean's paid Droplet Backups: point it
-  at your own machine and pay nothing extra to DO. It is **not** a full
-  droplet disk image — disaster recovery is "fresh droplet, rerun this
-  installer, restore the Borg repo," which is faster and more portable than
-  restoring a multi-GB snapshot. If the destination is a home machine
-  without a stable public IP, install \`netbird\` (above) first and use its
-  mesh IP as the SSH host instead of port-forwarding a home router.
+- **Caddy** — if installed (locally, or you're on a remote-Caddy setup), this
+  installer reverse-proxies the web admin on \`DOMAIN_NAME\` and Asterisk syncs
+  the resulting Let's Encrypt cert for SIP-TLS too. Not installed → self-signed
+  cert, plain HTTP admin.
+- **Authelia** — if installed locally (needs Caddy), or you point this
+  installer at a remote instance (e.g. a homelab, via NetBird mesh IP or a
+  public \`https://\` URL), the web admin gets SSO/2FA in front of it.
+- **CrowdSec** — see Security above; wires up SIP protection automatically
+  once installed, regardless of whether it went in before or after this.
 
 ## Manage
 

@@ -278,7 +278,7 @@ services:
 
 networks:
   caddy_net:
-    driver: bridge
+    external: true
     name: caddy_net
 CADDY_COMPOSE
 
