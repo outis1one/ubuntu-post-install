@@ -203,6 +203,123 @@ fi
 
 register_service asterisk-do homelab "Easy Asterisk PBX + coturn, tuned for a public DigitalOcean droplet" 5061
 
+# ── Shared: vendor file refresh ────────────────────────────────────────────
+# Called from both a fresh install and an "update in place" run, so a single
+# copy of this logic stays current for both instead of drifting apart. Must
+# be called with $PWD already at $EA_DIR.
+_asterisk_do_refresh_vendor_files() {
+    mkdir -p docker scripts
+
+    local _SELF_DIR_LOCAL
+    _SELF_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local VENDOR_DIR="$_SELF_DIR_LOCAL/../vendor/easy-asterisk"
+
+    if [[ -d "$VENDOR_DIR" ]]; then
+        log_info "Copying vendor files from $VENDOR_DIR ..."
+        cp "$VENDOR_DIR/Dockerfile"                    ./Dockerfile
+        cp "$VENDOR_DIR/docker/entrypoint.sh"          ./docker/entrypoint.sh
+        cp "$VENDOR_DIR/docker/coturn-entrypoint.sh"   ./docker/coturn-entrypoint.sh
+        cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk.sh
+        cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk-v0.10.0.sh
+        cp "$VENDOR_DIR/scripts/vpn-diagnostics.sh"    ./scripts/vpn-diagnostics.sh
+        cp "$VENDOR_DIR/scripts/dns-whitelist.sh"      ./scripts/dns-whitelist.sh
+    else
+        log_info "Vendor directory not found — downloading from GitHub ..."
+        local GH_RAW="https://raw.githubusercontent.com/DeadDork/easy-asterisk/main"
+        curl -fsSL "$GH_RAW/Dockerfile"                        -o ./Dockerfile
+        curl -fsSL "$GH_RAW/docker/entrypoint.sh"              -o ./docker/entrypoint.sh
+        curl -fsSL "$GH_RAW/docker/coturn-entrypoint.sh"       -o ./docker/coturn-entrypoint.sh
+        curl -fsSL "$GH_RAW/easy-asterisk-v0.10.0.sh"          -o ./easy-asterisk.sh
+        curl -fsSL "$GH_RAW/scripts/vpn-diagnostics.sh"        -o ./scripts/vpn-diagnostics.sh
+        curl -fsSL "$GH_RAW/scripts/dns-whitelist.sh"          -o ./scripts/dns-whitelist.sh
+        cp ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh
+    fi
+
+    chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
+              ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh \
+              ./scripts/vpn-diagnostics.sh ./scripts/dns-whitelist.sh
+
+    # Persist security-level logging to a file — vendor's logger.conf only
+    # sends the "security" level (auth failures, SIP brute-force attempts) to
+    # the console (Docker stdout), not a file CrowdSec/fail2ban can tail.
+    if grep -q '^console => notice,warning,error,security$' ./docker/entrypoint.sh; then
+        sed -i '/^console => notice,warning,error,security$/a full => notice,warning,error,security' \
+            ./docker/entrypoint.sh
+    else
+        log_warning "entrypoint.sh logger.conf template changed upstream — security events won't be logged to a file. Update the sed patch in this installer."
+    fi
+}
+
+# ── Shared: docker-compose.yml ─────────────────────────────────────────────
+# Same reasoning as above — one copy of the template used by both fresh
+# installs and updates. Must be called with $PWD already at $EA_DIR.
+_asterisk_do_write_compose() {
+    cat > docker-compose.yml << 'EOF'
+name: asterisk-do
+
+services:
+  asterisk:
+    build: .
+    container_name: easy-asterisk-do
+    network_mode: host
+    depends_on:
+      coturn:
+        condition: service_started
+    volumes:
+      - ./config/asterisk:/etc/asterisk
+      - ./config/easy-asterisk:/etc/easy-asterisk
+      - ./logs:/var/log/asterisk
+      - ./spool:/var/spool/asterisk
+      - ./lib:/var/lib/asterisk
+      - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
+      - ./exports:/root
+CADDY_VOLUME_PLACEHOLDER
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: easy-asterisk-do-coturn
+    network_mode: host
+    user: root
+    entrypoint: ["/coturn-entrypoint.sh"]
+    volumes:
+      - ./docker/coturn-entrypoint.sh:/coturn-entrypoint.sh:ro
+    env_file: .env
+    command:
+      - -n
+      - --listening-port=${TURN_PORT:-3478}
+      - --listening-ip=0.0.0.0
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${TURN_USERNAME:-easyasterisk}:${TURN_PASSWORD}
+      - --realm=${DOMAIN_NAME:-localhost}
+      - --min-port=49152
+      - --max-port=49252
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+      - --log-file=stdout
+    restart: unless-stopped
+
+EOF
+
+    # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
+    # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
+    # self-signed. No-op if Caddy isn't installed on this box.
+    if [[ -d "$DOCKER_DIR/caddy/data" ]]; then
+        sed -i "s#CADDY_VOLUME_PLACEHOLDER#      - ${DOCKER_DIR}/caddy/data:/caddy-data:ro#" docker-compose.yml
+    else
+        sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
+    fi
+}
+
 install_asterisk-do() {
     require_docker || return 1
     log_info "Installing Easy Asterisk PBX + coturn (DigitalOcean droplet edition)..."
@@ -224,7 +341,51 @@ install_asterisk-do() {
         echo "[DRY-RUN] Would offer local OR remote Authelia to protect the web admin"
         echo "[DRY-RUN] Would offer to install CrowdSec if not already present (full repo only)"
         echo "[DRY-RUN] Would offer to run base setup first if not already done (full repo only)"
+        echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if $EA_DIR already exists"
         return 0
+    fi
+
+    # ── Existing install? Offer update-in-place instead of a full reinstall ───
+    # A fresh install re-runs every prompt (domain, extras, DO firewall,
+    # Authelia). An update only refreshes vendor files + docker-compose.yml —
+    # picking up fixes like this one — and rebuilds, without touching .env,
+    # UFW, the Cloud Firewall, or the Caddy/Authelia config already in place.
+    if [[ -f "$EA_DIR/docker-compose.yml" && -f "$EA_DIR/.env" ]]; then
+        echo ""
+        log_info "Existing install found at $EA_DIR."
+        local UPDATE_INPLACE=""
+        prompt_yn "Update in place (refresh vendor files + docker-compose.yml, keep your existing domain/firewall/Authelia settings) instead of a full fresh reinstall? (y/n):" "y" UPDATE_INPLACE
+        if [[ "$UPDATE_INPLACE" =~ ^[Yy]$ ]]; then
+            mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
+                     "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
+            ensure_docker_dir_ownership "$EA_DIR"
+            cd "$EA_DIR" || return 1
+
+            _asterisk_do_refresh_vendor_files
+            _asterisk_do_write_compose
+
+            log_info "Rebuilding and restarting containers..."
+            if docker compose up -d --build --force-recreate; then
+                log_success "Update complete — vendor files and docker-compose.yml refreshed."
+            else
+                log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
+            fi
+
+            local _EXISTING_DOMAIN _EXISTING_PORT
+            _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
+            _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
+            echo ""
+            log_success "Existing .env, UFW rules, Cloud Firewall, and Caddy/Authelia config were left untouched."
+            if [[ -n "$_EXISTING_DOMAIN" ]]; then
+                echo "  Web admin: https://${_EXISTING_DOMAIN}/"
+            else
+                echo "  Web admin: http://<droplet-ip>:${_EXISTING_PORT:-8081}"
+            fi
+            echo "  Logs:      docker compose -f $EA_DIR/docker-compose.yml logs -f"
+            echo ""
+            return 0
+        fi
+        log_info "Proceeding with a full fresh reinstall — existing config will be reused where prompts match, everything else re-asked."
     fi
 
     # ── Bring in base first, if this is a genuinely fresh box ─────────────────
@@ -341,53 +502,7 @@ install_asterisk-do() {
     ensure_docker_dir_ownership "$EA_DIR"
     cd "$EA_DIR" || return 1
 
-    mkdir -p docker
-
-    # ── Vendor files (shared with services/asterisk.sh — no duplication) ──────
-    local _SELF_DIR_LOCAL
-    _SELF_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local VENDOR_DIR="$_SELF_DIR_LOCAL/../vendor/easy-asterisk"
-
-    mkdir -p scripts
-
-    if [[ -d "$VENDOR_DIR" ]]; then
-        log_info "Copying vendor files from $VENDOR_DIR ..."
-        cp "$VENDOR_DIR/Dockerfile"                    ./Dockerfile
-        cp "$VENDOR_DIR/docker/entrypoint.sh"          ./docker/entrypoint.sh
-        cp "$VENDOR_DIR/docker/coturn-entrypoint.sh"   ./docker/coturn-entrypoint.sh
-        cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk.sh
-        cp "$VENDOR_DIR/easy-asterisk-v0.10.0.sh"      ./easy-asterisk-v0.10.0.sh
-        cp "$VENDOR_DIR/scripts/vpn-diagnostics.sh"    ./scripts/vpn-diagnostics.sh
-        cp "$VENDOR_DIR/scripts/dns-whitelist.sh"      ./scripts/dns-whitelist.sh
-    else
-        log_info "Vendor directory not found — downloading from GitHub ..."
-        local GH_RAW="https://raw.githubusercontent.com/DeadDork/easy-asterisk/main"
-        curl -fsSL "$GH_RAW/Dockerfile"                        -o ./Dockerfile
-        curl -fsSL "$GH_RAW/docker/entrypoint.sh"              -o ./docker/entrypoint.sh
-        curl -fsSL "$GH_RAW/docker/coturn-entrypoint.sh"       -o ./docker/coturn-entrypoint.sh
-        curl -fsSL "$GH_RAW/easy-asterisk-v0.10.0.sh"          -o ./easy-asterisk.sh
-        curl -fsSL "$GH_RAW/scripts/vpn-diagnostics.sh"        -o ./scripts/vpn-diagnostics.sh
-        curl -fsSL "$GH_RAW/scripts/dns-whitelist.sh"          -o ./scripts/dns-whitelist.sh
-        cp ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh
-    fi
-
-    chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
-              ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh \
-              ./scripts/vpn-diagnostics.sh ./scripts/dns-whitelist.sh
-
-    # ── Persist security-level logging to a file ──────────────────────────────
-    # Vendor's logger.conf only sends the "security" level (auth failures, SIP
-    # brute-force attempts) to the console — that's Docker's stdout, not a file
-    # CrowdSec/fail2ban can tail. Patch our copy of entrypoint.sh (not the
-    # shared vendor/ source) so it also writes those events to
-    # /var/log/asterisk/full, which is bind-mounted to $EA_DIR/logs/full — a
-    # host path services/crowdsec.sh can point its Asterisk acquisition at.
-    if grep -q '^console => notice,warning,error,security$' ./docker/entrypoint.sh; then
-        sed -i '/^console => notice,warning,error,security$/a full => notice,warning,error,security' \
-            ./docker/entrypoint.sh
-    else
-        log_warning "entrypoint.sh logger.conf template changed upstream — security events won't be logged to a file. Update the sed patch in this installer."
-    fi
+    _asterisk_do_refresh_vendor_files
 
     # ── DigitalOcean droplet detection ────────────────────────────────────────
     # A droplet's own public IP/ID are readable, unauthenticated, from the
@@ -429,71 +544,7 @@ install_asterisk-do() {
     # a usable address (the FQDN if set, otherwise the droplet's public IP).
     local TURN_SERVER_VAL="${DOMAIN_NAME:-$PUBLIC_IP}:3478"
 
-    # ── docker-compose.yml ────────────────────────────────────────────────────
-    cat > docker-compose.yml << 'EOF'
-name: asterisk-do
-
-services:
-  asterisk:
-    build: .
-    container_name: easy-asterisk-do
-    network_mode: host
-    depends_on:
-      coturn:
-        condition: service_started
-    volumes:
-      - ./config/asterisk:/etc/asterisk
-      - ./config/easy-asterisk:/etc/easy-asterisk
-      - ./logs:/var/log/asterisk
-      - ./spool:/var/spool/asterisk
-      - ./lib:/var/lib/asterisk
-      - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
-      - ./exports:/root
-CADDY_VOLUME_PLACEHOLDER
-    env_file: .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "asterisk", "-rx", "core show version"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  coturn:
-    image: coturn/coturn:latest
-    container_name: easy-asterisk-do-coturn
-    network_mode: host
-    user: root
-    entrypoint: ["/coturn-entrypoint.sh"]
-    volumes:
-      - ./docker/coturn-entrypoint.sh:/coturn-entrypoint.sh:ro
-    env_file: .env
-    command:
-      - -n
-      - --listening-port=${TURN_PORT:-3478}
-      - --listening-ip=0.0.0.0
-      - --fingerprint
-      - --lt-cred-mech
-      - --user=${TURN_USERNAME:-easyasterisk}:${TURN_PASSWORD}
-      - --realm=${DOMAIN_NAME:-localhost}
-      - --min-port=49152
-      - --max-port=49252
-      - --no-tls
-      - --no-dtls
-      - --no-cli
-      - --no-multicast-peers
-      - --log-file=stdout
-    restart: unless-stopped
-
-EOF
-
-    # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
-    # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
-    # self-signed. No-op if Caddy isn't installed on this box.
-    if [[ -d "$DOCKER_DIR/caddy/data" ]]; then
-        sed -i "s#CADDY_VOLUME_PLACEHOLDER#      - ${DOCKER_DIR}/caddy/data:/caddy-data:ro#" docker-compose.yml
-    else
-        sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
-    fi
+    _asterisk_do_write_compose
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share

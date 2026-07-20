@@ -201,34 +201,16 @@ fi
 
 register_service asterisk homelab "Easy Asterisk PBX + coturn TURN server (home intercom/VoIP)" 5061
 
-install_asterisk() {
-    require_docker || return 1
-    log_info "Installing Easy Asterisk PBX + coturn..."
+# ── Shared: vendor file refresh ────────────────────────────────────────────
+# Called from both a fresh install and an "update in place" run, so a single
+# copy of this logic stays current for both instead of drifting apart. Must
+# be called with $PWD already at $EA_DIR.
+_asterisk_refresh_vendor_files() {
+    mkdir -p docker scripts
 
-    local EA_DIR="$DOCKER_DIR/asterisk"
-
-    if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
-        echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
-        echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
-        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
-        return 0
-    fi
-
-    mkdir -p "$EA_DIR"
-    mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
-             "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
-    ensure_docker_dir_ownership "$EA_DIR"
-    cd "$EA_DIR" || return 1
-
-    mkdir -p docker
-
-    # ── Vendor files ──────────────────────────────────────────────────────────
     local _SELF_DIR_LOCAL
     _SELF_DIR_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local VENDOR_DIR="$_SELF_DIR_LOCAL/../vendor/easy-asterisk"
-
-    mkdir -p scripts
 
     if [[ -d "$VENDOR_DIR" ]]; then
         log_info "Copying vendor files from $VENDOR_DIR ..."
@@ -254,54 +236,14 @@ install_asterisk() {
     chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
               ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh \
               ./scripts/vpn-diagnostics.sh ./scripts/dns-whitelist.sh
+}
 
-    # ── Networking mode ───────────────────────────────────────────────────────
-    echo ""
-    echo "  Networking mode:"
-    echo "    1) FQDN (recommended) — TLS + TURN relay, every phone connects the"
-    echo "                            same way regardless of LAN/VLAN/remote"
-    echo "    2) LAN-only           — no domain, self-signed cert, local network/VPN only"
-    local HA_NETMODE=""
-    prompt_text "Choose [1]:" "1" HA_NETMODE
-
-    local DOMAIN_NAME=""
-    if [[ "$HA_NETMODE" != "2" ]]; then
-        prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=fall back to LAN-only]:" "" DOMAIN_NAME
-        [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — proceeding in LAN-only mode."
-    fi
-
-    # ── Local networks / VLANs ────────────────────────────────────────────────
-    # Feeds HAS_VLANS/VLAN_SUBNETS into .env, which the entrypoint reads to add
-    # extra local_net= entries in pjsip.conf so phones on those subnets get
-    # correct NAT/SDP handling (this is what fixes the "no sound" symptom for
-    # devices on a VLAN the server isn't itself attached to).
-    echo ""
-    echo "  Detecting networks this host can see..."
-    local DETECTED_NETS=""
-    DETECTED_NETS="$(ip -o -f inet addr show scope global 2>/dev/null \
-        | awk '{print $2, $4}' \
-        | grep -Ev '^(docker|br-|veth|tun|tap|wg)' \
-        | awk '{ split($2,a,"/"); split(a[1],o,"."); print o[1]"."o[2]"."o[3]".0/"a[2] }' \
-        | sort -u)"
-    if [[ -n "$DETECTED_NETS" ]]; then
-        echo "  This host is directly attached to:"
-        echo "$DETECTED_NETS" | sed 's/^/    /'
-    fi
-    echo "  Phones on OTHER VLANs (this server usually can't see those directly)"
-    echo "  still need to be listed here so their media is treated as local/trusted."
-    local VLAN_SUBNETS_VAL=""
-    prompt_text "VLAN/VPN subnets, space-separated CIDRs [blank=none]:" "" VLAN_SUBNETS_VAL
-    local HAS_VLANS_VAL="n"
-    [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
-
-    # ── Secrets ───────────────────────────────────────────────────────────────
-    local TURN_PASSWORD
-    TURN_PASSWORD="$(generate_password 24)"
-
-    local TURN_SERVER_VAL=""
-    [[ -n "$DOMAIN_NAME" ]] && TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
-
-    # ── docker-compose.yml ────────────────────────────────────────────────────
+# ── Shared: docker-compose.yml ─────────────────────────────────────────────
+# Same reasoning as above — one copy of the template used by both fresh
+# installs and updates. Must be called with $PWD already at $EA_DIR.
+# HAS_VLANS_VAL/VLAN_SUBNETS_VAL aren't referenced here — they live only in
+# .env, which the entrypoint reads at container start.
+_asterisk_write_compose() {
     cat > docker-compose.yml << 'EOF'
 name: asterisk
 
@@ -366,6 +308,121 @@ EOF
     else
         sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
     fi
+}
+
+install_asterisk() {
+    require_docker || return 1
+    log_info "Installing Easy Asterisk PBX + coturn..."
+
+    local EA_DIR="$DOCKER_DIR/asterisk"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
+        echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
+        echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
+        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if $EA_DIR already exists"
+        return 0
+    fi
+
+    # ── Existing install? Offer update-in-place instead of a full reinstall ───
+    # A fresh install re-runs every prompt (networking mode, domain, VLANs,
+    # Authelia). An update only refreshes vendor files + docker-compose.yml —
+    # picking up fixes like this one — and rebuilds, without touching .env,
+    # UFW, or the Caddy/Authelia config already in place.
+    if [[ -f "$EA_DIR/docker-compose.yml" && -f "$EA_DIR/.env" ]]; then
+        echo ""
+        log_info "Existing install found at $EA_DIR."
+        local UPDATE_INPLACE=""
+        prompt_yn "Update in place (refresh vendor files + docker-compose.yml, keep your existing domain/VLAN/Authelia settings) instead of a full fresh reinstall? (y/n):" "y" UPDATE_INPLACE
+        if [[ "$UPDATE_INPLACE" =~ ^[Yy]$ ]]; then
+            mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
+                     "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
+            ensure_docker_dir_ownership "$EA_DIR"
+            cd "$EA_DIR" || return 1
+
+            _asterisk_refresh_vendor_files
+            _asterisk_write_compose
+
+            log_info "Rebuilding and restarting containers..."
+            if docker compose up -d --build --force-recreate; then
+                log_success "Update complete — vendor files and docker-compose.yml refreshed."
+            else
+                log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
+            fi
+
+            local _EXISTING_DOMAIN _EXISTING_PORT
+            _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
+            _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
+            echo ""
+            log_success "Existing .env, UFW rules, and Caddy/Authelia config were left untouched."
+            if [[ -n "$_EXISTING_DOMAIN" ]]; then
+                echo "  Web admin: https://${_EXISTING_DOMAIN}/"
+            else
+                echo "  Web admin: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${_EXISTING_PORT:-8081}"
+            fi
+            echo "  Logs:      docker compose -f $EA_DIR/docker-compose.yml logs -f"
+            echo ""
+            return 0
+        fi
+        log_info "Proceeding with a full fresh reinstall — existing config will be reused where prompts match, everything else re-asked."
+    fi
+
+    mkdir -p "$EA_DIR"
+    mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
+             "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
+    ensure_docker_dir_ownership "$EA_DIR"
+    cd "$EA_DIR" || return 1
+
+    _asterisk_refresh_vendor_files
+
+    # ── Networking mode ───────────────────────────────────────────────────────
+    echo ""
+    echo "  Networking mode:"
+    echo "    1) FQDN (recommended) — TLS + TURN relay, every phone connects the"
+    echo "                            same way regardless of LAN/VLAN/remote"
+    echo "    2) LAN-only           — no domain, self-signed cert, local network/VPN only"
+    local HA_NETMODE=""
+    prompt_text "Choose [1]:" "1" HA_NETMODE
+
+    local DOMAIN_NAME=""
+    if [[ "$HA_NETMODE" != "2" ]]; then
+        prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=fall back to LAN-only]:" "" DOMAIN_NAME
+        [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — proceeding in LAN-only mode."
+    fi
+
+    # ── Local networks / VLANs ────────────────────────────────────────────────
+    # Feeds HAS_VLANS/VLAN_SUBNETS into .env, which the entrypoint reads to add
+    # extra local_net= entries in pjsip.conf so phones on those subnets get
+    # correct NAT/SDP handling (this is what fixes the "no sound" symptom for
+    # devices on a VLAN the server isn't itself attached to).
+    echo ""
+    echo "  Detecting networks this host can see..."
+    local DETECTED_NETS=""
+    DETECTED_NETS="$(ip -o -f inet addr show scope global 2>/dev/null \
+        | awk '{print $2, $4}' \
+        | grep -Ev '^(docker|br-|veth|tun|tap|wg)' \
+        | awk '{ split($2,a,"/"); split(a[1],o,"."); print o[1]"."o[2]"."o[3]".0/"a[2] }' \
+        | sort -u)"
+    if [[ -n "$DETECTED_NETS" ]]; then
+        echo "  This host is directly attached to:"
+        echo "$DETECTED_NETS" | sed 's/^/    /'
+    fi
+    echo "  Phones on OTHER VLANs (this server usually can't see those directly)"
+    echo "  still need to be listed here so their media is treated as local/trusted."
+    local VLAN_SUBNETS_VAL=""
+    prompt_text "VLAN/VPN subnets, space-separated CIDRs [blank=none]:" "" VLAN_SUBNETS_VAL
+    local HAS_VLANS_VAL="n"
+    [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
+
+    # ── Secrets ───────────────────────────────────────────────────────────────
+    local TURN_PASSWORD
+    TURN_PASSWORD="$(generate_password 24)"
+
+    local TURN_SERVER_VAL=""
+    [[ -n "$DOMAIN_NAME" ]] && TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
+
+    _asterisk_write_compose
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share
