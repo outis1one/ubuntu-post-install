@@ -628,6 +628,14 @@ ENV
 
 # Asterisk Web Admin
 ${DOMAIN_NAME} {
+    # Auth (if any) must come before reverse_proxy — forward_auth is the
+    # same directive family as reverse_proxy internally, and Caddy doesn't
+    # reorder repeats of the same directive within a block; it runs them in
+    # the order they're written. With reverse_proxy first, it would handle
+    # and terminate every request immediately, so an auth check written
+    # after it would be dead code that never runs — full bypass regardless
+    # of what the auth server's own rules say.
+${EXTRA_BLOCK}
     reverse_proxy ${_PROXY_TARGET}
 
     header {
@@ -641,7 +649,6 @@ ${DOMAIN_NAME} {
         output file /var/log/caddy/${DOMAIN_NAME}.log
         format json
     }
-${EXTRA_BLOCK}
 }
 CADDY_BLOCK
 )"

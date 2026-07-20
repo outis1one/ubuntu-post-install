@@ -573,6 +573,14 @@ configure_caddy_for_service() {
 
 # $SERVICE_NAME
 ${SERVICE_DOMAIN} {
+    # Auth (if any) must come before reverse_proxy — forward_auth is the
+    # same directive family as reverse_proxy internally, and Caddy doesn't
+    # reorder repeats of the same directive within a block; it runs them in
+    # the order they're written. With reverse_proxy first, it would handle
+    # and terminate every request immediately, so an auth check written
+    # after it would be dead code that never runs — full bypass regardless
+    # of what the auth server's own rules say.
+${EXTRA_CONFIG}
     reverse_proxy ${_BLOCK_UPSTREAM}
 
     # Security headers
@@ -588,7 +596,6 @@ ${SERVICE_DOMAIN} {
         output file /var/log/caddy/${SERVICE_DOMAIN}.log
         format json
     }
-${EXTRA_CONFIG}
 }
 CADDY_BLOCK
 )"

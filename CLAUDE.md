@@ -159,6 +159,20 @@ reloads Caddy. No-ops silently if Caddy isn't installed. The fourth argument
 is an optional string inserted verbatim inside the Caddy site block (use it
 for `import authelia` or custom matchers).
 
+The function places that block **before** `reverse_proxy` in the generated
+site block — don't reorder this. `forward_auth` (what `import authelia`
+expands to) is the same directive family as `reverse_proxy` internally, and
+Caddy doesn't reorder repeats of the same directive within a block; it runs
+them in the order they're written. `reverse_proxy` written first would
+handle and terminate every request immediately, making an auth check
+written after it dead code that never runs — full bypass regardless of what
+the auth server's own access-control rules say. Confirmed live: this was
+the actual cause of a "Caddy proxies fine but Authelia never prompts for
+login" bug, on a site block that otherwise looked completely correct. If a
+service builds its own site block instead of using this helper (e.g.
+`services/asterisk-digital-ocean.sh` does, deliberately, see its own
+comment for why), put its auth block first there too.
+
 Sets two out-params (not `local` — read them after the call returns) so the
 caller can tell whether Caddy actually ended up fronting the service:
 
