@@ -87,6 +87,21 @@ else
     fi
 fi
 
+# The pull-failed fallback above assumes the existing checkout is at least
+# usable — it isn't always (e.g. a stale/broken .git dir, an origin remote
+# pointed at SSH with no key available under sudo, an interrupted first
+# clone). Rather than hand the user a guaranteed "setup.sh: No such file or
+# directory" crash, treat a missing setup.sh as "this copy is unusable" and
+# re-clone fresh over HTTPS (which doesn't need any SSH key at all).
+if [ ! -f "$DEST/setup.sh" ]; then
+    echo "  Existing copy at $DEST looks incomplete or broken — re-cloning fresh..."
+    rm -rf "$DEST"
+    git clone "$CLONE_URL" "$DEST"
+    if [ -n "$PAT" ]; then
+        git -C "$DEST" remote set-url origin "$REPO_URL"
+    fi
+fi
+
 echo ""
 echo "  Launching setup..."
 echo ""
