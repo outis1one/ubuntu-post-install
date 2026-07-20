@@ -416,12 +416,17 @@ configure_caddy_for_service() {
     local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
 
     # Derive the proxy upstream and a port number for display messages.
-    # Plain number  → localhost:PORT  (host-network or legacy services)
-    # name:port     → used as-is      (preferred: service on shared caddy_net)
+    # Plain number  → host.docker.internal:PORT  (host-network or legacy
+    #                 services — Caddy itself runs in its own container on
+    #                 caddy_net, a bridge network, so "localhost" here would
+    #                 resolve to Caddy's own container, not the host. Requires
+    #                 the extra_hosts entry set in services/caddy.sh's compose
+    #                 file — see the comment there.)
+    # name:port     → used as-is                  (preferred: service on shared caddy_net)
     local _UPSTREAM _DISPLAY_PORT
     case "$SERVICE_UPSTREAM" in
-        *:*) _UPSTREAM="$SERVICE_UPSTREAM";           _DISPLAY_PORT="${SERVICE_UPSTREAM##*:}" ;;
-        *)   _UPSTREAM="localhost:$SERVICE_UPSTREAM"; _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
+        *:*) _UPSTREAM="$SERVICE_UPSTREAM";                       _DISPLAY_PORT="${SERVICE_UPSTREAM##*:}" ;;
+        *)   _UPSTREAM="host.docker.internal:$SERVICE_UPSTREAM";  _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
     esac
 
     # ── Determine Caddy mode ──────────────────────────────────────────────────
