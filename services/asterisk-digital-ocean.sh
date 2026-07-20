@@ -584,9 +584,27 @@ ENV
                 local _remote_authelia=""
                 prompt_text "  Remote Authelia address — a bare host:port over a private network (e.g. a NetBird mesh IP:9091), or a full https:// URL if it's on its own public domain+TLS:" "" _remote_authelia
                 if [[ -n "$_remote_authelia" ]]; then
+                    # header_up lines are required here (unlike the local
+                    # "authelia:9091" snippet in services/authelia.sh) because
+                    # this upstream is reached over a second Caddy hop when
+                    # given as a scheme-qualified URL (https://auth.example.com).
+                    # Caddy rewrites the outgoing request's Host header to that
+                    # upstream host so the remote Caddy can route/SNI-match it —
+                    # and without an explicit override, X-Forwarded-Host picks up
+                    # that rewritten value instead of the original site's host.
+                    # Confirmed live: Authelia was evaluating every request as
+                    # if it were for auth.example.com itself (which has
+                    # policy: bypass in access_control.rules), so every domain
+                    # silently passed through with no 2FA prompt regardless of
+                    # its own policy. Pinning these to the original request's
+                    # values fixes it regardless of hop count.
                     EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
         uri /api/authz/forward-auth
         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+        header_up X-Forwarded-Method {method}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Uri {uri}
     }"
                     sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
                     log_info "Using remote Authelia at ${_remote_authelia}."
