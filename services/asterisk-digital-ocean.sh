@@ -598,12 +598,25 @@ ENV
                     # silently passed through with no 2FA prompt regardless of
                     # its own policy. Pinning these to the original request's
                     # values fixes it regardless of hop count.
+                    #
+                    # X-Forwarded-Host uses a literal domain, NOT the {host}
+                    # placeholder. Confirmed live: {host} still evaluated to
+                    # the upstream's own hostname (auth.example.com) rather
+                    # than the original site's — Caddy appears to rewrite the
+                    # outgoing request's Host to the upstream target before
+                    # header_up placeholders are resolved for a scheme-
+                    # qualified upstream, so {host} echoes back the already-
+                    # rewritten value instead of the original client-facing
+                    # host. Since this site block only ever serves one domain
+                    # (DOMAIN_NAME), hardcoding it sidesteps the ambiguity
+                    # entirely instead of depending on Caddy's internal
+                    # header-mutation ordering.
                     EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
         uri /api/authz/forward-auth
         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
         header_up X-Forwarded-Method {method}
         header_up X-Forwarded-Proto {scheme}
-        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Host ${DOMAIN_NAME}
         header_up X-Forwarded-Uri {uri}
     }"
                     sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
