@@ -422,13 +422,11 @@ COMPOSE
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$WOLFPAIR_DIR"
 
-    # ── 4. Firewall ───────────────────────────────────────────────────────────
-    if command -v ufw &>/dev/null; then
-        ufw allow "${WOLFPAIR_PORT}/tcp" comment "wolf-pair pairing UI" >/dev/null 2>&1 || true
-        log_success "UFW: opened port $WOLFPAIR_PORT/tcp"
-    fi
-
-    # ── 5. Caddy (optional) ───────────────────────────────────────────────────
+    # ── 4. Caddy (optional) ───────────────────────────────────────────────────
+    # Decided before the firewall rule below: wolf-pair has no login of its
+    # own (that's the whole reason to offer Authelia here), so if Caddy ends
+    # up fronting it locally, the UFW rule must not also leave the bare port
+    # open to the internet — that would bypass Authelia entirely.
     local WOLFPAIR_EXTRA_BLOCK=""
     if [ -d "$DOCKER_DIR/authelia" ]; then
         local _use_auth=""
@@ -436,6 +434,18 @@ COMPOSE
         [[ "$_use_auth" =~ ^[Yy]$ ]] && WOLFPAIR_EXTRA_BLOCK="    import authelia"
     fi
     configure_caddy_for_service "wolf-pair" "$WOLFPAIR_PORT" "wolf-pair" "$WOLFPAIR_EXTRA_BLOCK"
+
+    # ── 5. Firewall ───────────────────────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        if [[ "$CADDY_SERVICE_CONFIGURED" == true && "$CADDY_SERVICE_MODE" == "local" ]]; then
+            ufw delete allow "${WOLFPAIR_PORT}/tcp" 2>/dev/null || true
+            ufw_allow_from_caddy_net "${WOLFPAIR_PORT}"
+        else
+            ufw allow "${WOLFPAIR_PORT}/tcp" comment "wolf-pair pairing UI" >/dev/null 2>&1 || true
+            log_success "UFW: opened port $WOLFPAIR_PORT/tcp"
+        fi
+        ensure_ufw_enabled
+    fi
 
     # ── 6. README ─────────────────────────────────────────────────────────────
     write_readme "$WOLFPAIR_DIR" << 'MD'
