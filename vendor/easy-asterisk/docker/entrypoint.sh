@@ -479,15 +479,19 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-# Verify PJSIP transports are listening
+# Verify PJSIP transports are listening. res_pjsip finishes binding its
+# transports a beat after "core show version" first responds, so a single
+# immediate check can catch it mid-startup and misreport TLS as down even
+# though it comes up a second later — poll for a few seconds before giving up.
 tls_ok=false
 udp_ok=false
-if asterisk -rx "pjsip show transports" 2>/dev/null | grep -q "transport-tls"; then
-    tls_ok=true
-fi
-if asterisk -rx "pjsip show transports" 2>/dev/null | grep -q "transport-udp"; then
-    udp_ok=true
-fi
+for i in $(seq 1 10); do
+    transports_output=$(asterisk -rx "pjsip show transports" 2>/dev/null)
+    echo "$transports_output" | grep -q "transport-tls" && tls_ok=true
+    echo "$transports_output" | grep -q "transport-udp" && udp_ok=true
+    $tls_ok && $udp_ok && break
+    sleep 1
+done
 
 # Check if port 5061 is actually bound
 tls_listen=""
