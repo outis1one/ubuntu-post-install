@@ -479,6 +479,16 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
+# Rebuild the dialplan from the current pjsip.conf/rooms.conf on every start.
+# Devices/rooms are meant to trigger this themselves when added via the web
+# admin, but this is a cheap safety net against any path that misses it
+# (or config restored/edited outside the web admin) — without it, endpoints
+# can register fine yet be uncallable ("extension not found in context
+# 'intercom'") with no obvious cause.
+if [[ -x /usr/local/bin/easy-asterisk ]]; then
+    /usr/local/bin/easy-asterisk --rebuild-dialplan >/dev/null 2>&1 || true
+fi
+
 # Verify PJSIP transports are listening. res_pjsip finishes binding its
 # transports a beat after "core show version" first responds, so a single
 # immediate check can catch it mid-startup and misreport TLS as down even
