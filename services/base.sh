@@ -17,6 +17,8 @@ install_base() {
         echo "[DRY-RUN] Would offer SSH key import from GitHub/Launchpad"
         echo "[DRY-RUN] Would offer to disable SSH password auth"
         echo "[DRY-RUN] Would offer NetBird install with --allow-server-ssh"
+        echo "[DRY-RUN] Would offer Caddy reverse proxy install (full repo only)"
+        echo "[DRY-RUN] Would offer CrowdSec intrusion prevention install (full repo only)"
         echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
         return 0
     fi
@@ -44,6 +46,17 @@ install_base() {
 
     # ── NetBird ──────────────────────────────────────────────────────────────
     _base_setup_netbird
+
+    # ── Caddy + CrowdSec ──────────────────────────────────────────────────────
+    # Not this script's own install — just an early, recommended nudge toward
+    # two services most other things in this repo end up wanting (a reverse
+    # proxy, and something watching for brute-force/scan traffic). Both stay
+    # fully optional and available later from the whiptail menu either way.
+    local _BASE_PWD="$PWD"
+    _base_setup_caddy
+    cd "$_BASE_PWD" 2>/dev/null || true
+    _base_setup_crowdsec
+    cd "$_BASE_PWD" 2>/dev/null || true
 
     # ── SSH Host aliases ─────────────────────────────────────────────────────
     _base_setup_ssh_aliases
@@ -195,6 +208,35 @@ _base_setup_netbird() {
     else
         log_info "Run when ready: netbird up${_up_args:+ $_up_args}"
     fi
+}
+
+_base_setup_caddy() {
+    if [[ -d "$DOCKER_DIR/caddy" ]]; then
+        log_info "Caddy already installed."
+        return 0
+    fi
+    # Only available when the full repo is sourced (setup.sh loads every
+    # services/*.sh up front) — a standalone copy of base.sh doesn't have
+    # install_caddy, so skip silently rather than error.
+    declare -F install_caddy &>/dev/null || return 0
+
+    local INSTALL_CADDY=""
+    prompt_yn "Install Caddy reverse proxy? Recommended — gives every other service here a trusted HTTPS front door. (y/n):" "y" INSTALL_CADDY
+    [[ "$INSTALL_CADDY" =~ ^[Yy]$ ]] || return 0
+    install_caddy
+}
+
+_base_setup_crowdsec() {
+    if command -v cscli &>/dev/null; then
+        log_info "CrowdSec already installed."
+        return 0
+    fi
+    declare -F install_crowdsec &>/dev/null || return 0
+
+    local INSTALL_CS=""
+    prompt_yn "Install CrowdSec intrusion prevention? Recommended — bans brute-force/scan traffic against SSH and anything Caddy fronts. (y/n):" "y" INSTALL_CS
+    [[ "$INSTALL_CS" =~ ^[Yy]$ ]] || return 0
+    install_crowdsec
 }
 
 _base_setup_ssh_aliases() {
