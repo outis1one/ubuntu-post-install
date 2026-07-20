@@ -330,3 +330,19 @@ networks:
 ```
 
 And read the network name from `.env` using `CADDY_NET=$SITE_CADDY_NET`.
+
+`external: true` means *this* service expects the network to already exist —
+it doesn't create it. `require_docker` creates it for you (via
+`ensure_caddy_network` in `lib/common.sh`) the first time any service calls
+it, so as long as your `install_<name>()` calls `require_docker` before
+`docker compose up` (it always should), the network is guaranteed to exist
+regardless of whether Caddy itself has been installed yet.
+
+**`network_mode: host` services (e.g. `asterisk`/`asterisk-do`) don't join
+`caddy_net` at all** — Caddy reaching them (or anything else on the host
+network) needs `host.docker.internal:PORT` in the Caddyfile, not
+`localhost:PORT` or a container name. Caddy's own compose file
+(`services/caddy.sh`) sets `extra_hosts: host.docker.internal:host-gateway`
+so that hostname resolves; `configure_caddy_for_service`'s bare-port upstream
+case already does this for you — don't hand-roll `localhost:PORT` in a
+Caddy site block.

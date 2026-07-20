@@ -769,12 +769,21 @@ ENV
             local _CADDY_MODE="local"
             [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -n "${CADDY_REMOTE_HOST:-}" ]] && _CADDY_MODE="remote"
 
+            # Asterisk runs with network_mode: host, so whatever proxies to it
+            # needs a way to reach the host, not "localhost" (which resolves
+            # to the proxying container's own netns). A local Caddy container
+            # reaches the host via host.docker.internal (wired up in
+            # services/caddy.sh's compose file); a remote Caddy machine needs
+            # this droplet's actual public IP instead.
+            local _PROXY_TARGET="host.docker.internal:${WEB_ADMIN_PORT_VAL}"
+            [[ "$_CADDY_MODE" == "remote" ]] && _PROXY_TARGET="${PUBLIC_IP}:${WEB_ADMIN_PORT_VAL}"
+
             local _SITE_BLOCK
             _SITE_BLOCK="$(cat << CADDY_BLOCK
 
 # Asterisk Web Admin
 ${DOMAIN_NAME} {
-    reverse_proxy localhost:${WEB_ADMIN_PORT_VAL}
+    reverse_proxy ${_PROXY_TARGET}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"

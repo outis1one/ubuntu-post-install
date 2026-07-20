@@ -164,6 +164,7 @@ require_root() {
 
 require_docker() {
     if command -v docker &>/dev/null; then
+        ensure_caddy_network
         return 0
     fi
 
@@ -222,6 +223,25 @@ require_docker() {
     local _docker_bin
     _docker_bin="$(command -v docker 2>/dev/null || echo /usr/bin/docker)"
     log_success "Docker installed ($("$_docker_bin" --version 2>/dev/null))"
+
+    ensure_caddy_network
+}
+
+# Create the shared caddy_net bridge network if it doesn't exist yet.
+# Most services declare it "external: true" in their docker-compose.yml (see
+# CLAUDE.md → Caddy network wiring) — meaning THEY require it to already
+# exist, and only Caddy's own compose file (services/caddy.sh) actually
+# creates it. Installing any caddy_net-dependent service before Caddy would
+# otherwise fail outright with "network caddy_net declared as external, but
+# could not be found." Called from require_docker so every service gets this
+# for free regardless of install order. No-op in DRY_RUN; safe/idempotent
+# otherwise — docker network create is a no-op if the network already exists.
+ensure_caddy_network() {
+    [ "$DRY_RUN" = true ] && return 0
+    local _net="${SITE_CADDY_NET:-caddy_net}"
+    docker network inspect "$_net" &>/dev/null && return 0
+    docker network create "$_net" &>/dev/null \
+        && log_info "Created Docker network ${_net} (needed by Caddy-fronted services)"
 }
 
 # ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────
@@ -416,12 +436,17 @@ configure_caddy_for_service() {
     local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
 
     # Derive the proxy upstream and a port number for display messages.
-    # Plain number  → localhost:PORT  (host-network or legacy services)
-    # name:port     → used as-is      (preferred: service on shared caddy_net)
+    # Plain number  → host.docker.internal:PORT  (host-network or legacy
+    #                 services — Caddy itself runs in its own container on
+    #                 caddy_net, a bridge network, so "localhost" here would
+    #                 resolve to Caddy's own container, not the host. Requires
+    #                 the extra_hosts entry set in services/caddy.sh's compose
+    #                 file — see the comment there.)
+    # name:port     → used as-is                  (preferred: service on shared caddy_net)
     local _UPSTREAM _DISPLAY_PORT
     case "$SERVICE_UPSTREAM" in
-        *:*) _UPSTREAM="$SERVICE_UPSTREAM";           _DISPLAY_PORT="${SERVICE_UPSTREAM##*:}" ;;
-        *)   _UPSTREAM="localhost:$SERVICE_UPSTREAM"; _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
+        *:*) _UPSTREAM="$SERVICE_UPSTREAM";                       _DISPLAY_PORT="${SERVICE_UPSTREAM##*:}" ;;
+        *)   _UPSTREAM="host.docker.internal:$SERVICE_UPSTREAM";  _DISPLAY_PORT="$SERVICE_UPSTREAM"      ;;
     esac
 
     # ── Determine Caddy mode ──────────────────────────────────────────────────
