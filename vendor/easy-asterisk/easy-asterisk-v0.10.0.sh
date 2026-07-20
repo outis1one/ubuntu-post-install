@@ -549,7 +549,7 @@ manage_categories() {
                             # Delete the category
                             sed -i "/^${cid}|/d" "$CATEGORIES_FILE"
                             
-                            asterisk -rx "pjsip reload" 2>/dev/null
+                            asterisk -rx "module reload res_pjsip.so" 2>/dev/null
                             rebuild_dialplan
                             print_success "Category and ${device_count} device(s) deleted"
                         else
@@ -867,7 +867,7 @@ qualify_frequency=30
 EOF
 
     chown -R asterisk:asterisk /etc/asterisk 2>/dev/null || true
-    asterisk -rx "pjsip reload" >/dev/null 2>&1
+    asterisk -rx "module reload res_pjsip.so" >/dev/null 2>&1
     rebuild_dialplan
 
     # Prepare provisioning URLs if HTTP server is configured
@@ -1019,7 +1019,7 @@ remove_device() {
             ' /etc/asterisk/pjsip.conf > /etc/asterisk/pjsip.conf.tmp
             mv /etc/asterisk/pjsip.conf.tmp /etc/asterisk/pjsip.conf
             chown asterisk:asterisk /etc/asterisk/pjsip.conf
-            asterisk -rx "pjsip reload" 2>/dev/null
+            asterisk -rx "module reload res_pjsip.so" 2>/dev/null
             rebuild_dialplan
             print_success "All devices deleted"
         else
@@ -1066,7 +1066,7 @@ remove_device() {
         ' /etc/asterisk/pjsip.conf > /etc/asterisk/pjsip.conf.tmp
         mv /etc/asterisk/pjsip.conf.tmp /etc/asterisk/pjsip.conf
         chown asterisk:asterisk /etc/asterisk/pjsip.conf
-        asterisk -rx "pjsip reload" 2>/dev/null
+        asterisk -rx "module reload res_pjsip.so" 2>/dev/null
         rebuild_dialplan
         print_success "Removed extension $ext ($name)"
     fi
@@ -1155,7 +1155,7 @@ rename_device() {
     chown asterisk:asterisk /etc/asterisk/pjsip.conf
 
     # Reload Asterisk
-    asterisk -rx "pjsip reload" 2>/dev/null
+    asterisk -rx "module reload res_pjsip.so" 2>/dev/null
     rebuild_dialplan quiet
 
     print_success "Device renamed: ${old_name} → ${new_name}"
@@ -3943,7 +3943,7 @@ uninstall_menu() {
                     awk '/^; === Device:/{exit} {print}' /etc/asterisk/pjsip.conf > "$temp"
                     mv "$temp" /etc/asterisk/pjsip.conf
                     chown asterisk:asterisk /etc/asterisk/pjsip.conf
-                    asterisk -rx "pjsip reload" >/dev/null 2>&1 || true
+                    asterisk -rx "module reload res_pjsip.so" >/dev/null 2>&1 || true
                 fi
                 print_success "All devices removed"
                 ;;
@@ -4339,7 +4339,7 @@ def delete_device(extension):
     if found:
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
-        subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['asterisk', '-rx', 'module reload res_pjsip.so'], capture_output=True)
         subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Device deleted"
     return False, "Device not found"
@@ -4413,7 +4413,7 @@ def rename_device(extension, new_name):
     if found:
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
-        subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['asterisk', '-rx', 'module reload res_pjsip.so'], capture_output=True)
         subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Device renamed"
     return False, "Device not found"
@@ -4526,7 +4526,7 @@ def change_device_category(extension, new_category):
     if found:
         with open(PJSIP_CONF, 'w') as f:
             f.writelines(new_lines)
-        subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+        subprocess.run(['asterisk', '-rx', 'module reload res_pjsip.so'], capture_output=True)
         subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
         return True, "Category changed"
     return False, "Device not found"
@@ -4775,7 +4775,7 @@ qualify_frequency=30
     with open(PJSIP_CONF, 'a') as f:
         f.write(device_config)
 
-    subprocess.run(['asterisk', '-rx', 'pjsip reload'], capture_output=True)
+    subprocess.run(['asterisk', '-rx', 'module reload res_pjsip.so'], capture_output=True)
     subprocess.run(['chown', 'asterisk:asterisk', PJSIP_CONF], capture_output=True)
     subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
 
@@ -6891,7 +6891,7 @@ import_clients() {
     # Reload Asterisk
     echo ""
     echo "Reloading Asterisk configuration..."
-    asterisk -rx "pjsip reload" >/dev/null 2>&1
+    asterisk -rx "module reload res_pjsip.so" >/dev/null 2>&1
     rebuild_dialplan quiet
 
     print_success "Import completed successfully!"
