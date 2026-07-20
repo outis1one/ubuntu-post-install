@@ -362,6 +362,32 @@ prompt_text() {
     eval "$varname='${response:-$default}'"
 }
 
+# Prompt for how to handle a service that's already installed, honoring
+# unattended.  prompt_reinstall_mode VARNAME
+# Sets VARNAME to one of: update | fresh | cancel
+# Enter (no input) and any unrecognized input both resolve to "cancel" — this
+# guards a destructive full reinstall behind a deliberate keypress instead of
+# a stray Enter. Unattended mode always resolves to "cancel" too: never
+# silently touch an existing install when nobody's watching the prompt.
+prompt_reinstall_mode() {
+    local varname="$1" response
+    if [ "$UNATTENDED" = true ]; then
+        eval "$varname='cancel'"
+        echo "Existing install detected — leaving it as-is [auto: cancel, unattended mode]"
+        return
+    fi
+    echo "  Existing install detected. Choose:"
+    echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
+    echo "    f) Full install — re-run every prompt from scratch"
+    echo "    c) Cancel — leave everything as-is [default]"
+    read -p "  Choice [r/f/c, Enter=cancel]: " response
+    case "${response,,}" in
+        r) eval "$varname='update'" ;;
+        f) eval "$varname='fresh'" ;;
+        *) eval "$varname='cancel'" ;;
+    esac
+}
+
 # ── Per-service README generation ────────────────────────────────────────────
 # Write <dir>/README.md from stdin (markdown). Every module is encouraged to
 # call this so each ~/docker/<service>/ folder is self-documenting.

@@ -59,6 +59,25 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             eval "$_var='${_r:-$_def}'"
         }
 
+        prompt_reinstall_mode() {
+            local _var="$1" _r
+            if [[ "${UNATTENDED:-false}" == "true" ]]; then
+                eval "$_var='cancel'"
+                echo "Existing install detected — leaving it as-is [auto: cancel, unattended mode]"
+                return
+            fi
+            echo "  Existing install detected. Choose:"
+            echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
+            echo "    f) Full install — re-run every prompt from scratch"
+            echo "    c) Cancel — leave everything as-is [default]"
+            read -r -p "  Choice [r/f/c, Enter=cancel]: " _r
+            case "${_r,,}" in
+                r) eval "$_var='update'" ;;
+                f) eval "$_var='fresh'" ;;
+                *) eval "$_var='cancel'" ;;
+            esac
+        }
+
         configure_caddy_for_service() {
             local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
             local _caddy_dir="$DOCKER_DIR/caddy"
@@ -333,39 +352,47 @@ install_asterisk() {
     if [[ -f "$EA_DIR/docker-compose.yml" && -f "$EA_DIR/.env" ]]; then
         echo ""
         log_info "Existing install found at $EA_DIR."
-        local UPDATE_INPLACE=""
-        prompt_yn "Update in place (refresh vendor files + docker-compose.yml, keep your existing domain/VLAN/Authelia settings) instead of a full fresh reinstall? (y/n):" "y" UPDATE_INPLACE
-        if [[ "$UPDATE_INPLACE" =~ ^[Yy]$ ]]; then
-            mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
-                     "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
-            ensure_docker_dir_ownership "$EA_DIR"
-            cd "$EA_DIR" || return 1
+        local REINSTALL_MODE=""
+        prompt_reinstall_mode REINSTALL_MODE
+        case "$REINSTALL_MODE" in
+            update)
+                mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
+                         "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
+                ensure_docker_dir_ownership "$EA_DIR"
+                cd "$EA_DIR" || return 1
 
-            _asterisk_refresh_vendor_files
-            _asterisk_write_compose
+                _asterisk_refresh_vendor_files
+                _asterisk_write_compose
 
-            log_info "Rebuilding and restarting containers..."
-            if docker compose up -d --build --force-recreate; then
-                log_success "Update complete — vendor files and docker-compose.yml refreshed."
-            else
-                log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
-            fi
+                log_info "Rebuilding and restarting containers..."
+                if docker compose up -d --build --force-recreate; then
+                    log_success "Update complete — vendor files and docker-compose.yml refreshed."
+                else
+                    log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
+                fi
 
-            local _EXISTING_DOMAIN _EXISTING_PORT
-            _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
-            _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
-            echo ""
-            log_success "Existing .env, UFW rules, and Caddy/Authelia config were left untouched."
-            if [[ -n "$_EXISTING_DOMAIN" ]]; then
-                echo "  Web admin: https://${_EXISTING_DOMAIN}/"
-            else
-                echo "  Web admin: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${_EXISTING_PORT:-8081}"
-            fi
-            echo "  Logs:      docker compose -f $EA_DIR/docker-compose.yml logs -f"
-            echo ""
-            return 0
-        fi
-        log_info "Proceeding with a full fresh reinstall — existing config will be reused where prompts match, everything else re-asked."
+                local _EXISTING_DOMAIN _EXISTING_PORT
+                _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
+                _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
+                echo ""
+                log_success "Existing .env, UFW rules, and Caddy/Authelia config were left untouched."
+                if [[ -n "$_EXISTING_DOMAIN" ]]; then
+                    echo "  Web admin: https://${_EXISTING_DOMAIN}/"
+                else
+                    echo "  Web admin: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${_EXISTING_PORT:-8081}"
+                fi
+                echo "  Logs:      docker compose -f $EA_DIR/docker-compose.yml logs -f"
+                echo ""
+                return 0
+                ;;
+            cancel)
+                log_info "Leaving the existing install as-is — nothing changed."
+                return 0
+                ;;
+            fresh)
+                log_info "Proceeding with a full fresh reinstall — every prompt below runs from scratch."
+                ;;
+        esac
     fi
 
     mkdir -p "$EA_DIR"
