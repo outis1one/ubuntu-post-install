@@ -337,7 +337,7 @@ install_asterisk-do() {
 
     mkdir -p "$EA_DIR"
     mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
-             "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib"
+             "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
     ensure_docker_dir_ownership "$EA_DIR"
     cd "$EA_DIR" || return 1
 
@@ -448,6 +448,7 @@ services:
       - ./spool:/var/spool/asterisk
       - ./lib:/var/lib/asterisk
       - ./easy-asterisk.sh:/usr/local/bin/easy-asterisk:ro
+      - ./exports:/root
 CADDY_VOLUME_PLACEHOLDER
     env_file: .env
     restart: unless-stopped
