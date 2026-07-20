@@ -201,14 +201,19 @@ labels:
         sudo cscli collections install crowdsecurity/geoip-enrich 2>/dev/null || \
             echo "  ⚠ crowdsecurity/geoip-enrich may already be installed"
 
-        # North America + broad geographic Europe, ISO 3166-1 alpha-2. Russia,
-        # Belarus, and Turkey are deliberately left out even though they span
-        # into Europe geographically — they're common abuse-traffic sources
-        # and almost certainly not what "Europe" means here. To adjust, edit
-        # the two lists below and re-run, or hand-edit $GEO_SCENARIO directly
-        # (it's plain YAML — no reinstall needed, just restart crowdsec after).
+        # North America + Europe, ISO 3166-1 alpha-2. Russia, Belarus, and
+        # Turkey are left out (common abuse-traffic sources, and not really
+        # "Europe" in the sense meant here). Core Eastern Europe (Bulgaria,
+        # Czechia, Hungary, Moldova, Poland, Romania, Slovakia, Ukraine) is
+        # left out too — the Balkans and Baltics (Albania, Bosnia, Croatia,
+        # Estonia, Latvia, Lithuania, Montenegro, North Macedonia, Serbia,
+        # Slovenia) are kept in deliberately, since several of them (Estonia
+        # especially) don't fit the same risk profile despite the old
+        # Cold-War grouping. To adjust, edit the two lists below and re-run,
+        # or hand-edit $GEO_SCENARIO directly (it's plain YAML — no reinstall
+        # needed, just restart crowdsec after).
         local _GEO_NA="US CA MX"
-        local _GEO_EU="AD AL AT BA BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS SE SI SK SM UA VA"
+        local _GEO_EU="AD AL AT BA BE CH CY DE DK EE ES FI FR GB GR HR IE IS IT LI LT LU LV MC ME MK MT NL NO PT RS SE SI SM VA"
         local _geo_expr_list
         _geo_expr_list="$(printf "'%s', " $_GEO_NA $_GEO_EU)"
         _geo_expr_list="${_geo_expr_list%, }"
