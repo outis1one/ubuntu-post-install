@@ -707,6 +707,7 @@ CADDY_BLOCK
         ufw allow 3478/tcp
         ufw allow 10000:20000/udp
         ufw allow 49152:49252/udp
+        ensure_ufw_enabled
         log_success "UFW rules added."
     fi
 
