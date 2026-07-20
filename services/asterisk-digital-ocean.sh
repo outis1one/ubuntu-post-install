@@ -699,7 +699,7 @@ CADDY_BLOCK
             ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
         else
             ufw delete allow "${WEB_ADMIN_PORT_VAL}/tcp" 2>/dev/null || true
-            log_info "Web admin port ${WEB_ADMIN_PORT_VAL} kept closed to the internet — Caddy fronts it locally."
+            ufw_allow_from_caddy_net "${WEB_ADMIN_PORT_VAL}"
         fi
         ufw allow 8088/tcp
         ufw allow 8089/tcp

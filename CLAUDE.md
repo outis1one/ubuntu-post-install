@@ -187,6 +187,24 @@ you. No-ops if UFW is already active or not installed. Always allows SSH
 first (reading the real port from `sshd_config` in case it's non-default)
 before enabling, so this can't lock out the session running the installer.
 
+### Closing a port to the internet without also closing it to Caddy
+
+```bash
+ufw_allow_from_caddy_net PORT [PROTO]   # PROTO defaults to tcp
+```
+
+When `CADDY_SERVICE_MODE` is `"local"` (see above) and you `ufw delete
+allow` a port because Caddy fronts it now, don't stop there — UFW rules
+apply to *all* interfaces unless scoped, and Caddy's own request to
+`host.docker.internal:PORT` is ordinary INPUT-chain traffic arriving over
+the `caddy_net` bridge, not the public internet. A bare `ufw delete allow`
+blocks that too and silently breaks the service (confirmed live: closing
+the web admin port outright took Caddy down with it). Call
+`ufw_allow_from_caddy_net` right after the `delete` to re-open the port
+scoped to just `caddy_net`'s subnet — reachable from Caddy, not from the
+internet. See `services/asterisk-digital-ocean.sh` and
+`services/asterisk.sh` for the pattern.
+
 ### README generation
 
 ```bash

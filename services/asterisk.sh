@@ -528,7 +528,7 @@ ENV
         ufw allow 5061/tcp
         if [[ "$CADDY_SERVICE_CONFIGURED" == true && "$CADDY_SERVICE_MODE" == "local" ]]; then
             ufw delete allow "${WEB_ADMIN_PORT_VAL}/tcp" 2>/dev/null || true
-            log_info "Web admin port ${WEB_ADMIN_PORT_VAL} kept off the LAN — Caddy fronts it locally."
+            ufw_allow_from_caddy_net "${WEB_ADMIN_PORT_VAL}"
         else
             ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
         fi

@@ -268,6 +268,31 @@ ensure_ufw_enabled() {
     log_success "UFW enabled (SSH on port ${_ssh_port} allowed first, so this won't lock you out)."
 }
 
+# Scopes a UFW allow rule to just the caddy_net bridge subnet instead of
+# every interface. Needed for any port that only needs to be reachable from
+# a *locally* Caddy-fronted service (via host.docker.internal) — a plain
+# `ufw delete allow <port>` closes it everywhere, but Caddy's own request to
+# host.docker.internal is still ordinary INPUT-chain traffic as far as UFW
+# is concerned, arriving over the caddy_net bridge, not the internet. UFW
+# rules apply to all interfaces unless scoped like this, so closing the
+# port outright also silently breaks Caddy.
+ufw_allow_from_caddy_net() {
+    local _port="$1" _proto="${2:-tcp}"
+    command -v ufw &>/dev/null || return 0
+    [ "$DRY_RUN" = true ] && return 0
+
+    local _subnet
+    _subnet="$(docker network inspect "${SITE_CADDY_NET:-caddy_net}" \
+        --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)"
+    if [ -n "$_subnet" ]; then
+        ufw allow from "$_subnet" to any port "$_port" proto "$_proto" comment 'Caddy internal only' >/dev/null 2>&1
+        log_info "Port ${_port}/${_proto} reachable only from Caddy's internal network (${_subnet}), not the public internet."
+    else
+        log_warning "Could not determine ${SITE_CADDY_NET:-caddy_net}'s subnet — port ${_port}/${_proto} stays closed."
+        log_warning "If Caddy can't reach it: ufw allow from <caddy_net-subnet> to any port ${_port} proto ${_proto}"
+    fi
+}
+
 # ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────
 # Lets "ssh <alias>" connect directly to user@host without typing it out each
 # time — handy for VPN/NetBird peers with unmemorable IPs. Operates on the
