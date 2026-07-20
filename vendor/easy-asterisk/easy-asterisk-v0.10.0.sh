@@ -6135,12 +6135,22 @@ class WebAdminHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
 def main():
-    # A container recreate under network_mode: host depends on the *previous*
-    # container's web admin process actually dying before the port is free —
-    # there's no Docker-managed port mapping to instantly release it like
-    # there would be in bridge mode. A fast recreate-right-after-recreate can
-    # briefly race that teardown. Retry instead of crashing on the first
-    # failure, which otherwise means the web admin silently never comes up.
+    # socketserver.TCPServer (unlike http.server.HTTPServer, which sets this
+    # itself) defaults allow_reuse_address to False — without SO_REUSEADDR,
+    # the kernel can refuse to rebind this port for up to 60s while any
+    # TIME_WAIT socket from the previous instance lingers, regardless of
+    # whether that old process is even still alive. Live-confirmed: still
+    # failing after 20s of retries, only to succeed on its own well after
+    # that. This was the actual bug — SO_REUSEADDR is the standard fix for
+    # exactly this "restarted a TCP server, port still busy" symptom.
+    socketserver.TCPServer.allow_reuse_address = True
+
+    # Still retry on top of that: under network_mode: host there's no
+    # Docker-managed port mapping to instantly release like there'd be in
+    # bridge mode, so a fast recreate-right-after-recreate can still
+    # briefly race the previous process's own shutdown. Retry instead of
+    # crashing on the first failure, which otherwise means the web admin
+    # silently never comes up.
     httpd = None
     last_err = None
     for attempt in range(10):
