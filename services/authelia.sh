@@ -414,7 +414,20 @@ SNIPPET_EOF
 
 # ── Authelia login portal ──────────────────────────────────────────────────────
 auth.${AUTHELIA_DOMAIN} {
-    reverse_proxy authelia:9091
+    # header_up pins X-Forwarded-Host to whatever the client actually sent.
+    # Without it, Caddy's reverse_proxy recomputes X-Forwarded-Host from its
+    # own incoming request (always auth.${AUTHELIA_DOMAIN} itself) and
+    # overwrites the value a forward_auth caller (e.g. a remote site's
+    # "forward_auth https://auth.${AUTHELIA_DOMAIN}" block, see
+    # services/asterisk-digital-ocean.sh) set for its own domain. Confirmed
+    # live: every forward-auth check evaluated as if it were for
+    # auth.${AUTHELIA_DOMAIN} itself (which has policy: bypass in
+    # access_control.rules so its own login portal isn't gated behind
+    # itself), so every domain behind it silently passed through with no
+    # 2FA prompt regardless of that domain's own policy.
+    reverse_proxy authelia:9091 {
+        header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+    }
     log {
         output file /var/log/caddy/auth.log
     }

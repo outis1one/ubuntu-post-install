@@ -584,9 +584,40 @@ ENV
                 local _remote_authelia=""
                 prompt_text "  Remote Authelia address — a bare host:port over a private network (e.g. a NetBird mesh IP:9091), or a full https:// URL if it's on its own public domain+TLS:" "" _remote_authelia
                 if [[ -n "$_remote_authelia" ]]; then
+                    # header_up lines are required here (unlike the local
+                    # "authelia:9091" snippet in services/authelia.sh) because
+                    # this upstream is reached over a second Caddy hop when
+                    # given as a scheme-qualified URL (https://auth.example.com).
+                    # Caddy rewrites the outgoing request's Host header to that
+                    # upstream host so the remote Caddy can route/SNI-match it —
+                    # and without an explicit override, X-Forwarded-Host picks up
+                    # that rewritten value instead of the original site's host.
+                    # Confirmed live: Authelia was evaluating every request as
+                    # if it were for auth.example.com itself (which has
+                    # policy: bypass in access_control.rules), so every domain
+                    # silently passed through with no 2FA prompt regardless of
+                    # its own policy. Pinning these to the original request's
+                    # values fixes it regardless of hop count.
+                    #
+                    # X-Forwarded-Host uses a literal domain, NOT the {host}
+                    # placeholder. Confirmed live: {host} still evaluated to
+                    # the upstream's own hostname (auth.example.com) rather
+                    # than the original site's — Caddy appears to rewrite the
+                    # outgoing request's Host to the upstream target before
+                    # header_up placeholders are resolved for a scheme-
+                    # qualified upstream, so {host} echoes back the already-
+                    # rewritten value instead of the original client-facing
+                    # host. Since this site block only ever serves one domain
+                    # (DOMAIN_NAME), hardcoding it sidesteps the ambiguity
+                    # entirely instead of depending on Caddy's internal
+                    # header-mutation ordering.
                     EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
         uri /api/authz/forward-auth
         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+        header_up X-Forwarded-Method {method}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host ${DOMAIN_NAME}
+        header_up X-Forwarded-Uri {uri}
     }"
                     sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
                     log_info "Using remote Authelia at ${_remote_authelia}."
@@ -628,6 +659,14 @@ ENV
 
 # Asterisk Web Admin
 ${DOMAIN_NAME} {
+    # Auth (if any) must come before reverse_proxy — forward_auth is the
+    # same directive family as reverse_proxy internally, and Caddy doesn't
+    # reorder repeats of the same directive within a block; it runs them in
+    # the order they're written. With reverse_proxy first, it would handle
+    # and terminate every request immediately, so an auth check written
+    # after it would be dead code that never runs — full bypass regardless
+    # of what the auth server's own rules say.
+${EXTRA_BLOCK}
     reverse_proxy ${_PROXY_TARGET}
 
     header {
@@ -641,7 +680,6 @@ ${DOMAIN_NAME} {
         output file /var/log/caddy/${DOMAIN_NAME}.log
         format json
     }
-${EXTRA_BLOCK}
 }
 CADDY_BLOCK
 )"

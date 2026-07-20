@@ -159,6 +159,51 @@ reloads Caddy. No-ops silently if Caddy isn't installed. The fourth argument
 is an optional string inserted verbatim inside the Caddy site block (use it
 for `import authelia` or custom matchers).
 
+The function places that block **before** `reverse_proxy` in the generated
+site block — don't reorder this. `forward_auth` (what `import authelia`
+expands to) is the same directive family as `reverse_proxy` internally, and
+Caddy doesn't reorder repeats of the same directive within a block; it runs
+them in the order they're written. `reverse_proxy` written first would
+handle and terminate every request immediately, making an auth check
+written after it dead code that never runs — full bypass regardless of what
+the auth server's own access-control rules say. Confirmed live: this was
+the actual cause of a "Caddy proxies fine but Authelia never prompts for
+login" bug, on a site block that otherwise looked completely correct. If a
+service builds its own site block instead of using this helper (e.g.
+`services/asterisk-digital-ocean.sh` does, deliberately, see its own
+comment for why), put its auth block first there too.
+
+**`forward_auth` to a remote Authelia over a scheme-qualified URL needs
+explicit `header_up` pins.** A bare `forward_auth authelia:9091` (Authelia on
+the same Docker network, one hop) is fine relying on Caddy's default
+`X-Forwarded-*` headers. But `forward_auth https://auth.example.com { ... }`
+(Authelia on a *different* machine, reached over its own public domain+TLS —
+see `services/asterisk-digital-ocean.sh`'s remote-Authelia prompt) is a
+second Caddy hop: Caddy rewrites the outgoing request's `Host` header to
+`auth.example.com` so the remote Caddy can route/SNI-match it, and without an
+override `X-Forwarded-Host` picks up that rewritten value instead of the
+original site's host. Confirmed live: Authelia evaluated *every* protected
+domain as if the request were for `auth.example.com` itself (which typically
+has `policy: bypass` in `access_control.rules` so its own login portal isn't
+gated behind itself) — so every domain behind the remote instance silently
+passed through with no 2FA prompt, regardless of that domain's own policy.
+Fix: pin the forwarded headers to the original request explicitly instead of
+trusting Caddy's default derivation:
+
+```
+forward_auth https://auth.example.com {
+    uri /api/authz/forward-auth
+    copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+    header_up X-Forwarded-Method {method}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-Uri {uri}
+}
+```
+
+This only affects the remote-Authelia path — same-machine `authelia:9091`
+snippets (`services/authelia.sh`) are a single hop and don't need it.
+
 Sets two out-params (not `local` — read them after the call returns) so the
 caller can tell whether Caddy actually ended up fronting the service:
 
