@@ -125,9 +125,12 @@ log_error   "message"   # red    [ERROR]
 ```bash
 prompt_yn   "Question? (y/n):" "default_y_or_n" VARNAME
 prompt_text "Question? [default]:" "default" VARNAME
+prompt_reinstall_mode VARNAME   # sets VARNAME to: update | fresh | cancel
 ```
 
-When `UNATTENDED=true` both functions skip the prompt and use the default.
+When `UNATTENDED=true` all three skip the prompt; `prompt_yn`/`prompt_text` use
+their given default, `prompt_reinstall_mode` always resolves to `cancel`. See
+**Update vs. fresh reinstall on rerun** below for how to use the latter.
 
 ### Pre-flight
 
@@ -261,6 +264,51 @@ fi
 
 Put the check early — after any pure-display output (banners, info text)
 but before the first write.
+
+## Update vs. fresh reinstall on rerun
+
+Every service should detect an existing install at the top of its
+`install_<name>()` — after the `DRY_RUN` check, before any prompts — and
+offer `prompt_reinstall_mode` instead of silently re-running every prompt
+(domain, secrets, firewall, Authelia, extras...) from scratch. What counts
+as "already installed" is service-specific: usually `docker-compose.yml` and
+`.env` both existing in the service's `$DOCKER_DIR/<name>` directory.
+
+```bash
+if [[ -f "$DIR/docker-compose.yml" && -f "$DIR/.env" ]]; then
+    local MODE=""
+    prompt_reinstall_mode MODE
+    case "$MODE" in
+        update)
+            # Refresh vendor files / config templates, rebuild, done.
+            # Do NOT touch .env, firewall rules, or Caddy/Authelia config.
+            ...
+            return 0
+            ;;
+        cancel)
+            log_info "Leaving the existing install as-is."
+            return 0
+            ;;
+        fresh) ;;  # fall through to the full install flow below
+    esac
+fi
+```
+
+`update` should be genuinely non-destructive: refresh whatever the service
+vendors or templates (Docker image sources, config templates,
+`docker-compose.yml`) and rebuild/restart, but never touch `.env`, firewall
+rules, or reverse-proxy/SSO config that's already in place. If the
+vendor-copy or `docker-compose.yml`-generation logic is more than a few
+lines, factor it into a helper function so the fresh-install path and the
+update path share one copy instead of drifting apart — see
+`_asterisk_do_refresh_vendor_files`/`_asterisk_do_write_compose` in
+`services/asterisk-do.sh` (and their `_asterisk_*` counterparts in
+`services/asterisk.sh`) for the reference pattern.
+
+`cancel` must leave the install completely untouched — it's the default for
+a reason (a stray Enter on a service you're just checking on shouldn't
+trigger anything). `fresh` runs the exact same flow a first-time install
+would, prompts included.
 
 ## .env files and secrets
 
