@@ -159,6 +159,34 @@ reloads Caddy. No-ops silently if Caddy isn't installed. The fourth argument
 is an optional string inserted verbatim inside the Caddy site block (use it
 for `import authelia` or custom matchers).
 
+Sets two out-params (not `local` — read them after the call returns) so the
+caller can tell whether Caddy actually ended up fronting the service:
+
+```bash
+CADDY_SERVICE_CONFIGURED   # true/false
+CADDY_SERVICE_MODE         # "local" or "remote" (only meaningful if configured)
+```
+
+Use this to skip opening a host firewall port for a service Caddy already
+fronts *locally* (it reaches the service over `host.docker.internal`, not
+the network) — but still open it when `CADDY_SERVICE_MODE` is `"remote"`,
+since a remote Caddy machine needs to reach this host over the network
+instead. See `services/asterisk.sh` and `services/asterisk-digital-ocean.sh`
+for the reference pattern: call `configure_caddy_for_service` *before*
+building firewall rules, not after, so the decision is known in time.
+
+### UFW enable
+
+```bash
+ensure_ufw_enabled
+```
+
+Call this **after** your service has already added its own `ufw allow`
+rules — it only flips UFW from inactive to active, it doesn't add rules for
+you. No-ops if UFW is already active or not installed. Always allows SSH
+first (reading the real port from `sshd_config` in case it's non-default)
+before enabling, so this can't lock out the session running the installer.
+
 ### README generation
 
 ```bash
