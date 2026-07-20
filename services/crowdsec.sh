@@ -190,10 +190,59 @@ labels:
     # ── 6. Geo-blocking + reputation (the capability fail2ban/Authelia lack) ─
     echo ""
     echo "  Geo-blocking & IP reputation (optional):"
-    echo "    Enrich events with country/ASN data:"
-    echo "      sudo cscli collections install crowdsecurity/geoip-enrich"
     echo "    Subscribe to community/3rd-party blocklists at:"
     echo "      https://app.crowdsec.net/"
+    echo ""
+    local GEO_ALLOWLIST=""
+    prompt_yn "Restrict Caddy-fronted web traffic to North America + Europe only (block every other country)? Does NOT affect SSH. (y/n):" "n" GEO_ALLOWLIST
+    if [ "$GEO_ALLOWLIST" = "y" ] || [ "$GEO_ALLOWLIST" = "Y" ]; then
+        echo "  Installing geoip-enrich (tags every event with a country code; no MaxMind"
+        echo "  account needed — CrowdSec bundles its own redistributable GeoLite2 data)..."
+        sudo cscli collections install crowdsecurity/geoip-enrich 2>/dev/null || \
+            echo "  ⚠ crowdsecurity/geoip-enrich may already be installed"
+
+        # North America + broad geographic Europe, ISO 3166-1 alpha-2. Russia,
+        # Belarus, and Turkey are deliberately left out even though they span
+        # into Europe geographically — they're common abuse-traffic sources
+        # and almost certainly not what "Europe" means here. To adjust, edit
+        # the two lists below and re-run, or hand-edit $GEO_SCENARIO directly
+        # (it's plain YAML — no reinstall needed, just restart crowdsec after).
+        local _GEO_NA="US CA MX"
+        local _GEO_EU="AD AL AT BA BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS SE SI SK SM UA VA"
+        local _geo_expr_list
+        _geo_expr_list="$(printf "'%s', " $_GEO_NA $_GEO_EU)"
+        _geo_expr_list="${_geo_expr_list%, }"
+
+        # Scope: evt.Line.Labels.type is the acquisition-level "labels: type:"
+        # field set in acquis.d/caddy.yaml (section 5 above) — this only ever
+        # matches Caddy-sourced events, never SSH/syslog, so a mistake here
+        # can't lock out the session running this installer.
+        sudo mkdir -p /etc/crowdsec/scenarios
+        local GEO_SCENARIO="/etc/crowdsec/scenarios/geo-allowlist-web.yaml"
+        local GEO_SCENARIO_CONTENT="type: trigger
+name: local/geo-allowlist-web
+description: \"Block Caddy-fronted web requests from outside the allowed country list\"
+filter: \"evt.Line.Labels.type == 'caddy' && evt.Enriched.IsoCode != '' && !(evt.Enriched.IsoCode in [${_geo_expr_list}])\"
+groupby: evt.Meta.source_ip
+blackhole: 1m
+labels:
+  service: http
+  type: geo_allowlist
+  remediation: true"
+        if echo "$GEO_SCENARIO_CONTENT" | sudo tee "$GEO_SCENARIO" > /dev/null; then
+            echo "  ✓ Geo-allowlist scenario written ($GEO_SCENARIO)"
+            echo "  ⚠ This blocks ALL web visitors outside the allowed countries, including"
+            echo "    Let's Encrypt's out-of-region validation checks (deliberately used to"
+            echo "    prevent BGP-hijacking attacks) — if a cert renewal ever fails"
+            echo "    mysteriously, check this scenario first."
+            echo "  ℹ Allowed: $_GEO_NA $_GEO_EU"
+            echo "  ℹ After restarting, verify it actually loaded (no typo/syntax issue):"
+            echo "      sudo cscli metrics | grep geo-allowlist"
+            echo "      sudo systemctl status crowdsec   # should stay 'active', not restart-looping"
+        else
+            echo "  ⚠ Failed to write geo-allowlist scenario — create it manually"
+        fi
+    fi
 
     # ── 7. Optional: push ban alerts to ntfy ─────────────────────────────────
     echo ""
@@ -395,6 +444,12 @@ sudo cscli collections list             # installed detection collections
 - Subscribe to community / 3rd-party blocklists at https://app.crowdsec.net/
 - ntfy alerts fire when an IP is **banned** (after repeated failed attempts),
   not on every individual failed login.
+- Geo-allowlist (if enabled): `/etc/crowdsec/scenarios/geo-allowlist-web.yaml`
+  bans any Caddy-fronted web request from outside the countries listed in its
+  `filter:` line. Web traffic only — SSH is never affected. Edit the country
+  list directly in that file, then `sudo systemctl restart crowdsec`. This
+  can block Let's Encrypt's out-of-region ACME validation checks; if a cert
+  renewal fails mysteriously, check here first.
 
 ## Service control
 
