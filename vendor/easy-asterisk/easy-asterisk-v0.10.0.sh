@@ -5076,8 +5076,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="form-group">
                         <label>Connection Type</label>
                         <select name="conn_type" class="form-control">
+                            <option value="fqdn" selected>FQDN/Internet (TLS)</option>
                             <option value="lan">LAN/VPN (UDP)</option>
-                            <option value="fqdn">FQDN/Internet (TLS)</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -5314,9 +5314,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 devicesCache = devices;
                 renderDevices();
 
-                // Update category select in add device form
+                // Update category select in add device form. Most devices
+                // added day-to-day are phones, not fixed kiosks, so default
+                // to the "mobile" category instead of whichever sorts first.
                 document.getElementById('category-select').innerHTML = categoriesCache.map(c =>
-                    `<option value="${c.id}">${c.name}</option>`
+                    `<option value="${c.id}" ${c.id === 'mobile' ? 'selected' : ''}>${c.name}</option>`
                 ).join('');
             } catch (e) {
                 showAlert('Failed to load devices', 'error');
@@ -5455,7 +5457,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 }).join('');
 
                 document.getElementById('category-select').innerHTML = categories.map(c =>
-                    `<option value="${c.id}">${c.name}</option>`
+                    `<option value="${c.id}" ${c.id === 'mobile' ? 'selected' : ''}>${c.name}</option>`
                 ).join('');
             } catch (e) {
                 showAlert('Failed to load categories', 'error');
