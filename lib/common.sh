@@ -164,6 +164,7 @@ require_root() {
 
 require_docker() {
     if command -v docker &>/dev/null; then
+        ensure_caddy_network
         return 0
     fi
 
@@ -222,6 +223,25 @@ require_docker() {
     local _docker_bin
     _docker_bin="$(command -v docker 2>/dev/null || echo /usr/bin/docker)"
     log_success "Docker installed ($("$_docker_bin" --version 2>/dev/null))"
+
+    ensure_caddy_network
+}
+
+# Create the shared caddy_net bridge network if it doesn't exist yet.
+# Most services declare it "external: true" in their docker-compose.yml (see
+# CLAUDE.md → Caddy network wiring) — meaning THEY require it to already
+# exist, and only Caddy's own compose file (services/caddy.sh) actually
+# creates it. Installing any caddy_net-dependent service before Caddy would
+# otherwise fail outright with "network caddy_net declared as external, but
+# could not be found." Called from require_docker so every service gets this
+# for free regardless of install order. No-op in DRY_RUN; safe/idempotent
+# otherwise — docker network create is a no-op if the network already exists.
+ensure_caddy_network() {
+    [ "$DRY_RUN" = true ] && return 0
+    local _net="${SITE_CADDY_NET:-caddy_net}"
+    docker network inspect "$_net" &>/dev/null && return 0
+    docker network create "$_net" &>/dev/null \
+        && log_info "Created Docker network ${_net} (needed by Caddy-fronted services)"
 }
 
 # ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────

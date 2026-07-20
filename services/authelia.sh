@@ -387,13 +387,8 @@ AUTHELIA_USERS
     chown -R 1000:1000 "$AUTHELIA_DIR/config" "$AUTHELIA_DIR/data"
     log_success "Authelia configured at $AUTHELIA_DIR"
 
-    # ── Docker network ────────────────────────────────────────────────────────
-    if ! docker network ls --format '{{.Name}}' | grep -q "^${CADDY_NET}$"; then
-        docker network create "$CADDY_NET" >/dev/null 2>&1 && echo "  ✓ Created docker network ${CADDY_NET}" \
-            || echo "  ⚠ Failed to create ${CADDY_NET}"
-    else
-        echo "  ✓ Docker network ${CADDY_NET} already exists"
-    fi
+    # $CADDY_NET already exists at this point — require_docker (called at the
+    # top of this function) creates it via ensure_caddy_network in lib/common.sh.
 
     # ── Caddyfile forward-auth snippet + portal block ────────────────────────
     local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
