@@ -7024,4 +7024,16 @@ if [[ "${1:-}" == "--rebuild-dialplan" ]]; then
     exit 0
 fi
 
+# Non-interactive entry point used by the container entrypoint on every
+# start. create_web_admin_script() writes /usr/local/bin/easy-asterisk-
+# webadmin, but that file lives only in the container's writable layer —
+# it isn't baked into the image or bind-mounted anywhere — so it's wiped
+# on every recreate. Without regenerating it here, the web admin only
+# ever starts after someone manually runs it once from the interactive
+# CLI menu, which defeats the point of it auto-starting at all.
+if [[ "${1:-}" == "--write-web-admin-script" ]]; then
+    create_web_admin_script
+    exit 0
+fi
+
 main "$@"
