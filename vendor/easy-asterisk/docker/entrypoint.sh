@@ -464,7 +464,20 @@ fi
 # ── 11. Signal handling for clean shutdown ────────────────────
 cleanup() {
     log_info "Shutting down..."
-    pkill -f "easy-asterisk-webadmin" 2>/dev/null || true
+    # pkill only sends the signal and returns immediately — it doesn't wait
+    # for the process to actually exit and release its listening socket.
+    # Under network_mode: host there's no Docker-managed port mapping to
+    # tear down, so the next container's bind attempt races however long
+    # this process actually takes to die. Wait for it (briefly) instead of
+    # racing the next container's startup — it retries too now, but a
+    # clean handoff here means it usually shouldn't need to.
+    if pkill -f "easy-asterisk-webadmin" 2>/dev/null; then
+        for i in $(seq 1 20); do
+            pgrep -f "easy-asterisk-webadmin" >/dev/null 2>&1 || break
+            sleep 0.1
+        done
+        pkill -9 -f "easy-asterisk-webadmin" 2>/dev/null || true
+    fi
     asterisk -rx "core stop now" 2>/dev/null || true
     exit 0
 }
