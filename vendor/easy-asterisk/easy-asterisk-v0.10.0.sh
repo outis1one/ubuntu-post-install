@@ -4779,7 +4779,13 @@ qualify_frequency=30
     subprocess.run(['chown', 'asterisk:asterisk', PJSIP_CONF], capture_output=True)
     subprocess.run(['/usr/local/bin/easy-asterisk', '--rebuild-dialplan'], capture_output=True)
 
-    return True, {'extension': extension, 'password': password, 'name': name}
+    return True, {
+        'extension': extension,
+        'password': password,
+        'name': name,
+        'transport': 'tls' if conn_type == 'fqdn' else 'udp',
+        'port': 5061 if conn_type == 'fqdn' else 5060,
+    }
 
 def get_server_info():
     """Get server configuration info including TURN/STUN details"""
@@ -5099,7 +5105,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 <p>Save these credentials - the password cannot be retrieved later</p>
             </div>
             <div class="credentials" id="credentials-display"></div>
-            <div style="margin-top: 20px; text-align: right;">
+            <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+                <button class="btn" onclick="copyDevicePassword()" style="background: #e2e8f0;">Copy Password</button>
+                <button class="btn" onclick="copyAllCredentials()" style="background: #e2e8f0;">Copy All</button>
                 <button class="btn btn-primary" onclick="closeCredentialsModal()">Done</button>
             </div>
         </div>
@@ -5702,24 +5710,49 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
                 if (result.success) {
                     closeModal();
-                    let credHtml = `
-                        <p><strong>Extension:</strong> ${result.data.extension}</p>
-                        <p><strong>Password:</strong> ${result.data.password}</p>
-                        <p><strong>Name:</strong> ${result.data.name}</p>
-                    `;
-                    // Fetch server info to show TURN details
+                    const d = result.data;
+                    const transportLabel = d.transport === 'tls' ? 'TLS' : 'UDP';
+
+                    // Fetch server info for the domain and TURN details
+                    let srv = {};
                     try {
                         const srvRes = await fetch(API_BASE + '/server');
-                        const srv = await srvRes.json();
-                        if (srv.turn_enabled && srv.turn_server) {
-                            credHtml += `<hr style="margin:12px 0;border-color:#e2e8f0">
-                                <p style="font-size:13px;color:#64748b;margin-bottom:6px">STUN/TURN (configure in app Network settings)</p>
-                                <p><strong>STUN/TURN server:</strong> ${srv.turn_server}</p>
-                                <p><strong>TURN username:</strong> ${srv.turn_username}</p>
-                                <p><strong>TURN password:</strong> ${srv.turn_password}</p>
-                            `;
-                        }
+                        srv = await srvRes.json();
                     } catch(e) {}
+                    const server = srv.domain || srv.server_ip || '';
+
+                    // Everything a SIP client (e.g. Sipnetic) needs, kept in one
+                    // object so both the display and the copy buttons read from
+                    // the same source instead of re-parsing rendered HTML.
+                    lastDeviceCreds = {
+                        name: d.name,
+                        server: server,
+                        port: d.port,
+                        transport: transportLabel,
+                        username: d.extension,
+                        password: d.password,
+                        turnEnabled: !!(srv.turn_enabled && srv.turn_server),
+                        turnServer: srv.turn_server || '',
+                        turnUsername: srv.turn_username || '',
+                        turnPassword: srv.turn_password || ''
+                    };
+
+                    let credHtml = `
+                        <p><strong>Display Name:</strong> ${lastDeviceCreds.name}</p>
+                        <p><strong>Server:</strong> ${lastDeviceCreds.server}</p>
+                        <p><strong>Port:</strong> ${lastDeviceCreds.port}</p>
+                        <p><strong>Transport:</strong> ${lastDeviceCreds.transport}</p>
+                        <p><strong>Username:</strong> ${lastDeviceCreds.username}</p>
+                        <p><strong>Password:</strong> ${lastDeviceCreds.password}</p>
+                    `;
+                    if (lastDeviceCreds.turnEnabled) {
+                        credHtml += `<hr style="margin:12px 0;border-color:#e2e8f0">
+                            <p style="font-size:13px;color:#64748b;margin-bottom:6px">STUN/TURN (configure in app Network settings)</p>
+                            <p><strong>STUN/TURN server:</strong> ${lastDeviceCreds.turnServer}</p>
+                            <p><strong>TURN username:</strong> ${lastDeviceCreds.turnUsername}</p>
+                            <p><strong>TURN password:</strong> ${lastDeviceCreds.turnPassword}</p>
+                        `;
+                    }
                     document.getElementById('credentials-display').innerHTML = credHtml;
                     document.getElementById('credentials-modal').classList.add('active');
                 } else {
@@ -5728,6 +5761,57 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             } catch (e) {
                 showAlert('Failed to add device', 'error');
             }
+        }
+
+        // Holds the most recently created device's credentials so the
+        // Copy All / Copy Password buttons don't need to re-parse the DOM.
+        let lastDeviceCreds = null;
+
+        function copyToClipboard(text) {
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(text);
+            }
+            // Fallback for non-HTTPS/non-secure contexts where the Clipboard
+            // API is unavailable (e.g. plain-HTTP self-signed-cert access).
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try {
+                document.execCommand('copy');
+            } finally {
+                document.body.removeChild(ta);
+            }
+            return Promise.resolve();
+        }
+
+        function copyAllCredentials() {
+            if (!lastDeviceCreds) return;
+            const c = lastDeviceCreds;
+            let text = `Display Name: ${c.name}\n` +
+                       `Server: ${c.server}\n` +
+                       `Port: ${c.port}\n` +
+                       `Transport: ${c.transport}\n` +
+                       `Username: ${c.username}\n` +
+                       `Password: ${c.password}\n`;
+            if (c.turnEnabled) {
+                text += `STUN/TURN server: ${c.turnServer}\n` +
+                        `TURN username: ${c.turnUsername}\n` +
+                        `TURN password: ${c.turnPassword}\n`;
+            }
+            copyToClipboard(text)
+                .then(() => showAlert('All settings copied to clipboard', 'success'))
+                .catch(() => showAlert('Copy failed — select and copy manually', 'error'));
+        }
+
+        function copyDevicePassword() {
+            if (!lastDeviceCreds) return;
+            copyToClipboard(lastDeviceCreds.password)
+                .then(() => showAlert('Password copied to clipboard', 'success'))
+                .catch(() => showAlert('Copy failed — select and copy manually', 'error'));
         }
 
         async function deleteDevice(ext, name) {
@@ -6937,6 +7021,18 @@ main() {
 # rebuilds the dialplan after the initial container boot.
 if [[ "${1:-}" == "--rebuild-dialplan" ]]; then
     rebuild_dialplan quiet
+    exit 0
+fi
+
+# Non-interactive entry point used by the container entrypoint on every
+# start. create_web_admin_script() writes /usr/local/bin/easy-asterisk-
+# webadmin, but that file lives only in the container's writable layer —
+# it isn't baked into the image or bind-mounted anywhere — so it's wiped
+# on every recreate. Without regenerating it here, the web admin only
+# ever starts after someone manually runs it once from the interactive
+# CLI menu, which defeats the point of it auto-starting at all.
+if [[ "${1:-}" == "--write-web-admin-script" ]]; then
+    create_web_admin_script
     exit 0
 fi
 

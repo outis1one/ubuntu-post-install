@@ -543,78 +543,20 @@ WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
 
-    # ── UFW firewall rules (host-level) ───────────────────────────────────────
-    if command -v ufw &>/dev/null; then
-        log_info "Opening UFW ports for Asterisk + coturn..."
-        ufw allow 5060/udp
-        ufw allow 5060/tcp
-        ufw allow 5061/tcp
-        ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
-        ufw allow 8088/tcp
-        ufw allow 8089/tcp
-        ufw allow 3478/udp
-        ufw allow 3478/tcp
-        ufw allow 10000:20000/udp
-        ufw allow 49152:49252/udp
-    fi
-
-    if command -v ufw &>/dev/null; then
-        log_success "UFW rules added."
-    fi
-
-    # ── DigitalOcean Cloud Firewall (network edge, in front of the droplet) ───
-    local DO_FW_RULES=(
-        "protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:5060,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:5060,address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:5061,address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:${WEB_ADMIN_PORT_VAL},address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:8088-8089,address:0.0.0.0/0,address:::/0"
-        "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
-    )
-
-    echo ""
-    if [[ -n "$DROPLET_ID" ]] && command -v doctl &>/dev/null && doctl account get &>/dev/null; then
-        local EXISTING_FW
-        EXISTING_FW="$(doctl compute firewall list --format ID,DropletIDs --no-header 2>/dev/null \
-            | grep -E "(^|[, ])${DROPLET_ID}([, ]|\$)" | awk '{print $1}' | head -1)"
-
-        if [[ -n "$EXISTING_FW" ]]; then
-            log_warning "A Cloud Firewall (id $EXISTING_FW) is already attached to this droplet — not touching it."
-            log_warning "Add these inbound rules to it yourself (Networking → Firewalls in the DO console):"
-            printf '    %s\n' "${DO_FW_RULES[@]}"
-        else
-            local DO_FW=""
-            prompt_yn "Create a DigitalOcean Cloud Firewall for this droplet via doctl now? (y/n):" "y" DO_FW
-            if [[ "$DO_FW" =~ ^[Yy]$ ]]; then
-                if doctl compute firewall create \
-                    --name "asterisk-digital-ocean" \
-                    --droplet-ids "$DROPLET_ID" \
-                    --inbound-rules "$(IFS=' '; echo "${DO_FW_RULES[*]}")" \
-                    --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,ports:0,address:0.0.0.0/0,address:::/0" \
-                    &>/dev/null; then
-                    log_success "Cloud Firewall 'asterisk-digital-ocean' created and attached (SSH/22 included so you don't get locked out)."
-                    log_info "Verify it in the DO console — adjust the SSH rule if you use a non-default SSH port."
-                else
-                    log_warning "doctl firewall create failed — add the rules manually (see README)."
-                fi
-            fi
-        fi
-    else
-        log_info "doctl not installed/authenticated — configure a DigitalOcean Cloud Firewall manually:"
-        log_info "Control Panel → Networking → Firewalls → create, attach to this droplet, allow:"
-        printf '    %s\n' "${DO_FW_RULES[@]}"
-    fi
-
     # ── Caddy: reverse-proxy the web admin on the SAME FQDN used for SIP ──────
     # Caddy only holds a cert for domains it's actively serving. If the web
     # admin were proxied on a different "admin" subdomain, Caddy would obtain
     # a cert for THAT domain instead — the sync earlier would never find one
     # matching $DOMAIN_NAME, and SIP TLS would silently stay self-signed. So
     # there's no separate domain prompt: this always targets $DOMAIN_NAME.
+    #
+    # Decided before the firewall rules below so they can be scoped
+    # correctly: if Caddy ends up fronting the web admin locally, there's no
+    # reason to also expose it directly to the internet — Caddy already
+    # reaches it over the host's internal network (host.docker.internal),
+    # and leaving the bare IP:port open would let anyone bypass Caddy/
+    # Authelia entirely.
+    local WEB_ADMIN_PUBLIC_ACCESS_NEEDED=true
     if [[ -z "$DOMAIN_NAME" ]]; then
         log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL} (nothing for Caddy to do)."
     elif [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
@@ -705,6 +647,9 @@ CADDY_BLOCK
 )"
 
             if [[ "$_CADDY_MODE" == "local" ]]; then
+                # Caddy reaches this over the host's internal network — no
+                # need to keep the port open to the public internet.
+                WEB_ADMIN_PUBLIC_ACCESS_NEEDED=false
                 local _CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
                 local _CADDY_BACKUP="$_CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)"
                 if [[ -f "$_CADDYFILE" ]]; then
@@ -739,8 +684,81 @@ CADDY_BLOCK
                 chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk-digital-ocean.caddy" 2>/dev/null || true
                 log_success "Snippet saved: $_SNIPPET_DIR/asterisk-digital-ocean.caddy"
                 log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk-digital-ocean.caddy caddy-host:~/caddy-snippets/"
+                log_info "Remote Caddy reaches this droplet over its public IP, so the web admin port stays open below."
             fi
         fi
+    fi
+
+    # ── UFW firewall rules (host-level) ───────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        log_info "Opening UFW ports for Asterisk + coturn..."
+        ufw allow 5060/udp
+        ufw allow 5060/tcp
+        ufw allow 5061/tcp
+        if [[ "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" == true ]]; then
+            ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
+        else
+            ufw delete allow "${WEB_ADMIN_PORT_VAL}/tcp" 2>/dev/null || true
+            log_info "Web admin port ${WEB_ADMIN_PORT_VAL} kept closed to the internet — Caddy fronts it locally."
+        fi
+        ufw allow 8088/tcp
+        ufw allow 8089/tcp
+        ufw allow 3478/udp
+        ufw allow 3478/tcp
+        ufw allow 10000:20000/udp
+        ufw allow 49152:49252/udp
+        log_success "UFW rules added."
+    fi
+
+    # ── DigitalOcean Cloud Firewall (network edge, in front of the droplet) ───
+    local DO_FW_RULES=(
+        "protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:5060,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:5060,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:5061,address:0.0.0.0/0,address:::/0"
+    )
+    if [[ "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" == true ]]; then
+        DO_FW_RULES+=("protocol:tcp,ports:${WEB_ADMIN_PORT_VAL},address:0.0.0.0/0,address:::/0")
+    fi
+    DO_FW_RULES+=(
+        "protocol:tcp,ports:8088-8089,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
+    )
+
+    echo ""
+    if [[ -n "$DROPLET_ID" ]] && command -v doctl &>/dev/null && doctl account get &>/dev/null; then
+        local EXISTING_FW
+        EXISTING_FW="$(doctl compute firewall list --format ID,DropletIDs --no-header 2>/dev/null \
+            | grep -E "(^|[, ])${DROPLET_ID}([, ]|\$)" | awk '{print $1}' | head -1)"
+
+        if [[ -n "$EXISTING_FW" ]]; then
+            log_warning "A Cloud Firewall (id $EXISTING_FW) is already attached to this droplet — not touching it."
+            log_warning "Add these inbound rules to it yourself (Networking → Firewalls in the DO console):"
+            printf '    %s\n' "${DO_FW_RULES[@]}"
+        else
+            local DO_FW=""
+            prompt_yn "Create a DigitalOcean Cloud Firewall for this droplet via doctl now? (y/n):" "y" DO_FW
+            if [[ "$DO_FW" =~ ^[Yy]$ ]]; then
+                if doctl compute firewall create \
+                    --name "asterisk-digital-ocean" \
+                    --droplet-ids "$DROPLET_ID" \
+                    --inbound-rules "$(IFS=' '; echo "${DO_FW_RULES[*]}")" \
+                    --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,ports:0,address:0.0.0.0/0,address:::/0" \
+                    &>/dev/null; then
+                    log_success "Cloud Firewall 'asterisk-digital-ocean' created and attached (SSH/22 included so you don't get locked out)."
+                    log_info "Verify it in the DO console — adjust the SSH rule if you use a non-default SSH port."
+                else
+                    log_warning "doctl firewall create failed — add the rules manually (see README)."
+                fi
+            fi
+        fi
+    else
+        log_info "doctl not installed/authenticated — configure a DigitalOcean Cloud Firewall manually:"
+        log_info "Control Panel → Networking → Firewalls → create, attach to this droplet, allow:"
+        printf '    %s\n' "${DO_FW_RULES[@]}"
     fi
 
     # ── CrowdSec note ──────────────────────────────────────────────────────────
@@ -833,7 +851,7 @@ plan for the admin panel.
 | 22            | TCP      | SSH (keep this open or you're locked out) |
 | 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
 | 5061          | TCP      | SIP over TLS                     |
-| ${WEB_ADMIN_PORT_VAL}          | TCP      | Easy Asterisk web admin (auto-picked — see \`.env\`) |
+| ${WEB_ADMIN_PORT_VAL}          | TCP      | Easy Asterisk web admin (auto-picked — see \`.env\`). Only opened publicly if Caddy isn't fronting it locally — otherwise it's reachable only via \`https://${DOMAIN_NAME:-your-domain}/\`, not the bare IP:port. |
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
