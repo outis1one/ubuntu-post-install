@@ -112,8 +112,9 @@ install_security-dashboard() {
         }
         case "$MODE" in
             update)
-                log_info "Refreshing app code only (no config/domain changes)..."
+                log_info "Refreshing app code + sudoers rule (no config/domain changes)..."
                 _secdash_write_app "$APP_DIR"
+                _secdash_write_sudoers "$SVC_USER"
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
@@ -146,21 +147,7 @@ install_security-dashboard() {
     _secdash_write_app "$APP_DIR"
     chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
 
-    # ── Scoped sudo — only the exact commands the app needs, nothing else ───
-    # Numeric-only glob on the decision ID; Python subprocess calls always pass
-    # args as a list (no shell=True anywhere), so there's no shell-metachar
-    # injection surface even before sudoers' own pattern match kicks in — the
-    # server-side ID validation (must be all-digits) happens before this is
-    # ever reached, this is defense in depth, not the only check.
-    cat > /etc/sudoers.d/security-dashboard << SUDOERS
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/cscli decisions list -o json
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart crowdsec
-SUDOERS
-    chmod 440 /etc/sudoers.d/security-dashboard
-    visudo -c -f /etc/sudoers.d/security-dashboard >/dev/null 2>&1 \
-        && log_success "Sudoers rule installed and validated" \
-        || { log_error "Sudoers rule failed validation — removing it (dashboard's CrowdSec tab won't work until fixed)"; rm -f /etc/sudoers.d/security-dashboard; }
+    _secdash_write_sudoers "$SVC_USER"
 
     # ── systemd unit ──────────────────────────────────────────────────────────
     cat > /etc/systemd/system/security-dashboard.service << SDSVC
@@ -323,9 +310,11 @@ sudo journalctl -u security-dashboard -f
 
 ## Security notes
 - Runs as a dedicated, unprivileged system user (\`secdash\`), not root.
-- Sudo access is scoped to exactly three commands via
+- Sudo access is scoped to exactly four commands via
   \`/etc/sudoers.d/security-dashboard\`: \`cscli decisions delete --id <digits>\`,
-  \`cscli decisions list -o json\`, and \`systemctl restart crowdsec\`. Nothing else.
+  \`cscli decisions list -o json\`, \`cscli alerts list -o json\` (read-only,
+  used only to label ASN exemptions with a carrier name from past alerts),
+  and \`systemctl restart crowdsec\`. Nothing else.
 - Listens on all interfaces (Caddy reaches it via \`host.docker.internal\`, a
   Docker bridge IP — a loopback-only bind refuses that). Access is scoped by
   UFW instead, allowed only from Caddy's internal network, not the internet.
@@ -337,6 +326,30 @@ README_MD
     echo "  Local access: http://localhost:$DASHBOARD_PORT"
     echo "  README:       $APP_DIR/README.md"
     echo ""
+}
+
+# Scoped sudo — only the exact commands the app needs, nothing else. Numeric-
+# only glob on the decision ID; Python subprocess calls always pass args as a
+# list (no shell=True anywhere), so there's no shell-metachar injection
+# surface even before sudoers' own pattern match kicks in — the server-side
+# ID validation (must be all-digits) happens before this is ever reached,
+# this is defense in depth, not the only check. Separate function, called
+# from both "update" and fresh-install, so adding a new permission later
+# (like alerts list, added after ASN-exempt entries with no currently-active
+# ban had no carrier name to show) reaches existing installs on their next
+# update instead of silently only applying to new ones.
+_secdash_write_sudoers() {
+    local _svc_user="$1"
+    cat > /etc/sudoers.d/security-dashboard << SUDOERS
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions list -o json
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli alerts list -o json
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/systemctl restart crowdsec
+SUDOERS
+    chmod 440 /etc/sudoers.d/security-dashboard
+    visudo -c -f /etc/sudoers.d/security-dashboard >/dev/null 2>&1 \
+        && log_success "Sudoers rule installed and validated" \
+        || { log_error "Sudoers rule failed validation — removing it (dashboard's CrowdSec tab won't work until fixed)"; rm -f /etc/sudoers.d/security-dashboard; }
 }
 
 # Writes the Python app. Separate function so "update" mode (refresh code,
@@ -451,6 +464,30 @@ def delete_decision(decision_id):
         return False, "Invalid decision ID"
     ok, out, err = run_sudo(["/usr/bin/cscli", "decisions", "delete", "--id", str(decision_id)])
     return ok, (err or out or ("deleted" if ok else "failed"))
+
+
+def get_alert_history_names():
+    """ASN -> as_name map built from historical alerts (cscli alerts list,
+    unlike decisions list, includes expired/resolved ones). A successfully
+    exempted ASN (e.g. T-Mobile once its bans stop firing) has no *active*
+    decision left to source a name from — this is the fallback that still
+    finds one, from the alert that was raised before the exemption took
+    effect."""
+    ok, out, err = run_sudo(["/usr/bin/cscli", "alerts", "list", "-o", "json"])
+    if not ok or not out.strip():
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    names = {}
+    for alert in data or []:
+        source = alert.get("source") or {}
+        asn = source.get("as_number")
+        name = source.get("as_name")
+        if asn and name:
+            names.setdefault(str(asn), name)
+    return names
 
 
 def get_asn_exempt(known_names=None):
@@ -683,6 +720,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/asn-exempt":
             decisions = get_decisions()
             known_names = {d["as_number"]: d["as_name"] for d in decisions if d.get("as_number")}
+            for asn, name in get_alert_history_names().items():
+                known_names.setdefault(asn, name)
             self._json({"asns": get_asn_exempt(known_names)})
         else:
             self._json({"error": "not found"}, 404)
