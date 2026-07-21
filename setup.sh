@@ -89,7 +89,7 @@ is_installed() {
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
         sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
         sky-cam-frigate) [ -d "$ACTUAL_HOME/sky-cam/.git" ] && [ -f "$ACTUAL_HOME/sky-cam/frigate-retime.sh" ] ;;
-        pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
+        pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] || [ -f "$DOCKER_DIR/asterisk/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
         ssh-config) false ;;   # repeatable management tool, never shows [installed]
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac

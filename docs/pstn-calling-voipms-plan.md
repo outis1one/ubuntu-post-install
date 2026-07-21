@@ -4,19 +4,47 @@ Research and decisions from a design discussion, saved here so the work can
 be picked up in a fresh chat without re-deriving the background.
 
 **Implemented** — see `services/pstn-trunk.sh` (run `sudo ./setup.sh
-pstn-trunk` after `asterisk-digital-ocean` is installed). Generic SIP trunk
-add-on that defaults to VoIP.ms but isn't hardcoded to it — any provider
-supporting IP authentication works. Covers: IP-authenticated trunk,
-US/NANP-only outbound dialplan, a configurable concurrent-call cap (default
-3), **role-based outbound permission** (some extensions internal-only, some
-PSTN-enabled — internal intercom dialing is never gated either way), a
-configurable **inbound ring-group** (one extension or several), **ntfy
-alerts** on denied/rejected calls (immediate) and spend/volume thresholds
-(hourly check), and settings persisted to `.pstn-trunk.env` so "update in
-place" reapplies everything without re-prompting. That file's own header
-comment explains how it survives Easy Asterisk's config regeneration (an
-architectural wrinkle discovered while implementing this — worth reading
-before touching either file).
+pstn-trunk` after `asterisk-digital-ocean` **or** `asterisk` (home/LAN) is
+installed — both are supported, see the file for the static-IP caveat on the
+LAN variant). Generic SIP trunk add-on that defaults to VoIP.ms but isn't
+hardcoded to it — any provider supporting IP authentication works. Covers:
+
+- IP-authenticated trunk, US/NANP-only outbound dialplan, no catch-all.
+- A configurable concurrent-call cap (default 3, global not per-extension).
+- **Three-tier per-extension permission model**: `internal` (default — no
+  PSTN at all, but can always call/receive other extensions and internal
+  ring groups), `restricted` (also only pre-approved US numbers, both
+  directions), `full` (also any US number). Internal extension-to-extension
+  dialing is *never* gated by any tier.
+- **Permissions are live, not baked into the dialplan.** Stored in
+  `pstn-permissions.conf`, read by the dialplan via Asterisk's
+  `AST_CONFIG()` on every call — editing that file takes effect on the next
+  call, no restart, no reinstall. `services/pstn-trunk.sh`'s "update in
+  place" mode deliberately never touches it (same protection this repo's
+  update-mode convention already gives `.env`/firewall/Caddy config
+  elsewhere) — only a "fresh" reinstall (with confirmation) or the web UI
+  below change it.
+- A configurable **inbound ring-group** (one extension or several), each
+  member's live tier/approved-numbers checked per inbound call via an
+  unrolled per-member dialplan block (no AGI needed).
+- **`services/security-dashboard.sh` integration** — a "PSTN Trunk" tab
+  lists every extension (parsed from `pjsip.conf`) with its live tier and
+  approved numbers, editable with no restart. This is what makes the tier
+  model actually manageable day-to-day instead of needing a reinstall for
+  every roster change.
+- **ntfy alerts** on denied/rejected calls (immediate — permission denied,
+  number not approved, or concurrency cap hit) and spend/volume thresholds
+  (hourly check: once/month on a spend threshold, every hour on a call-burst
+  threshold).
+- Structural settings (server, DID, ring-group membership, cap, ntfy,
+  rate/thresholds) persist to `.pstn-trunk.env` so "update in place"
+  reapplies them without re-prompting.
+
+`services/pstn-trunk.sh`'s own header comment explains how the trunk/dialplan
+config survives Easy Asterisk's regeneration, and why permissions are a
+separate live file rather than baked in — both architectural wrinkles
+discovered while implementing this, worth reading before touching either
+file.
 
 ## Decision so far
 - **Provider: VoIP.ms.** Chosen for its prepaid-balance model: turn off
@@ -104,17 +132,40 @@ separately from that hourly check.
   `_1NXXNXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXX` (10-digit,
   auto-prefixed with 1), both routed to the trunk. No catch-all `_X.`
   pattern.
-- **Role-based outbound permission — implemented.** A space-separated list
-  of extensions allowed to dial PSTN, prompted at install (blank = every
-  extension, the original default before roles existed). Baked into the
-  dialplan as a `REGEX()` check against `${CHANNEL(peername)}` — no changes
-  needed to Easy Asterisk's own per-device pjsip.conf sections, since the
-  gate lives entirely in code this repo already owns. Internal
-  extension-to-extension dialing is never gated by this, regardless of PSTN
-  permission — only the two NANP patterns above are.
+- **Three-tier permission model — implemented**, superseding an earlier flat
+  allow-list design. `internal` / `restricted` / `full` per extension, read
+  live from `pstn-permissions.conf` via `AST_CONFIG()` rather than baked
+  into the dialplan text — no changes needed to Easy Asterisk's own
+  per-device pjsip.conf sections, since the gate lives entirely in files
+  this repo already owns. Internal extension-to-extension dialing is never
+  gated by any tier — only the two NANP patterns (outbound) and the
+  ring-group (inbound) are. Numbers are stored pipe-separated specifically
+  because they're used as a `REGEX()` alternation pattern in the dialplan —
+  see the security note below on why the untrusted call-time value must
+  never be interpolated into the *pattern* side of that check.
 - **Inbound ring-group — implemented.** A space-separated list of
   extensions to ring for inbound calls (one, or several for a ring group via
-  `Dial(PJSIP/a&PJSIP/b,20)`), prompted at install.
+  `Dial(PJSIP/a&PJSIP/b,20)`), prompted at install. Each member's tier is
+  checked live per inbound call (an unrolled dialplan block per member —
+  full always rings, restricted only rings if the caller's number is on
+  that member's approved list, internal never rings).
+- **Security note on the REGEX() checks**: an inbound Caller-ID (or an
+  outbound dialed number) is attacker-influenced data and must never be
+  interpolated into the *pattern* argument of `REGEX()` — only ever the
+  string being tested. Doing it backwards would let a crafted Caller-ID
+  (e.g. containing regex metacharacters) forge a match against an unrelated
+  approved-numbers entry. Both checks in `services/pstn-trunk.sh` put the
+  admin-controlled approved-list in the pattern position and the live call
+  data in the tested-string position — worth keeping that direction if this
+  is ever refactored.
+- **Web UI — implemented.** `services/security-dashboard.sh`'s "PSTN Trunk"
+  tab lists every extension (parsed from `pjsip.conf`, the same marker
+  format Easy Asterisk's own `rebuild_dialplan()` uses) with a tier dropdown
+  and approved-numbers field, saving straight to `pstn-permissions.conf`.
+  Tested end-to-end with a real running instance of the (stdlib-only)
+  Python app: extension parsing, tier changes, number normalization/
+  validation, and persistence all verified with actual HTTP requests against
+  a live server in a sandboxed test — not just read through.
 - Provider-specific setup that isn't scriptable (user does this manually):
   create the account, order a DID, decide pay-per-minute vs. unlimited DID
   plan and whether to add E911, pick a server/POP, fund the prepaid balance
@@ -154,10 +205,16 @@ separately from that hourly check.
 2. ~~IP auth vs. registration~~ Done — IP authentication, no password stored.
 3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`.
 4. ~~Inbound~~ Done — rings a configurable list of extensions (ring-group
-   supported), prompted at install time. ~~Role-based outbound permission~~
-   Done — space-separated allow-list, blank = everyone. Still unresolved:
-   pick pay-per-minute vs. unlimited DID plan on VoIP.ms's side based on
-   real expected volume, and decide on E911 (see cost estimate).
+   supported), each checked live per-call against its own tier. ~~Permission
+   model~~ Done — superseded the original flat allow-list with a 3-tier
+   model (internal/restricted/full) managed live via
+   `pstn-permissions.conf` + the Security Dashboard web UI, no reinstall
+   needed to change. ~~Generic Asterisk target~~ Done —
+   `services/pstn-trunk.sh` now supports either `asterisk-digital-ocean` or
+   the home/LAN `asterisk` install (the latter with a static-IP caveat for
+   the provider's IP authentication). Still unresolved: pick pay-per-minute
+   vs. unlimited DID plan on VoIP.ms's side based on real expected volume,
+   and decide on E911 (see cost estimate).
 5. ~~Concurrent-call cap~~ Done — configurable, default 3, global not
    per-extension. ~~Spend/volume alert~~ Done — ntfy, hourly threshold +
    burst check, plus immediate alerts on denied/rejected calls.

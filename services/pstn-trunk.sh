@@ -1,25 +1,30 @@
 #!/bin/bash
-# services/pstn-trunk.sh — SIP PSTN trunk add-on for asterisk-digital-ocean:
-# US-only outbound (NANP dialplan restriction), a configurable concurrent-call
-# cap, role-based outbound permission (some extensions internal-only, some
-# PSTN-enabled), a configurable inbound ring-group, IP-authenticated trunk
-# (no SIP password stored), ntfy alerts on denied/rejected calls, and a
-# periodic spend/volume check.
+# services/pstn-trunk.sh — SIP PSTN trunk add-on for asterisk-digital-ocean
+# (or the home/LAN asterisk install): US-only outbound (NANP dialplan
+# restriction), a configurable concurrent-call cap, a 3-tier permission model
+# per extension (internal-only / restricted to pre-approved numbers / full US
+# calling), a configurable inbound ring-group, IP-authenticated trunk (no SIP
+# password stored), ntfy alerts on denied/rejected calls, and a periodic
+# spend/volume check.
 #
 # Defaults to VoIP.ms (see docs/pstn-calling-voipms-plan.md for the design/
 # cost background this is built from) but isn't hardcoded to it — any SIP
 # trunk provider that supports IP authentication works the same way.
 #
-# Requires an existing services/asterisk-digital-ocean.sh install — this adds
-# a PSTN trunk on top of it and does not stand alone.
+# Requires an existing services/asterisk-digital-ocean.sh OR services/asterisk.sh
+# install — this adds a PSTN trunk on top of one of them and does not stand
+# alone. Permission tiers are managed live (no restart needed) via
+# pstn-permissions.conf — editable by hand, or from services/security-dashboard.sh's
+# "PSTN Trunk" tab if that's installed.
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean — US-only, role-based permissions, spend/volume alerts (defaults to VoIP.ms)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/asterisk — US-only, per-extension permission tiers, spend/volume alerts (defaults to VoIP.ms)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
-# Easy Asterisk (the vendor project asterisk-digital-ocean.sh builds on) fully
-# OVERWRITES both pjsip.conf and extensions.conf from its own internal state:
+# Easy Asterisk (the vendor project asterisk-digital-ocean.sh/asterisk.sh
+# build on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
+# internal state:
 #   - extensions.conf: rebuilt by rebuild_dialplan() on every container start,
 #     and whenever a device/room is added or removed via the web admin.
 #   - pjsip.conf: rewritten by generate_pjsip_conf() whenever VLAN/domain/TLS
@@ -34,11 +39,28 @@ register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean �
 # technique this repo already uses for the logger.conf security-logging fix
 # in _asterisk_do_refresh_vendor_files (see services/asterisk-digital-ocean.sh).
 #
-# Caveat: if the base asterisk-digital-ocean install is later refreshed
-# ("update in place", which re-copies fresh vendor files) independently of
-# this service, the patch is wiped along with it and needs reapplying — run
-# this service again (fresh or update mode both reapply it) after any
-# asterisk-digital-ocean update.
+# Caveat: if the base asterisk-digital-ocean/asterisk install is later
+# refreshed ("update in place", which re-copies fresh vendor files)
+# independently of this service, the patch is wiped along with it and needs
+# reapplying — run this service again (fresh or update mode both reapply it)
+# after any base install update.
+#
+# ── Why permissions are a separate live file, not baked into the dialplan ──
+# pstn-permissions.conf holds each extension's tier (internal/restricted/full)
+# and, for restricted, its pipe-separated approved-number list. The dialplan
+# reads it via Asterisk's AST_CONFIG() function, which re-reads the file from
+# disk on every call — so editing this file (by hand, or via the Security
+# Dashboard web UI) takes effect on the very next call, no Asterisk restart
+# and no re-running this installer needed. "update in place" (below) never
+# touches this file once it exists, for the same reason CLAUDE.md's
+# update-mode convention protects .env/firewall/Caddy config — only "fresh"
+# reinstall or the web UI change it. This is also why numbers are stored
+# pipe-separated, not comma-separated: they're used directly as a regex
+# alternation pattern in the dialplan, and the caller-supplied number being
+# checked against them must never itself be interpolated into the PATTERN
+# side of a REGEX() call (that would let a crafted Caller-ID/dialed-string
+# forge a match) — this file's contents are always the pattern, the
+# live call data is always the string being tested, never the reverse.
 
 # ── Shared: patch vendor generator functions to #include our config ────────
 # Anchors on "user_agent=EasyAsterisk" (pjsip.conf's [global] section) and
@@ -49,11 +71,13 @@ _pstn_patch_vendor_files() {
     local EA_DIR="$1"
     local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
     local EASY1="$EA_DIR/easy-asterisk.sh"
-    local EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
     local f
 
     for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
-        [[ -f "$f" ]] || { log_error "$f not found — is asterisk-digital-ocean fully installed?"; return 1; }
+        [[ -f "$f" ]] || { log_error "$f not found — is the base Asterisk install fully set up?"; return 1; }
     done
 
     for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
@@ -120,6 +144,36 @@ EOF
     sed -i "s/__PSTN_SERVER_IP__/${SERVER_IP}/g; s/__PSTN_SERVER__/${SERVER}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
 }
 
+# ── Shared: one inbound ring-group member's live permission check ─────────
+# Emits a block that only adds this extension to PSTN_RING_LIST if it's
+# "full" tier, or "restricted" tier AND the inbound Caller-ID is on its
+# approved list. Uses a single-quoted heredoc (fully literal — no bash
+# expansion) captured into a variable, then a pure bash string replace for
+# the extension number placeholder — safer than sed here since it needs no
+# escaping at all (the extension is plain digits, but this avoids relying on
+# that fact staying true).
+_pstn_ring_member_block() {
+    local EXT="$1"
+    local block
+    # ring__EXT__/skip__EXT__ are named priorities WITHIN this same extension
+    # (declared below via "same => n(label),..."), not separate exten =>
+    # entries — Goto/GotoIf must use the single-argument label form here
+    # (bare "?label" / "Goto(label)"), not "label,1" (which addresses a
+    # different, nonexistent extension named "label" instead).
+    block=$(cat << 'MEMBER'
+ same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier)})
+ same => n,GotoIf($["${PSTN_M_TIER}" = "full"]?ring__EXT__)
+ same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_numbers)})
+ same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${CALLERID(num)})}=1]?ring__EXT__)
+ same => n,Goto(skip__EXT__)
+ same => n(ring__EXT__),Set(PSTN_RING_LIST=${PSTN_RING_LIST}${PSTN_RING_SEP}PJSIP/__EXT__)
+ same => n,Set(PSTN_RING_SEP=&)
+ same => n(skip__EXT__),NoOp()
+MEMBER
+)
+    echo "${block//__EXT__/$EXT}"
+}
+
 # ── Shared: outbound/inbound dialplan ───────────────────────────────────────
 # Continues in the [intercom] context established just above this include
 # (rebuild_dialplan() writes "[intercom]" then this #include right after it),
@@ -127,10 +181,10 @@ EOF
 # below is a separate context, for calls arriving from the trunk.
 #
 # Role model: internal intercom dialing (extension-to-extension) is NEVER
-# gated here — everyone keeps that, regardless of PSTN permission. Only the
-# two NANP patterns (the trunk route) are gated by ALLOWED_REGEX. An empty
-# allow-list at install time becomes ".*" (match anything), preserving
-# "every extension can dial out" as the explicit opt-in default.
+# gated here — everyone keeps that, regardless of PSTN tier. Only the two
+# NANP patterns (the trunk route) and the inbound ring-group are gated, both
+# via a LIVE read of pstn-permissions.conf (see the file-level comment above
+# for why that's a separate file rather than baked in here).
 #
 # Calls are logged to pstn-trunk-calls.log (epoch|direction|who|what|seconds)
 # for the usage-alert script — not Asterisk's own CDR, to avoid depending on
@@ -138,11 +192,15 @@ EOF
 # CDR CSV's comma-quoting entirely (our own pipe-delimited format has no
 # embedded-delimiter risk since every field here is digits/hostnames).
 _pstn_write_dialplan_include() {
-    local FILE="$1" DID="$2" ALLOWED_REGEX="$3" MAX_CONCURRENT="$4" RING_DIAL="$5" NTFY_URL="$6"
+    local FILE="$1" DID="$2" MAX_CONCURRENT="$3" RING_EXTS="$4" NTFY_URL="$5"
     cat > "$FILE" << 'EOF'
-; PSTN outbound/inbound — US-only (NANP), concurrent-call cap, role-based
-; outbound permission. Regenerated by services/pstn-trunk.sh — edit there,
-; not here directly, or a reinstall/update will overwrite this.
+; PSTN outbound/inbound — US-only (NANP), concurrent-call cap, tiered
+; permissions (internal / restricted / full) read LIVE from
+; pstn-permissions.conf via AST_CONFIG() — edit permissions there, or via the
+; Security Dashboard web UI, with no restart needed. Regenerated by
+; services/pstn-trunk.sh — edit there, not here directly, or a
+; reinstall/update will overwrite this file (pstn-permissions.conf itself is
+; NOT touched by "update", only by a "fresh" reinstall or the web UI).
 ;
 ; No catch-all pattern here on purpose: only these two NANP patterns route
 ; to the trunk, so an unauthorized or compromised extension can't reach
@@ -151,14 +209,23 @@ _pstn_write_dialplan_include() {
 
 exten => _1NXXNXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
  same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
- same => n,GotoIf($[${REGEX("^(__PSTN_ALLOWED_REGEX__)$" ${PSTN_CALLER})} = 1]?pstn_check_busy,1)
- same => n,NoOp(Denied - ${PSTN_CALLER} is not authorized for PSTN outbound)
-__ALERT_DENY_LINE__
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_check_busy,1)
+ same => n,GotoIf($["${PSTN_TIER}" = "restricted"]?pstn_check_allow_out,1)
+ same => n,NoOp(Denied - ${PSTN_CALLER} has no PSTN permission, tier: ${PSTN_TIER})
+__ALERT_DENY_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
 exten => _NXXNXXXXX,1,NoOp(Assuming NANP - adding leading 1)
  same => n,Goto(1${EXTEN},1)
+
+exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_numbers)})
+ same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${EXTEN})} = 1]?pstn_check_busy,1)
+ same => n,NoOp(Denied - ${EXTEN} not on ${PSTN_CALLER}'s approved number list)
+__ALERT_DENY_NUMBER_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
 
 exten => pstn_check_busy,1,GotoIf($[${GROUP_COUNT(pstn-out)} >= __PSTN_MAX_CONCURRENT__]?pstn_busy,1)
  same => n,Set(GROUP()=pstn-out)
@@ -173,29 +240,88 @@ exten => pstn_busy,1,NoOp(PSTN trunk - concurrent-call cap reached, rejecting)
 __ALERT_BUSY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
-
-[from-pstn-trunk]
-exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)})
- same => n,Set(PSTN_START=${EPOCH})
- same => n,Dial(__PSTN_RING_DIAL__,20)
- same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
- same => n,System(printf '%s|in|%s|ring-group|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
- same => n,Hangup()
 EOF
-    sed -i "s/__PSTN_ALLOWED_REGEX__/${ALLOWED_REGEX}/g; s/__PSTN_MAX_CONCURRENT__/${MAX_CONCURRENT}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
-    # RING_DIAL is "PJSIP/a&PJSIP/b&..." — the literal "&" must be escaped in
-    # a sed replacement (bare "&" means "the matched text", same gotcha as
-    # NTFY_URL below), or every "&" gets replaced with the placeholder itself.
-    local _esc_ring_dial="${RING_DIAL//&/\\&}"
-    sed -i "s#__PSTN_RING_DIAL__#${_esc_ring_dial}#g" "$FILE"
+    sed -i "s/__PSTN_MAX_CONCURRENT__/${MAX_CONCURRENT}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
 
     if [[ -n "$NTFY_URL" ]]; then
         local _esc_url="${NTFY_URL//&/\\&}"
-        sed -i "s#__ALERT_DENY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - extension not authorized.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_TIER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - no PSTN permission.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_NUMBER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - number not pre-approved.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_BUSY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: concurrent-call cap reached - a call was rejected.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
     else
-        sed -i "/__ALERT_DENY_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
+        sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
     fi
+
+    # ── Inbound: [from-pstn-trunk], one unrolled block per ring-group member
+    cat >> "$FILE" << 'EOF'
+
+[from-pstn-trunk]
+exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)})
+ same => n,Set(PSTN_RING_LIST=)
+ same => n,Set(PSTN_RING_SEP=)
+EOF
+
+    local _ext
+    for _ext in $RING_EXTS; do
+        _pstn_ring_member_block "$_ext" >> "$FILE"
+    done
+
+    cat >> "$FILE" << 'EOF'
+ same => n,GotoIf($["${PSTN_RING_LIST}" = ""]?pstn_in_denied,1)
+ same => n,Set(PSTN_START=${EPOCH})
+ same => n,Dial(${PSTN_RING_LIST},20)
+ same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
+ same => n,System(printf '%s|in|%s|ring-group|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
+ same => n,Hangup()
+
+exten => pstn_in_denied,1,NoOp(Inbound PSTN call from ${CALLERID(num)} - no ring target authorized for this caller)
+__ALERT_DENY_INBOUND_LINE__
+ same => n,Hangup()
+EOF
+
+    if [[ -n "$NTFY_URL" ]]; then
+        local _esc_url2="${NTFY_URL//&/\\&}"
+        sed -i "s#__ALERT_DENY_INBOUND_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound call rejected - caller not approved for any ring target.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+    else
+        sed -i "/__ALERT_DENY_INBOUND_LINE__/d" "$FILE"
+    fi
+}
+
+# ── Shared: initial permission tiers (fresh install / explicit reset only —
+# "update in place" never calls this, matching how .env/firewall/Caddy config
+# are protected elsewhere in this repo; see file-level comment above) ──────
+# Args: FILE, space-separated FULL_EXTS, then "ext" "pipe|separated|numbers"
+# pairs for each restricted extension.
+_pstn_write_permissions_file() {
+    local FILE="$1" FULL_EXTS="$2"
+    shift 2
+    {
+        echo "; PSTN permission tiers — internal / restricted / full."
+        echo "; Read LIVE by the dialplan on every call (AST_CONFIG()) — no Asterisk"
+        echo "; restart needed when this changes. Edit here directly, via the Security"
+        echo "; Dashboard web UI's \"PSTN Trunk\" tab (if installed), or by re-running"
+        echo "; 'sudo ./setup.sh pstn-trunk' and choosing a FRESH reinstall (\"update in"
+        echo "; place\" leaves this file alone on purpose)."
+        echo "; Any extension not listed here is internal-only (no PSTN) by default —"
+        echo "; it can still call/receive other Asterisk extensions and join internal"
+        echo "; ring groups, just not the PSTN trunk."
+        echo ""
+        local _ext
+        for _ext in $FULL_EXTS; do
+            echo "[$_ext]"
+            echo "tier=full"
+            echo ""
+        done
+        while [[ $# -gt 0 ]]; do
+            _ext="$1"; local _nums="$2"
+            shift 2
+            echo "[$_ext]"
+            echo "tier=restricted"
+            echo "allowed_numbers=${_nums}"
+            echo ""
+        done
+    } > "$FILE"
+    chmod 664 "$FILE"
 }
 
 # ── Shared: periodic spend/volume checker (run hourly via cron) ────────────
@@ -251,31 +377,20 @@ EOF
     chmod 755 "$FILE"
 }
 
-# ── Shared: apply everything from a settings set (used by fresh + update) ──
+# ── Shared: structural settings only (used by fresh install AND update) ────
+# Does NOT touch pstn-permissions.conf — see the file-level comment above
+# for why that file is managed separately.
 _pstn_apply_settings() {
     local EA_DIR="$1" ASTERISK_DIR="$2"
-    local SERVER="$3" SERVER_IP="$4" DID="$5" ALLOWED_EXTS="$6" MAX_CONCURRENT="$7"
-    local RING_EXTS="$8" NTFY_URL="$9" RATE="${10}" MONTH_THRESHOLD="${11}" BURST_THRESHOLD="${12}"
-    local PROVIDER_NAME="${13}"
-
-    local ALLOWED_REGEX
-    if [[ -z "$ALLOWED_EXTS" ]]; then
-        ALLOWED_REGEX=".*"
-    else
-        ALLOWED_REGEX="$(echo "$ALLOWED_EXTS" | tr -s ' ' '|')"
-    fi
-
-    local RING_DIAL="" _ext
-    for _ext in $RING_EXTS; do
-        [[ -n "$RING_DIAL" ]] && RING_DIAL="${RING_DIAL}&"
-        RING_DIAL="${RING_DIAL}PJSIP/${_ext}"
-    done
+    local SERVER="$3" SERVER_IP="$4" DID="$5" MAX_CONCURRENT="$6"
+    local RING_EXTS="$7" NTFY_URL="$8" RATE="$9" MONTH_THRESHOLD="${10}" BURST_THRESHOLD="${11}"
+    local PROVIDER_NAME="${12}"
 
     _pstn_patch_vendor_files "$EA_DIR" || return 1
 
     mkdir -p "$ASTERISK_DIR"
     _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IP" "$DID"
-    _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$ALLOWED_REGEX" "$MAX_CONCURRENT" "$RING_DIAL" "$NTFY_URL"
+    _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$MAX_CONCURRENT" "$RING_EXTS" "$NTFY_URL"
     _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$NTFY_URL"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
     chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf"
@@ -285,7 +400,6 @@ PROVIDER_NAME=${PROVIDER_NAME}
 TRUNK_SERVER=${SERVER}
 TRUNK_SERVER_IP=${SERVER_IP}
 TRUNK_DID=${DID}
-PSTN_ALLOWED_EXTS=${ALLOWED_EXTS}
 MAX_CONCURRENT=${MAX_CONCURRENT}
 RING_EXTS=${RING_EXTS}
 NTFY_URL=${NTFY_URL}
@@ -308,41 +422,64 @@ CRON
 install_pstn-trunk() {
     require_docker || return 1
 
-    local EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
+    local EA_DIR="" ASTERISK_KIND=""
+    if [[ -f "$DOCKER_DIR/asterisk-digital-ocean/docker-compose.yml" ]]; then
+        EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
+        ASTERISK_KIND="asterisk-digital-ocean"
+    elif [[ -f "$DOCKER_DIR/asterisk/docker-compose.yml" ]]; then
+        EA_DIR="$DOCKER_DIR/asterisk"
+        ASTERISK_KIND="asterisk"
+    fi
+
     local ASTERISK_DIR="$EA_DIR/config/asterisk"
     local PJSIP_INCLUDE="$ASTERISK_DIR/pstn-trunk-pjsip.conf"
     local DIALPLAN_INCLUDE="$ASTERISK_DIR/pstn-trunk-dialplan.conf"
+    local PERMISSIONS_FILE="$ASTERISK_DIR/pstn-permissions.conf"
     local SETTINGS_FILE="$EA_DIR/.pstn-trunk.env"
+    local CONTAINER_NAME="easy-asterisk"
+    [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would require an existing asterisk-digital-ocean install at $EA_DIR"
-        echo "[DRY-RUN] Would prompt for: SIP provider name (default VoIP.ms), server/POP hostname,"
-        echo "[DRY-RUN]   DID, extensions allowed to dial out (blank=all), max concurrent calls (default 3),"
-        echo "[DRY-RUN]   extensions to ring inbound (space-separated, ring-group supported),"
+        echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
+        echo "[DRY-RUN] Would prompt for: SIP provider name (default VoIP.ms), server/POP hostname, DID,"
+        echo "[DRY-RUN]   full-PSTN extensions, restricted-PSTN extensions + their approved numbers,"
+        echo "[DRY-RUN]   max concurrent calls (default 3), inbound ring-group extensions,"
         echo "[DRY-RUN]   ntfy alert topic (optional), per-minute rate + monthly/hourly alert thresholds"
         echo "[DRY-RUN] Would resolve the server hostname to an IP for inbound call matching"
         echo "[DRY-RUN] Would patch vendor generator functions to #include the trunk config"
-        echo "[DRY-RUN] Would write $PJSIP_INCLUDE, $DIALPLAN_INCLUDE, and an hourly usage-alert script + cron.d entry"
-        echo "[DRY-RUN] Would offer 'update in place' (reads settings back from $SETTINGS_FILE) instead of a fresh install if already configured"
+        echo "[DRY-RUN] Would write pjsip/dialplan includes, pstn-permissions.conf (fresh install only),"
+        echo "[DRY-RUN]   and an hourly usage-alert script + cron.d entry"
+        echo "[DRY-RUN] Would offer 'update in place' (structural settings only — never touches"
+        echo "[DRY-RUN]   pstn-permissions.conf) instead of a fresh install if already configured"
         echo "[DRY-RUN] Would restart the asterisk container to apply"
         return 0
     fi
 
-    if [[ ! -f "$EA_DIR/docker-compose.yml" ]]; then
-        log_error "asterisk-digital-ocean isn't installed at $EA_DIR — install it first:"
-        log_error "  sudo ./setup.sh asterisk-digital-ocean"
-        log_error "This service adds a PSTN trunk on top of it; it doesn't stand alone."
+    if [[ -z "$EA_DIR" ]]; then
+        log_error "Neither asterisk-digital-ocean nor asterisk (LAN) is installed — install one first:"
+        log_error "  sudo ./setup.sh asterisk-digital-ocean     (recommended — public droplet, static IP)"
+        log_error "  sudo ./setup.sh asterisk                   (home/LAN — see the static-IP caveat below)"
+        log_error "This service adds a PSTN trunk on top of one of them; it doesn't stand alone."
         return 1
     fi
 
-    log_info "Configuring a SIP PSTN trunk for asterisk-digital-ocean (defaults to VoIP.ms)."
-    log_info "US-only outbound (NANP dialplan), a concurrent-call cap, role-based outbound permission,"
-    log_info "an inbound ring-group, and ntfy alerts on denied/rejected calls plus spend/volume checks."
+    if [[ "$ASTERISK_KIND" == "asterisk" ]]; then
+        echo ""
+        log_warning "Using the home/LAN asterisk install. IP authentication needs a STABLE public IP —"
+        log_warning "if this box is behind a dynamic home IP, your provider's IP allow-list goes stale"
+        log_warning "whenever your ISP rotates it, breaking calls until you update it there yourself."
+        log_warning "A static IP from your ISP avoids that; asterisk-digital-ocean sidesteps it entirely."
+    fi
+
+    log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (defaults to VoIP.ms)."
+    log_info "US-only outbound (NANP dialplan), a concurrent-call cap, per-extension permission"
+    log_info "tiers, an inbound ring-group, and ntfy alerts on denied/rejected calls plus"
+    log_info "spend/volume checks."
     echo ""
     log_warning "Before continuing, on your provider's side you should already have: created an"
     log_warning "account, funded and set up prepaid billing with auto-recharge OFF (VoIP.ms: Client"
     log_warning "Area -> Balance Management), ordered a DID with IP authentication pointed at this"
-    log_warning "droplet's public IP, and picked a server/POP. Also restrict outbound routing to"
+    log_warning "box's public IP, and picked a server/POP. Also restrict outbound routing to"
     log_warning "US/NANP on the provider's own side if it offers that — this dialplan is the second,"
     log_warning "independent layer, not a substitute for the first."
     log_warning "See docs/pstn-calling-voipms-plan.md for the full background."
@@ -359,12 +496,14 @@ install_pstn-trunk() {
                     # shellcheck disable=SC1090
                     source "$SETTINGS_FILE"
                     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
-                        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$PSTN_ALLOWED_EXTS" \
-                        "$MAX_CONCURRENT" "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
+                        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$MAX_CONCURRENT" \
+                        "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
                         "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
                         && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
+                    log_info "pstn-permissions.conf was NOT touched — edit it directly, via the Security"
+                    log_info "Dashboard, or choose FRESH reinstall to reset it."
                     return 0
                 else
                     log_warning "No $SETTINGS_FILE found (pre-dates this settings-file version) — falling back to a fresh install (every prompt below)."
@@ -375,6 +514,17 @@ install_pstn-trunk() {
                 return 0
                 ;;
             fresh)
+                if [[ -f "$PERMISSIONS_FILE" ]]; then
+                    log_warning "pstn-permissions.conf already exists and may have been edited since"
+                    log_warning "(directly, or via the Security Dashboard). A fresh reinstall OVERWRITES it"
+                    log_warning "with whatever you enter below."
+                    local _confirm_reset=""
+                    prompt_yn "Continue and reset permission tiers? (y/n):" "n" _confirm_reset
+                    if [[ ! "$_confirm_reset" =~ ^[Yy]$ ]]; then
+                        log_info "Cancelled — nothing changed."
+                        return 0
+                    fi
+                fi
                 log_info "Proceeding with a full fresh reinstall — every prompt below runs from scratch."
                 ;;
         esac
@@ -386,7 +536,7 @@ install_pstn-trunk() {
     prompt_text "SIP trunk provider name (for your reference/docs only):" "VoIP.ms" PROVIDER_NAME
 
     local TRUNK_SERVER=""
-    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms — pick the one closest to this droplet from your provider's server list):" "" TRUNK_SERVER
+    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms — pick the one closest to this box from your provider's server list):" "" TRUNK_SERVER
     if [[ -z "$TRUNK_SERVER" ]]; then
         log_error "A server hostname is required — aborting."
         return 1
@@ -412,17 +562,36 @@ install_pstn-trunk() {
         return 1
     fi
 
+    # ── Permission tiers ───────────────────────────────────────────────────
     echo ""
-    echo "  Role model: EVERY extension can always call/receive calls from other"
-    echo "  Asterisk extensions (internal intercom dialing is never restricted"
-    echo "  here). The setting below only controls PSTN (real phone number)"
-    echo "  access — extensions left out behave exactly as they do today."
-    local PSTN_ALLOWED_EXTS=""
-    prompt_text "Extensions allowed to dial PSTN numbers (space-separated, e.g. '1001 1002'; blank = every extension):" "" PSTN_ALLOWED_EXTS
-    if [[ -z "$PSTN_ALLOWED_EXTS" ]]; then
-        log_info "No restriction entered — every extension will be able to dial PSTN numbers."
-    else
-        log_info "Only these extensions may dial PSTN numbers: $PSTN_ALLOWED_EXTS"
+    echo "  Three tiers, per extension:"
+    echo "    internal   — call/receive other Asterisk extensions + internal ring"
+    echo "                 groups only. No PSTN at all. Default for anything not"
+    echo "                 listed below."
+    echo "    restricted — internal, PLUS call/receive ONLY pre-approved US numbers."
+    echo "    full       — internal, PLUS call/receive ANY US number."
+    echo "  These are managed LIVE after install (pstn-permissions.conf) — via the"
+    echo "  Security Dashboard web UI if installed, or by hand — with no restart or"
+    echo "  reinstall needed to change them later."
+    local FULL_EXTS=""
+    prompt_text "Full-PSTN extensions (space-separated, blank = none):" "" FULL_EXTS
+
+    local RESTRICTED_EXTS=""
+    prompt_text "Restricted-PSTN extensions (space-separated, blank = none):" "" RESTRICTED_EXTS
+
+    local RESTRICTED_ARGS=()
+    if [[ -n "$RESTRICTED_EXTS" ]]; then
+        local _ext _raw_nums _clean_nums
+        for _ext in $RESTRICTED_EXTS; do
+            prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567):" "" _raw_nums
+            _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
+            if [[ -z "$_clean_nums" ]]; then
+                log_warning "No valid 11-digit numbers entered for $_ext — it will be restricted with an EMPTY"
+                log_warning "approved list, meaning no PSTN number can currently reach/be reached by it until"
+                log_warning "you add some (via the Security Dashboard or by editing pstn-permissions.conf)."
+            fi
+            RESTRICTED_ARGS+=("$_ext" "$_clean_nums")
+        done
     fi
 
     local MAX_CONCURRENT=""
@@ -432,8 +601,10 @@ install_pstn-trunk() {
         MAX_CONCURRENT=3
     fi
 
+    local _suggested_ring
+    _suggested_ring="$(echo "$FULL_EXTS $RESTRICTED_EXTS" | xargs)"
     local RING_EXTS=""
-    prompt_text "Extensions to ring for inbound PSTN calls (space-separated — one extension, or several for a ring group):" "" RING_EXTS
+    prompt_text "Extensions to ring for inbound PSTN calls (space-separated — one, or several for a ring group; only full/restricted-tier members will actually ring):" "$_suggested_ring" RING_EXTS
     if [[ -z "$RING_EXTS" ]]; then
         log_error "At least one extension is required for inbound routing — aborting."
         return 1
@@ -441,7 +612,7 @@ install_pstn-trunk() {
 
     echo ""
     local WANT_NTFY=""
-    prompt_yn "Send an ntfy alert when a call is denied (unauthorized extension) or rejected (concurrency cap hit)? (y/n):" "y" WANT_NTFY
+    prompt_yn "Send an ntfy alert when a call is denied (permission tier/approved-number check failed) or rejected (concurrency cap hit)? (y/n):" "y" WANT_NTFY
     local NTFY_URL=""
     if [[ "$WANT_NTFY" =~ ^[Yy]$ ]]; then
         # Prefer a locally-installed ntfy's own base-url as the default, same
@@ -473,23 +644,26 @@ install_pstn-trunk() {
     prompt_text "  Alert if more than this many outbound calls happen in one hour:" "10" BURST_THRESHOLD
 
     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
-        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$PSTN_ALLOWED_EXTS" \
-        "$MAX_CONCURRENT" "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
+        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$MAX_CONCURRENT" \
+        "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
         "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
 
-    # No new firewall rules: asterisk-digital-ocean.sh already opens SIP
-    # (5060/5061) and RTP (10000-20000) to the internet, and providers' source
-    # IPs vary by POP/redundancy, so there's no single IP to scope this to
-    # even if narrowing it were otherwise worthwhile.
+    _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "${RESTRICTED_ARGS[@]}"
+    ensure_docker_dir_ownership "$ASTERISK_DIR"
 
-    # ── Docs (separate file — asterisk-digital-ocean already owns README.md
-    # in this same directory via write_readme, so don't overwrite it) ───────
+    # No new firewall rules: the base install already opens SIP (5060/5061)
+    # and RTP (10000-20000) to the internet, and providers' source IPs vary
+    # by POP/redundancy, so there's no single IP to scope this to even if
+    # narrowing it were otherwise worthwhile.
+
+    # ── Docs (separate file — the base install already owns README.md in
+    # this same directory via write_readme, so don't overwrite it) ─────────
     local DOC_FILE="$EA_DIR/README-pstn-trunk.md"
     cat > "$DOC_FILE" << MD
-# SIP PSTN trunk (add-on to asterisk-digital-ocean)
+# SIP PSTN trunk (add-on to $ASTERISK_KIND)
 
 US-only outbound PSTN calling over a SIP trunk (defaults to VoIP.ms, works
-with any IP-authenticated provider), role-based outbound permission, a
+with any IP-authenticated provider), per-extension permission tiers, a
 configurable concurrent-call cap, and an inbound ring-group. See
 \`docs/pstn-calling-voipms-plan.md\` in the repo for the full design
 background, cost estimate, and toll-fraud reasoning.
@@ -502,47 +676,63 @@ background, cost estimate, and toll-fraud reasoning.
 | Server/POP | ${TRUNK_SERVER} (${TRUNK_SERVER_IP}) |
 | DID | ${TRUNK_DID} |
 | Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all |
-| PSTN-allowed extensions | ${PSTN_ALLOWED_EXTS:-all extensions} |
+| Full-PSTN extensions | ${FULL_EXTS:-none} |
+| Restricted-PSTN extensions | ${RESTRICTED_EXTS:-none} |
 | Concurrency cap | ${MAX_CONCURRENT} simultaneous outbound calls |
-| Inbound rings | ${RING_EXTS} |
+| Inbound ring-group | ${RING_EXTS} |
 | ntfy alerts | ${NTFY_URL:-disabled} |
 | Estimated rate | \$${RATE_PER_MIN}/min |
 | Monthly spend alert threshold | \$${MONTH_THRESHOLD} |
 | Hourly burst alert threshold | ${BURST_THRESHOLD} calls/hour |
 
-## Role model
+## Permission tiers
 
 Every extension can always call and receive calls from other Asterisk
-extensions — that's unchanged and never gated. The PSTN-allowed list above
-only controls the two additional things a "PSTN-enabled" extension gets on
-top of that: dialing real phone numbers out, and being included in the
-inbound ring-group. Leaving the allow-list blank means every extension gets
-PSTN access too (the original default before roles existed).
+extensions, and join internal ring groups — that's unchanged and never
+gated by anything below. Three tiers control PSTN (real phone number)
+access specifically:
+
+- **internal** (default — anything not listed as full/restricted): no PSTN
+  at all, in or out.
+- **restricted**: can only call and be called by numbers on its own
+  pre-approved list.
+- **full**: can call/receive any US number.
+
+Stored in \`config/asterisk/pstn-permissions.conf\`, read **live** by the
+dialplan via Asterisk's \`AST_CONFIG()\` on every call — editing this file
+(by hand, or via the Security Dashboard's "PSTN Trunk" tab, if that service
+is installed) takes effect on the next call, no restart needed. Re-running
+this installer in "update" mode never touches this file — only a "fresh"
+reinstall (with confirmation) or the web UI change it, the same protection
+CLAUDE.md's update-mode convention gives \`.env\`/firewall/Caddy config
+elsewhere in this repo.
 
 ## How this survives Easy Asterisk's own regeneration
 
 Easy Asterisk rewrites \`pjsip.conf\` and \`extensions.conf\` from its own
 internal state (device list, network settings) rather than treating them as
-hand-edited files. Trunk/dialplan config here lives in two files of its own,
+hand-edited files. Trunk/dialplan config here lives in files of its own,
 \`#include\`'d from the generated files:
 
 - \`config/asterisk/pstn-trunk-pjsip.conf\` — the trunk's \`aor\`/\`identify\`/
   \`endpoint\` sections (IP-authenticated, no password stored).
 - \`config/asterisk/pstn-trunk-dialplan.conf\` — NANP-only outbound routing,
-  the outbound permission gate, the concurrency cap, ntfy alert hooks, and
-  the \`[from-pstn-trunk]\` inbound context.
+  the concurrency cap, ntfy alert hooks, and the \`[from-pstn-trunk]\` inbound
+  context. Reads permission tiers live from \`pstn-permissions.conf\` (above)
+  rather than baking them in, specifically so they can change without
+  touching this file.
 
 The \`#include\` lines themselves are patched into Easy Asterisk's *generator
-functions* (\`docker/entrypoint.sh\`, \`easy-asterisk.sh\`,
-\`easy-asterisk-v0.10.0.sh\`) so they get re-emitted every time those functions
-regenerate the config, instead of being wiped.
+functions* (\`docker/entrypoint.sh\`, \`easy-asterisk.sh\`, and its versioned
+copy) so they get re-emitted every time those functions regenerate the
+config, instead of being wiped.
 
-**Caveat:** if the base \`asterisk-digital-ocean\` service is ever updated
-independently (\`sudo ./setup.sh asterisk-digital-ocean\`, choosing "update in
-place" — that path re-copies fresh vendor files), this patch is wiped along
-with it. Re-run \`sudo ./setup.sh pstn-trunk\` afterward (update mode
-reapplies the patch and rewrites everything from \`.pstn-trunk.env\`, no
-re-prompting).
+**Caveat:** if the base $ASTERISK_KIND service is ever updated independently
+(\`sudo ./setup.sh $ASTERISK_KIND\`, choosing "update in place" — that path
+re-copies fresh vendor files), this patch is wiped along with it. Re-run
+\`sudo ./setup.sh pstn-trunk\` afterward (update mode reapplies the patch and
+rewrites structural settings from \`.pstn-trunk.env\`, no re-prompting, and
+without touching \`pstn-permissions.conf\`).
 
 ## Spend/volume alerts
 
@@ -559,27 +749,30 @@ comma-quoting). It sends an ntfy alert:
   calls/hour — this is the faster tripwire for a burst/abuse scenario,
   independent of whether it's crossed the monthly dollar threshold yet.
 
-Separately, denied calls (unauthorized extension) and rejected calls
-(concurrency cap hit) alert **immediately**, not on the hourly schedule —
-see the dialplan file's \`__ALERT_DENY_LINE__\`/\`__ALERT_BUSY_LINE__\` sites.
+Separately, denied calls (no permission / number not pre-approved) and
+rejected calls (concurrency cap hit) alert **immediately**, not on the
+hourly schedule.
 
 These are cost *estimates* (call count/duration × your entered rate), not
 real billing data — treat them as a safety net, not a substitute for
 checking your provider's own balance/usage dashboard.
 
-## Changing settings
+## Managing this from a web UI
 
-Re-run \`sudo ./setup.sh pstn-trunk\` and choose "reinstall in place" —
-current settings are read from \`.pstn-trunk.env\` and reapplied exactly,
-including regenerating the usage-alert script and cron entry. Choose "full
-install" instead to re-prompt for everything.
+If \`services/security-dashboard.sh\` is installed, its "PSTN Trunk" tab
+lists every known extension (parsed from \`pjsip.conf\`) with its current
+tier and approved-numbers list, editable live — no restart, no reinstall.
+Install/update it any time with \`sudo ./setup.sh security-dashboard\`; it
+auto-detects this install.
 
 ## Manual edits
 
 Don't hand-edit \`pstn-trunk-pjsip.conf\` / \`pstn-trunk-dialplan.conf\` /
 \`pstn-trunk-usage-alert.sh\` directly if you plan to re-run this installer
-later — it overwrites all three unconditionally from \`.pstn-trunk.env\`. For
-one-off testing, restart the container instead of running the installer:
+later — it overwrites all three unconditionally from \`.pstn-trunk.env\` on
+both fresh and update. \`pstn-permissions.conf\` is different — see
+"Permission tiers" above, it's safe to hand-edit any time. For one-off
+testing, restart the container instead of running the installer:
 
 \`\`\`bash
 docker compose -f $EA_DIR/docker-compose.yml restart asterisk
@@ -588,16 +781,17 @@ docker compose -f $EA_DIR/docker-compose.yml restart asterisk
 ## Verifying it's working
 
 \`\`\`bash
-docker exec -it easy-asterisk-do asterisk -rx "pjsip show endpoint pstn-trunk"
-docker exec -it easy-asterisk-do asterisk -rx "dialplan show intercom"
-docker exec -it easy-asterisk-do asterisk -rx "dialplan show from-pstn-trunk"
+docker exec -it $CONTAINER_NAME asterisk -rx "pjsip show endpoint pstn-trunk"
+docker exec -it $CONTAINER_NAME asterisk -rx "dialplan show intercom"
+docker exec -it $CONTAINER_NAME asterisk -rx "dialplan show from-pstn-trunk"
 tail -f $EA_DIR/logs/pstn-trunk-calls.log
 \`\`\`
 
-A PSTN-allowed device should be able to dial a 10-digit or 11-digit US
-number and reach the trunk; a non-allowed device should get a busy signal
-(and an ntfy alert, if enabled). A call to \`${TRUNK_DID}\` from outside
-should ring: ${RING_EXTS}.
+A full-tier device should be able to dial a 10-digit or 11-digit US number
+and reach the trunk; a restricted-tier device should only reach numbers on
+its approved list; an internal-tier device should get a busy signal (and an
+ntfy alert, if enabled). A call to \`${TRUNK_DID}\` from an approved/any US
+number (depending on tier) should ring: ${RING_EXTS}.
 MD
     chown "$ACTUAL_USER:$ACTUAL_USER" "$DOC_FILE" 2>/dev/null || true
 
@@ -617,12 +811,13 @@ MD
 
     echo ""
     log_success "PSTN trunk configured."
-    echo "  Provider:       $PROVIDER_NAME ($TRUNK_SERVER / $TRUNK_SERVER_IP)"
-    echo "  DID:            $TRUNK_DID"
-    echo "  Outbound:       US/NANP only, max $MAX_CONCURRENT concurrent calls"
-    echo "  PSTN-allowed:   ${PSTN_ALLOWED_EXTS:-all extensions}"
-    echo "  Inbound rings:  $RING_EXTS"
-    echo "  ntfy alerts:    ${NTFY_URL:-disabled}"
-    echo "  Docs:           $DOC_FILE"
+    echo "  Provider:              $PROVIDER_NAME ($TRUNK_SERVER / $TRUNK_SERVER_IP)"
+    echo "  DID:                   $TRUNK_DID"
+    echo "  Outbound:              US/NANP only, max $MAX_CONCURRENT concurrent calls"
+    echo "  Full-PSTN extensions:  ${FULL_EXTS:-none}"
+    echo "  Restricted extensions: ${RESTRICTED_EXTS:-none}"
+    echo "  Inbound ring-group:    $RING_EXTS"
+    echo "  ntfy alerts:           ${NTFY_URL:-disabled}"
+    echo "  Docs:                  $DOC_FILE"
     echo ""
 }

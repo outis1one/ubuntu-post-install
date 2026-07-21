@@ -69,27 +69,40 @@ register_service security-dashboard homelab "Security dashboard: Asterisk failed
 install_security-dashboard() {
     local APP_DIR="/opt/security-dashboard"
     local DASHBOARD_PORT=8092
-    local ASTERISK_LOG_DIR="$DOCKER_DIR/asterisk-digital-ocean/logs"
     local SVC_USER="secdash"
+
+    # Either Asterisk flavor works — prefer asterisk-digital-ocean if both
+    # happen to be installed, matching services/pstn-trunk.sh's own
+    # preference order for consistency.
+    local ASTERISK_EA_DIR=""
+    if [ -d "$DOCKER_DIR/asterisk-digital-ocean" ]; then
+        ASTERISK_EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
+    elif [ -d "$DOCKER_DIR/asterisk" ]; then
+        ASTERISK_EA_DIR="$DOCKER_DIR/asterisk"
+    fi
+    local ASTERISK_LOG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/logs}"
+    local ASTERISK_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/asterisk}"
+
     local ASTERISK_ADMIN_URL=""
-    if [ -f "$DOCKER_DIR/asterisk-digital-ocean/.env" ]; then
+    if [ -n "$ASTERISK_EA_DIR" ] && [ -f "$ASTERISK_EA_DIR/.env" ]; then
         local _ea_domain
-        _ea_domain="$(grep -E '^DOMAIN_NAME=' "$DOCKER_DIR/asterisk-digital-ocean/.env" | cut -d= -f2-)"
+        _ea_domain="$(grep -E '^DOMAIN_NAME=' "$ASTERISK_EA_DIR/.env" | cut -d= -f2-)"
         [ -n "$_ea_domain" ] && ASTERISK_ADMIN_URL="https://${_ea_domain}"
     fi
 
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ SECURITY DASHBOARD                                               │"
-    echo "│ Asterisk failed-connection log + CrowdSec decisions, one page.  │"
-    echo "│ Runs natively on the host (not Docker) so it can call cscli and │"
-    echo "│ read Asterisk's security log directly. Authelia-protected.      │"
+    echo "│ Asterisk failed-connection log + CrowdSec decisions + PSTN      │"
+    echo "│ trunk permissions, one page. Runs natively on the host (not     │"
+    echo "│ Docker) so it can call cscli and read Asterisk's files          │"
+    echo "│ directly. Authelia-protected.                                   │"
     echo "└─────────────────────────────────────────────────────────────────┘"
     echo ""
 
-    if [ ! -d "$ASTERISK_LOG_DIR" ]; then
-        log_warning "No asterisk-digital-ocean install detected at $ASTERISK_LOG_DIR."
-        log_warning "The Security Log tab will just be empty — CrowdSec's tab still works fine."
+    if [ -z "$ASTERISK_EA_DIR" ]; then
+        log_warning "No asterisk-digital-ocean or asterisk install detected."
+        log_warning "The Security Log and PSTN Trunk tabs will just be empty — CrowdSec's tab still works fine."
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -97,6 +110,7 @@ install_security-dashboard() {
         echo "[DRY-RUN] Would write $APP_DIR/app.py"
         echo "[DRY-RUN] Would write /etc/sudoers.d/security-dashboard (scoped cscli/systemctl only)"
         echo "[DRY-RUN] Would write a systemd unit and start it on 0.0.0.0:$DASHBOARD_PORT (firewalled via UFW, not interface binding)"
+        echo "[DRY-RUN] Would grant read/write access to the detected Asterisk config dir (for the PSTN Trunk tab)"
         echo "[DRY-RUN] Would configure Caddy + Authelia for a domain you'll be prompted for"
         return 0
     fi
@@ -112,9 +126,11 @@ install_security-dashboard() {
         }
         case "$MODE" in
             update)
-                log_info "Refreshing app code + sudoers rule (no config/domain changes)..."
+                log_info "Refreshing app code + sudoers rule + systemd unit (no Caddy/domain changes)..."
+                _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR"
                 _secdash_write_app "$APP_DIR"
                 _secdash_write_sudoers "$SVC_USER"
+                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
@@ -142,45 +158,14 @@ install_security-dashboard() {
         log_success "Created system user $SVC_USER"
     fi
 
-    # Read access to the Asterisk security log without running as root or the
-    # actual user — add secdash to the group that owns the log files instead.
-    if [ -d "$ASTERISK_LOG_DIR" ]; then
-        local _log_group
-        _log_group="$(stat -c '%G' "$ASTERISK_LOG_DIR" 2>/dev/null || echo "$ACTUAL_USER")"
-        usermod -aG "$_log_group" "$SVC_USER" 2>/dev/null || true
-        chmod 750 "$ASTERISK_LOG_DIR" 2>/dev/null || true
-    fi
+    _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR"
 
     mkdir -p "$APP_DIR"
     _secdash_write_app "$APP_DIR"
     chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
 
     _secdash_write_sudoers "$SVC_USER"
-
-    # ── systemd unit ──────────────────────────────────────────────────────────
-    cat > /etc/systemd/system/security-dashboard.service << SDSVC
-[Unit]
-Description=Security dashboard (Asterisk security log + CrowdSec decisions)
-After=network.target
-
-[Service]
-Type=simple
-User=$SVC_USER
-Group=$SVC_USER
-Environment=DASHBOARD_PORT=$DASHBOARD_PORT
-Environment=ASTERISK_LOG=$ASTERISK_LOG_DIR/full
-Environment=ASTERISK_ADMIN_URL=$ASTERISK_ADMIN_URL
-ExecStart=/usr/bin/python3 $APP_DIR/app.py
-Restart=on-failure
-RestartSec=3
-NoNewPrivileges=false
-ProtectSystem=strict
-ReadOnlyPaths=$ASTERISK_LOG_DIR
-ReadWritePaths=/etc/crowdsec/scenarios
-
-[Install]
-WantedBy=multi-user.target
-SDSVC
+    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
 
     systemctl daemon-reload
     systemctl enable security-dashboard >/dev/null 2>&1
@@ -221,6 +206,12 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
+- **PSTN Trunk** (only if \`services/pstn-trunk.sh\` is installed) — every
+  known extension (parsed from \`pjsip.conf\`) with its current permission
+  tier (internal / restricted / full) and, for restricted, its approved
+  numbers, editable live — no Asterisk restart, no reinstall. Writes
+  directly to \`pstn-permissions.conf\`, which the dialplan reads fresh on
+  every call.
 - Link to the Asterisk web admin itself (doesn't embed it, just links out).
 
 ## Manage
@@ -255,6 +246,77 @@ README_MD
     echo "  Local access: http://localhost:$DASHBOARD_PORT"
     echo "  README:       $APP_DIR/README.md"
     echo ""
+}
+
+# Grants secdash read/write access to wherever Asterisk's config lives
+# without running the dashboard as root or the actual user — added to the
+# group that already owns those directories (ensure_docker_dir_ownership
+# elsewhere in this repo sets both owner AND group to ACTUAL_USER, so the log
+# dir and config dir normally share one group already; handled separately
+# anyway in case that ever changes). Separate function, called from both
+# "update" and fresh-install, so a PSTN trunk installed *after* this
+# dashboard (or an asterisk-digital-ocean/asterisk swap) reaches an existing
+# install on its next update instead of silently only applying to new ones.
+_secdash_grant_asterisk_access() {
+    local _svc_user="$1" _log_dir="$2" _config_dir="$3"
+    local _dir
+    for _dir in "$_log_dir" "$_config_dir"; do
+        [ -n "$_dir" ] && [ -d "$_dir" ] || continue
+        local _group
+        _group="$(stat -c '%G' "$_dir" 2>/dev/null || echo "$ACTUAL_USER")"
+        usermod -aG "$_group" "$_svc_user" 2>/dev/null || true
+        chmod 750 "$_dir" 2>/dev/null || true
+    done
+    # pstn-permissions.conf specifically needs group WRITE (750 above is
+    # read+execute for the group, not write) — the file itself is written
+    # group-writable (664) by services/pstn-trunk.sh, but the containing
+    # directory also needs the group execute+write bit for a new file save
+    # (configparser writes a fresh temp file then renames it into place) to
+    # succeed. 770 only on the config dir, not the log dir (no reason for
+    # secdash to ever create files in the log dir).
+    if [ -n "$_config_dir" ] && [ -d "$_config_dir" ]; then
+        chmod 770 "$_config_dir" 2>/dev/null || true
+    fi
+}
+
+# Systemd unit — separate function so "update" mode can refresh it too
+# (Environment= vars and ReadWritePaths depend on which Asterisk flavor is
+# detected, which can change between installs — e.g. a PSTN trunk or a
+# different Asterisk flavor installed after this dashboard's first setup).
+# ProtectSystem=strict makes the whole filesystem read-only for this unit
+# except the paths explicitly listed below, regardless of Unix permissions —
+# both layers (this AND the group access above) need to agree, or writes
+# fail even when Unix permissions alone would have allowed them.
+_secdash_write_systemd_unit() {
+    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _admin_url="$6"
+    local _read_only_paths="" _read_write_paths="/etc/crowdsec/scenarios"
+    [ -n "$_log_dir" ] && _read_only_paths="$_log_dir"
+    [ -n "$_config_dir" ] && _read_write_paths="$_read_write_paths $_config_dir"
+
+    cat > /etc/systemd/system/security-dashboard.service << SDSVC
+[Unit]
+Description=Security dashboard (Asterisk security log + CrowdSec decisions + PSTN trunk permissions)
+After=network.target
+
+[Service]
+Type=simple
+User=$_svc_user
+Group=$_svc_user
+Environment=DASHBOARD_PORT=$_port
+Environment=ASTERISK_LOG=${_log_dir:+$_log_dir/full}
+Environment=ASTERISK_CONFIG_DIR=$_config_dir
+Environment=ASTERISK_ADMIN_URL=$_admin_url
+ExecStart=/usr/bin/python3 $_app_dir/app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false
+ProtectSystem=strict
+ReadOnlyPaths=$_read_only_paths
+ReadWritePaths=$_read_write_paths
+
+[Install]
+WantedBy=multi-user.target
+SDSVC
 }
 
 # Scoped sudo — only the exact commands the app needs, nothing else. Numeric-
@@ -473,6 +535,7 @@ _secdash_write_app() {
 Stdlib only, deliberately — this runs on a small droplet alongside Asterisk,
 Caddy, and CrowdSec, and shouldn't add a framework's worth of RAM overhead.
 """
+import configparser
 import json
 import os
 import re
@@ -482,6 +545,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("DASHBOARD_PORT", "8092"))
 ASTERISK_LOG = os.environ.get("ASTERISK_LOG", "")
 ASTERISK_ADMIN_URL = os.environ.get("ASTERISK_ADMIN_URL", "")
+ASTERISK_CONFIG_DIR = os.environ.get("ASTERISK_CONFIG_DIR", "")
 ASN_SCENARIO_FILES = [
     "/etc/crowdsec/scenarios/local-asterisk_bf.yaml",
     "/etc/crowdsec/scenarios/local-asterisk_user_enum.yaml",
@@ -493,6 +557,11 @@ ASN_FILTER_RE = re.compile(r"ASNNumber in \[([^\]]*)\]\)")
 ID_RE = re.compile(r"^\d+$")
 ASN_RE = re.compile(r"^\d+$")
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+DEVICE_MARKER_RE = re.compile(r"^; === Device: (.+?)(?:\s*\[AA:(?:yes|no)\])?\s*\((.+?)\)\s*===\s*$")
+EXT_HEADER_RE = re.compile(r"^\[(\d+)\]")
+EXTEN_RE = re.compile(r"^\d+$")
+TIER_RE = re.compile(r"^(internal|restricted|full)$")
+NUMBER_RE = re.compile(r"^\d{11}$")
 
 
 def parse_security_log(limit=200):
@@ -711,6 +780,130 @@ def ban_asn(asn):
     }
 
 
+def list_extensions():
+    """Extension numbers + display names, parsed from pjsip.conf the same
+    way Easy Asterisk's own rebuild_dialplan() finds them: a
+    "; === Device: NAME (category) ===" comment immediately followed (once
+    other lines are skipped) by that device's "[extnum]" section header.
+    Read-only, best-effort — an unparseable/missing file just means an empty
+    list, not an error, same convention as parse_security_log."""
+    if not ASTERISK_CONFIG_DIR:
+        return []
+    path = os.path.join(ASTERISK_CONFIG_DIR, "pjsip.conf")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    extensions = []
+    pending_name = None
+    for line in lines:
+        line = line.rstrip("\n")
+        m = DEVICE_MARKER_RE.match(line)
+        if m:
+            pending_name = m.group(1).strip()
+            continue
+        m = EXT_HEADER_RE.match(line)
+        if m and pending_name is not None:
+            extensions.append({"ext": m.group(1), "name": pending_name})
+            pending_name = None
+    return extensions
+
+
+def _permissions_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "pstn-permissions.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _read_permissions_cp():
+    cp = configparser.ConfigParser(delimiters=("=",))
+    path = _permissions_path()
+    if path and os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def get_all_permissions():
+    """{ext: {"tier": ..., "allowed_numbers": "num|num|..."}} for every
+    extension with a non-internal tier on record. Extensions with no section
+    are implicitly "internal" — the dialplan's AST_CONFIG() lookup treats a
+    missing section as empty/denied the same way, so there's nothing to
+    return for them here; the UI fills in "internal" as the default for any
+    known extension (from list_extensions()) not present in this dict."""
+    cp = _read_permissions_cp()
+    result = {}
+    for section in cp.sections():
+        if not EXTEN_RE.match(section):
+            continue
+        result[section] = {
+            "tier": cp.get(section, "tier", fallback="internal"),
+            "allowed_numbers": cp.get(section, "allowed_numbers", fallback=""),
+        }
+    return result
+
+
+def write_permission(ext, tier, numbers_raw):
+    """Saves one extension's tier + (for restricted) approved-number list.
+    Numbers are normalized to a pipe-separated list of 11-digit US numbers —
+    pipe, not comma, because the dialplan uses this value directly as a
+    REGEX() alternation pattern (see services/pstn-trunk.sh's file-level
+    comment on why the untrusted call data is always the string being
+    tested, never interpolated into the pattern side)."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    ext = str(ext).strip()
+    if not EXTEN_RE.match(ext):
+        return False, "Invalid extension"
+    if not TIER_RE.match(tier):
+        return False, "Invalid tier"
+
+    tokens = re.split(r"[,\s|]+", (numbers_raw or "").strip())
+    clean_numbers = [t for t in tokens if NUMBER_RE.match(t)]
+    numbers = "|".join(clean_numbers)
+
+    cp = _read_permissions_cp()
+    if tier == "internal":
+        if cp.has_section(ext):
+            cp.remove_section(ext)
+    else:
+        if not cp.has_section(ext):
+            cp.add_section(ext)
+        cp.set(ext, "tier", tier)
+        if tier == "restricted":
+            cp.set(ext, "allowed_numbers", numbers)
+        elif cp.has_option(ext, "allowed_numbers"):
+            cp.remove_option(ext, "allowed_numbers")
+
+    path = _permissions_path()
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(
+                "; PSTN permission tiers - internal / restricted / full.\n"
+                "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
+                "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
+                "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
+                "; never touches this file, only a fresh reinstall does.\n"
+                "; Any extension not listed here is internal-only (no PSTN) by default.\n\n"
+            )
+            cp.write(f)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, "Failed writing %s: %s" % (path, e)
+
+    if tier == "restricted" and not clean_numbers:
+        return True, "Saved as restricted with an EMPTY approved list — no PSTN number can reach/be reached by it yet."
+    return True, "Saved"
+
+
 INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
 <title>Security Dashboard</title>
@@ -744,6 +937,7 @@ INDEX_HTML = """<!doctype html>
   <nav>
     <button class="tab-btn active" data-tab="security">Security Log</button>
     <button class="tab-btn" data-tab="crowdsec">CrowdSec</button>
+    <button class="tab-btn" data-tab="pstn">PSTN Trunk</button>
   </nav>
   <a id="admin-link" href="#" target="_blank" style="display:none">Asterisk Web Admin &#8599;</a>
 </header>
@@ -770,16 +964,30 @@ INDEX_HTML = """<!doctype html>
       <div id="msg"></div>
     </div>
   </div>
+  <div id="tab-pstn" style="display:none">
+    <div class="card">
+      <h3 style="margin-top:0">PSTN permission tiers</h3>
+      <p class="muted">
+        <b>internal</b> — no PSTN, can still call/receive other extensions and internal ring groups.
+        <b>restricted</b> — internal, plus only pre-approved US numbers.
+        <b>full</b> — internal, plus any US number.
+        Changes apply live, on the next call — no Asterisk restart needed.
+      </p>
+      <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+  </div>
 </main>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
+const TABS = ["security", "crowdsec", "pstn"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
-    document.getElementById("tab-security").style.display = btn.dataset.tab === "security" ? "" : "none";
-    document.getElementById("tab-crowdsec").style.display = btn.dataset.tab === "crowdsec" ? "" : "none";
+    TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
+    if (btn.dataset.tab === "pstn") loadPstnPermissions();
   });
 });
 
@@ -880,6 +1088,49 @@ async function banAsn(asn) {
   loadDecisions();
 }
 
+async function loadPstnPermissions() {
+  const res = await fetch("/api/pstn-permissions");
+  const data = await res.json();
+  const exts = data.extensions || [];
+  const tbody = document.querySelector("#pstn-table tbody");
+  if (!exts.length) {
+    tbody.innerHTML = '<tr><td colspan=5 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
+    return;
+  }
+  tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
+    <td>${esc(e.ext)}</td>
+    <td>${esc(e.name)}</td>
+    <td>
+      <select class="pstn-tier">
+        <option value="internal" ${e.tier === "internal" ? "selected" : ""}>internal</option>
+        <option value="restricted" ${e.tier === "restricted" ? "selected" : ""}>restricted</option>
+        <option value="full" ${e.tier === "full" ? "selected" : ""}>full</option>
+      </select>
+    </td>
+    <td><input type="text" class="pstn-numbers" value="${esc(e.allowed_numbers)}" placeholder="15551234567,15559876543" ${e.tier === "restricted" ? "" : "disabled"}></td>
+    <td><button class="action" onclick="savePstnPermission('${esc(e.ext)}')">Save</button></td>
+  </tr>`).join("");
+
+  tbody.querySelectorAll("tr").forEach(row => {
+    const tierSel = row.querySelector(".pstn-tier");
+    const numsInput = row.querySelector(".pstn-numbers");
+    tierSel.addEventListener("change", () => { numsInput.disabled = tierSel.value !== "restricted"; });
+  });
+}
+
+async function savePstnPermission(ext) {
+  const row = document.querySelector(`#pstn-table tr[data-ext="${ext}"]`);
+  const tier = row.querySelector(".pstn-tier").value;
+  const numbers = row.querySelector(".pstn-numbers").value;
+  const res = await fetch("/api/pstn-permissions", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ext: ext, tier: tier, allowed_numbers: numbers}),
+  });
+  const data = await res.json();
+  document.getElementById("pstn-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
+  loadPstnPermissions();
+}
+
 const adminUrl = "__ASTERISK_ADMIN_URL__";
 if (adminUrl) {
   const link = document.getElementById("admin-link");
@@ -928,6 +1179,14 @@ class Handler(BaseHTTPRequestHandler):
             for asn, name in get_alert_history_names().items():
                 known_names.setdefault(asn, name)
             self._json({"asns": get_asn_exempt(known_names)})
+        elif self.path == "/api/pstn-permissions":
+            perms = get_all_permissions()
+            extensions = []
+            for e in list_extensions():
+                p = perms.get(e["ext"], {"tier": "internal", "allowed_numbers": ""})
+                extensions.append({"ext": e["ext"], "name": e["name"],
+                                    "tier": p["tier"], "allowed_numbers": p["allowed_numbers"]})
+            self._json({"extensions": extensions})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -947,6 +1206,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/asn-exempt/ban":
             self._json(ban_asn(payload.get("asn", "")))
+        elif self.path == "/api/pstn-permissions":
+            ok, message = write_permission(
+                payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", "")
+            )
+            self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)
 
