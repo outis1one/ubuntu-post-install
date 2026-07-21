@@ -1,9 +1,15 @@
 # PSTN Calling via VoIP.ms — Planning Notes
 
 Research and decisions from a design discussion, saved here so the work can
-be picked up in a fresh chat without re-deriving the background. **Nothing
-has been implemented yet** — this is prep for a future `services/*.sh`
-addition on top of `asterisk-digital-ocean`.
+be picked up in a fresh chat without re-deriving the background.
+
+**Implemented** — see `services/voipms-trunk.sh` (run `sudo ./setup.sh
+voipms-trunk` after `asterisk-digital-ocean` is installed). IP-authenticated
+trunk, US/NANP-only outbound dialplan, 3-concurrent-call cap, inbound to one
+extension. That file's own header comment explains how it survives Easy
+Asterisk's config regeneration (an architectural wrinkle discovered while
+implementing this — worth reading before touching either file). The
+outbound spend/volume alert mentioned below is still not implemented.
 
 ## Decision so far
 - **Provider: VoIP.ms.** Chosen for its prepaid-balance model: turn off
@@ -67,33 +73,38 @@ parallel and draining the whole balance (e.g. $15 balance ÷ $0.01/min =
 1,500 minutes total, which 20 concurrent legs could burn through in under
 an hour). The prepaid-balance-off-auto-recharge layer bounds the *dollar*
 ceiling; only a concurrent-call cap bounds the *speed* of a breach. Treat
-the per-extension concurrent-call cap and spend/volume alert below as
-required before funding a live trunk, not optional hardening.
+the concurrent-call cap and spend/volume alert below as required before
+funding a live trunk, not optional hardening.
+
+**Implemented:** the concurrent-call cap in `services/voipms-trunk.sh` is a
+*global* cap (max 3 outbound legs total via the trunk, via
+`GROUP()`/`GROUP_COUNT()` in the dialplan, shared across all extensions) —
+not per-extension. That was the explicit ask when this got built; a
+per-extension cap layered on top is still a possible future refinement, not
+done. The spend/volume alert is still not implemented.
 
 ## What it takes technically (asterisk-digital-ocean)
-- A PJSIP trunk to VoIP.ms: `endpoint` / `aor` / `auth` / `identify`
-  sections in the pjsip config, using either IP authentication or SIP
-  registration — VoIP.ms supports both. IP auth is simpler for a droplet
-  (it has a static IP already) and avoids storing a SIP password in the
-  config at all — worth confirming with VoIP.ms which they actually
-  recommend before choosing.
-- An outbound dialplan route matching US numbers only, e.g. `_1NXXNXXXXX`
-  (11-digit NANP with leading 1) or `_NXXNXXXXX`, depending on how numbers
-  get dialed from the existing extensions, routed to the VoIP.ms trunk. No
-  catch-all `_X.` pattern — an explicit NANP pattern is itself a hard block
-  on non-US destinations at the dialplan level.
+- A PJSIP trunk to VoIP.ms: `endpoint` / `aor` / `identify` sections in the
+  pjsip config. **Implemented with IP authentication** (no `auth` section,
+  no SIP password stored anywhere) — see `services/voipms-trunk.sh`.
+- An outbound dialplan route matching US numbers only — **implemented**:
+  `_1NXXNXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXX` (10-digit,
+  auto-prefixed with 1), both routed to the VoIP.ms trunk. No catch-all
+  `_X.` pattern.
 - VoIP.ms-specific setup that isn't scriptable (user does this manually):
   create the account, order a DID (inbound is wanted — see above), decide
   pay-per-minute vs. unlimited DID plan and whether to add E911, pick a
   VoIP.ms POP/server (affects the trunk hostname), fund the prepaid balance
-  ($15 minimum), turn off auto-recharge.
-- Defense-in-depth to design alongside the trunk (not yet designed):
-  - Per-extension concurrent-call cap in the dialplan (`GROUP()` /
-    `GROUP_COUNT()`) so one compromised extension can't open dozens of
-    simultaneous outbound legs at once.
-  - A simple outbound call-count/spend alert — could live in the existing
-    `security-dashboard` service (see `services/security-dashboard.sh`) or
-    as a separate CDR-based check. Not designed yet.
+  ($15 minimum), turn off auto-recharge. `services/voipms-trunk.sh` prompts
+  for the POP hostname, DID, and a ring extension for inbound at install time.
+- Defense-in-depth alongside the trunk:
+  - **Implemented:** a global concurrent-call cap in the dialplan
+    (`GROUP()`/`GROUP_COUNT()`, max 3 outbound legs via the trunk at once)
+    so a compromised extension can't open dozens of simultaneous outbound
+    legs. Global, not per-extension — see the note above.
+  - **Not implemented:** a simple outbound call-count/spend alert — could
+    live in the existing `security-dashboard` service (see
+    `services/security-dashboard.sh`) or as a separate CDR-based check.
   - Worth being explicit that CrowdSec's existing `asterisk_bf` /
     `asterisk_user_enum` scenarios (see `services/crowdsec.sh`) cover
     registration brute-force, which is a *different* threat model from a
@@ -111,16 +122,21 @@ required before funding a live trunk, not optional hardening.
   across the space, VoIP.ms included.
 
 ## Open items for whoever picks this up next
-1. Decide: new `services/voipms-trunk.sh`, or an optional trunk section
-   added directly to `services/asterisk-digital-ocean.sh`? Leaning toward a
-   separate service file so trunk config isn't forced on installs that
-   don't want PSTN calling, matching this repo's one-feature-per-file
-   convention (see CLAUDE.md).
-2. IP auth vs. registration — confirm which VoIP.ms recommends for a single
-   fixed-IP droplet.
-3. Exact NANP dial pattern(s) and any prefix-stripping VoIP.ms requires.
-4. Inbound is decided (wanted) — still need to pick pay-per-minute vs.
-   unlimited DID plan based on real expected volume, and decide on E911.
-5. Design the concurrent-call cap and any spend/volume alerting mentioned
-   above — treat as required before funding a live trunk, not optional
-   (see toll-fraud nuance above: NANP-only bounds cost/min, not burn speed).
+1. ~~Decide: new `services/voipms-trunk.sh`...~~ Done — separate service file.
+2. ~~IP auth vs. registration~~ Done — IP authentication, no password stored.
+3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`.
+4. ~~Inbound~~ Done — rings one extension, prompted at install time. Still
+   unresolved: pick pay-per-minute vs. unlimited DID plan on VoIP.ms's side
+   based on real expected volume, and decide on E911 (see cost estimate).
+5. ~~Concurrent-call cap~~ Done — global 3-call cap. Still not implemented:
+   the spend/volume alert (security-dashboard integration or CDR-based
+   check) — treat as still-required before fully trusting this against a
+   sustained breach, not optional (see toll-fraud nuance above: the NANP
+   restriction + call cap bound cost/min and burn speed, but nothing here
+   yet notices a breach in progress or alerts on unusual volume).
+6. Verify against a live VoIP.ms account: auto-recharge-off behavior at
+   sign-up, and that the chosen POP server's actual source IP for inbound
+   calls matches what `services/voipms-trunk.sh` resolved via DNS at install
+   time (VoIP.ms's docs mention some redundancy/failover between servers —
+   if inbound calls ever stop matching the `identify` section, this is the
+   first thing to check).
