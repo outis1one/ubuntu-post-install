@@ -185,6 +185,85 @@ labels:
         else
             echo "  ✓ Asterisk acquisition already exists"
         fi
+
+        # ── 5c. Optional: exempt specific carrier ASNs from Asterisk
+        # brute-force bans only (SSH/web/geo protection stays normal). Confirmed
+        # live: a phone on a CGNAT mobile/satellite carrier (Starlink, T-Mobile
+        # home internet) shares one public IP across many customers and rotates
+        # it — a device roaming WiFi<->mobile can get banned for someone else's
+        # brute-force attempt on that same shared IP, or for its own
+        # re-registration burst looking like one. This forks
+        # crowdsecurity/asterisk_bf and crowdsecurity/asterisk_user_enum
+        # locally with an ASN exclusion added to their filter, then disables
+        # the hub originals so there's no double-processing of the same events.
+        echo ""
+        local ASN_EXEMPT=""
+        prompt_yn "Exempt specific carrier ASNs from Asterisk brute-force bans only? (y/n):" "n" ASN_EXEMPT
+        if [ "$ASN_EXEMPT" = "y" ] || [ "$ASN_EXEMPT" = "Y" ]; then
+            sudo cscli collections install crowdsecurity/geoip-enrich 2>/dev/null || true
+            echo "  ASNs observed live: T-Mobile 21928, Starlink 14593. A carrier can operate"
+            echo "  more than one ASN — if the same carrier bans you again later under a"
+            echo "  different number, check the AS column in 'cscli decisions list' and add it."
+            local ASN_LIST=""
+            prompt_text "  ASN numbers to exempt, space-separated:" "21928 14593" ASN_LIST
+            if [ -n "$ASN_LIST" ]; then
+                local _asn_expr
+                _asn_expr="$(printf "%s, " $ASN_LIST)"
+                _asn_expr="${_asn_expr%, }"
+
+                sudo mkdir -p /etc/crowdsec/scenarios
+                sudo tee /etc/crowdsec/scenarios/local-asterisk_bf.yaml > /dev/null << ASTBF
+type: leaky
+name: local/asterisk_bf
+description: "Detect Asterisk user bruteforce (ASN-exempt fork of crowdsecurity/asterisk_bf)"
+filter: "evt.Meta.log_type == 'asterisk_failed_auth' && !(evt.Enriched.ASNNumber in [${_asn_expr}])"
+groupby: evt.Meta.source_ip
+leakspeed: 10s
+capacity: 5
+blackhole: 1m
+labels:
+  service: asterisk
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  behavior: "sip:bruteforce"
+  label: "Asterisk Bruteforce"
+  remediation: true
+ASTBF
+
+                sudo tee /etc/crowdsec/scenarios/local-asterisk_user_enum.yaml > /dev/null << ASTENUM
+type: leaky
+name: local/asterisk_user_enum
+description: "Detect Asterisk user enumeration bruteforce (ASN-exempt fork of crowdsecurity/asterisk_user_enum)"
+filter: "evt.Meta.log_type == 'asterisk_failed_auth' && !(evt.Enriched.ASNNumber in [${_asn_expr}])"
+groupby: evt.Meta.source_ip
+distinct: evt.Meta.target_user
+leakspeed: 10s
+capacity: 5
+blackhole: 1m
+labels:
+  service: asterisk
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1087
+    - attack.T1589.001
+    - attack.T1110
+  behavior: "sip:bruteforce"
+  label: "Asterisk User Enumeration"
+  remediation: true
+ASTENUM
+
+                # Disable the hub originals so they don't double-process the
+                # same events alongside the ASN-exempt forks written above.
+                sudo cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum 2>/dev/null || true
+                echo "  ✓ Wrote ASN-exempt local forks; disabled the hub originals"
+                echo "  ℹ Exempted ASNs: $ASN_LIST — SSH/web/geo-allowlist scenarios are unaffected"
+                echo "  ℹ Edit /etc/crowdsec/scenarios/local-asterisk_*.yaml to add/remove ASNs later"
+                echo "    (then: sudo systemctl restart crowdsec)"
+            fi
+        fi
     fi
 
     # ── 6. Geo-blocking + reputation (the capability fail2ban/Authelia lack) ─
@@ -457,6 +536,19 @@ sudo cscli collections list             # installed detection collections
   list directly in that file, then `sudo systemctl restart crowdsec`. This
   can block Let's Encrypt's out-of-region ACME validation checks; if a cert
   renewal fails mysteriously, check here first.
+- ASN-exempt Asterisk brute-force scenarios (if enabled, asterisk-digital-ocean
+  only): `/etc/crowdsec/scenarios/local-asterisk_bf.yaml` and
+  `local-asterisk_user_enum.yaml` — local forks of the stock hub scenarios with
+  specific carrier ASNs excluded from their filter (the hub originals get
+  disabled so events aren't double-processed). Exists because CGNAT mobile/
+  satellite carriers (Starlink, T-Mobile home internet) share one public IP
+  across many customers, so a phone roaming WiFi↔mobile can get banned for
+  someone else's brute-force attempt on that same shared IP. SSH, web, and the
+  geo-allowlist are all unaffected — this only loosens Asterisk auth-failure
+  detection for the listed ASNs. Edit the `filter:` line in both files to
+  add/remove ASNs, then `sudo systemctl restart crowdsec`. Check the AS column
+  in `cscli decisions list` if the same carrier bans you again under a
+  different ASN later.
 
 ## Service control
 
