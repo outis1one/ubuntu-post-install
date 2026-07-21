@@ -83,6 +83,7 @@ is_installed() {
         base) command -v ncdu >/dev/null 2>&1 ;;
         glow) command -v glow >/dev/null 2>&1 ;;
         crowdsec) command -v cscli >/dev/null 2>&1 ;;
+        security-dashboard) [ -f /opt/security-dashboard/app.py ] ;;
         kdeconnect) command -v kdeconnect >/dev/null 2>&1 ;;
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
