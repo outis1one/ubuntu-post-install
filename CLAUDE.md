@@ -17,7 +17,12 @@ checklist per group, and calls `install_<name>()` for each selected item.
 
 1. Create `services/<name>.sh` (kebab-case filename)
 2. Call `register_service` at the top of the file
-3. Define `install_<name>()` (hyphens → underscores in function name)
+3. Define `install_<name>()` — keep hyphens **literal** in the function name
+   (`install_asterisk-digital-ocean`, not `install_asterisk_digital_ocean`).
+   `setup.sh`'s dispatcher calls `install_${name}` with no hyphen→underscore
+   conversion, so the function name must match the service name exactly.
+   Confirmed live: a mismatched underscore here produces
+   `Service 'x' has no install_x` at runtime, not a load-time error.
 
 That's it. The menu picks it up on the next run.
 

@@ -66,7 +66,7 @@ fi
 
 register_service security-dashboard homelab "Security dashboard: Asterisk failed-connections + CrowdSec bans (Authelia-protected)" 8092
 
-install_security_dashboard() {
+install_security-dashboard() {
     local APP_DIR="/opt/security-dashboard"
     local DASHBOARD_PORT=8092
     local ASTERISK_LOG_DIR="$DOCKER_DIR/asterisk-digital-ocean/logs"
@@ -682,4 +682,4 @@ if __name__ == "__main__":
 PYAPP
 }
 
-[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_security_dashboard
+[[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_security-dashboard
