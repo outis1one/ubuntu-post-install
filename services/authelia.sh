@@ -206,13 +206,29 @@ install_authelia() {
 
     # Don't clobber an existing install (it would regenerate secrets and break sessions).
     if [ -f "$AUTHELIA_DIR/docker-compose.yml" ]; then
-        local RECONF=""
-        echo "  ⚠ Authelia already exists at $AUTHELIA_DIR (secrets/users would be regenerated)."
-        prompt_yn "  Reconfigure from scratch? (y/n):" "n" RECONF
-        if [ "$RECONF" != "y" ] && [ "$RECONF" != "Y" ]; then
-            echo "  Keeping existing Authelia. (Edit config/users.yml then: cd $AUTHELIA_DIR && docker compose restart authelia)"
-            return 0
-        fi
+        echo "  ⚠ Authelia already exists at $AUTHELIA_DIR."
+        echo ""
+        echo "    1) Add another protected domain to this instance (non-destructive —"
+        echo "       one Authelia+Redis, multiple independent apex domains/logins)"
+        echo "    2) Reconfigure from scratch (regenerates secrets/users — breaks"
+        echo "       existing sessions for every domain already on this instance)"
+        echo "    3) Leave as-is"
+        echo ""
+        local EXISTING_CHOICE=""
+        prompt_text "  Choice [1/2/3]:" "3" EXISTING_CHOICE
+        case "$EXISTING_CHOICE" in
+            1)
+                add_authelia_domain
+                return 0
+                ;;
+            2)
+                : # fall through to the full reinstall flow below
+                ;;
+            *)
+                echo "  Keeping existing Authelia. (Edit config/users.yml then: cd $AUTHELIA_DIR && docker compose restart authelia)"
+                return 0
+                ;;
+        esac
     fi
 
     log_info "Installing Authelia..."
@@ -471,6 +487,16 @@ myservice.${AUTHELIA_DOMAIN} {
 The \`(authelia)\` snippet and the \`auth.${AUTHELIA_DOMAIN}\` portal block were
 added to \`$DOCKER_DIR/caddy/Caddyfile\` automatically.
 
+## Protecting a second (or third) apex domain
+Re-run this installer (\`sudo ./setup.sh authelia\` or \`sudo bash authelia.sh\`)
+and choose **"Add another protected domain to this instance"** when it detects
+the existing install. That domain gets its own \`session.cookies\` entry and its
+own \`auth.<domain>\` portal — a separate login/session from ${AUTHELIA_DOMAIN},
+so no accidental cross-domain SSO — but it's still one shared Authelia + Redis
+container and one shared user database, not a second full stack. Cheaper than
+standing up an entirely separate instance, and the right way to protect
+multiple unrelated domains from the same box.
+
 ## Manage
 \`\`\`
 cd $AUTHELIA_DIR
@@ -507,6 +533,114 @@ README_MD
     echo "  Auth portal:  https://auth.${AUTHELIA_DOMAIN}"
     echo "  Admin login:  ${AUTHELIA_ADMIN_USER}  (use Forgot Password to set a real password)"
     echo "  README:       $AUTHELIA_DIR/README.md"
+    echo ""
+}
+
+# Adds a second (or third, etc.) independent apex domain to an EXISTING Authelia
+# instance instead of standing up a whole separate Authelia+Redis stack for it.
+# Authelia natively supports this: session.cookies and access_control.rules are
+# both lists, so one instance can hold a distinct cookie scope + login portal per
+# domain, each with its own session (no cross-domain SSO, but also no collision —
+# see the "Running more than one Authelia instance" note in CLAUDE.md for why two
+# domains can't just share one session.cookies entry). Far cheaper on RAM than a
+# second full instance, which matters most on a small droplet.
+add_authelia_domain() {
+    local AUTHELIA_DIR="$DOCKER_DIR/authelia"
+    local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
+    local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warning "No configuration.yml found at $CONFIG_FILE — install Authelia first."
+        return 1
+    fi
+
+    echo ""
+    echo "  Add another apex domain to this Authelia instance."
+    echo "  It gets its own session-cookie scope and its own auth.<domain> portal —"
+    echo "  a separate login/session from your other domain(s) — but shares this"
+    echo "  same Authelia + Redis container, not a second full stack."
+    echo ""
+    local NEW_DOMAIN=""
+    prompt_text "  New domain (e.g., example.com):" "" NEW_DOMAIN
+    if [ -z "$NEW_DOMAIN" ]; then
+        log_warning "No domain entered — nothing to do."
+        return 0
+    fi
+
+    if grep -qF "\"*.${NEW_DOMAIN}\"" "$CONFIG_FILE" 2>/dev/null; then
+        log_warning "$NEW_DOMAIN is already configured in $CONFIG_FILE — nothing to do."
+        return 0
+    fi
+
+    # ── access_control.rules: insert right after "rules:" ────────────────────
+    awk -v domain="$NEW_DOMAIN" '
+        { print }
+        /^  rules:$/ && !done {
+            print "    - domain: \"*." domain "\""
+            print "      policy: two_factor"
+            done=1
+        }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    # ── session.cookies: insert right after "cookies:" ────────────────────────
+    awk -v domain="$NEW_DOMAIN" '
+        { print }
+        /^  cookies:$/ && !done {
+            print "    - domain: " domain
+            print "      authelia_url: https://auth." domain
+            print "      default_redirection_url: https://" domain
+            done=1
+        }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    chown 1000:1000 "$CONFIG_FILE" 2>/dev/null || true
+    log_success "Added $NEW_DOMAIN to $CONFIG_FILE (access_control rule + session cookie scope)"
+
+    # ── Caddy portal block for the new domain ─────────────────────────────────
+    if [ -f "$CADDY_FILE" ]; then
+        if ! grep -q "^auth.${NEW_DOMAIN} {" "$CADDY_FILE"; then
+            cat >> "$CADDY_FILE" << CADDY_AUTH_BLOCK2
+
+# ── Authelia login portal (${NEW_DOMAIN}) ─────────────────────────────────────
+auth.${NEW_DOMAIN} {
+    # See auth.${AUTHELIA_DOMAIN:-<original domain>}'s block above for why
+    # header_up X-Forwarded-Host is required here, not optional.
+    reverse_proxy authelia:9091 {
+        header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
+    }
+    log {
+        output file /var/log/caddy/auth.${NEW_DOMAIN}.log
+    }
+}
+CADDY_AUTH_BLOCK2
+            echo "  ✓ Authelia portal block added for auth.${NEW_DOMAIN}"
+            docker ps --format '{{.Names}}' | grep -q "^caddy$" && \
+                { docker exec -w /etc/caddy caddy caddy reload 2>/dev/null && echo "  ✓ Caddy reloaded" || echo "  ⚠ Reload manually: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"; }
+        else
+            echo "  ✓ auth.${NEW_DOMAIN} portal block already exists in the Caddyfile"
+        fi
+    else
+        echo "  ℹ Caddy not installed — add an auth.${NEW_DOMAIN} portal block manually later (see README)."
+    fi
+
+    # ── Restart Authelia to pick up the new config ────────────────────────────
+    local RESTART_AUTH=""
+    prompt_yn "  Restart Authelia to apply the new domain? (y/n):" "y" RESTART_AUTH
+    if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
+        (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Restart failed — check: docker compose logs authelia"
+    fi
+
+    echo ""
+    echo "  Auth portal for $NEW_DOMAIN: https://auth.${NEW_DOMAIN}"
+    echo "  Protect a service under this domain the same way as any other:"
+    echo "    myservice.${NEW_DOMAIN} {"
+    echo "        import authelia"
+    echo "        reverse_proxy localhost:PORT"
+    echo "    }"
+    echo "  Same users/passwords work across every domain on this instance —"
+    echo "  it's one shared user database, just separate sessions per domain."
     echo ""
 }
 

@@ -281,23 +281,37 @@ self-documenting on the deployed box.
 Some services have their own login screens; others have none and need Caddy to
 gate them via Authelia.
 
-**Running more than one Authelia instance (e.g. one per machine).** `services/authelia.sh`
+**Protecting more than one apex domain from the same box — same instance, not a second
+one.** `services/authelia.sh`, re-run against an existing install, offers "Add another
+protected domain to this instance": it appends a new `access_control.rules` entry and a new
+`session.cookies` entry (both are YAML lists — Authelia natively supports multiple
+independent cookie scopes) plus a Caddy `auth.<domain>` portal block for the new domain, all
+on the **same** Authelia + Redis container. Each domain gets its own login/session (no
+cross-domain SSO between them) and shares one user database, without the RAM cost of a
+second full Authelia+Redis stack — the right choice whenever the domains are going to live
+on the same machine anyway. See `add_authelia_domain()` in `services/authelia.sh`.
+
+**Running a genuinely separate instance (e.g. one per machine).** `services/authelia.sh`
 runs standalone on any box (`sudo bash authelia.sh`, same pattern as `crowdsec.sh`) and
 `asterisk-digital-ocean.sh` already auto-detects a local install (`if [ -d
 "$DOCKER_DIR/authelia" ]`), switching from the remote-Authelia `forward_auth` flow to the
 local `import authelia` snippet automatically — so a second, fully independent instance on
 another machine (e.g. a droplet, for resilience if the first machine goes down) works with
-no code changes.
+no code changes. Use this instead of the same-instance approach above when the two domains
+are on different machines, not just different domains on one machine.
 
-The one real constraint: Authelia's session cookie is scoped to `AUTHELIA_DOMAIN` (the apex
-domain entered at install time) with `includeSubDomains`-style matching, and the portal
-itself lives at `auth.${AUTHELIA_DOMAIN}`. **Two independent instances must not share the
-same `AUTHELIA_DOMAIN`.** If they did, both would try to claim the same `auth.<domain>`
-hostname (DNS can only point that at one machine) and the same cookie scope with completely
-separate session stores — users bouncing between subdomains fronted by different instances
-would see confusing repeated logins as each instance's cookie gets overwritten/rejected by
-the other's. Give each instance either a genuinely separate apex domain, or a distinct
-subdomain tree the other instance doesn't also claim.
+The one real constraint for genuinely separate instances: Authelia's session cookie is
+scoped to `AUTHELIA_DOMAIN` (the apex domain entered at install time) with
+`includeSubDomains`-style matching, and the portal itself lives at `auth.${AUTHELIA_DOMAIN}`.
+**Two independent instances must not share the same `AUTHELIA_DOMAIN`.** If they did, both
+would try to claim the same `auth.<domain>` hostname (DNS can only point that at one
+machine) and the same cookie scope with completely separate session stores — users bouncing
+between subdomains fronted by different instances would see confusing repeated logins as
+each instance's cookie gets overwritten/rejected by the other's. Give each instance either a
+genuinely separate apex domain, or a distinct subdomain tree the other instance doesn't also
+claim. (This constraint doesn't apply to the same-instance, multiple-domains approach above —
+each domain there gets its own cookie entry by design, which is exactly what avoids the
+collision.)
 
 **Has built-in auth — no Authelia needed:**
 `emby`, `jellyfin`, `audiobookshelf`, `immich`, `mealie`, `actualbudget`,
