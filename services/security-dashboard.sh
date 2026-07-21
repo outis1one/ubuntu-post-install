@@ -426,6 +426,12 @@ def get_decisions():
         return []
     decisions = []
     for alert in data or []:
+        # AS number/name and country live on the parent alert's "source"
+        # object, not on the individual decision — confirmed against real
+        # output (source.as_number, source.as_name, source.cn) rather than
+        # guessed, after getting evt.Enriched.ASNNumber's type wrong earlier
+        # tonight for the same underlying data.
+        source = alert.get("source") or {}
         for d in alert.get("decisions") or []:
             decisions.append({
                 "id": d.get("id"),
@@ -433,6 +439,9 @@ def get_decisions():
                 "scenario": d.get("scenario"),
                 "duration": d.get("duration"),
                 "origin": d.get("origin"),
+                "as_number": source.get("as_number", ""),
+                "as_name": source.get("as_name", ""),
+                "country": source.get("cn", ""),
             })
     return decisions
 
@@ -444,7 +453,11 @@ def delete_decision(decision_id):
     return ok, (err or out or ("deleted" if ok else "failed"))
 
 
-def get_asn_exempt():
+def get_asn_exempt(known_names=None):
+    """known_names: optional {asn: as_name} lookup, built from current
+    decisions, to label already-exempt ASNs that aren't actively generating
+    bans right now (and so wouldn't otherwise have a name available)."""
+    known_names = known_names or {}
     asns = set()
     for path in ASN_SCENARIO_FILES:
         try:
@@ -458,7 +471,8 @@ def get_asn_exempt():
                 tok = tok.strip().strip("'").strip('"')
                 if tok:
                     asns.add(tok)
-    return sorted(asns, key=lambda x: int(x) if x.isdigit() else 0)
+    ordered = sorted(asns, key=lambda x: int(x) if x.isdigit() else 0)
+    return [{"asn": a, "name": known_names.get(a, "")} for a in ordered]
 
 
 def set_asn_exempt(asn_list):
@@ -530,7 +544,7 @@ INDEX_HTML = """<!doctype html>
   <div id="tab-crowdsec" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Active bans</h3>
-      <table id="dec-table"><thead><tr><th>IP/Range</th><th>Scenario</th><th>Duration</th><th>Origin</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="dec-table"><thead><tr><th>IP/Range</th><th>Scenario</th><th>Network / Carrier</th><th>Country</th><th>Duration</th><th>Origin</th><th></th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
       <h3 style="margin-top:0">Asterisk brute-force ASN exemptions</h3>
@@ -539,6 +553,7 @@ INDEX_HTML = """<!doctype html>
         <input type="text" id="asn-input" placeholder="e.g. 21928, 14593">
         <button class="action" id="asn-save">Save</button>
       </div>
+      <div id="asn-list" class="muted" style="margin-top:0.5rem"></div>
       <div id="msg"></div>
     </div>
   </div>
@@ -568,17 +583,24 @@ async function loadSecurity() {
   </tr>`).join("") || "<tr><td colspan=5 class=muted>No events found.</td></tr>";
 }
 
+let lastDecisions = [];
+
 async function loadDecisions() {
   const res = await fetch("/api/decisions");
-  const decisions = await res.json();
+  lastDecisions = await res.json();
   const tbody = document.querySelector("#dec-table tbody");
-  tbody.innerHTML = decisions.map(d => `<tr>
+  tbody.innerHTML = lastDecisions.map(d => `<tr>
     <td>${esc(d.value)}</td>
     <td>${esc(d.scenario)}</td>
+    <td>${d.as_number ? esc(d.as_number) + (d.as_name ? " — " + esc(d.as_name) : "") : ""}</td>
+    <td>${esc(d.country)}</td>
     <td>${esc(d.duration)}</td>
     <td>${esc(d.origin)}</td>
-    <td><button class="action" onclick="unban(${d.id})">Unban</button></td>
-  </tr>`).join("") || "<tr><td colspan=5 class=muted>No active bans.</td></tr>";
+    <td>
+      <button class="action" onclick="unban(${d.id})">Unban</button>
+      ${d.as_number ? `<button class="action" onclick="exemptAsn('${esc(d.as_number)}')">Exempt ASN</button>` : ""}
+    </td>
+  </tr>`).join("") || "<tr><td colspan=7 class=muted>No active bans.</td></tr>";
 }
 
 async function unban(id) {
@@ -589,10 +611,23 @@ async function unban(id) {
   loadDecisions();
 }
 
+async function exemptAsn(asn) {
+  const current = document.getElementById("asn-input").value.split(",").map(s => s.trim()).filter(Boolean);
+  if (current.includes(asn)) { alert("ASN " + asn + " is already exempt."); return; }
+  if (!confirm("Add ASN " + asn + " to the Asterisk brute-force exemption list? This only affects Asterisk auth-failure detection — SSH/web/geo protection is unaffected.")) return;
+  current.push(asn);
+  document.getElementById("asn-input").value = current.join(", ");
+  document.getElementById("asn-save").click();
+}
+
 async function loadAsnExempt() {
   const res = await fetch("/api/asn-exempt");
   const data = await res.json();
-  document.getElementById("asn-input").value = (data.asns || []).join(", ");
+  const asns = data.asns || [];
+  document.getElementById("asn-input").value = asns.map(a => a.asn).join(", ");
+  document.getElementById("asn-list").textContent = asns.length
+    ? "Currently exempt: " + asns.map(a => a.asn + (a.name ? " (" + a.name + ")" : "")).join(", ")
+    : "No ASNs currently exempted.";
 }
 
 document.getElementById("asn-save").addEventListener("click", async () => {
@@ -646,7 +681,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/decisions":
             self._json(get_decisions())
         elif self.path == "/api/asn-exempt":
-            self._json({"asns": get_asn_exempt()})
+            decisions = get_decisions()
+            known_names = {d["as_number"]: d["as_name"] for d in decisions if d.get("as_number")}
+            self._json({"asns": get_asn_exempt(known_names)})
         else:
             self._json({"error": "not found"}, 404)
 
