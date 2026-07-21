@@ -112,11 +112,20 @@ install_security-dashboard() {
         }
         case "$MODE" in
             update)
-                log_info "Refreshing app code only (no config/domain changes)..."
+                log_info "Refreshing app code + sudoers rule (no config/domain changes)..."
                 _secdash_write_app "$APP_DIR"
+                _secdash_write_sudoers "$SVC_USER"
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
+
+                echo ""
+                local _reconf=""
+                prompt_yn "Reconfigure this dashboard's Caddy protection (Authelia domain, or add/rotate an independent Basic Auth layer)? (y/n):" "n" _reconf
+                if [[ "$_reconf" =~ ^[Yy]$ ]]; then
+                    _secdash_remove_caddy_block "$DASHBOARD_PORT"
+                    _secdash_configure_caddy "$DASHBOARD_PORT"
+                fi
                 return 0
                 ;;
             cancel)
@@ -146,21 +155,7 @@ install_security-dashboard() {
     _secdash_write_app "$APP_DIR"
     chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
 
-    # ── Scoped sudo — only the exact commands the app needs, nothing else ───
-    # Numeric-only glob on the decision ID; Python subprocess calls always pass
-    # args as a list (no shell=True anywhere), so there's no shell-metachar
-    # injection surface even before sudoers' own pattern match kicks in — the
-    # server-side ID validation (must be all-digits) happens before this is
-    # ever reached, this is defense in depth, not the only check.
-    cat > /etc/sudoers.d/security-dashboard << SUDOERS
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/cscli decisions list -o json
-$SVC_USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart crowdsec
-SUDOERS
-    chmod 440 /etc/sudoers.d/security-dashboard
-    visudo -c -f /etc/sudoers.d/security-dashboard >/dev/null 2>&1 \
-        && log_success "Sudoers rule installed and validated" \
-        || { log_error "Sudoers rule failed validation — removing it (dashboard's CrowdSec tab won't work until fixed)"; rm -f /etc/sudoers.d/security-dashboard; }
+    _secdash_write_sudoers "$SVC_USER"
 
     # ── systemd unit ──────────────────────────────────────────────────────────
     cat > /etc/systemd/system/security-dashboard.service << SDSVC
@@ -195,42 +190,144 @@ SDSVC
         log_warning "Failed to start — check: systemctl status security-dashboard"
     fi
 
-    # ── Caddy + Authelia ──────────────────────────────────────────────────────
-    # This is deliberately more insistent about Authelia than most services —
-    # it can delete active CrowdSec bans, so an unauthenticated exposure here
-    # is a real security hole, not just an inconvenience.
-    echo ""
-    if command -v docker &>/dev/null && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
-        local _default_domain=""
-        if [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
-            _default_domain="security.${SITE_DOMAIN}"
-        fi
-        local SD_DOMAIN=""
-        prompt_text "  Domain for the dashboard (e.g. security.yourdomain.com), you'll need to point DNS at this droplet yourself [${_default_domain:-required}]:" "$_default_domain" SD_DOMAIN
+    # ── Caddy + Authelia (+ optional independent Basic Auth) ────────────────
+    # This is deliberately more insistent about auth than most services — it
+    # can delete active CrowdSec bans, so an unauthenticated exposure here is
+    # a real security hole, not just an inconvenience. Factored into
+    # _secdash_configure_caddy so "update" mode can also offer to reconfigure
+    # it later (e.g. to add Basic Auth to an already-deployed dashboard)
+    # without duplicating this logic — see that function for the rest.
+    _secdash_configure_caddy "$DASHBOARD_PORT"
 
-        if [ -z "$SD_DOMAIN" ]; then
-            log_warning "No domain entered — dashboard stays on http://localhost:$DASHBOARD_PORT only (not reachable from outside this box)."
-        else
-            local EXTRA_BLOCK=""
-            if [ -d "$DOCKER_DIR/authelia" ]; then
-                EXTRA_BLOCK="    import authelia"
-                log_info "Local Authelia detected — protecting with it."
-            else
-                log_warning "No local Authelia found. This dashboard can delete active security"
-                log_warning "bans — strongly recommend protecting it before exposing it publicly."
-                local _use_remote=""
-                prompt_yn "  Protect with a remote Authelia instance (e.g. on a homelab)? (y/n):" "y" _use_remote
-                if [[ "$_use_remote" =~ ^[Yy]$ ]]; then
-                    local _remote_authelia=""
-                    prompt_text "  Remote Authelia address (bare host:port on a private network, or a full https:// URL on its own public domain+TLS):" "" _remote_authelia
-                    if [ -n "$_remote_authelia" ]; then
-                        # See services/asterisk-digital-ocean.sh for why
-                        # X-Forwarded-Host must be a literal domain here, not
-                        # the {host} placeholder — confirmed live that the
-                        # placeholder still evaluates to the upstream
-                        # Authelia's own hostname for a scheme-qualified
-                        # remote upstream, not the original site's.
-                        EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
+    write_readme "$APP_DIR" << README_MD
+# Security Dashboard
+
+Asterisk failed-connection log + CrowdSec ban management, one Authelia-
+protected page. Runs natively on the host (systemd service \`security-dashboard\`),
+not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
+
+## Tabs
+- **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
+  (wrong password, unknown extension, etc.) with timestamp/account/remote IP.
+- **CrowdSec** — current bans (\`cscli decisions list\`), a delete/unban button
+  per entry, carrier/ASN + country columns, and management of the ASN-exempt
+  Asterisk brute-force scenarios (see \`services/crowdsec.sh\`'s "Exempt
+  specific carrier ASNs" option) without SSHing in:
+  - **Currently-exempt ASNs** are listed with carrier name (resolved from
+    current bans, falling back to alert history for ASNs with no active ban
+    right now) regardless of when they were added.
+  - **Unwhitelist** removes an ASN from the exemption list — future Asterisk
+    auth failures from it are evaluated normally again.
+  - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
+    CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
+    where you don't want to wait for it to misbehave again.
+- Link to the Asterisk web admin itself (doesn't embed it, just links out).
+
+## Manage
+\`\`\`
+sudo systemctl status security-dashboard
+sudo systemctl restart security-dashboard
+sudo journalctl -u security-dashboard -f
+\`\`\`
+
+## Security notes
+- Runs as a dedicated, unprivileged system user (\`secdash\`), not root.
+- Sudo access is scoped to exactly five commands via
+  \`/etc/sudoers.d/security-dashboard\`: \`cscli decisions delete --id <digits>\`,
+  \`cscli decisions list -o json\`, \`cscli alerts list -o json\` (read-only,
+  used to label ASN exemptions with a carrier name from past alerts and to
+  find known offending IPs for the "Ban" action), \`cscli decisions add --ip
+  <ip> --duration <dur> --type ban --reason <text>\` (used only by "Ban"),
+  and \`systemctl restart crowdsec\`. Nothing else.
+- Listens on all interfaces (Caddy reaches it via \`host.docker.internal\`, a
+  Docker bridge IP — a loopback-only bind refuses that). Access is scoped by
+  UFW instead, allowed only from Caddy's internal network, not the internet.
+- **This page can delete active security bans.** It's protected by Authelia
+  (or a remote instance) by default, and the installer offers a second,
+  independent HTTP Basic Auth layer in front of that — a request must pass
+  Basic Auth *and* Authelia before it ever reaches the app, so an Authelia
+  bug or misconfiguration alone isn't enough to expose this page. Re-run the
+  installer ("update" mode → reconfigure Caddy protection) to add, rotate, or
+  remove that Basic Auth layer later.
+README_MD
+
+    echo ""
+    echo "  Local access: http://localhost:$DASHBOARD_PORT"
+    echo "  README:       $APP_DIR/README.md"
+    echo ""
+}
+
+# Scoped sudo — only the exact commands the app needs, nothing else. Numeric-
+# only glob on the decision ID; Python subprocess calls always pass args as a
+# list (no shell=True anywhere), so there's no shell-metachar injection
+# surface even before sudoers' own pattern match kicks in — the server-side
+# ID validation (must be all-digits) happens before this is ever reached,
+# this is defense in depth, not the only check. Separate function, called
+# from both "update" and fresh-install, so adding a new permission later
+# (like alerts list, added after ASN-exempt entries with no currently-active
+# ban had no carrier name to show) reaches existing installs on their next
+# update instead of silently only applying to new ones.
+_secdash_write_sudoers() {
+    local _svc_user="$1"
+    cat > /etc/sudoers.d/security-dashboard << SUDOERS
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions list -o json
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli alerts list -o json
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions add --ip * --duration * --type ban --reason *
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/systemctl restart crowdsec
+SUDOERS
+    chmod 440 /etc/sudoers.d/security-dashboard
+    visudo -c -f /etc/sudoers.d/security-dashboard >/dev/null 2>&1 \
+        && log_success "Sudoers rule installed and validated" \
+        || { log_error "Sudoers rule failed validation — removing it (dashboard's CrowdSec tab won't work until fixed)"; rm -f /etc/sudoers.d/security-dashboard; }
+}
+
+# Caddy + Authelia (+ optional independent Basic Auth) for the dashboard.
+# Separate function so "update" mode can call _secdash_remove_caddy_block +
+# this to reconfigure an already-deployed dashboard (e.g. to add Basic Auth
+# retroactively) using the exact same code path as a fresh install, instead
+# of hand-patching a live Caddyfile block in place.
+_secdash_configure_caddy() {
+    local DASHBOARD_PORT="$1"
+
+    echo ""
+    if ! command -v docker &>/dev/null || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
+        log_info "Caddy not running — dashboard stays on http://localhost:$DASHBOARD_PORT until you set it up."
+        return 0
+    fi
+
+    local _default_domain=""
+    if [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+        _default_domain="security.${SITE_DOMAIN}"
+    fi
+    local SD_DOMAIN=""
+    prompt_text "  Domain for the dashboard (e.g. security.yourdomain.com), you'll need to point DNS at this droplet yourself [${_default_domain:-required}]:" "$_default_domain" SD_DOMAIN
+
+    if [ -z "$SD_DOMAIN" ]; then
+        log_warning "No domain entered — dashboard stays on http://localhost:$DASHBOARD_PORT only (not reachable from outside this box)."
+        return 0
+    fi
+
+    local EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        EXTRA_BLOCK="    import authelia"
+        log_info "Local Authelia detected — protecting with it."
+    else
+        log_warning "No local Authelia found. This dashboard can delete active security"
+        log_warning "bans — strongly recommend protecting it before exposing it publicly."
+        local _use_remote=""
+        prompt_yn "  Protect with a remote Authelia instance (e.g. on a homelab)? (y/n):" "y" _use_remote
+        if [[ "$_use_remote" =~ ^[Yy]$ ]]; then
+            local _remote_authelia=""
+            prompt_text "  Remote Authelia address (bare host:port on a private network, or a full https:// URL on its own public domain+TLS):" "" _remote_authelia
+            if [ -n "$_remote_authelia" ]; then
+                # See services/asterisk-digital-ocean.sh for why
+                # X-Forwarded-Host must be a literal domain here, not
+                # the {host} placeholder — confirmed live that the
+                # placeholder still evaluates to the upstream
+                # Authelia's own hostname for a scheme-qualified
+                # remote upstream, not the original site's.
+                EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
         uri /api/authz/forward-auth
         copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
         header_up X-Forwarded-Method {method}
@@ -238,29 +335,59 @@ SDSVC
         header_up X-Forwarded-Host ${SD_DOMAIN}
         header_up X-Forwarded-Uri {uri}
     }"
-                    fi
-                fi
             fi
+        fi
+    fi
 
-            if [ -z "$EXTRA_BLOCK" ]; then
-                log_error "Proceeding WITHOUT Authelia protection — anyone who finds this domain"
-                log_error "can view and delete active security bans. Strongly reconsider."
-                local _confirm_unsafe=""
-                prompt_yn "  Really continue without auth protection? (y/n):" "n" _confirm_unsafe
-                if [[ ! "$_confirm_unsafe" =~ ^[Yy]$ ]]; then
-                    log_info "Skipping Caddy setup. Re-run this installer once Authelia is available."
-                    SD_DOMAIN=""
-                fi
-            fi
+    # ── Independent Basic Auth layer (defense-in-depth on top of Authelia) ──
+    # Authelia already gates this page, but it's still one piece of software
+    # this dashboard trusts completely — this repo already hit one real
+    # Authelia forward_auth header bypass (see services/authelia.sh's
+    # header_up X-Forwarded-Host fix). This dashboard can delete active
+    # security bans, so it's worth a second, genuinely independent gate that
+    # doesn't depend on Authelia (or its session store, or its config) at
+    # all. basicauth is written before EXTRA_BLOCK below, so a request must
+    # clear it before ever reaching Authelia's forward_auth call.
+    local BASICAUTH_BLOCK=""
+    local _use_basicauth=""
+    prompt_yn "  Add an independent Basic Auth login in front of Authelia, as a second, separate layer? (y/n):" "y" _use_basicauth
+    if [[ "$_use_basicauth" =~ ^[Yy]$ ]]; then
+        local BA_USER="" BA_PASS="" BA_HASH=""
+        prompt_text "  Basic Auth username [admin]:" "admin" BA_USER
+        BA_PASS="$(generate_password 20)"
+        log_info "Generating Basic Auth password hash (via the running Caddy container)..."
+        BA_HASH="$(docker exec caddy caddy hash-password --plaintext "$BA_PASS" 2>/dev/null)"
+        if [ -z "$BA_HASH" ]; then
+            log_warning "Could not generate the Basic Auth hash — skipping this layer. Authelia alone will protect the dashboard."
+        else
+            BASICAUTH_BLOCK="    basicauth {
+        ${BA_USER} ${BA_HASH}
+    }
+"
+            log_success "Basic Auth username: ${BA_USER}"
+            log_success "Basic Auth password: ${BA_PASS}"
+            log_warning "Save that password now — only the bcrypt hash is written to the Caddyfile, it is not stored anywhere in plaintext."
+        fi
+    fi
 
-            if [ -n "$SD_DOMAIN" ]; then
-                local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
-                if [ -f "$CADDY_FILE" ] && ! grep -q "^${SD_DOMAIN} {" "$CADDY_FILE"; then
-                    cat >> "$CADDY_FILE" << CADDYBLOCK
+    if [ -z "$EXTRA_BLOCK" ] && [ -z "$BASICAUTH_BLOCK" ]; then
+        log_error "Proceeding WITHOUT any auth protection — anyone who finds this domain"
+        log_error "can view and delete active security bans. Strongly reconsider."
+        local _confirm_unsafe=""
+        prompt_yn "  Really continue without auth protection? (y/n):" "n" _confirm_unsafe
+        if [[ ! "$_confirm_unsafe" =~ ^[Yy]$ ]]; then
+            log_info "Skipping Caddy setup. Re-run this installer once Authelia is available."
+            return 0
+        fi
+    fi
+
+    local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
+    if [ -f "$CADDY_FILE" ] && ! grep -q "^${SD_DOMAIN} {" "$CADDY_FILE"; then
+        cat >> "$CADDY_FILE" << CADDYBLOCK
 
 # Security Dashboard
 ${SD_DOMAIN} {
-${EXTRA_BLOCK}
+${BASICAUTH_BLOCK}${EXTRA_BLOCK}
     reverse_proxy host.docker.internal:${DASHBOARD_PORT}
 
     header {
@@ -276,67 +403,62 @@ ${EXTRA_BLOCK}
     }
 }
 CADDYBLOCK
-                    docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-                    docker compose -f "$DOCKER_DIR/caddy/docker-compose.yml" restart caddy 2>/dev/null \
-                        && log_success "Caddy restarted — dashboard at https://${SD_DOMAIN}" \
-                        || log_warning "Restart Caddy manually: cd $DOCKER_DIR/caddy && docker compose restart"
-                elif [ -f "$CADDY_FILE" ]; then
-                    log_warning "$SD_DOMAIN already in Caddyfile — leaving the existing entry alone."
-                fi
-
-                # Port 8092 never needs to be open to the internet — only Caddy
-                # (local, via host.docker.internal) ever needs to reach it.
-                if command -v ufw &>/dev/null; then
-                    ufw delete allow "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
-                    if declare -f ufw_allow_from_caddy_net >/dev/null 2>&1; then
-                        ufw_allow_from_caddy_net "${DASHBOARD_PORT}"
-                    fi
-                fi
-            fi
-        fi
-    else
-        log_info "Caddy not running — dashboard stays on http://localhost:$DASHBOARD_PORT until you set it up."
+        docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+        docker compose -f "$DOCKER_DIR/caddy/docker-compose.yml" restart caddy 2>/dev/null \
+            && log_success "Caddy restarted — dashboard at https://${SD_DOMAIN}" \
+            || log_warning "Restart Caddy manually: cd $DOCKER_DIR/caddy && docker compose restart"
+    elif [ -f "$CADDY_FILE" ]; then
+        log_warning "$SD_DOMAIN already in Caddyfile — leaving the existing entry alone."
     fi
 
-    write_readme "$APP_DIR" << README_MD
-# Security Dashboard
+    # This port never needs to be open to the internet — only Caddy (local,
+    # via host.docker.internal) ever needs to reach it.
+    if command -v ufw &>/dev/null; then
+        ufw delete allow "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
+        if declare -f ufw_allow_from_caddy_net >/dev/null 2>&1; then
+            ufw_allow_from_caddy_net "${DASHBOARD_PORT}"
+        fi
+    fi
+}
 
-Asterisk failed-connection log + CrowdSec ban management, one Authelia-
-protected page. Runs natively on the host (systemd service \`security-dashboard\`),
-not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
+# Removes the dashboard's existing Caddyfile site block (found via its
+# unique reverse_proxy line, walking backward to the nearest "<domain> {"
+# open and forward to the matching unindented "}" close) so
+# _secdash_configure_caddy can regenerate it fresh on "update" mode's
+# reconfigure path, rather than trying to surgically patch a live Caddyfile
+# in place — a whole-block delete-and-regenerate is much harder to get
+# subtly wrong than in-place editing of a file this security-critical.
+_secdash_remove_caddy_block() {
+    local port="$1"
+    local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$caddy_file" ] || return 0
 
-## Tabs
-- **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
-  (wrong password, unknown extension, etc.) with timestamp/account/remote IP.
-- **CrowdSec** — current bans (\`cscli decisions list\`), a delete/unban button
-  per entry, and a way to add/remove ASNs from the ASN-exempt Asterisk
-  brute-force scenarios (see \`services/crowdsec.sh\`'s "Exempt specific carrier
-  ASNs" option) without SSHing in.
-- Link to the Asterisk web admin itself (doesn't embed it, just links out).
+    local marker="    reverse_proxy host.docker.internal:${port}"
+    local marker_line domain_line end_line
+    marker_line="$(grep -nF "$marker" "$caddy_file" | head -1 | cut -d: -f1)"
+    if [ -z "$marker_line" ]; then
+        return 0  # nothing deployed yet — fine, the fresh flow will just append
+    fi
 
-## Manage
-\`\`\`
-sudo systemctl status security-dashboard
-sudo systemctl restart security-dashboard
-sudo journalctl -u security-dashboard -f
-\`\`\`
+    domain_line="$(head -n "$marker_line" "$caddy_file" | grep -nE '^[^[:space:]#].* \{$' | tail -1 | cut -d: -f1)"
+    if [ -z "$domain_line" ]; then
+        log_warning "Could not find the start of the existing dashboard Caddy block — leaving it as-is."
+        return 1
+    fi
+    # Pull in the "# Security Dashboard" comment line right above it too, if present
+    if [ "$domain_line" -gt 1 ] && sed -n "$((domain_line - 1))p" "$caddy_file" | grep -qx '# Security Dashboard'; then
+        domain_line=$((domain_line - 1))
+    fi
 
-## Security notes
-- Runs as a dedicated, unprivileged system user (\`secdash\`), not root.
-- Sudo access is scoped to exactly three commands via
-  \`/etc/sudoers.d/security-dashboard\`: \`cscli decisions delete --id <digits>\`,
-  \`cscli decisions list -o json\`, and \`systemctl restart crowdsec\`. Nothing else.
-- Listens on all interfaces (Caddy reaches it via \`host.docker.internal\`, a
-  Docker bridge IP — a loopback-only bind refuses that). Access is scoped by
-  UFW instead, allowed only from Caddy's internal network, not the internet.
-- **This page can delete active security bans.** Don't run it without Authelia
-  (or equivalent) in front of it.
-README_MD
+    end_line="$(tail -n "+$marker_line" "$caddy_file" | grep -nx '}' | head -1 | cut -d: -f1)"
+    if [ -z "$end_line" ]; then
+        log_warning "Could not find the end of the existing dashboard Caddy block — leaving it as-is."
+        return 1
+    fi
+    end_line=$((marker_line + end_line - 1))
 
-    echo ""
-    echo "  Local access: http://localhost:$DASHBOARD_PORT"
-    echo "  README:       $APP_DIR/README.md"
-    echo ""
+    sed -i "${domain_line},${end_line}d" "$caddy_file"
+    log_info "Removed the existing dashboard Caddy block (regenerating it fresh)."
 }
 
 # Writes the Python app. Separate function so "update" mode (refresh code,
@@ -370,6 +492,7 @@ KV_RE = re.compile(r'(\w+)="([^"]*)"')
 ASN_FILTER_RE = re.compile(r"ASNNumber in \[([^\]]*)\]\)")
 ID_RE = re.compile(r"^\d+$")
 ASN_RE = re.compile(r"^\d+$")
+IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
 
 def parse_security_log(limit=200):
@@ -453,6 +576,30 @@ def delete_decision(decision_id):
     return ok, (err or out or ("deleted" if ok else "failed"))
 
 
+def get_alert_history_names():
+    """ASN -> as_name map built from historical alerts (cscli alerts list,
+    unlike decisions list, includes expired/resolved ones). A successfully
+    exempted ASN (e.g. T-Mobile once its bans stop firing) has no *active*
+    decision left to source a name from — this is the fallback that still
+    finds one, from the alert that was raised before the exemption took
+    effect."""
+    ok, out, err = run_sudo(["/usr/bin/cscli", "alerts", "list", "-o", "json"])
+    if not ok or not out.strip():
+        return {}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return {}
+    names = {}
+    for alert in data or []:
+        source = alert.get("source") or {}
+        asn = source.get("as_number")
+        name = source.get("as_name")
+        if asn and name:
+            names.setdefault(str(asn), name)
+    return names
+
+
 def get_asn_exempt(known_names=None):
     """known_names: optional {asn: as_name} lookup, built from current
     decisions, to label already-exempt ASNs that aren't actively generating
@@ -476,9 +623,13 @@ def get_asn_exempt(known_names=None):
 
 
 def set_asn_exempt(asn_list):
-    clean = [a.strip() for a in asn_list if ASN_RE.match(a.strip())]
-    if not clean:
-        return False, "No valid (numeric) ASNs provided"
+    # Empty is valid and means "no ASNs exempted" — ASNNumber in [] is valid
+    # expr-language and always evaluates false, so the exclusion filter
+    # !(... in []) is always true and every Asterisk auth failure is
+    # evaluated normally again. Needed so removing the last remaining
+    # exempt ASN (the "unwhitelist" action) can actually reach zero instead
+    # of being stuck refusing an empty save.
+    clean = sorted(set(a.strip() for a in asn_list if ASN_RE.match(a.strip())))
     expr = ", ".join("'%s'" % a for a in clean)
     for path in ASN_SCENARIO_FILES:
         try:
@@ -495,7 +646,69 @@ def set_asn_exempt(asn_list):
     ok, out, err = run_sudo(["/usr/bin/systemctl", "restart", "crowdsec"])
     if not ok:
         return False, "Wrote ASN list but failed to restart CrowdSec: %s" % (err or out)
+    if not clean:
+        return True, "Cleared — no ASNs exempted, all Asterisk traffic is evaluated normally again."
     return True, "Updated: %s" % ", ".join(clean)
+
+
+def get_asn_source_ips(asn):
+    """Every source IP CrowdSec has ever recorded for a given ASN, from alert
+    history (includes expired/resolved alerts) — used so "ban" can act on
+    previously-seen offenders immediately, not just future ones."""
+    ok, out, err = run_sudo(["/usr/bin/cscli", "alerts", "list", "-o", "json"])
+    if not ok or not out.strip():
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    ips = set()
+    for alert in data or []:
+        source = alert.get("source") or {}
+        if str(source.get("as_number", "")) == str(asn):
+            ip = source.get("ip")
+            if ip and IP_RE.match(ip):
+                ips.add(ip)
+    return sorted(ips)
+
+
+def ban_ip(ip, reason, duration="24h"):
+    if not IP_RE.match(ip):
+        return False, "Invalid IP"
+    ok, out, err = run_sudo([
+        "/usr/bin/cscli", "decisions", "add",
+        "--ip", ip, "--duration", duration, "--type", "ban", "--reason", reason,
+    ])
+    return ok, (err or out or ("banned" if ok else "failed"))
+
+
+def ban_asn(asn):
+    """For an accidental whitelist: drop the ASN from the exempt list (so
+    future traffic from it is evaluated normally again) and immediately ban
+    every IP CrowdSec has on record for it, so the response isn't limited to
+    "wait for it to misbehave again."""
+    asn = str(asn).strip()
+    if not ASN_RE.match(asn):
+        return {"ok": False, "message": "Invalid ASN"}
+
+    current = [d["asn"] for d in get_asn_exempt()]
+    if asn in current:
+        remaining = [a for a in current if a != asn]
+        unexempt_ok, unexempt_message = set_asn_exempt(remaining)
+    else:
+        unexempt_ok, unexempt_message = True, "ASN was not currently exempt"
+
+    banned, failed = [], []
+    for ip in get_asn_source_ips(asn):
+        ok, _msg = ban_ip(ip, "manual: AS%s exemption removed, known offender re-banned" % asn)
+        (banned if ok else failed).append(ip)
+
+    return {
+        "ok": unexempt_ok,
+        "unexempt_message": unexempt_message,
+        "banned_ips": banned,
+        "failed_ips": failed,
+    }
 
 
 INDEX_HTML = """<!doctype html>
@@ -553,7 +766,7 @@ INDEX_HTML = """<!doctype html>
         <input type="text" id="asn-input" placeholder="e.g. 21928, 14593">
         <button class="action" id="asn-save">Save</button>
       </div>
-      <div id="asn-list" class="muted" style="margin-top:0.5rem"></div>
+      <table id="asn-table" style="margin-top:0.75rem"><thead><tr><th>ASN</th><th>Carrier</th><th></th></tr></thead><tbody></tbody></table>
       <div id="msg"></div>
     </div>
   </div>
@@ -625,9 +838,15 @@ async function loadAsnExempt() {
   const data = await res.json();
   const asns = data.asns || [];
   document.getElementById("asn-input").value = asns.map(a => a.asn).join(", ");
-  document.getElementById("asn-list").textContent = asns.length
-    ? "Currently exempt: " + asns.map(a => a.asn + (a.name ? " (" + a.name + ")" : "")).join(", ")
-    : "No ASNs currently exempted.";
+  const tbody = document.querySelector("#asn-table tbody");
+  tbody.innerHTML = asns.map(a => `<tr>
+    <td>${esc(a.asn)}</td>
+    <td>${esc(a.name) || '<span class="muted">(unknown)</span>'}</td>
+    <td>
+      <button class="action" onclick="unexemptAsn('${esc(a.asn)}')">Unwhitelist</button>
+      <button class="action" onclick="banAsn('${esc(a.asn)}')">Unwhitelist + Ban</button>
+    </td>
+  </tr>`).join("") || "<tr><td colspan=3 class=muted>No ASNs currently exempted.</td></tr>";
 }
 
 document.getElementById("asn-save").addEventListener("click", async () => {
@@ -636,7 +855,30 @@ document.getElementById("asn-save").addEventListener("click", async () => {
   const res = await fetch("/api/asn-exempt", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({asns: asns})});
   const data = await res.json();
   document.getElementById("msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  loadAsnExempt();
 });
+
+async function unexemptAsn(asn) {
+  if (!confirm("Remove ASN " + asn + " from the exemption list? Future Asterisk auth failures from it will be evaluated normally again (no immediate ban of past offenders).")) return;
+  const current = (document.getElementById("asn-input").value || "").split(",").map(s => s.trim()).filter(s => s && s !== asn);
+  const res = await fetch("/api/asn-exempt", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({asns: current})});
+  const data = await res.json();
+  document.getElementById("msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  loadAsnExempt();
+}
+
+async function banAsn(asn) {
+  if (!confirm("Remove ASN " + asn + " from the exemption list AND immediately ban (24h) every IP CrowdSec has ever recorded for it? Use this for an accidental whitelist.")) return;
+  const res = await fetch("/api/asn-exempt/ban", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({asn: asn})});
+  const data = await res.json();
+  const parts = [data.unexempt_message || (data.ok ? "Unwhitelisted" : "Unwhitelist failed")];
+  if (data.banned_ips && data.banned_ips.length) parts.push("Banned: " + data.banned_ips.join(", "));
+  if (data.failed_ips && data.failed_ips.length) parts.push("Failed to ban: " + data.failed_ips.join(", "));
+  if (!data.banned_ips || !data.banned_ips.length) parts.push("No previously-recorded IPs found for this ASN to ban.");
+  document.getElementById("msg").textContent = parts.join(" — ");
+  loadAsnExempt();
+  loadDecisions();
+}
 
 const adminUrl = "__ASTERISK_ADMIN_URL__";
 if (adminUrl) {
@@ -683,6 +925,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/asn-exempt":
             decisions = get_decisions()
             known_names = {d["as_number"]: d["as_name"] for d in decisions if d.get("as_number")}
+            for asn, name in get_alert_history_names().items():
+                known_names.setdefault(asn, name)
             self._json({"asns": get_asn_exempt(known_names)})
         else:
             self._json({"error": "not found"}, 404)
@@ -701,6 +945,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/asn-exempt":
             ok, message = set_asn_exempt(payload.get("asns", []))
             self._json({"ok": ok, "message": message})
+        elif self.path == "/api/asn-exempt/ban":
+            self._json(ban_asn(payload.get("asn", "")))
         else:
             self._json({"error": "not found"}, 404)
 
