@@ -207,8 +207,14 @@ labels:
             local ASN_LIST=""
             prompt_text "  ASN numbers to exempt, space-separated:" "21928 14593" ASN_LIST
             if [ -n "$ASN_LIST" ]; then
+                # ASNNumber is a string field internally (like IsoCode in the
+                # geo-allowlist scenario above) even though it prints as a bare
+                # number in cscli/explain output. Confirmed live: unquoted
+                # integer literals here made CrowdSec fatal-crash-loop at
+                # startup with "cannot use string as type int in array" —
+                # every ASN must be quoted as a string to match.
                 local _asn_expr
-                _asn_expr="$(printf "%s, " $ASN_LIST)"
+                _asn_expr="$(printf "'%s', " $ASN_LIST)"
                 _asn_expr="${_asn_expr%, }"
 
                 sudo mkdir -p /etc/crowdsec/scenarios
