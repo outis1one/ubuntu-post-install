@@ -284,6 +284,8 @@ format: |
   {{range . -}}
   {{range .Decisions -}}
   {{.Value}} banned: {{.Scenario}} for {{.Duration}}
+  Check all bans:  sudo cscli decisions list
+  Unban this IP:   sudo cscli decisions delete --ip {{.Value}}
   {{end -}}
   {{end -}}
 url: $CS_NTFY_URL
