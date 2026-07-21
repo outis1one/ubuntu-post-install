@@ -96,7 +96,7 @@ install_security-dashboard() {
         echo "[DRY-RUN] Would create system user $SVC_USER"
         echo "[DRY-RUN] Would write $APP_DIR/app.py"
         echo "[DRY-RUN] Would write /etc/sudoers.d/security-dashboard (scoped cscli/systemctl only)"
-        echo "[DRY-RUN] Would write a systemd unit and start it on 127.0.0.1:$DASHBOARD_PORT"
+        echo "[DRY-RUN] Would write a systemd unit and start it on 0.0.0.0:$DASHBOARD_PORT (firewalled via UFW, not interface binding)"
         echo "[DRY-RUN] Would configure Caddy + Authelia for a domain you'll be prompted for"
         return 0
     fi
@@ -190,7 +190,7 @@ SDSVC
     systemctl daemon-reload
     systemctl enable security-dashboard >/dev/null 2>&1
     if systemctl restart security-dashboard; then
-        log_success "security-dashboard started on 127.0.0.1:$DASHBOARD_PORT"
+        log_success "security-dashboard started on port $DASHBOARD_PORT (all interfaces — UFW scopes actual access)"
     else
         log_warning "Failed to start — check: systemctl status security-dashboard"
     fi
@@ -326,8 +326,9 @@ sudo journalctl -u security-dashboard -f
 - Sudo access is scoped to exactly three commands via
   \`/etc/sudoers.d/security-dashboard\`: \`cscli decisions delete --id <digits>\`,
   \`cscli decisions list -o json\`, and \`systemctl restart crowdsec\`. Nothing else.
-- Listens on \`127.0.0.1:$DASHBOARD_PORT\` only — never exposed directly to the
-  internet, only reachable through Caddy.
+- Listens on all interfaces (Caddy reaches it via \`host.docker.internal\`, a
+  Docker bridge IP — a loopback-only bind refuses that). Access is scoped by
+  UFW instead, allowed only from Caddy's internal network, not the internet.
 - **This page can delete active security bans.** Don't run it without Authelia
   (or equivalent) in front of it.
 README_MD
@@ -672,8 +673,15 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ThreadingHTTPServer.allow_reuse_address = True
-    with ThreadingHTTPServer(("127.0.0.1", PORT), Handler) as httpd:
-        print(f"Security dashboard running on 127.0.0.1:{PORT}")
+    # 0.0.0.0, not 127.0.0.1: Caddy runs in a container and reaches this via
+    # host.docker.internal (a Docker bridge gateway IP, not localhost) — a
+    # loopback-only bind refuses that connection outright. Confirmed live:
+    # "dial tcp 172.17.0.1:8092: connect: connection refused" even though
+    # curl from the host itself worked fine on 127.0.0.1. Access is scoped by
+    # UFW (see install_security-dashboard), not by which interface this binds
+    # to — same pattern every other host-network service in this repo uses.
+    with ThreadingHTTPServer(("0.0.0.0", PORT), Handler) as httpd:
+        print(f"Security dashboard running on 0.0.0.0:{PORT}")
         httpd.serve_forever()
 
 
