@@ -281,6 +281,24 @@ self-documenting on the deployed box.
 Some services have their own login screens; others have none and need Caddy to
 gate them via Authelia.
 
+**Running more than one Authelia instance (e.g. one per machine).** `services/authelia.sh`
+runs standalone on any box (`sudo bash authelia.sh`, same pattern as `crowdsec.sh`) and
+`asterisk-digital-ocean.sh` already auto-detects a local install (`if [ -d
+"$DOCKER_DIR/authelia" ]`), switching from the remote-Authelia `forward_auth` flow to the
+local `import authelia` snippet automatically — so a second, fully independent instance on
+another machine (e.g. a droplet, for resilience if the first machine goes down) works with
+no code changes.
+
+The one real constraint: Authelia's session cookie is scoped to `AUTHELIA_DOMAIN` (the apex
+domain entered at install time) with `includeSubDomains`-style matching, and the portal
+itself lives at `auth.${AUTHELIA_DOMAIN}`. **Two independent instances must not share the
+same `AUTHELIA_DOMAIN`.** If they did, both would try to claim the same `auth.<domain>`
+hostname (DNS can only point that at one machine) and the same cookie scope with completely
+separate session stores — users bouncing between subdomains fronted by different instances
+would see confusing repeated logins as each instance's cookie gets overwritten/rejected by
+the other's. Give each instance either a genuinely separate apex domain, or a distinct
+subdomain tree the other instance doesn't also claim.
+
 **Has built-in auth — no Authelia needed:**
 `emby`, `jellyfin`, `audiobookshelf`, `immich`, `mealie`, `actualbudget`,
 `homeassistant`, `portainer`, `meshcentral`, `traccar`, `uptimekuma`,
