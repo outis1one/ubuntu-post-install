@@ -3,13 +3,20 @@
 Research and decisions from a design discussion, saved here so the work can
 be picked up in a fresh chat without re-deriving the background.
 
-**Implemented** — see `services/voipms-trunk.sh` (run `sudo ./setup.sh
-voipms-trunk` after `asterisk-digital-ocean` is installed). IP-authenticated
-trunk, US/NANP-only outbound dialplan, 3-concurrent-call cap, inbound to one
-extension. That file's own header comment explains how it survives Easy
-Asterisk's config regeneration (an architectural wrinkle discovered while
-implementing this — worth reading before touching either file). The
-outbound spend/volume alert mentioned below is still not implemented.
+**Implemented** — see `services/pstn-trunk.sh` (run `sudo ./setup.sh
+pstn-trunk` after `asterisk-digital-ocean` is installed). Generic SIP trunk
+add-on that defaults to VoIP.ms but isn't hardcoded to it — any provider
+supporting IP authentication works. Covers: IP-authenticated trunk,
+US/NANP-only outbound dialplan, a configurable concurrent-call cap (default
+3), **role-based outbound permission** (some extensions internal-only, some
+PSTN-enabled — internal intercom dialing is never gated either way), a
+configurable **inbound ring-group** (one extension or several), **ntfy
+alerts** on denied/rejected calls (immediate) and spend/volume thresholds
+(hourly check), and settings persisted to `.pstn-trunk.env` so "update in
+place" reapplies everything without re-prompting. That file's own header
+comment explains how it survives Easy Asterisk's config regeneration (an
+architectural wrinkle discovered while implementing this — worth reading
+before touching either file).
 
 ## Decision so far
 - **Provider: VoIP.ms.** Chosen for its prepaid-balance model: turn off
@@ -76,35 +83,55 @@ ceiling; only a concurrent-call cap bounds the *speed* of a breach. Treat
 the concurrent-call cap and spend/volume alert below as required before
 funding a live trunk, not optional hardening.
 
-**Implemented:** the concurrent-call cap in `services/voipms-trunk.sh` is a
-*global* cap (max 3 outbound legs total via the trunk, via
-`GROUP()`/`GROUP_COUNT()` in the dialplan, shared across all extensions) —
-not per-extension. That was the explicit ask when this got built; a
-per-extension cap layered on top is still a possible future refinement, not
-done. The spend/volume alert is still not implemented.
+**Implemented:** the concurrent-call cap in `services/pstn-trunk.sh` is a
+*global* cap (configurable, default max 3 outbound legs total via the trunk,
+via `GROUP()`/`GROUP_COUNT()` in the dialplan, shared across all extensions)
+— not per-extension. That was the explicit ask when this got built. The
+spend/volume alert is also implemented now: an hourly cron script reads a
+call log the dialplan appends to directly (not Asterisk's CDR — see the
+service file's own comments for why) and alerts via ntfy once per month when
+estimated spend crosses a threshold, and every hour that call volume in the
+last hour looks like a burst. Denied/rejected calls alert immediately,
+separately from that hourly check.
 
 ## What it takes technically (asterisk-digital-ocean)
-- A PJSIP trunk to VoIP.ms: `endpoint` / `aor` / `identify` sections in the
-  pjsip config. **Implemented with IP authentication** (no `auth` section,
-  no SIP password stored anywhere) — see `services/voipms-trunk.sh`.
+- A PJSIP trunk: `endpoint` / `aor` / `identify` sections in the pjsip
+  config. **Implemented with IP authentication** (no `auth` section, no SIP
+  password stored anywhere) — see `services/pstn-trunk.sh`. Provider name,
+  server hostname, and DID are all prompted at install time (VoIP.ms is only
+  the suggested default), so any provider supporting IP auth works.
 - An outbound dialplan route matching US numbers only — **implemented**:
   `_1NXXNXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXX` (10-digit,
-  auto-prefixed with 1), both routed to the VoIP.ms trunk. No catch-all
-  `_X.` pattern.
-- VoIP.ms-specific setup that isn't scriptable (user does this manually):
-  create the account, order a DID (inbound is wanted — see above), decide
-  pay-per-minute vs. unlimited DID plan and whether to add E911, pick a
-  VoIP.ms POP/server (affects the trunk hostname), fund the prepaid balance
-  ($15 minimum), turn off auto-recharge. `services/voipms-trunk.sh` prompts
-  for the POP hostname, DID, and a ring extension for inbound at install time.
+  auto-prefixed with 1), both routed to the trunk. No catch-all `_X.`
+  pattern.
+- **Role-based outbound permission — implemented.** A space-separated list
+  of extensions allowed to dial PSTN, prompted at install (blank = every
+  extension, the original default before roles existed). Baked into the
+  dialplan as a `REGEX()` check against `${CHANNEL(peername)}` — no changes
+  needed to Easy Asterisk's own per-device pjsip.conf sections, since the
+  gate lives entirely in code this repo already owns. Internal
+  extension-to-extension dialing is never gated by this, regardless of PSTN
+  permission — only the two NANP patterns above are.
+- **Inbound ring-group — implemented.** A space-separated list of
+  extensions to ring for inbound calls (one, or several for a ring group via
+  `Dial(PJSIP/a&PJSIP/b,20)`), prompted at install.
+- Provider-specific setup that isn't scriptable (user does this manually):
+  create the account, order a DID, decide pay-per-minute vs. unlimited DID
+  plan and whether to add E911, pick a server/POP, fund the prepaid balance
+  ($15 minimum for VoIP.ms), turn off auto-recharge. `services/pstn-trunk.sh`
+  prompts for the server hostname, DID, allowed extensions, ring extensions,
+  concurrency cap, ntfy topic, and spend-alert settings at install time.
 - Defense-in-depth alongside the trunk:
   - **Implemented:** a global concurrent-call cap in the dialplan
-    (`GROUP()`/`GROUP_COUNT()`, max 3 outbound legs via the trunk at once)
-    so a compromised extension can't open dozens of simultaneous outbound
-    legs. Global, not per-extension — see the note above.
-  - **Not implemented:** a simple outbound call-count/spend alert — could
-    live in the existing `security-dashboard` service (see
-    `services/security-dashboard.sh`) or as a separate CDR-based check.
+    (`GROUP()`/`GROUP_COUNT()`, configurable, default max 3 outbound legs via
+    the trunk at once) so an unauthorized or compromised extension can't
+    open dozens of simultaneous outbound legs. Global, not per-extension —
+    see the note above.
+  - **Implemented:** an outbound call-count/spend alert via ntfy — a
+    self-contained call log (not Asterisk's CDR) plus an hourly cron script.
+    Denied/rejected calls also alert immediately. See
+    `services/pstn-trunk.sh`'s "Spend/volume alerts" README section for the
+    exact mechanics and why CDR wasn't used.
   - Worth being explicit that CrowdSec's existing `asterisk_bf` /
     `asterisk_user_enum` scenarios (see `services/crowdsec.sh`) cover
     registration brute-force, which is a *different* threat model from a
@@ -122,21 +149,21 @@ done. The spend/volume alert is still not implemented.
   across the space, VoIP.ms included.
 
 ## Open items for whoever picks this up next
-1. ~~Decide: new `services/voipms-trunk.sh`...~~ Done — separate service file.
+1. ~~Decide: new `services/pstn-trunk.sh`...~~ Done — separate service file,
+   generalized to any IP-auth SIP provider (VoIP.ms is just the default).
 2. ~~IP auth vs. registration~~ Done — IP authentication, no password stored.
 3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`.
-4. ~~Inbound~~ Done — rings one extension, prompted at install time. Still
-   unresolved: pick pay-per-minute vs. unlimited DID plan on VoIP.ms's side
-   based on real expected volume, and decide on E911 (see cost estimate).
-5. ~~Concurrent-call cap~~ Done — global 3-call cap. Still not implemented:
-   the spend/volume alert (security-dashboard integration or CDR-based
-   check) — treat as still-required before fully trusting this against a
-   sustained breach, not optional (see toll-fraud nuance above: the NANP
-   restriction + call cap bound cost/min and burn speed, but nothing here
-   yet notices a breach in progress or alerts on unusual volume).
+4. ~~Inbound~~ Done — rings a configurable list of extensions (ring-group
+   supported), prompted at install time. ~~Role-based outbound permission~~
+   Done — space-separated allow-list, blank = everyone. Still unresolved:
+   pick pay-per-minute vs. unlimited DID plan on VoIP.ms's side based on
+   real expected volume, and decide on E911 (see cost estimate).
+5. ~~Concurrent-call cap~~ Done — configurable, default 3, global not
+   per-extension. ~~Spend/volume alert~~ Done — ntfy, hourly threshold +
+   burst check, plus immediate alerts on denied/rejected calls.
 6. Verify against a live VoIP.ms account: auto-recharge-off behavior at
    sign-up, and that the chosen POP server's actual source IP for inbound
-   calls matches what `services/voipms-trunk.sh` resolved via DNS at install
+   calls matches what `services/pstn-trunk.sh` resolved via DNS at install
    time (VoIP.ms's docs mention some redundancy/failover between servers —
    if inbound calls ever stop matching the `identify` section, this is the
    first thing to check).

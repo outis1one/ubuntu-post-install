@@ -1,17 +1,21 @@
 #!/bin/bash
-# services/voipms-trunk.sh — VoIP.ms SIP trunk add-on for asterisk-digital-ocean:
-# US-only outbound (NANP dialplan restriction), capped at 3 concurrent
-# outbound calls, IP-authenticated trunk (no SIP password stored), plus
-# inbound routing to one extension.
+# services/pstn-trunk.sh — SIP PSTN trunk add-on for asterisk-digital-ocean:
+# US-only outbound (NANP dialplan restriction), a configurable concurrent-call
+# cap, role-based outbound permission (some extensions internal-only, some
+# PSTN-enabled), a configurable inbound ring-group, IP-authenticated trunk
+# (no SIP password stored), ntfy alerts on denied/rejected calls, and a
+# periodic spend/volume check.
+#
+# Defaults to VoIP.ms (see docs/pstn-calling-voipms-plan.md for the design/
+# cost background this is built from) but isn't hardcoded to it — any SIP
+# trunk provider that supports IP authentication works the same way.
 #
 # Requires an existing services/asterisk-digital-ocean.sh install — this adds
-# a PSTN trunk on top of it and does not stand alone. See
-# docs/pstn-calling-voipms-plan.md for the design/cost background this is
-# built from.
+# a PSTN trunk on top of it and does not stand alone.
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service voipms-trunk homelab "VoIP.ms SIP trunk for asterisk-digital-ocean — US-only outbound, max 3 concurrent calls"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean — US-only, role-based permissions, spend/volume alerts (defaults to VoIP.ms)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
 # Easy Asterisk (the vendor project asterisk-digital-ocean.sh builds on) fully
@@ -25,7 +29,7 @@ register_service voipms-trunk homelab "VoIP.ms SIP trunk for asterisk-digital-oc
 #     that runs.
 # So the trunk/dialplan content below lives in its own files and is
 # #include'd from the generated files instead of appended directly. To make
-# the #include itself survive regeneration too, _voipms_patch_vendor_files
+# the #include itself survive regeneration too, _pstn_patch_vendor_files
 # (below) patches it into the vendor's *generator functions* — the same
 # technique this repo already uses for the logger.conf security-logging fix
 # in _asterisk_do_refresh_vendor_files (see services/asterisk-digital-ocean.sh).
@@ -41,7 +45,7 @@ register_service voipms-trunk homelab "VoIP.ms SIP trunk for asterisk-digital-oc
 # "[intercom]" (extensions.conf) — each confirmed to appear exactly once per
 # file in the vendor source, so this is safe regardless of what else changes
 # around it upstream. Idempotent: skips files that already have the include.
-_voipms_patch_vendor_files() {
+_pstn_patch_vendor_files() {
     local EA_DIR="$1"
     local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
     local EASY1="$EA_DIR/easy-asterisk.sh"
@@ -53,119 +57,273 @@ _voipms_patch_vendor_files() {
     done
 
     for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
-        if ! grep -q 'voipms-trunk-pjsip.conf' "$f"; then
+        if ! grep -q 'pstn-trunk-pjsip.conf' "$f"; then
             if grep -q '^user_agent=EasyAsterisk$' "$f"; then
-                sed -i '/^user_agent=EasyAsterisk$/a #include voipms-trunk-pjsip.conf' "$f"
+                sed -i '/^user_agent=EasyAsterisk$/a #include pstn-trunk-pjsip.conf' "$f"
             else
                 log_warning "$(basename "$f"): 'user_agent=EasyAsterisk' anchor not found — vendor template changed upstream."
-                log_warning "  Add '#include voipms-trunk-pjsip.conf' manually after [global] in this file's pjsip.conf heredoc."
+                log_warning "  Add '#include pstn-trunk-pjsip.conf' manually after [global] in this file's pjsip.conf heredoc."
             fi
         fi
     done
 
     for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
-        if ! grep -q 'voipms-trunk-dialplan.conf' "$f"; then
+        if ! grep -q 'pstn-trunk-dialplan.conf' "$f"; then
             if grep -q '^\[intercom\]$' "$f"; then
-                sed -i '/^\[intercom\]$/a #include voipms-trunk-dialplan.conf' "$f"
+                sed -i '/^\[intercom\]$/a #include pstn-trunk-dialplan.conf' "$f"
             else
                 log_warning "$(basename "$f"): '[intercom]' anchor not found — vendor template changed upstream."
-                log_warning "  Add '#include voipms-trunk-dialplan.conf' manually after [intercom] in this file's extensions.conf heredoc."
+                log_warning "  Add '#include pstn-trunk-dialplan.conf' manually after [intercom] in this file's extensions.conf heredoc."
             fi
         fi
     done
 
-    log_success "Vendor generator functions patched to include the VoIP.ms trunk config."
+    log_success "Vendor generator functions patched to include the PSTN trunk config."
 }
 
 # ── Shared: pjsip trunk config (aor/identify/endpoint, IP-authenticated) ───
-_voipms_write_pjsip_include() {
+_pstn_write_pjsip_include() {
     local FILE="$1" SERVER="$2" SERVER_IP="$3" DID="$4"
     cat > "$FILE" << 'EOF'
-; VoIP.ms trunk — IP authentication, no password stored (see
-; docs/pstn-calling-voipms-plan.md). Regenerated by services/voipms-trunk.sh —
+; SIP PSTN trunk — IP authentication, no password stored (see
+; docs/pstn-calling-voipms-plan.md). Regenerated by services/pstn-trunk.sh —
 ; edit there, not here directly, or a reinstall/update will overwrite this.
 ;
 ; match= below is the resolved IP of the server hostname at install time.
-; VoIP.ms's servers are fixed per-POP, but if calls stop matching after a
-; provider-side change, re-run this service to re-resolve and rewrite it.
+; Providers sometimes send inbound INVITEs from a different IP than the one
+; their hostname resolves to (load balancing / multiple servers per POP) —
+; if inbound calls stop matching after a provider-side change, re-run this
+; service to re-resolve and rewrite it, or add extra "type=identify" /
+; "match=" lines here by hand for additional known source IPs.
 
-[voipms-trunk]
+[pstn-trunk]
 type=aor
-contact=sip:__VOIPMS_SERVER__
+contact=sip:__PSTN_SERVER__
 qualify_frequency=60
 
-[voipms-trunk]
+[pstn-trunk]
 type=identify
-endpoint=voipms-trunk
-match=__VOIPMS_SERVER_IP__
+endpoint=pstn-trunk
+match=__PSTN_SERVER_IP__
 
-[voipms-trunk]
+[pstn-trunk]
 type=endpoint
-context=from-voipms
+context=from-pstn-trunk
 disallow=all
 allow=ulaw,alaw
-aors=voipms-trunk
-from_user=__VOIPMS_DID__
-from_domain=__VOIPMS_SERVER__
-callerid=__VOIPMS_DID__
+aors=pstn-trunk
+from_user=__PSTN_DID__
+from_domain=__PSTN_SERVER__
+callerid=__PSTN_DID__
 direct_media=no
 EOF
-    sed -i "s/__VOIPMS_SERVER_IP__/${SERVER_IP}/g; s/__VOIPMS_SERVER__/${SERVER}/g; s/__VOIPMS_DID__/${DID}/g" "$FILE"
+    sed -i "s/__PSTN_SERVER_IP__/${SERVER_IP}/g; s/__PSTN_SERVER__/${SERVER}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
 }
 
-# ── Shared: outbound/inbound dialplan (NANP-only, 3-concurrent cap) ────────
+# ── Shared: outbound/inbound dialplan ───────────────────────────────────────
 # Continues in the [intercom] context established just above this include
 # (rebuild_dialplan() writes "[intercom]" then this #include right after it),
-# so existing extensions can dial out through it directly. [from-voipms]
+# so existing extensions can dial out through it directly. [from-pstn-trunk]
 # below is a separate context, for calls arriving from the trunk.
-_voipms_write_dialplan_include() {
-    local FILE="$1" DID="$2" RING_EXT="$3"
+#
+# Role model: internal intercom dialing (extension-to-extension) is NEVER
+# gated here — everyone keeps that, regardless of PSTN permission. Only the
+# two NANP patterns (the trunk route) are gated by ALLOWED_REGEX. An empty
+# allow-list at install time becomes ".*" (match anything), preserving
+# "every extension can dial out" as the explicit opt-in default.
+#
+# Calls are logged to pstn-trunk-calls.log (epoch|direction|who|what|seconds)
+# for the usage-alert script — not Asterisk's own CDR, to avoid depending on
+# whether cdr_csv is enabled/configured on a given image, and to sidestep
+# CDR CSV's comma-quoting entirely (our own pipe-delimited format has no
+# embedded-delimiter risk since every field here is digits/hostnames).
+_pstn_write_dialplan_include() {
+    local FILE="$1" DID="$2" ALLOWED_REGEX="$3" MAX_CONCURRENT="$4" RING_DIAL="$5" NTFY_URL="$6"
     cat > "$FILE" << 'EOF'
-; VoIP.ms outbound/inbound — US-only (NANP), max 3 concurrent outbound calls.
-; Regenerated by services/voipms-trunk.sh — edit there, not here directly.
+; PSTN outbound/inbound — US-only (NANP), concurrent-call cap, role-based
+; outbound permission. Regenerated by services/pstn-trunk.sh — edit there,
+; not here directly, or a reinstall/update will overwrite this.
 ;
 ; No catch-all pattern here on purpose: only these two NANP patterns route
-; to the trunk, so a compromised extension can't reach anything else even if
-; the trunk itself would technically allow more. See
-; docs/pstn-calling-voipms-plan.md for the full toll-fraud reasoning.
+; to the trunk, so an unauthorized or compromised extension can't reach
+; anything else even if the trunk itself would technically allow more. See
+; docs/pstn-calling-voipms-plan.md for the toll-fraud reasoning.
 
-exten => _1NXXNXXXXX,1,NoOp(VoIP.ms outbound call to ${EXTEN})
- same => n,GotoIf($[${GROUP_COUNT(voipms-out)} >= 3]?voipms_busy,1)
- same => n,Set(GROUP()=voipms-out)
- same => n,Set(CALLERID(num)=__VOIPMS_DID__)
- same => n,Dial(PJSIP/${EXTEN}@voipms-trunk,60)
- same => n,Hangup()
-
-exten => _NXXNXXXXX,1,NoOp(Assuming NANP, adding leading 1)
- same => n,Goto(1${EXTEN},1)
-
-exten => voipms_busy,1,NoOp(VoIP.ms: 3 concurrent outbound calls already active — rejecting)
+exten => _1NXXNXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+ same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
+ same => n,GotoIf($[${REGEX("^(__PSTN_ALLOWED_REGEX__)$" ${PSTN_CALLER})} = 1]?pstn_check_busy,1)
+ same => n,NoOp(Denied - ${PSTN_CALLER} is not authorized for PSTN outbound)
+__ALERT_DENY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
-[from-voipms]
+exten => _NXXNXXXXX,1,NoOp(Assuming NANP - adding leading 1)
+ same => n,Goto(1${EXTEN},1)
+
+exten => pstn_check_busy,1,GotoIf($[${GROUP_COUNT(pstn-out)} >= __PSTN_MAX_CONCURRENT__]?pstn_busy,1)
+ same => n,Set(GROUP()=pstn-out)
+ same => n,Set(CALLERID(num)=__PSTN_DID__)
+ same => n,Set(PSTN_START=${EPOCH})
+ same => n,Dial(PJSIP/${EXTEN}@pstn-trunk,60)
+ same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
+ same => n,System(printf '%s|out|%s|%s|%s\n' "${PSTN_START}" "${PSTN_CALLER}" "${EXTEN}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
+ same => n,Hangup()
+
+exten => pstn_busy,1,NoOp(PSTN trunk - concurrent-call cap reached, rejecting)
+__ALERT_BUSY_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
+
+[from-pstn-trunk]
 exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)})
- same => n,Dial(PJSIP/__VOIPMS_RING_EXT__,20)
+ same => n,Set(PSTN_START=${EPOCH})
+ same => n,Dial(__PSTN_RING_DIAL__,20)
+ same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
+ same => n,System(printf '%s|in|%s|ring-group|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
  same => n,Hangup()
 EOF
-    sed -i "s/__VOIPMS_DID__/${DID}/g; s/__VOIPMS_RING_EXT__/${RING_EXT}/g" "$FILE"
+    sed -i "s/__PSTN_ALLOWED_REGEX__/${ALLOWED_REGEX}/g; s/__PSTN_MAX_CONCURRENT__/${MAX_CONCURRENT}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
+    # RING_DIAL is "PJSIP/a&PJSIP/b&..." — the literal "&" must be escaped in
+    # a sed replacement (bare "&" means "the matched text", same gotcha as
+    # NTFY_URL below), or every "&" gets replaced with the placeholder itself.
+    local _esc_ring_dial="${RING_DIAL//&/\\&}"
+    sed -i "s#__PSTN_RING_DIAL__#${_esc_ring_dial}#g" "$FILE"
+
+    if [[ -n "$NTFY_URL" ]]; then
+        local _esc_url="${NTFY_URL//&/\\&}"
+        sed -i "s#__ALERT_DENY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - extension not authorized.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_BUSY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: concurrent-call cap reached - a call was rejected.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+    else
+        sed -i "/__ALERT_DENY_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
+    fi
 }
 
-install_voipms-trunk() {
+# ── Shared: periodic spend/volume checker (run hourly via cron) ────────────
+_pstn_write_usage_alert_script() {
+    local FILE="$1" EA_DIR="$2" RATE="$3" MONTH_THRESHOLD="$4" BURST_THRESHOLD="$5" NTFY_URL="$6"
+    cat > "$FILE" << 'EOF'
+#!/bin/bash
+# Auto-generated by services/pstn-trunk.sh — do not edit directly, re-run
+# the installer instead. Run hourly via /etc/cron.d/pstn-trunk-usage.
+# Reads the call log pstn-trunk-dialplan.conf appends to and alerts via
+# ntfy when month-to-date estimated spend crosses a threshold (alerted once
+# per month) or when call volume in the last hour looks like a burst.
+
+LOG_FILE="__EA_DIR__/logs/pstn-trunk-calls.log"
+STATE_FILE="__EA_DIR__/.pstn-trunk-alert-state"
+RATE="__PSTN_RATE__"
+MONTH_THRESHOLD="__PSTN_MONTH_THRESHOLD__"
+BURST_THRESHOLD="__PSTN_BURST_THRESHOLD__"
+NTFY_URL="__PSTN_NTFY_URL__"
+
+[[ -f "$LOG_FILE" ]] || exit 0
+
+now_epoch=$(date +%s)
+current_month=$(date +%Y-%m)
+one_hour_ago=$((now_epoch - 3600))
+month_start_epoch=$(date -d "$(date +%Y-%m-01)" +%s)
+
+month_seconds=$(awk -F'|' -v start="$month_start_epoch" '$2=="out" && $1+0>=start {sum+=$5} END{print sum+0}' "$LOG_FILE")
+month_minutes=$(awk -v s="$month_seconds" 'BEGIN{printf "%.1f", s/60}')
+month_cost=$(awk -v m="$month_minutes" -v r="$RATE" 'BEGIN{printf "%.2f", m*r}')
+hour_calls=$(awk -F'|' -v start="$one_hour_ago" '$2=="out" && $1+0>=start {c++} END{print c+0}' "$LOG_FILE")
+
+send_ntfy() {
+    [[ -n "$NTFY_URL" ]] && curl -m 5 -s -d "$1" "$NTFY_URL" >/dev/null 2>&1
+}
+
+last_alert_month=""
+[[ -f "$STATE_FILE" ]] && last_alert_month=$(cat "$STATE_FILE")
+
+if awk -v c="$month_cost" -v t="$MONTH_THRESHOLD" 'BEGIN{exit !(c>=t)}'; then
+    if [[ "$last_alert_month" != "$current_month" ]]; then
+        send_ntfy "PSTN trunk: estimated spend this month (\$${month_cost}) has crossed the \$${MONTH_THRESHOLD} threshold. ${month_minutes} minutes so far."
+        echo "$current_month" > "$STATE_FILE"
+    fi
+fi
+
+if [[ "$hour_calls" -ge "$BURST_THRESHOLD" ]]; then
+    send_ntfy "PSTN trunk: $hour_calls outbound calls placed in the last hour - check for unusual activity."
+fi
+EOF
+    sed -i "s#__EA_DIR__#${EA_DIR}#g; s/__PSTN_RATE__/${RATE}/g; s/__PSTN_MONTH_THRESHOLD__/${MONTH_THRESHOLD}/g; s/__PSTN_BURST_THRESHOLD__/${BURST_THRESHOLD}/g" "$FILE"
+    sed -i "s#__PSTN_NTFY_URL__#${NTFY_URL}#g" "$FILE"
+    chmod 755 "$FILE"
+}
+
+# ── Shared: apply everything from a settings set (used by fresh + update) ──
+_pstn_apply_settings() {
+    local EA_DIR="$1" ASTERISK_DIR="$2"
+    local SERVER="$3" SERVER_IP="$4" DID="$5" ALLOWED_EXTS="$6" MAX_CONCURRENT="$7"
+    local RING_EXTS="$8" NTFY_URL="$9" RATE="${10}" MONTH_THRESHOLD="${11}" BURST_THRESHOLD="${12}"
+    local PROVIDER_NAME="${13}"
+
+    local ALLOWED_REGEX
+    if [[ -z "$ALLOWED_EXTS" ]]; then
+        ALLOWED_REGEX=".*"
+    else
+        ALLOWED_REGEX="$(echo "$ALLOWED_EXTS" | tr -s ' ' '|')"
+    fi
+
+    local RING_DIAL="" _ext
+    for _ext in $RING_EXTS; do
+        [[ -n "$RING_DIAL" ]] && RING_DIAL="${RING_DIAL}&"
+        RING_DIAL="${RING_DIAL}PJSIP/${_ext}"
+    done
+
+    _pstn_patch_vendor_files "$EA_DIR" || return 1
+
+    mkdir -p "$ASTERISK_DIR"
+    _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IP" "$DID"
+    _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$ALLOWED_REGEX" "$MAX_CONCURRENT" "$RING_DIAL" "$NTFY_URL"
+    _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$NTFY_URL"
+    ensure_docker_dir_ownership "$ASTERISK_DIR"
+    chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf"
+
+    cat > "$EA_DIR/.pstn-trunk.env" << ENV
+PROVIDER_NAME=${PROVIDER_NAME}
+TRUNK_SERVER=${SERVER}
+TRUNK_SERVER_IP=${SERVER_IP}
+TRUNK_DID=${DID}
+PSTN_ALLOWED_EXTS=${ALLOWED_EXTS}
+MAX_CONCURRENT=${MAX_CONCURRENT}
+RING_EXTS=${RING_EXTS}
+NTFY_URL=${NTFY_URL}
+RATE_PER_MIN=${RATE}
+MONTH_THRESHOLD=${MONTH_THRESHOLD}
+BURST_THRESHOLD=${BURST_THRESHOLD}
+ENV
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR/.pstn-trunk.env" 2>/dev/null || true
+
+    if command -v cron >/dev/null 2>&1 || [[ -d /etc/cron.d ]]; then
+        cat > /etc/cron.d/pstn-trunk-usage << CRON
+0 * * * * root /bin/bash $EA_DIR/pstn-trunk-usage-alert.sh >> $EA_DIR/logs/pstn-trunk-usage-alert.log 2>&1
+CRON
+        log_success "Hourly spend/volume check installed (cron.d)."
+    else
+        log_warning "cron not available — run $EA_DIR/pstn-trunk-usage-alert.sh manually/periodically for spend/volume alerts."
+    fi
+}
+
+install_pstn-trunk() {
     require_docker || return 1
 
     local EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
     local ASTERISK_DIR="$EA_DIR/config/asterisk"
-    local PJSIP_INCLUDE="$ASTERISK_DIR/voipms-trunk-pjsip.conf"
-    local DIALPLAN_INCLUDE="$ASTERISK_DIR/voipms-trunk-dialplan.conf"
+    local PJSIP_INCLUDE="$ASTERISK_DIR/pstn-trunk-pjsip.conf"
+    local DIALPLAN_INCLUDE="$ASTERISK_DIR/pstn-trunk-dialplan.conf"
+    local SETTINGS_FILE="$EA_DIR/.pstn-trunk.env"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean install at $EA_DIR"
-        echo "[DRY-RUN] Would prompt for VoIP.ms server/POP hostname, DID, and ring extension"
+        echo "[DRY-RUN] Would prompt for: SIP provider name (default VoIP.ms), server/POP hostname,"
+        echo "[DRY-RUN]   DID, extensions allowed to dial out (blank=all), max concurrent calls (default 3),"
+        echo "[DRY-RUN]   extensions to ring inbound (space-separated, ring-group supported),"
+        echo "[DRY-RUN]   ntfy alert topic (optional), per-minute rate + monthly/hourly alert thresholds"
         echo "[DRY-RUN] Would resolve the server hostname to an IP for inbound call matching"
         echo "[DRY-RUN] Would patch vendor generator functions to #include the trunk config"
-        echo "[DRY-RUN] Would write $PJSIP_INCLUDE and $DIALPLAN_INCLUDE"
-        echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if already configured"
+        echo "[DRY-RUN] Would write $PJSIP_INCLUDE, $DIALPLAN_INCLUDE, and an hourly usage-alert script + cron.d entry"
+        echo "[DRY-RUN] Would offer 'update in place' (reads settings back from $SETTINGS_FILE) instead of a fresh install if already configured"
         echo "[DRY-RUN] Would restart the asterisk container to apply"
         return 0
     fi
@@ -173,52 +331,47 @@ install_voipms-trunk() {
     if [[ ! -f "$EA_DIR/docker-compose.yml" ]]; then
         log_error "asterisk-digital-ocean isn't installed at $EA_DIR — install it first:"
         log_error "  sudo ./setup.sh asterisk-digital-ocean"
-        log_error "This service adds a VoIP.ms PSTN trunk on top of it; it doesn't stand alone."
+        log_error "This service adds a PSTN trunk on top of it; it doesn't stand alone."
         return 1
     fi
 
-    log_info "Configuring VoIP.ms SIP trunk for asterisk-digital-ocean..."
-    log_info "US-only outbound (NANP dialplan), max 3 concurrent outbound calls, IP-authenticated trunk."
+    log_info "Configuring a SIP PSTN trunk for asterisk-digital-ocean (defaults to VoIP.ms)."
+    log_info "US-only outbound (NANP dialplan), a concurrent-call cap, role-based outbound permission,"
+    log_info "an inbound ring-group, and ntfy alerts on denied/rejected calls plus spend/volume checks."
     echo ""
-    log_warning "Before continuing, on VoIP.ms's side you should already have: created an"
-    log_warning "account, funded the \$15 minimum prepaid balance, turned OFF auto-recharge"
-    log_warning "(Client Area -> Balance Management), ordered a DID with IP authentication"
-    log_warning "pointed at this droplet's public IP, and picked a server/POP. Also restrict"
-    log_warning "outbound routing to US/NANP on VoIP.ms's own side if it offers that — this"
-    log_warning "dialplan is the second, independent layer, not a substitute for the first."
+    log_warning "Before continuing, on your provider's side you should already have: created an"
+    log_warning "account, funded and set up prepaid billing with auto-recharge OFF (VoIP.ms: Client"
+    log_warning "Area -> Balance Management), ordered a DID with IP authentication pointed at this"
+    log_warning "droplet's public IP, and picked a server/POP. Also restrict outbound routing to"
+    log_warning "US/NANP on the provider's own side if it offers that — this dialplan is the second,"
+    log_warning "independent layer, not a substitute for the first."
     log_warning "See docs/pstn-calling-voipms-plan.md for the full background."
     echo ""
 
     # ── Existing install? Offer update-in-place instead of a full reinstall ──
     if [[ -f "$PJSIP_INCLUDE" && -f "$DIALPLAN_INCLUDE" ]]; then
-        log_info "Existing VoIP.ms trunk config found."
+        log_info "Existing PSTN trunk config found."
         local REINSTALL_MODE=""
         prompt_reinstall_mode REINSTALL_MODE
         case "$REINSTALL_MODE" in
             update)
-                local _SERVER _SERVER_IP _DID _RING_EXT
-                _SERVER="$(grep -m1 '^from_domain=' "$PJSIP_INCLUDE" | cut -d= -f2-)"
-                _SERVER_IP="$(grep -m1 '^match=' "$PJSIP_INCLUDE" | cut -d= -f2-)"
-                _DID="$(grep -m1 '^from_user=' "$PJSIP_INCLUDE" | cut -d= -f2-)"
-                # Match only the inbound line (Dial(PJSIP/<digits>,20)) — the
-                # outbound line matches Dial(PJSIP/${EXTEN}@voipms-trunk,60),
-                # which starts with "$" right after PJSIP/, not a digit.
-                _RING_EXT="$(grep -m1 -E 'Dial\(PJSIP/[0-9]+,20\)' "$DIALPLAN_INCLUDE" | sed -E 's/.*Dial\(PJSIP\/([0-9]+),20\).*/\1/')"
-                if [[ -z "$_SERVER" || -z "$_DID" || -z "$_RING_EXT" ]]; then
-                    log_warning "Couldn't parse existing settings back out — falling back to a fresh install (every prompt below)."
-                else
-                    _voipms_patch_vendor_files "$EA_DIR" || return 1
-                    _voipms_write_pjsip_include "$PJSIP_INCLUDE" "$_SERVER" "$_SERVER_IP" "$_DID"
-                    _voipms_write_dialplan_include "$DIALPLAN_INCLUDE" "$_DID" "$_RING_EXT"
-                    ensure_docker_dir_ownership "$ASTERISK_DIR"
+                if [[ -f "$SETTINGS_FILE" ]]; then
+                    # shellcheck disable=SC1090
+                    source "$SETTINGS_FILE"
+                    _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
+                        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$PSTN_ALLOWED_EXTS" \
+                        "$MAX_CONCURRENT" "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
+                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
-                        && log_success "Updated — settings unchanged (server $_SERVER, DID $_DID, ring ext $_RING_EXT)." \
+                        && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
                     return 0
+                else
+                    log_warning "No $SETTINGS_FILE found (pre-dates this settings-file version) — falling back to a fresh install (every prompt below)."
                 fi
                 ;;
             cancel)
-                log_info "Leaving the existing VoIP.ms trunk config as-is."
+                log_info "Leaving the existing PSTN trunk config as-is."
                 return 0
                 ;;
             fresh)
@@ -227,64 +380,117 @@ install_voipms-trunk() {
         esac
     fi
 
-    # ── Prompts — VoIP.ms account details aren't scriptable, user sets these
-    # up manually on VoIP.ms's own site first (see warning above) ───────────
-    local VOIPMS_SERVER=""
-    prompt_text "VoIP.ms server/POP hostname (e.g. atlanta2.voip.ms — pick the one closest to this droplet from VoIP.ms's server list):" "" VOIPMS_SERVER
-    if [[ -z "$VOIPMS_SERVER" ]]; then
-        log_error "A VoIP.ms server hostname is required — aborting."
+    # ── Prompts — provider account details aren't scriptable, set up manually
+    # on the provider's own site first (see warning above) ───────────────────
+    local PROVIDER_NAME=""
+    prompt_text "SIP trunk provider name (for your reference/docs only):" "VoIP.ms" PROVIDER_NAME
+
+    local TRUNK_SERVER=""
+    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms — pick the one closest to this droplet from your provider's server list):" "" TRUNK_SERVER
+    if [[ -z "$TRUNK_SERVER" ]]; then
+        log_error "A server hostname is required — aborting."
         return 1
     fi
 
-    local VOIPMS_SERVER_IP=""
-    VOIPMS_SERVER_IP="$(getent ahostsv4 "$VOIPMS_SERVER" 2>/dev/null | awk '{print $1}' | head -1)"
-    if [[ -z "$VOIPMS_SERVER_IP" ]]; then
-        log_warning "Couldn't resolve $VOIPMS_SERVER — the identify section needs an IP to match inbound calls against."
-        prompt_text "Enter its IP manually (check VoIP.ms's server list page):" "" VOIPMS_SERVER_IP
-        if [[ -z "$VOIPMS_SERVER_IP" ]]; then
+    local TRUNK_SERVER_IP=""
+    TRUNK_SERVER_IP="$(getent ahostsv4 "$TRUNK_SERVER" 2>/dev/null | awk '{print $1}' | head -1)"
+    if [[ -z "$TRUNK_SERVER_IP" ]]; then
+        log_warning "Couldn't resolve $TRUNK_SERVER — the identify section needs an IP to match inbound calls against."
+        prompt_text "Enter its IP manually (check your provider's server list page):" "" TRUNK_SERVER_IP
+        if [[ -z "$TRUNK_SERVER_IP" ]]; then
             log_error "No IP available — aborting."
             return 1
         fi
     else
-        log_success "Resolved $VOIPMS_SERVER -> $VOIPMS_SERVER_IP"
+        log_success "Resolved $TRUNK_SERVER -> $TRUNK_SERVER_IP"
     fi
 
-    local VOIPMS_DID=""
-    prompt_text "VoIP.ms DID (the 10-digit US phone number assigned to this trunk, digits only):" "" VOIPMS_DID
-    if [[ ! "$VOIPMS_DID" =~ ^[0-9]{10}$ ]]; then
+    local TRUNK_DID=""
+    prompt_text "DID (the 10-digit US phone number assigned to this trunk, digits only):" "" TRUNK_DID
+    if [[ ! "$TRUNK_DID" =~ ^[0-9]{10}$ ]]; then
         log_error "That doesn't look like a 10-digit US number — aborting."
         return 1
     fi
 
-    local RING_EXT=""
-    prompt_text "Local extension to ring for inbound calls (must already exist in Easy Asterisk):" "" RING_EXT
-    if [[ -z "$RING_EXT" ]]; then
-        log_error "An extension number is required for inbound routing — aborting."
+    echo ""
+    echo "  Role model: EVERY extension can always call/receive calls from other"
+    echo "  Asterisk extensions (internal intercom dialing is never restricted"
+    echo "  here). The setting below only controls PSTN (real phone number)"
+    echo "  access — extensions left out behave exactly as they do today."
+    local PSTN_ALLOWED_EXTS=""
+    prompt_text "Extensions allowed to dial PSTN numbers (space-separated, e.g. '1001 1002'; blank = every extension):" "" PSTN_ALLOWED_EXTS
+    if [[ -z "$PSTN_ALLOWED_EXTS" ]]; then
+        log_info "No restriction entered — every extension will be able to dial PSTN numbers."
+    else
+        log_info "Only these extensions may dial PSTN numbers: $PSTN_ALLOWED_EXTS"
+    fi
+
+    local MAX_CONCURRENT=""
+    prompt_text "Max simultaneous outbound PSTN calls allowed:" "3" MAX_CONCURRENT
+    if [[ ! "$MAX_CONCURRENT" =~ ^[0-9]+$ ]]; then
+        log_warning "Not a number — defaulting to 3."
+        MAX_CONCURRENT=3
+    fi
+
+    local RING_EXTS=""
+    prompt_text "Extensions to ring for inbound PSTN calls (space-separated — one extension, or several for a ring group):" "" RING_EXTS
+    if [[ -z "$RING_EXTS" ]]; then
+        log_error "At least one extension is required for inbound routing — aborting."
         return 1
     fi
 
-    # ── Patch vendor generator functions, then write the include files ───────
-    _voipms_patch_vendor_files "$EA_DIR" || return 1
+    echo ""
+    local WANT_NTFY=""
+    prompt_yn "Send an ntfy alert when a call is denied (unauthorized extension) or rejected (concurrency cap hit)? (y/n):" "y" WANT_NTFY
+    local NTFY_URL=""
+    if [[ "$WANT_NTFY" =~ ^[Yy]$ ]]; then
+        # Prefer a locally-installed ntfy's own base-url as the default, same
+        # detection pattern services/crowdsec.sh uses for its own ntfy alerts.
+        local _ntfy_default="https://ntfy.sh/pstn-trunk-alerts"
+        if [ -f "$DOCKER_DIR/ntfy/config/server.yml" ]; then
+            local _local_base_url
+            _local_base_url="$(grep -oP '(?<=base-url: ")[^"]+' "$DOCKER_DIR/ntfy/config/server.yml" 2>/dev/null || true)"
+            if [ -n "$_local_base_url" ] && [ "$_local_base_url" != "https://ntfy.example.com" ]; then
+                _ntfy_default="${_local_base_url}/pstn-trunk-alerts"
+                log_info "Detected a configured local ntfy instance at $_local_base_url — using it as the default."
+            fi
+        fi
+        if [ "$_ntfy_default" = "https://ntfy.sh/pstn-trunk-alerts" ]; then
+            log_info "No configured local ntfy instance detected — defaulting to the public ntfy.sh."
+            log_info "If you have one hosted elsewhere, enter its topic URL instead."
+        fi
+        prompt_text "  ntfy topic URL:" "$_ntfy_default" NTFY_URL
+    fi
 
-    mkdir -p "$ASTERISK_DIR"
-    _voipms_write_pjsip_include "$PJSIP_INCLUDE" "$VOIPMS_SERVER" "$VOIPMS_SERVER_IP" "$VOIPMS_DID"
-    _voipms_write_dialplan_include "$DIALPLAN_INCLUDE" "$VOIPMS_DID" "$RING_EXT"
-    ensure_docker_dir_ownership "$ASTERISK_DIR"
-    chmod 644 "$PJSIP_INCLUDE" "$DIALPLAN_INCLUDE"
+    echo ""
+    log_info "Spend/volume alert settings (used only to estimate cost and flag unusual usage —"
+    log_info "not billing-accurate, just a safety net)."
+    local RATE_PER_MIN=""
+    prompt_text "  Outbound per-minute rate in USD (VoIP.ms US rate is 0.01):" "0.01" RATE_PER_MIN
+    local MONTH_THRESHOLD=""
+    prompt_text "  Alert once when estimated spend this month reaches (USD):" "10" MONTH_THRESHOLD
+    local BURST_THRESHOLD=""
+    prompt_text "  Alert if more than this many outbound calls happen in one hour:" "10" BURST_THRESHOLD
+
+    _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
+        "$TRUNK_SERVER" "$TRUNK_SERVER_IP" "$TRUNK_DID" "$PSTN_ALLOWED_EXTS" \
+        "$MAX_CONCURRENT" "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
+        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
 
     # No new firewall rules: asterisk-digital-ocean.sh already opens SIP
-    # (5060/5061) and RTP (10000-20000) to the internet, and VoIP.ms's source
+    # (5060/5061) and RTP (10000-20000) to the internet, and providers' source
     # IPs vary by POP/redundancy, so there's no single IP to scope this to
     # even if narrowing it were otherwise worthwhile.
 
     # ── Docs (separate file — asterisk-digital-ocean already owns README.md
     # in this same directory via write_readme, so don't overwrite it) ───────
-    local DOC_FILE="$EA_DIR/README-voipms-trunk.md"
+    local DOC_FILE="$EA_DIR/README-pstn-trunk.md"
     cat > "$DOC_FILE" << MD
-# VoIP.ms SIP trunk (add-on to asterisk-digital-ocean)
+# SIP PSTN trunk (add-on to asterisk-digital-ocean)
 
-US-only outbound PSTN calling over a VoIP.ms trunk, capped at 3 concurrent
-outbound calls, plus inbound routing to one extension. See
+US-only outbound PSTN calling over a SIP trunk (defaults to VoIP.ms, works
+with any IP-authenticated provider), role-based outbound permission, a
+configurable concurrent-call cap, and an inbound ring-group. See
 \`docs/pstn-calling-voipms-plan.md\` in the repo for the full design
 background, cost estimate, and toll-fraud reasoning.
 
@@ -292,11 +498,26 @@ background, cost estimate, and toll-fraud reasoning.
 
 | Setting | Value |
 |---|---|
-| VoIP.ms server/POP | ${VOIPMS_SERVER} (${VOIPMS_SERVER_IP}) |
-| DID | ${VOIPMS_DID} |
-| Inbound rings extension | ${RING_EXT} |
+| Provider | ${PROVIDER_NAME} |
+| Server/POP | ${TRUNK_SERVER} (${TRUNK_SERVER_IP}) |
+| DID | ${TRUNK_DID} |
 | Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all |
-| Concurrency cap | 3 simultaneous outbound calls (GROUP()/GROUP_COUNT() in the dialplan); a 4th gets a busy signal |
+| PSTN-allowed extensions | ${PSTN_ALLOWED_EXTS:-all extensions} |
+| Concurrency cap | ${MAX_CONCURRENT} simultaneous outbound calls |
+| Inbound rings | ${RING_EXTS} |
+| ntfy alerts | ${NTFY_URL:-disabled} |
+| Estimated rate | \$${RATE_PER_MIN}/min |
+| Monthly spend alert threshold | \$${MONTH_THRESHOLD} |
+| Hourly burst alert threshold | ${BURST_THRESHOLD} calls/hour |
+
+## Role model
+
+Every extension can always call and receive calls from other Asterisk
+extensions — that's unchanged and never gated. The PSTN-allowed list above
+only controls the two additional things a "PSTN-enabled" extension gets on
+top of that: dialing real phone numbers out, and being included in the
+inbound ring-group. Leaving the allow-list blank means every extension gets
+PSTN access too (the original default before roles existed).
 
 ## How this survives Easy Asterisk's own regeneration
 
@@ -305,10 +526,11 @@ internal state (device list, network settings) rather than treating them as
 hand-edited files. Trunk/dialplan config here lives in two files of its own,
 \`#include\`'d from the generated files:
 
-- \`config/asterisk/voipms-trunk-pjsip.conf\` — the trunk's \`aor\`/\`identify\`/
+- \`config/asterisk/pstn-trunk-pjsip.conf\` — the trunk's \`aor\`/\`identify\`/
   \`endpoint\` sections (IP-authenticated, no password stored).
-- \`config/asterisk/voipms-trunk-dialplan.conf\` — the NANP-only outbound
-  routing + concurrency cap, and the \`[from-voipms]\` inbound context.
+- \`config/asterisk/pstn-trunk-dialplan.conf\` — NANP-only outbound routing,
+  the outbound permission gate, the concurrency cap, ntfy alert hooks, and
+  the \`[from-pstn-trunk]\` inbound context.
 
 The \`#include\` lines themselves are patched into Easy Asterisk's *generator
 functions* (\`docker/entrypoint.sh\`, \`easy-asterisk.sh\`,
@@ -318,49 +540,64 @@ regenerate the config, instead of being wiped.
 **Caveat:** if the base \`asterisk-digital-ocean\` service is ever updated
 independently (\`sudo ./setup.sh asterisk-digital-ocean\`, choosing "update in
 place" — that path re-copies fresh vendor files), this patch is wiped along
-with it. Re-run \`sudo ./setup.sh voipms-trunk\` afterward (update mode
-reapplies the patch and rewrites both include files with your existing
-settings, no re-prompting).
+with it. Re-run \`sudo ./setup.sh pstn-trunk\` afterward (update mode
+reapplies the patch and rewrites everything from \`.pstn-trunk.env\`, no
+re-prompting).
+
+## Spend/volume alerts
+
+\`pstn-trunk-usage-alert.sh\` runs hourly (\`/etc/cron.d/pstn-trunk-usage\`) and
+reads \`logs/pstn-trunk-calls.log\` (appended to directly by the dialplan, not
+Asterisk's own CDR — a deliberate choice to avoid depending on whether this
+image's CDR modules are enabled/configured, and to sidestep CDR CSV's
+comma-quoting). It sends an ntfy alert:
+
+- **Once per calendar month** the first time estimated spend crosses
+  \$${MONTH_THRESHOLD} (state tracked in \`.pstn-trunk-alert-state\` so it
+  doesn't repeat every hour).
+- **Every hour** that outbound call volume exceeds ${BURST_THRESHOLD}
+  calls/hour — this is the faster tripwire for a burst/abuse scenario,
+  independent of whether it's crossed the monthly dollar threshold yet.
+
+Separately, denied calls (unauthorized extension) and rejected calls
+(concurrency cap hit) alert **immediately**, not on the hourly schedule —
+see the dialplan file's \`__ALERT_DENY_LINE__\`/\`__ALERT_BUSY_LINE__\` sites.
+
+These are cost *estimates* (call count/duration × your entered rate), not
+real billing data — treat them as a safety net, not a substitute for
+checking your provider's own balance/usage dashboard.
 
 ## Changing settings
 
-Re-run \`sudo ./setup.sh voipms-trunk\` and choose "reinstall in place" —
-current settings are read back out of the include files above and reapplied.
-Choose "full install" instead to re-prompt for everything (new server, DID,
-or ring extension).
+Re-run \`sudo ./setup.sh pstn-trunk\` and choose "reinstall in place" —
+current settings are read from \`.pstn-trunk.env\` and reapplied exactly,
+including regenerating the usage-alert script and cron entry. Choose "full
+install" instead to re-prompt for everything.
 
 ## Manual edits
 
-Don't hand-edit \`voipms-trunk-pjsip.conf\` / \`voipms-trunk-dialplan.conf\`
-directly if you plan to re-run this installer later — it overwrites both
-files unconditionally. If you do need one-off manual changes (e.g. testing a
-second POP as a failover \`match=\` line), edit them directly and just don't
-re-run the installer until you're ready to lose those changes, or restart
-the container instead of running the installer to test them:
+Don't hand-edit \`pstn-trunk-pjsip.conf\` / \`pstn-trunk-dialplan.conf\` /
+\`pstn-trunk-usage-alert.sh\` directly if you plan to re-run this installer
+later — it overwrites all three unconditionally from \`.pstn-trunk.env\`. For
+one-off testing, restart the container instead of running the installer:
 
 \`\`\`bash
 docker compose -f $EA_DIR/docker-compose.yml restart asterisk
 \`\`\`
 
-## What the 3-call cap does and doesn't cover
-
-It bounds *how many* outbound calls can be active at once — the first line
-of defense against a compromised extension opening dozens of parallel legs.
-It does not bound total spend by itself; that's still the prepaid-balance +
-auto-recharge-off layer on VoIP.ms's side. Both matter — see the toll-fraud
-section of \`docs/pstn-calling-voipms-plan.md\`.
-
 ## Verifying it's working
 
 \`\`\`bash
-docker exec -it easy-asterisk-do asterisk -rx "pjsip show endpoint voipms-trunk"
+docker exec -it easy-asterisk-do asterisk -rx "pjsip show endpoint pstn-trunk"
 docker exec -it easy-asterisk-do asterisk -rx "dialplan show intercom"
-docker exec -it easy-asterisk-do asterisk -rx "dialplan show from-voipms"
+docker exec -it easy-asterisk-do asterisk -rx "dialplan show from-pstn-trunk"
+tail -f $EA_DIR/logs/pstn-trunk-calls.log
 \`\`\`
 
-A registered device should be able to dial a 10-digit or 11-digit US number
-and reach the VoIP.ms trunk; a call to \`${VOIPMS_DID}\` from outside should
-ring extension \`${RING_EXT}\`.
+A PSTN-allowed device should be able to dial a 10-digit or 11-digit US
+number and reach the trunk; a non-allowed device should get a busy signal
+(and an ntfy alert, if enabled). A call to \`${TRUNK_DID}\` from outside
+should ring: ${RING_EXTS}.
 MD
     chown "$ACTUAL_USER:$ACTUAL_USER" "$DOC_FILE" 2>/dev/null || true
 
@@ -379,11 +616,13 @@ MD
     fi
 
     echo ""
-    log_success "VoIP.ms trunk configured."
-    echo "  Server:        $VOIPMS_SERVER ($VOIPMS_SERVER_IP)"
-    echo "  DID:           $VOIPMS_DID"
-    echo "  Outbound:      US/NANP only, max 3 concurrent calls (dialplan-enforced)"
-    echo "  Inbound rings: extension $RING_EXT"
-    echo "  Docs:          $DOC_FILE"
+    log_success "PSTN trunk configured."
+    echo "  Provider:       $PROVIDER_NAME ($TRUNK_SERVER / $TRUNK_SERVER_IP)"
+    echo "  DID:            $TRUNK_DID"
+    echo "  Outbound:       US/NANP only, max $MAX_CONCURRENT concurrent calls"
+    echo "  PSTN-allowed:   ${PSTN_ALLOWED_EXTS:-all extensions}"
+    echo "  Inbound rings:  $RING_EXTS"
+    echo "  ntfy alerts:    ${NTFY_URL:-disabled}"
+    echo "  Docs:           $DOC_FILE"
     echo ""
 }
