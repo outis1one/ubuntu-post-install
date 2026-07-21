@@ -18,6 +18,31 @@ addition on top of `asterisk-digital-ocean`.
   VoIP.ms requires for US routing, and again independently in Asterisk's own
   dialplan (see below), so a compromised extension can't reach anything
   outside the US even if the trunk itself would technically allow more later.
+- **Inbound: wanted.** A DID is in scope, not outbound-only. Decide pay-per-minute
+  vs. unlimited DID plan based on expected inbound volume (see cost estimate
+  below), and decide E911 deliberately rather than skipping it by default —
+  VoIP.ms doesn't require it, but without it 911 dialed from the line either
+  fails or doesn't carry accurate address/location info.
+
+## Cost estimate (100 min/month each direction, US-only)
+
+Verified against VoIP.ms's public wiki/rate pages, not a live account — confirm
+at sign-up since rates can change.
+
+| Item | Rate | Monthly | Annual |
+|---|---|---|---|
+| DID (phone number), pay-per-minute plan | $0.85/mo flat | — | $10.20 |
+| Inbound usage | $0.009/min | $0.90 | $10.80 |
+| Outbound usage | $0.01/min | $1.00 | $12.00 |
+| **Total** | | **~$2.75** | **~$33** |
+
+- Skipping the DID (outbound-only) drops this to ~$12/year.
+- Adding E911 adds a $1.50 one-time fee plus **$1.50/month** regulatory fee
+  (~$18/year) — pushes the total above to ~$51/year.
+- **Funding minimum:** VoIP.ms requires a **$15 minimum deposit** to activate
+  calling — a one-time balance top-up, not a recurring charge. At ~$2.75/month
+  usage that balance lasts ~5 months before a refill is needed (longer at
+  lower volume). Leave auto-recharge **off** per the toll-fraud design above.
 
 ## Why this matters (toll fraud)
 A compromised Asterisk box can dial premium-rate or international numbers
@@ -32,6 +57,19 @@ anyone notices. Two independent layers matter more than either alone:
    This is the first line of defense and should exist independent of the
    trunk's own capabilities.
 
+**Important nuance: these two layers bound different things, and neither
+alone bounds both.** NANP-only restriction bounds *cost-per-minute* (a
+compromised box can only ever reach $0.01/min US numbers, never $2–5/min
+international/premium destinations) — that risk is fully closed. It does
+**not** bound *how fast* the prepaid balance gets burned: nothing stops a
+compromised box from opening many concurrent US-destination calls in
+parallel and draining the whole balance (e.g. $15 balance ÷ $0.01/min =
+1,500 minutes total, which 20 concurrent legs could burn through in under
+an hour). The prepaid-balance-off-auto-recharge layer bounds the *dollar*
+ceiling; only a concurrent-call cap bounds the *speed* of a breach. Treat
+the per-extension concurrent-call cap and spend/volume alert below as
+required before funding a live trunk, not optional hardening.
+
 ## What it takes technically (asterisk-digital-ocean)
 - A PJSIP trunk to VoIP.ms: `endpoint` / `aor` / `auth` / `identify`
   sections in the pjsip config, using either IP authentication or SIP
@@ -45,10 +83,10 @@ anyone notices. Two independent layers matter more than either alone:
   catch-all `_X.` pattern — an explicit NANP pattern is itself a hard block
   on non-US destinations at the dialplan level.
 - VoIP.ms-specific setup that isn't scriptable (user does this manually):
-  create the account, decide whether a DID is needed (this research was
-  outbound-only — inbound PSTN wasn't discussed/decided), pick a VoIP.ms
-  POP/server (affects the trunk hostname), fund the prepaid balance, turn
-  off auto-recharge.
+  create the account, order a DID (inbound is wanted — see above), decide
+  pay-per-minute vs. unlimited DID plan and whether to add E911, pick a
+  VoIP.ms POP/server (affects the trunk hostname), fund the prepaid balance
+  ($15 minimum), turn off auto-recharge.
 - Defense-in-depth to design alongside the trunk (not yet designed):
   - Per-extension concurrent-call cap in the dialplan (`GROUP()` /
     `GROUP_COUNT()`) so one compromised extension can't open dozens of
@@ -81,7 +119,8 @@ anyone notices. Two independent layers matter more than either alone:
 2. IP auth vs. registration — confirm which VoIP.ms recommends for a single
    fixed-IP droplet.
 3. Exact NANP dial pattern(s) and any prefix-stripping VoIP.ms requires.
-4. Whether inbound (a DID) is wanted at all, or outbound-only for now — not
-   discussed yet.
+4. Inbound is decided (wanted) — still need to pick pay-per-minute vs.
+   unlimited DID plan based on real expected volume, and decide on E911.
 5. Design the concurrent-call cap and any spend/volume alerting mentioned
-   above.
+   above — treat as required before funding a live trunk, not optional
+   (see toll-fraud nuance above: NANP-only bounds cost/min, not burn speed).
