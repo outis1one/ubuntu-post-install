@@ -267,9 +267,12 @@ __ALERT_KILLED_LINE__
 ; tested, never the reverse, same safe direction as every other permission
 ; check in this file. Reuses pstn_check_busy for the actual dial once a
 ; country check passes — same concurrency cap and call-log accounting as
-; domestic calls (the estimated per-minute RATE assumed there is a US rate
-; and will under/over-estimate true international cost; treat the spend
-; figures as even less precise for international minutes than domestic).
+; domestic calls. pstn-trunk-usage-alert.sh's cost estimate buckets logged
+; calls into domestic vs. per-country international (by the dialed digits
+; after "011", longest-code-first match) and applies each country's own
+; admin-entered rate (pstn-intl-allowed.conf's allowed_rates), not the flat
+; domestic RATE — still an estimate (rates you entered, not fetched live),
+; but no longer blended across two very different rate scales.
 exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
@@ -487,9 +490,16 @@ _pstn_write_killswitch_file() {
 # ── Shared: international-calling allow-list (CLI-managed only — see
 # _pstn_manage_international/_pstn_run_international_step below) ───────────
 _pstn_write_intl_allowed_file() {
-    local FILE="$1" CODES="$2" NAMES="$3" EXPIRES="$4"
+    local FILE="$1" CODES="$2" NAMES="$3" EXPIRES="$4" RATES="$5"
     {
-        echo "; International-calling allow-list (country calling codes, beyond NANP/US)."
+        echo "; International-calling allow-list (country calling codes, beyond NANP/US),"
+        echo "; each with its own admin-entered per-minute rate (allowed_rates, parallel to"
+        echo "; allowed_codes/allowed_names — NOT fetched live from the provider; no"
+        echo "; confirmed rates API exists for either supported provider as of this"
+        echo "; writing, see docs/pstn-calling-voipms-plan.md). pstn-trunk-usage-alert.sh"
+        echo "; uses these per-country rates instead of the single flat domestic RATE when"
+        echo "; estimating spend for international minutes, since a blended rate badly"
+        echo "; under/over-estimates international cost otherwise."
         echo "; Read LIVE by the dialplan (AST_CONFIG()) on every _011 international call —"
         echo "; no Asterisk restart needed. Managed ONLY from the CLI installer"
         echo "; ('sudo ./setup.sh pstn-trunk' -> 'Review/change allowed international-"
@@ -503,6 +513,7 @@ _pstn_write_intl_allowed_file() {
         echo "[countries]"
         echo "allowed_codes=${CODES}"
         echo "allowed_names=${NAMES}"
+        echo "allowed_rates=${RATES}"
         echo "expires=${EXPIRES}"
     } > "$FILE"
     chmod 664 "$FILE"
@@ -512,10 +523,12 @@ _pstn_read_intl_current() {
     local FILE="$1"
     _PSTN_CUR_CODES=""
     _PSTN_CUR_NAMES=""
+    _PSTN_CUR_RATES=""
     _PSTN_CUR_EXPIRES=""
     if [[ -f "$FILE" ]]; then
         _PSTN_CUR_CODES="$(grep '^allowed_codes=' "$FILE" | head -1 | cut -d= -f2-)"
         _PSTN_CUR_NAMES="$(grep '^allowed_names=' "$FILE" | head -1 | cut -d= -f2-)"
+        _PSTN_CUR_RATES="$(grep '^allowed_rates=' "$FILE" | head -1 | cut -d= -f2-)"
         _PSTN_CUR_EXPIRES="$(grep '^expires=' "$FILE" | head -1 | cut -d= -f2-)"
     fi
 }
@@ -525,7 +538,15 @@ _pstn_print_intl_allowed() {
     _pstn_read_intl_current "$FILE"
     echo ""
     if [[ -n "$_PSTN_CUR_CODES" ]]; then
-        log_info "International calling currently ALLOWED to: ${_PSTN_CUR_NAMES//|/, }"
+        local -a _p_codes _p_names _p_rates
+        IFS='|' read -ra _p_codes <<< "$_PSTN_CUR_CODES"
+        IFS='|' read -ra _p_names <<< "$_PSTN_CUR_NAMES"
+        IFS='|' read -ra _p_rates <<< "$_PSTN_CUR_RATES"
+        log_info "International calling currently ALLOWED to:"
+        local _pi
+        for _pi in "${!_p_codes[@]}"; do
+            log_info "  ${_p_names[$_pi]:-+${_p_codes[$_pi]}} — \$${_p_rates[$_pi]:-0}/min"
+        done
         if [[ -n "$_PSTN_CUR_EXPIRES" ]]; then
             log_info "  Expires: $_PSTN_CUR_EXPIRES (auto-revoked and re-blocked after this date)."
         else
@@ -547,14 +568,18 @@ _pstn_manage_international() {
 
     _pstn_read_intl_current "$FILE"
 
+    # SELECTED[code] = "name|rate" — carries both through add/remove/list so
+    # the per-country rate survives re-running this menu without re-asking
+    # for it on every country that's already allowed.
     local -A SELECTED=()
     if [[ -n "$_PSTN_CUR_CODES" ]]; then
-        local -a _cur_codes_arr _cur_names_arr
+        local -a _cur_codes_arr _cur_names_arr _cur_rates_arr
         IFS='|' read -ra _cur_codes_arr <<< "$_PSTN_CUR_CODES"
         IFS='|' read -ra _cur_names_arr <<< "$_PSTN_CUR_NAMES"
+        IFS='|' read -ra _cur_rates_arr <<< "$_PSTN_CUR_RATES"
         local _k
         for _k in "${!_cur_codes_arr[@]}"; do
-            SELECTED["${_cur_codes_arr[$_k]}"]="${_cur_names_arr[$_k]}"
+            SELECTED["${_cur_codes_arr[$_k]}"]="${_cur_names_arr[$_k]}|${_cur_rates_arr[$_k]:-0}"
         done
     fi
 
@@ -578,8 +603,11 @@ _pstn_manage_international() {
         echo "    1) North America (non-NANP)   2) South America   3) Europe"
         echo "    4) Asia                       5) Africa           6) Oceania"
         echo "    0) Enter a country/code manually (not listed above)"
-        local _cur_list="" _cc
-        for _cc in "${!SELECTED[@]}"; do _cur_list="${_cur_list}${_cur_list:+, }${SELECTED[$_cc]}"; done
+        local _cur_list="" _cc _cc_name
+        for _cc in "${!SELECTED[@]}"; do
+            _cc_name="${SELECTED[$_cc]%%|*}"
+            _cur_list="${_cur_list}${_cur_list:+, }${_cc_name} (\$${SELECTED[$_cc]##*|}/min)"
+        done
         echo "  Currently selected: ${_cur_list:-none}"
         local _choice=""
         prompt_text "  Continent number, 0, or 'd' when done:" "d" _choice
@@ -588,12 +616,14 @@ _pstn_manage_international() {
         case "$_choice" in
             d|D) DONE=y; continue ;;
             0)
-                local _manual_name="" _manual_code=""
+                local _manual_name="" _manual_code="" _manual_rate=""
                 prompt_text "    Country name (for your reference):" "" _manual_name
                 prompt_text "    Country calling code (digits only, e.g. 44):" "" _manual_code
                 if [[ "$_manual_code" =~ ^[0-9]{1,4}$ ]]; then
-                    SELECTED["$_manual_code"]="${_manual_name:-Unnamed} (+$_manual_code)"
-                    log_success "Added ${_manual_name:-Unnamed} (+$_manual_code)."
+                    prompt_text "    Per-minute rate in USD for ${_manual_name:-this country} (used in the spend estimate, not fetched live):" "0.05" _manual_rate
+                    [[ "$_manual_rate" =~ ^[0-9]+(\.[0-9]+)?$ ]] || _manual_rate="0.05"
+                    SELECTED["$_manual_code"]="${_manual_name:-Unnamed} (+$_manual_code)|${_manual_rate}"
+                    log_success "Added ${_manual_name:-Unnamed} (+$_manual_code) at \$${_manual_rate}/min."
                 else
                     log_warning "Not a valid calling code — skipped."
                 fi
@@ -612,13 +642,17 @@ _pstn_manage_international() {
         while [[ "$_sub_done" != "y" && "$_sub_done" != "Y" ]]; do
             echo ""
             echo "  $_cname:"
-            local _j _entry _name _code _mark
+            local _j _entry _name _code _mark _rate_suffix
             for _j in "${!_countries[@]}"; do
                 _entry="${_countries[$_j]}"
                 _name="${_entry%%|*}"; _code="${_entry##*|}"
                 _mark=" "
-                [[ -n "${SELECTED[$_code]+x}" ]] && _mark="x"
-                echo "    $((_j+1))) [$_mark] $_name (+$_code)"
+                _rate_suffix=""
+                if [[ -n "${SELECTED[$_code]+x}" ]]; then
+                    _mark="x"
+                    _rate_suffix=" — \$${SELECTED[$_code]##*|}/min"
+                fi
+                echo "    $((_j+1))) [$_mark] $_name (+$_code)${_rate_suffix}"
             done
             local _pick=""
             prompt_text "    Toggle a number, or 'b' for back:" "b" _pick
@@ -631,8 +665,11 @@ _pstn_manage_international() {
                     unset 'SELECTED[$_code]'
                     log_info "Removed $_name."
                 else
-                    SELECTED["$_code"]="$_name (+$_code)"
-                    log_info "Added $_name."
+                    local _new_rate=""
+                    prompt_text "    Per-minute rate in USD for $_name (used in the spend estimate, not fetched live):" "0.05" _new_rate
+                    [[ "$_new_rate" =~ ^[0-9]+(\.[0-9]+)?$ ]] || _new_rate="0.05"
+                    SELECTED["$_code"]="$_name (+$_code)|${_new_rate}"
+                    log_info "Added $_name at \$${_new_rate}/min."
                 fi
             else
                 log_warning "Invalid choice."
@@ -640,10 +677,11 @@ _pstn_manage_international() {
         done
     done
 
-    local NEW_CODES="" NEW_NAMES="" _sep="" _code
+    local NEW_CODES="" NEW_NAMES="" NEW_RATES="" _sep="" _code
     for _code in "${!SELECTED[@]}"; do
         NEW_CODES="${NEW_CODES}${_sep}${_code}"
-        NEW_NAMES="${NEW_NAMES}${_sep}${SELECTED[$_code]}"
+        NEW_NAMES="${NEW_NAMES}${_sep}${SELECTED[$_code]%%|*}"
+        NEW_RATES="${NEW_RATES}${_sep}${SELECTED[$_code]##*|}"
         _sep="|"
     done
 
@@ -660,7 +698,7 @@ _pstn_manage_international() {
         fi
     fi
 
-    _pstn_write_intl_allowed_file "$FILE" "$NEW_CODES" "$NEW_NAMES" "$NEW_EXPIRES"
+    _pstn_write_intl_allowed_file "$FILE" "$NEW_CODES" "$NEW_NAMES" "$NEW_EXPIRES" "$NEW_RATES"
     chmod 664 "$FILE"
 }
 
@@ -715,7 +753,7 @@ _pstn_check_killswitch_clear() {
 # _pstn_install_periodic_timer above) ───────────────────────────────────────
 _pstn_write_usage_alert_script() {
     local FILE="$1" EA_DIR="$2" ASTERISK_DIR="$3" RATE="$4" MONTH_THRESHOLD="$5" \
-          BURST_THRESHOLD="$6" MAX_MONTHLY_SPEND="$7" NTFY_URL="$8"
+          BURST_THRESHOLD="$6" MAX_MONTHLY_SPEND="$7" NTFY_URL="$8" CONTAINER_NAME="${9:-easy-asterisk}"
     cat > "$FILE" << 'EOF'
 #!/bin/bash
 # Auto-generated by services/pstn-trunk.sh — do not edit directly, re-run
@@ -726,16 +764,28 @@ _pstn_write_usage_alert_script() {
 #   - alerts via ntfy when month-to-date estimated spend crosses
 #     MONTH_THRESHOLD (once per month), or call volume in the last hour
 #     looks like a burst;
+#   - estimates outbound spend as DOMESTIC minutes x RATE, PLUS each
+#     international destination's own minutes x its own admin-entered rate
+#     (pstn-intl-allowed.conf's allowed_rates) — a single blended rate badly
+#     under/over-estimates international cost, which is usually far from
+#     the domestic rate. Still an estimate (rates you entered, not fetched
+#     live from the provider — no confirmed rates API exists for either
+#     supported provider as of this writing).
 #   - trips the spend-cap kill-switch (pstn-trunk-killswitch.conf) once
 #     estimated spend reaches MAX_MONTHLY_SPEND — read LIVE by the dialplan
 #     on every call, blocking ALL PSTN calling (in and out) until manually
 #     cleared (does NOT reset automatically — see CLAUDE.md/README for how);
 #   - sends a loud (priority=urgent) ntfy warning once spend reaches 80% of
 #     that cap, distinct from and in addition to the trip alert itself;
+#   - while tripped, actively hangs up any PSTN calls already in progress
+#     (docker exec + Asterisk's "channel request hangup") instead of only
+#     blocking new ones — otherwise a call already connected when the cap
+#     is crossed just keeps running (and costing) until whoever's on it
+#     hangs up naturally, since the dialplan only gates the START of a call;
 #   - actively re-blocks (clears) the international-calling allow-list once
 #     its expiry date has passed, with ntfy notices both the day of and at
 #     the moment it actually revokes.
-# These are estimates (call count/duration x an entered rate), not real
+# These are estimates (call count/duration x entered rates), not real
 # billing data, and only as fresh as the last run of this script (every
 # minute) — a safety net, not a substitute for the provider's own billing.
 
@@ -750,6 +800,7 @@ MONTH_THRESHOLD="__PSTN_MONTH_THRESHOLD__"
 BURST_THRESHOLD="__PSTN_BURST_THRESHOLD__"
 MAX_MONTHLY_SPEND="__PSTN_MAX_MONTHLY_SPEND__"
 NTFY_URL="__PSTN_NTFY_URL__"
+CONTAINER_NAME="__PSTN_CONTAINER_NAME__"
 
 send_ntfy() {
     [[ -n "$NTFY_URL" ]] && curl -m 5 -s -d "$1" "$NTFY_URL" >/dev/null 2>&1
@@ -758,16 +809,95 @@ send_ntfy_loud() {
     [[ -n "$NTFY_URL" ]] && curl -m 5 -s -H "Priority: urgent" -H "Title: PSTN trunk alert" -d "$1" "$NTFY_URL" >/dev/null 2>&1
 }
 
+# Hangs up every currently-active channel on the pstn-trunk PJSIP endpoint —
+# used only once the kill-switch is tripped, as a backstop against a call
+# that was already in progress when the cap was crossed. "core show channels
+# concise" is Asterisk's long-documented machine-parsable channel listing
+# (bang-delimited, channel name always first field); hanging up the
+# trunk-side leg of a bridged call tears down both legs.
+_pstn_hangup_active_trunk_calls() {
+    docker exec "$CONTAINER_NAME" asterisk -rx "core show channels concise" 2>/dev/null \
+        | awk -F'!' '$1 ~ /^PJSIP\/pstn-trunk-/ {print $1}' \
+        | while read -r ch; do
+            [[ -n "$ch" ]] && docker exec "$CONTAINER_NAME" asterisk -rx "channel request hangup ${ch}" >/dev/null 2>&1
+        done
+}
+
 current_month=$(date +%Y-%m)
+
+# ── International allow-list: read once, used both for cost bucketing
+# below and for the expiry check further down ─────────────────────────────
+intl_codes=""
+intl_rates_raw=""
+if [[ -f "$INTL_FILE" ]]; then
+    intl_codes=$(grep '^allowed_codes=' "$INTL_FILE" | head -1 | cut -d= -f2-)
+    intl_rates_raw=$(grep '^allowed_rates=' "$INTL_FILE" | head -1 | cut -d= -f2-)
+fi
+declare -A INTL_RATE_MAP=()
+INTL_CODES_SORTED=""
+if [[ -n "$intl_codes" ]]; then
+    IFS='|' read -ra _codes_arr <<< "$intl_codes"
+    IFS='|' read -ra _rates_arr <<< "$intl_rates_raw"
+    for _i in "${!_codes_arr[@]}"; do
+        INTL_RATE_MAP["${_codes_arr[$_i]}"]="${_rates_arr[$_i]:-0}"
+    done
+    # Longest code first, so e.g. a 4-digit code is tried before a 2-digit
+    # code that happens to be its prefix.
+    INTL_CODES_SORTED=$(printf '%s\n' "${_codes_arr[@]}" | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2- | xargs)
+fi
+
+month_cost="0.00"
+hour_calls=0
 
 if [[ -f "$LOG_FILE" ]]; then
     now_epoch=$(date +%s)
     one_hour_ago=$((now_epoch - 3600))
     month_start_epoch=$(date -d "$(date +%Y-%m-01)" +%s)
 
-    month_seconds=$(awk -F'|' -v start="$month_start_epoch" '$2=="out" && $1+0>=start {sum+=$5} END{print sum+0}' "$LOG_FILE")
-    month_minutes=$(awk -v s="$month_seconds" 'BEGIN{printf "%.1f", s/60}')
-    month_cost=$(awk -v m="$month_minutes" -v r="$RATE" 'BEGIN{printf "%.2f", m*r}')
+    # ── Bucket this month's outbound seconds: domestic vs. per-country
+    # international, by longest-prefix match on the dialed digits (after the
+    # "011" prefix). Domestic entries never start with "011" (NANP dialing
+    # is always "1" + 10 digits), so the two are unambiguous. An
+    # international call whose destination code isn't (or is no longer) on
+    # the allow-list is excluded from the cost estimate entirely — a known
+    # undercount if the allow-list changed after the call was placed, since
+    # there's no other rate to charge it at.
+    domestic_seconds=0
+    declare -A INTL_SECONDS=()
+    while IFS='|' read -r ep dir who what secs; do
+        [[ "$dir" != "out" ]] && continue
+        (( ep < month_start_epoch )) && continue
+        if [[ "$what" == 011* ]]; then
+            digits="${what:3}"
+            matched=""
+            for code in $INTL_CODES_SORTED; do
+                if [[ "$digits" == "$code"* ]]; then
+                    matched="$code"
+                    break
+                fi
+            done
+            [[ -n "$matched" ]] && INTL_SECONDS["$matched"]=$(( ${INTL_SECONDS["$matched"]:-0} + secs ))
+        else
+            domestic_seconds=$(( domestic_seconds + secs ))
+        fi
+    done < "$LOG_FILE"
+
+    domestic_minutes=$(awk -v s="$domestic_seconds" 'BEGIN{printf "%.2f", s/60}')
+    domestic_cost=$(awk -v m="$domestic_minutes" -v r="$RATE" 'BEGIN{printf "%.2f", m*r}')
+
+    intl_cost="0.00"
+    intl_total_seconds=0
+    for code in "${!INTL_SECONDS[@]}"; do
+        secs="${INTL_SECONDS[$code]}"
+        intl_total_seconds=$(( intl_total_seconds + secs ))
+        rate="${INTL_RATE_MAP[$code]:-0}"
+        mins=$(awk -v s="$secs" 'BEGIN{printf "%.2f", s/60}')
+        c=$(awk -v m="$mins" -v r="$rate" 'BEGIN{printf "%.2f", m*r}')
+        intl_cost=$(awk -v a="$intl_cost" -v b="$c" 'BEGIN{printf "%.2f", a+b}')
+    done
+
+    month_cost=$(awk -v a="$domestic_cost" -v b="$intl_cost" 'BEGIN{printf "%.2f", a+b}')
+    month_minutes=$(awk -v d="$domestic_seconds" -v i="$intl_total_seconds" 'BEGIN{printf "%.1f", (d+i)/60}')
     hour_calls=$(awk -F'|' -v start="$one_hour_ago" '$2=="out" && $1+0>=start {c++} END{print c+0}' "$LOG_FILE")
 
     last_alert_month=""
@@ -775,7 +905,7 @@ if [[ -f "$LOG_FILE" ]]; then
 
     if awk -v c="$month_cost" -v t="$MONTH_THRESHOLD" 'BEGIN{exit !(c>=t)}'; then
         if [[ "$last_alert_month" != "$current_month" ]]; then
-            send_ntfy "PSTN trunk: estimated spend this month (\$${month_cost}) has crossed the \$${MONTH_THRESHOLD} threshold. ${month_minutes} minutes so far."
+            send_ntfy "PSTN trunk: estimated spend this month (\$${month_cost} - \$${domestic_cost} domestic + \$${intl_cost} international) has crossed the \$${MONTH_THRESHOLD} threshold. ${month_minutes} minutes so far."
             echo "$current_month" > "$STATE_FILE"
         fi
     fi
@@ -783,39 +913,49 @@ if [[ -f "$LOG_FILE" ]]; then
     if [[ "$hour_calls" -ge "$BURST_THRESHOLD" ]]; then
         send_ntfy "PSTN trunk: $hour_calls outbound calls placed in the last hour - check for unusual activity."
     fi
+fi
 
-    # ── Spend-cap kill-switch: trip, or warn once approaching it ──────────
-    # MAX_MONTHLY_SPEND=0 means the kill-switch is disabled (not configured).
-    if awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(m+0>0)}'; then
-        already_tripped="0"
-        [[ -f "$KILLSWITCH_FILE" ]] && grep -q '^tripped=1' "$KILLSWITCH_FILE" && already_tripped="1"
+# ── Spend-cap kill-switch: trip, or warn once approaching it. Deliberately
+# OUTSIDE the "if log file exists" block above — the hangup sweep below
+# must still run every minute while tripped even if the call log is
+# missing/rotated, otherwise a missing log file would silently stop the
+# active-hangup backstop entirely. month_cost/hour_calls default to 0/0
+# when there's no log file (set before that block), so this still can't
+# falsely trip on no data. ─────────────────────────────────────────────────
+# MAX_MONTHLY_SPEND=0 means the kill-switch is disabled (not configured).
+if awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(m+0>0)}'; then
+    already_tripped="0"
+    [[ -f "$KILLSWITCH_FILE" ]] && grep -q '^tripped=1' "$KILLSWITCH_FILE" && already_tripped="1"
 
-        if [[ "$already_tripped" != "1" ]] && awk -v c="$month_cost" -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(c>=m)}'; then
-            cat > "$KILLSWITCH_FILE" << KS
+    if [[ "$already_tripped" != "1" ]] && awk -v c="$month_cost" -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(c>=m)}'; then
+        cat > "$KILLSWITCH_FILE" << KS
 [state]
 tripped=1
 KS
-            send_ntfy_loud "PSTN trunk: SPEND-CAP KILL-SWITCH TRIPPED. Estimated spend this month (\$${month_cost}) reached the \$${MAX_MONTHLY_SPEND} cap. ALL PSTN calling (in and out) is now blocked - internal Asterisk calling is unaffected. This does NOT reset automatically - clear it with 'sudo ./setup.sh pstn-trunk' (update mode)."
-        elif [[ "$already_tripped" != "1" ]]; then
-            warn_threshold=$(awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{printf "%.2f", m*0.8}')
-            if awk -v c="$month_cost" -v t="$warn_threshold" 'BEGIN{exit !(c>=t)}'; then
-                last_warn_month=""
-                [[ -f "$WARN_STATE_FILE" ]] && last_warn_month=$(cat "$WARN_STATE_FILE")
-                if [[ "$last_warn_month" != "$current_month" ]]; then
-                    send_ntfy_loud "PSTN trunk: approaching the spend cap - estimated spend this month (\$${month_cost}) is at 80%+ of the \$${MAX_MONTHLY_SPEND} kill-switch cap. PSTN calling will be BLOCKED automatically if it reaches \$${MAX_MONTHLY_SPEND}."
-                    echo "$current_month" > "$WARN_STATE_FILE"
-                fi
+        send_ntfy_loud "PSTN trunk: SPEND-CAP KILL-SWITCH TRIPPED. Estimated spend this month (\$${month_cost}) reached the \$${MAX_MONTHLY_SPEND} cap. ALL PSTN calling (in and out) is now blocked - internal Asterisk calling is unaffected. This does NOT reset automatically - clear it with 'sudo ./setup.sh pstn-trunk' (update mode)."
+        already_tripped="1"
+    elif [[ "$already_tripped" != "1" ]]; then
+        warn_threshold=$(awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{printf "%.2f", m*0.8}')
+        if awk -v c="$month_cost" -v t="$warn_threshold" 'BEGIN{exit !(c>=t)}'; then
+            last_warn_month=""
+            [[ -f "$WARN_STATE_FILE" ]] && last_warn_month=$(cat "$WARN_STATE_FILE")
+            if [[ "$last_warn_month" != "$current_month" ]]; then
+                send_ntfy_loud "PSTN trunk: approaching the spend cap - estimated spend this month (\$${month_cost}) is at 80%+ of the \$${MAX_MONTHLY_SPEND} kill-switch cap. PSTN calling will be BLOCKED automatically if it reaches \$${MAX_MONTHLY_SPEND}."
+                echo "$current_month" > "$WARN_STATE_FILE"
             fi
         fi
     fi
+
+    # Every run while tripped, not just the run that trips it — closes
+    # the race where a call started just before the flag went live.
+    [[ "$already_tripped" == "1" ]] && _pstn_hangup_active_trunk_calls
 fi
 
 # ── International allow-list: expiry notices + active re-block ────────────
-if [[ -f "$INTL_FILE" ]]; then
-    intl_codes=$(grep '^allowed_codes=' "$INTL_FILE" | head -1 | cut -d= -f2-)
+if [[ -n "$intl_codes" ]]; then
     intl_expires=$(grep '^expires=' "$INTL_FILE" | head -1 | cut -d= -f2-)
     today=$(date +%Y-%m-%d)
-    if [[ -n "$intl_codes" && -n "$intl_expires" ]]; then
+    if [[ -n "$intl_expires" ]]; then
         last_intl_notice=""
         [[ -f "$INTL_STATE_FILE" ]] && last_intl_notice=$(cat "$INTL_STATE_FILE")
         if [[ "$today" == "$intl_expires" && "$last_intl_notice" != "day-of:$intl_expires" ]]; then
@@ -823,14 +963,14 @@ if [[ -f "$INTL_FILE" ]]; then
             echo "day-of:$intl_expires" > "$INTL_STATE_FILE"
         fi
         if [[ "$today" > "$intl_expires" ]]; then
-            sed -i 's/^allowed_codes=.*/allowed_codes=/; s/^allowed_names=.*/allowed_names=/; s/^expires=.*/expires=/' "$INTL_FILE"
+            sed -i 's/^allowed_codes=.*/allowed_codes=/; s/^allowed_names=.*/allowed_names=/; s/^allowed_rates=.*/allowed_rates=/; s/^expires=.*/expires=/' "$INTL_FILE"
             send_ntfy "PSTN trunk: international calling access EXPIRED ($intl_expires) and has been revoked/re-blocked automatically."
             echo "expired:$intl_expires" > "$INTL_STATE_FILE"
         fi
     fi
 fi
 EOF
-    sed -i "s#__EA_DIR__#${EA_DIR}#g; s#__ASTERISK_DIR__#${ASTERISK_DIR}#g; s/__PSTN_RATE__/${RATE}/g; s/__PSTN_MONTH_THRESHOLD__/${MONTH_THRESHOLD}/g; s/__PSTN_BURST_THRESHOLD__/${BURST_THRESHOLD}/g; s/__PSTN_MAX_MONTHLY_SPEND__/${MAX_MONTHLY_SPEND}/g" "$FILE"
+    sed -i "s#__EA_DIR__#${EA_DIR}#g; s#__ASTERISK_DIR__#${ASTERISK_DIR}#g; s/__PSTN_RATE__/${RATE}/g; s/__PSTN_MONTH_THRESHOLD__/${MONTH_THRESHOLD}/g; s/__PSTN_BURST_THRESHOLD__/${BURST_THRESHOLD}/g; s/__PSTN_MAX_MONTHLY_SPEND__/${MAX_MONTHLY_SPEND}/g; s/__PSTN_CONTAINER_NAME__/${CONTAINER_NAME}/g" "$FILE"
     sed -i "s#__PSTN_NTFY_URL__#${NTFY_URL}#g" "$FILE"
     chmod 755 "$FILE"
 }
@@ -896,7 +1036,7 @@ _pstn_apply_settings() {
     local EA_DIR="$1" ASTERISK_DIR="$2"
     local SERVER="$3" SERVER_IPS="$4" DID="$5"
     local RING_EXTS="$6" NTFY_URL="$7" RATE="$8" MONTH_THRESHOLD="$9" BURST_THRESHOLD="${10}"
-    local PROVIDER_NAME="${11}" MAX_MONTHLY_SPEND="${12:-0}"
+    local PROVIDER_NAME="${11}" MAX_MONTHLY_SPEND="${12:-0}" CONTAINER_NAME="${13:-easy-asterisk}"
 
     _pstn_patch_vendor_files "$EA_DIR" || return 1
 
@@ -904,7 +1044,7 @@ _pstn_apply_settings() {
     _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IPS" "$DID"
     _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$RING_EXTS" "$NTFY_URL"
     _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$ASTERISK_DIR" \
-        "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL"
+        "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL" "$CONTAINER_NAME"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
     chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf"
 
@@ -925,6 +1065,7 @@ RATE_PER_MIN="${RATE}"
 MONTH_THRESHOLD="${MONTH_THRESHOLD}"
 BURST_THRESHOLD="${BURST_THRESHOLD}"
 MAX_MONTHLY_SPEND="${MAX_MONTHLY_SPEND}"
+CONTAINER_NAME="${CONTAINER_NAME}"
 ENV
     chown "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR/.pstn-trunk.env" 2>/dev/null || true
 
@@ -1020,7 +1161,7 @@ install_pstn-trunk() {
                     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
                         "$TRUNK_SERVER" "$TRUNK_SERVER_IPS" "$TRUNK_DID" \
                         "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
-                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "${MAX_MONTHLY_SPEND:-0}" || return 1
+                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "${MAX_MONTHLY_SPEND:-0}" "$CONTAINER_NAME" || return 1
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
                         && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
@@ -1240,7 +1381,7 @@ install_pstn-trunk() {
     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
         "$TRUNK_SERVER" "$TRUNK_SERVER_IPS" "$TRUNK_DID" \
         "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
-        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "$MAX_MONTHLY_SPEND" || return 1
+        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "$MAX_MONTHLY_SPEND" "$CONTAINER_NAME" || return 1
 
     _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "$MESSAGING_EXTS" "${RESTRICTED_ARGS[@]}"
     _pstn_write_limits_file "$LIMITS_FILE" "$MAX_OUTBOUND" "$MAX_INBOUND"
@@ -1269,6 +1410,15 @@ Asterisk-to-Asterisk calling is never affected) and blocks it immediately
 with a loud (priority=urgent) ntfy alert. You also get a separate loud ntfy
 warning once spend reaches 80% of this cap, before it actually trips.
 
+While tripped, every run of \`pstn-trunk-usage-alert.sh\` (every minute) also
+force-hangs-up any PSTN call already in progress (via \`docker exec ... asterisk
+-rx \"channel request hangup ...\"\` against the trunk's active channels) —
+not just new calls. Otherwise a call already connected when the cap is
+crossed would just keep running (and costing) until it ends naturally,
+since the dialplan only gates the *start* of a call. This bounds worst-case
+overage to roughly one check interval's cost across whatever's active,
+rather than open-ended.
+
 **This does NOT reset automatically** — once tripped, it stays tripped
 until you clear it yourself: re-run \`sudo ./setup.sh pstn-trunk\`, choose
 update mode, and answer yes when asked. This is deliberately a CLI-only
@@ -1276,7 +1426,8 @@ action, not exposed on the Security Dashboard web UI, so a compromised or
 careless web session can't quietly re-enable spend after a trip.
 
 Based on estimated cost, not real billing data, and checked once a minute —
-a strong safety net, not an absolute guarantee against any overage."
+a strong safety net, not an absolute guarantee against any overage. See
+\"How bulletproof is this?\" below."
     else
         KILLSWITCH_DOC="**Disabled.** The spend alerts above still notify you, but PSTN calling won't be auto-blocked. Enable it by re-running \`sudo ./setup.sh pstn-trunk\` (update mode)."
     fi
@@ -1284,12 +1435,23 @@ a strong safety net, not an absolute guarantee against any overage."
     _pstn_read_intl_current "$ASTERISK_DIR/pstn-intl-allowed.conf"
     local INTL_DOC=""
     if [[ -n "$_PSTN_CUR_CODES" ]]; then
-        INTL_DOC="**Currently allowed:** ${_PSTN_CUR_NAMES//|/, }
+        local -a _doc_codes _doc_names _doc_rates
+        IFS='|' read -ra _doc_codes <<< "$_PSTN_CUR_CODES"
+        IFS='|' read -ra _doc_names <<< "$_PSTN_CUR_NAMES"
+        IFS='|' read -ra _doc_rates <<< "$_PSTN_CUR_RATES"
+        INTL_DOC="**Currently allowed:**
 "
+        local _di
+        for _di in "${!_doc_codes[@]}"; do
+            INTL_DOC="${INTL_DOC}- ${_doc_names[$_di]:-+${_doc_codes[$_di]}} — \$${_doc_rates[$_di]:-0}/min
+"
+        done
         if [[ -n "$_PSTN_CUR_EXPIRES" ]]; then
-            INTL_DOC="${INTL_DOC}**Expires:** $_PSTN_CUR_EXPIRES — auto-revoked and re-blocked after this date (with an ntfy notice both the day of and at the moment it expires)."
+            INTL_DOC="${INTL_DOC}
+**Expires:** $_PSTN_CUR_EXPIRES — auto-revoked and re-blocked after this date (with an ntfy notice both the day of and at the moment it expires)."
         else
-            INTL_DOC="${INTL_DOC}**No expiry set** — stays allowed until changed again from the CLI."
+            INTL_DOC="${INTL_DOC}
+**No expiry set** — stays allowed until changed again from the CLI."
         fi
     else
         INTL_DOC="**No countries currently allowed** — outbound/inbound PSTN calling is US/NANP-only."
@@ -1439,6 +1601,28 @@ dashboard.
 ## Spend-cap kill-switch
 
 $KILLSWITCH_DOC
+
+### How bulletproof is this?
+
+Not fully — be clear-eyed about what's actually guaranteed vs. estimated:
+
+- **Genuinely hard:** your provider's own prepaid-balance block (confirmed
+  in writing for Anveo Direct: all calls, in and out, blocked in real time
+  at \$0 balance — ask the same question of any other provider before
+  trusting it). That's a real ceiling enforced outside this repo's code
+  entirely.
+- **Not hard:** the kill-switch above only enforces *the dollar figure you
+  typed in here* — a separate, smaller number than your actual account
+  balance. It's estimate-based (call count/duration × rates you entered,
+  not the provider's real billing), checked once a minute, and a call
+  already in progress is only invisible to the estimator until it either
+  ends or gets force-hung-up on the next check (see the active-hangup
+  behavior above — that closes most, not all, of the gap).
+- The one setup that's actually bulletproof against losing more than \$X:
+  fund the prepaid account with exactly \$X (top it up manually, no
+  auto-recharge) and let the provider's own \$0 block be the real ceiling.
+  Treat this kill-switch as a fast early-warning/second layer on top of
+  that, not the guarantee itself.
 
 ## International calling (beyond NANP/US)
 
