@@ -130,9 +130,20 @@ anyone notices. Two independent layers matter more than either alone:
    trunk's own capabilities.
 
 **Important nuance: these two layers bound different things, and neither
-alone bounds both.** NANP-only restriction bounds *cost-per-minute* (a
-compromised box can only ever reach $0.01/min US numbers, never $2–5/min
-international/premium destinations) — that risk is fully closed. It does
+alone bounds both.** NANP-only restriction bounds *cost-per-minute* — but
+**NANP-only alone was not actually sufficient**, and this design carried
+that gap for a while before it was caught. NANP includes Caribbean/Atlantic
+nations and several US territories (Bahamas, Puerto Rico, Dominican
+Republic, and 24 others) that dial exactly like a normal 10-digit US number
+but bill at international/premium rates — a well-known toll-fraud/
+"one-ring scam" vector specifically because the format looks domestic. The
+NANP pattern match alone would have let a compromised extension reach every
+one of these. **Fixed**: `services/pstn-trunk.sh` now blocks those 27 area
+codes explicitly, checked before permission tier, for every extension
+regardless of tier — see the dialplan file's own comment and
+"Non-US NANP area codes are blocked" in its generated README for the full
+list. With that fix in place, cost-per-minute risk actually is closed (a
+compromised box can only ever reach genuine US-rate destinations). It does
 **not** bound *how fast* the prepaid balance gets burned: nothing stops a
 compromised box from opening many concurrent US-destination calls in
 parallel and draining the whole balance (e.g. $15 balance ÷ $0.01/min =
@@ -165,7 +176,11 @@ separately from that hourly check.
 - An outbound dialplan route matching US numbers only — **implemented**:
   `_1NXXNXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXX` (10-digit,
   auto-prefixed with 1), both routed to the trunk. No catch-all `_X.`
-  pattern.
+  pattern. **Also implemented**: an explicit block on the 27 NANP area
+  codes that aren't actually US (Caribbean/Atlantic nations + US
+  territories — see the toll-fraud nuance above for why this matters),
+  checked via `REGEX()` against the extracted area code before permission
+  tier, ahead of every other check.
 - **Three-tier permission model — implemented**, superseding an earlier flat
   allow-list design. `internal` / `restricted` / `full` per extension, read
   live from `pstn-permissions.conf` via `AST_CONFIG()` rather than baked
@@ -309,7 +324,10 @@ generator output. Fixed by quoting every value in that heredoc.
 1. ~~Decide: new `services/pstn-trunk.sh`...~~ Done — separate service file,
    generalized to any IP-auth SIP provider (VoIP.ms is just the default).
 2. ~~IP auth vs. registration~~ Done — IP authentication, no password stored.
-3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`.
+3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`. ~~NANP
+   ≠ US gap~~ Done — 27 Caribbean/territory area codes explicitly blocked
+   (see toll-fraud nuance above); this was a real, live gap in the design
+   for a while, not a hypothetical.
 4. ~~Inbound~~ Done — rings a configurable list of extensions (ring-group
    supported), each checked live per-call against its own tier. ~~Permission
    model~~ Done — superseded the original flat allow-list with a 3-tier
@@ -338,3 +356,9 @@ generator output. Fixed by quoting every value in that heredoc.
    (VoIP.ms's docs mention some redundancy/failover between servers — if
    inbound calls ever stop matching the `identify` section, this is the
    first thing to check).
+7. Anveo Direct specifically has a provider-side "Call Security" setting
+   (account portal, not exposed through SIP config) — a per-minute rate
+   cap ("block calls with rate more than $X/min, 0 = block all") and a
+   maximum call duration. Worth setting on any Anveo Direct account as a
+   provider-side backstop independent of this repo's own dialplan code —
+   not automatable from here since it's their web UI, not a config file.

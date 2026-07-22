@@ -221,8 +221,19 @@ _pstn_write_dialplan_include() {
 ; to the trunk, so an unauthorized or compromised extension can't reach
 ; anything else even if the trunk itself would technically allow more. See
 ; docs/pstn-calling-voipms-plan.md for the toll-fraud reasoning.
+;
+; NANP is NOT the same thing as "US" — it also covers Caribbean/Atlantic
+; nations and several US territories, all of which dial exactly like a
+; normal 10-digit US number but get billed by most providers at
+; international/premium rates (a well-known toll-fraud/"one-ring scam"
+; vector precisely because the number format looks domestic). Blocked by
+; area code below, checked before tier permission — this is a hard "never
+; reachable" rule, not something even a "full" tier extension can override,
+; since "full" means "any US number," not "any NANP-shaped number."
 
 exten => _1NXXNXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+ same => n,Set(PSTN_AREA_CODE=${EXTEN:1:3})
+ same => n,GotoIf($[${REGEX("^(242|246|264|268|284|340|345|441|473|649|658|664|670|671|684|721|758|767|784|787|809|829|849|868|869|876|939)$" ${PSTN_AREA_CODE})} = 1]?pstn_intl_blocked,1)
  same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
  same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_check_busy,1)
@@ -234,6 +245,11 @@ __ALERT_DENY_TIER_LINE__
 
 exten => _NXXNXXXXX,1,NoOp(Assuming NANP - adding leading 1)
  same => n,Goto(1${EXTEN},1)
+
+exten => pstn_intl_blocked,1,NoOp(PSTN outbound call to ${EXTEN} blocked - non-US/premium NANP area code ${PSTN_AREA_CODE})
+__ALERT_DENY_INTL_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
 
 exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_numbers)})
  same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${EXTEN})} = 1]?pstn_check_busy,1)
@@ -263,10 +279,11 @@ EOF
     if [[ -n "$NTFY_URL" ]]; then
         local _esc_url="${NTFY_URL//&/\\&}"
         sed -i "s#__ALERT_DENY_TIER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - no PSTN permission.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_INTL_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call blocked - non-US/premium NANP area code.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_DENY_NUMBER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - number not pre-approved.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_BUSY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound concurrent-call cap reached - a call was rejected.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
     else
-        sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
+        sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_INTL_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
     fi
 
     # ── Inbound: [from-pstn-trunk], one unrolled block per ring-group member.
@@ -761,7 +778,7 @@ background, cost estimate, and toll-fraud reasoning.
 | Provider | ${PROVIDER_NAME} |
 | Server/POP | ${TRUNK_SERVER} (inbound match IPs: ${TRUNK_SERVER_IPS}) |
 | DID | ${TRUNK_DID} |
-| Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all |
+| Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all, minus 27 non-US/premium NANP area codes (see below) |
 | Full-PSTN extensions | ${FULL_EXTS:-none} |
 | Restricted-PSTN extensions | ${RESTRICTED_EXTS:-none} |
 | Concurrency caps | ${MAX_OUTBOUND} outbound / ${MAX_INBOUND} inbound simultaneous calls (live — see \`pstn-limits.conf\` below) |
@@ -770,6 +787,31 @@ background, cost estimate, and toll-fraud reasoning.
 | Estimated rate | \$${RATE_PER_MIN}/min |
 | Monthly spend alert threshold | \$${MONTH_THRESHOLD} |
 | Hourly burst alert threshold | ${BURST_THRESHOLD} calls/hour |
+
+## Non-US NANP area codes are blocked, not just "anything outside NANP"
+
+NANP (the North American Numbering Plan) isn't the same thing as "US" — it
+also covers several Caribbean/Atlantic nations and US territories, all of
+which dial exactly like a normal 10-digit US number but get billed by most
+providers at international/premium rates. This is a well-known toll-fraud/
+"one-ring scam" vector specifically because the number *looks* domestic.
+27 area codes are blocked explicitly, checked before permission tier — this
+applies to **every** extension regardless of tier, since "full" means "any
+US number," not "any NANP-shaped number":
+
+Bahamas (242), Barbados (246), Anguilla (264), Antigua & Barbuda (268),
+British Virgin Islands (284), US Virgin Islands (340), Cayman Islands
+(345), Bermuda (441), Grenada (473), Turks & Caicos (649), Jamaica
+(658/876), Montserrat (664), Northern Mariana Islands (670), Guam (671),
+American Samoa (684), Sint Maarten (721), Saint Lucia (758), Dominica
+(767), Saint Vincent (784), Puerto Rico (787/939), Dominican Republic
+(809/829/849), Trinidad & Tobago (868), Saint Kitts & Nevis (869).
+
+If you have a legitimate reason to call one of these (e.g. family in Puerto
+Rico), remove that entry from the `REGEX()` pattern in
+`pstn-trunk-dialplan.conf`'s `_1NXXNXXXXX` extension — it'll be
+regenerated exactly the same way on the next reinstall/update, so note the
+change somewhere you'll remember it, or keep a local diff.
 
 ## Permission tiers
 
