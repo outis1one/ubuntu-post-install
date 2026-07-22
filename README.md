@@ -67,7 +67,7 @@ a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 | Group | Services |
 |-------|---------|
 | `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import, optional password-auth lockdown, and SSH Host aliases; optional NetBird overlay network |
-| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `asterisk-digital-ocean`, `security-dashboard`, `sunshine` |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `asterisk-digital-ocean`, `pstn-trunk`, `security-dashboard`, `sunshine` |
 | `utilities` | `actualbudget`, `ai-gpu`, `ai-stack`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `paintplus`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
@@ -92,6 +92,7 @@ homelab
   homeassistant
   asterisk
   asterisk-digital-ocean
+  pstn-trunk
   security-dashboard
   sunshine
 
