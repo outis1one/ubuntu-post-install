@@ -269,14 +269,21 @@ so treat "no ID requirement found" as exactly that, not confirmation.
     their FAQ as of this writing — confirmed different from what web search
     surfaced independently, which was a different, apparently stale set of
     5 IPs). This is what prompted the multi-IP `identify` support below.
+    **Re-confirmed directly with Anveo Direct support** (ticket reply from
+    MFonk, 7/22/2026): these 4 IPs are still current/accurate.
   - STIR/SHAKEN signing is handled by Anveo as intermediate provider for
     personal use (originating your own calls, not reselling to customers) —
     no FCC registration/certificate needed on our side.
-  - Still open: does Anveo actually block *new* outbound calls in real time
-    at $0 balance (matching VoIP.ms's documented behavior), or only enforce
-    via the recurring-fee grace-period mechanism their FAQ describes? Not
-    confirmed either way — ask their support before funding a real account,
-    since it's the crux of the toll-fraud backstop assumption.
+  - ~~Still open: does Anveo actually block new outbound calls in real time
+    at $0 balance~~ **Resolved** — asked their support directly (same
+    ticket, 7/22/2026): "all calls (incoming and outgoing) will be blocked"
+    at $0 balance, in real time, not just via the recurring-fee
+    grace-period mechanism. This also answers the inbound question that
+    hadn't been asked of VoIP.ms either (see item 6 below): **inbound is
+    blocked at $0 the same as outbound**, not billed-through unconditionally.
+    This closes the crux assumption behind the toll-fraud backstop layering
+    for Anveo Direct specifically — VoIP.ms's own equivalent behavior is
+    still unverified against a live account (see item 6).
 - **SIP.US** — prepaid, but a flat ~$24.95/mo per-channel (unlimited minutes
   on that channel) model, not pay-per-minute — **not actually
   similarly-priced** at this project's volume (100 min/month costs ~$1-3/mo
