@@ -59,10 +59,32 @@ file.
 - **Provider: VoIP.ms.** Chosen for its prepaid-balance model: turn off
   auto-recharge in the account's Finances settings and outbound calls simply
   fail once the balance hits $0 — that's the toll-fraud backstop if the
-  droplet's Asterisk (`asterisk-digital-ocean`) is ever compromised. This
-  behavior wasn't verified against a live account — confirm the
-  auto-recharge toggle still works this way at sign-up time, since billing
-  UX can change.
+  droplet's Asterisk (`asterisk-digital-ocean`) is ever compromised.
+
+  **Update — read VoIP.ms's actual ToS (not just the wiki) on this.** The
+  wiki says plainly "only accounts with a balance over $0 are able to send
+  and receive calls" — new call attempts should be blocked in real time at
+  $0, and that's still the core assumption this design leans on. But the
+  ToS separately says the account "may run on a negative balance," that any
+  negative balance is "immediately due and payable," that VoIP.ms may
+  suspend an account below a $5 minimum balance (30-day notice first), and
+  may permanently close it after 30 *consecutive* days negative. Read
+  together, not a contradiction — two different things:
+  - **Can new calls start** — real-time balance check, blocked at $0. Core
+    assumption holds.
+  - **Can the balance ever read negative** — yes, most plausibly from
+    recurring fees (DID monthly, E911) landing when the balance is already
+    near zero, or edge-case settlement of an in-progress call ticking
+    slightly negative before teardown. Neither is a runaway toll-fraud
+    scenario; both mean liability isn't cleanly capped at the funded amount
+    to the exact penny, and the account needs topping up within the 30-day
+    windows or it gets suspended/closed (an account-status consequence, not
+    "30 free days of unblocked calling while negative").
+  - Still not verified against an actual live account — this is a read of
+    their published wiki + ToS text, not a test. Watch the real balance for
+    the first month or two after go-live, and don't panic at a small
+    negative reading — check whether it's a recurring fee or an actual call
+    spike before assuming the block failed.
 - **Scope: US calling only, for now.** No international, no premium-rate
   destinations. Enforce this twice — once via whatever dial-plan/prefix
   VoIP.ms requires for US routing, and again independently in Asterisk's own
@@ -233,9 +255,15 @@ separately from that hourly check.
    cover it), default 10/10, global not per-extension, live-editable via
    `pstn-limits.conf`/web UI. ~~Spend/volume alert~~ Done — ntfy, hourly
    threshold + burst check, plus immediate alerts on denied/rejected calls.
-6. Verify against a live VoIP.ms account: auto-recharge-off behavior at
-   sign-up, and that the chosen POP server's actual source IP for inbound
-   calls matches what `services/pstn-trunk.sh` resolved via DNS at install
-   time (VoIP.ms's docs mention some redundancy/failover between servers —
-   if inbound calls ever stop matching the `identify` section, this is the
+6. Verify against a live VoIP.ms account (still not done — only their wiki
+   + ToS text has been read, see "Decision so far" above for what that
+   turned up): confirm new outbound calls actually get blocked at $0
+   balance as documented; watch whether/when the balance goes slightly
+   negative in normal operation (expected from recurring fees, not
+   necessarily a sign of a problem) and top up within the 30-day windows
+   the ToS describes so the account/DID doesn't get suspended or closed.
+   Also confirm the chosen POP server's actual source IP for inbound calls
+   matches what `services/pstn-trunk.sh` resolved via DNS at install time
+   (VoIP.ms's docs mention some redundancy/failover between servers — if
+   inbound calls ever stop matching the `identify` section, this is the
    first thing to check).
