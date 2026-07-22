@@ -206,12 +206,13 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** (only if \`services/pstn-trunk.sh\` is installed) — every
-  known extension (parsed from \`pjsip.conf\`) with its current permission
-  tier (internal / restricted / full) and, for restricted, its approved
-  numbers, editable live — no Asterisk restart, no reinstall. Writes
-  directly to \`pstn-permissions.conf\`, which the dialplan reads fresh on
-  every call.
+- **PSTN Trunk** (only if \`services/pstn-trunk.sh\` is installed) — the
+  outbound/inbound concurrent-call caps, and every known extension (parsed
+  from \`pjsip.conf\`) with its current permission tier (internal /
+  restricted / full) and, for restricted, its approved numbers — all
+  editable live, no Asterisk restart, no reinstall. Writes directly to
+  \`pstn-limits.conf\` / \`pstn-permissions.conf\`, which the dialplan reads
+  fresh on every call.
 - Link to the Asterisk web admin itself (doesn't embed it, just links out).
 
 ## Manage
@@ -904,6 +905,60 @@ def write_permission(ext, tier, numbers_raw):
     return True, "Saved"
 
 
+LIMIT_RE = re.compile(r"^\d+$")
+
+
+def get_limits():
+    """Current outbound/inbound concurrent-call caps. Defaults (10/10) match
+    what the dialplan itself falls back to (via AST_CONFIG()+IF()) if this
+    file is missing or a key is absent, so a display here is never wrong
+    even before pstn-limits.conf exists."""
+    if not ASTERISK_CONFIG_DIR:
+        return {"max_outbound": 10, "max_inbound": 10}
+    path = os.path.join(ASTERISK_CONFIG_DIR, "pstn-limits.conf")
+    cp = configparser.ConfigParser(delimiters=("=",))
+    if os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return {
+        "max_outbound": cp.getint("limits", "max_outbound", fallback=10),
+        "max_inbound": cp.getint("limits", "max_inbound", fallback=10),
+    }
+
+
+def write_limits(max_outbound, max_inbound):
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    max_outbound, max_inbound = str(max_outbound).strip(), str(max_inbound).strip()
+    if not LIMIT_RE.match(max_outbound) or not LIMIT_RE.match(max_inbound):
+        return False, "Both caps must be whole numbers"
+
+    path = os.path.join(ASTERISK_CONFIG_DIR, "pstn-limits.conf")
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(
+                "; PSTN concurrent-call caps, both directions.\n"
+                "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no Asterisk\n"
+                "; restart needed. Managed here (Security Dashboard); also safe to edit\n"
+                "; by hand. 'sudo ./setup.sh pstn-trunk' update mode never touches this\n"
+                "; file, only a fresh reinstall does.\n\n"
+                "[limits]\n"
+                "max_outbound=%s\n"
+                "max_inbound=%s\n" % (max_outbound, max_inbound)
+            )
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, "Failed writing %s: %s" % (path, e)
+    return True, "Saved"
+
+
 INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
 <title>Security Dashboard</title>
@@ -966,6 +1021,16 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div id="tab-pstn" style="display:none">
     <div class="card">
+      <h3 style="margin-top:0">Concurrent-call caps</h3>
+      <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes apply live, on the next call.</p>
+      <div class="row">
+        <label class="muted" style="white-space:nowrap">Max outbound<br><input type="text" id="limit-out" style="width:5rem"></label>
+        <label class="muted" style="white-space:nowrap">Max inbound<br><input type="text" id="limit-in" style="width:5rem"></label>
+        <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
+      </div>
+      <div id="limits-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
       <h3 style="margin-top:0">PSTN permission tiers</h3>
       <p class="muted">
         <b>internal</b> — no PSTN, can still call/receive other extensions and internal ring groups.
@@ -987,7 +1052,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") loadPstnPermissions();
+    if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); }
   });
 });
 
@@ -1088,6 +1153,25 @@ async function banAsn(asn) {
   loadDecisions();
 }
 
+async function loadPstnLimits() {
+  const res = await fetch("/api/pstn-limits");
+  const data = await res.json();
+  document.getElementById("limit-out").value = data.max_outbound;
+  document.getElementById("limit-in").value = data.max_inbound;
+}
+
+document.getElementById("limits-save").addEventListener("click", async () => {
+  const maxOut = document.getElementById("limit-out").value;
+  const maxIn = document.getElementById("limit-in").value;
+  const res = await fetch("/api/pstn-limits", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({max_outbound: maxOut, max_inbound: maxIn}),
+  });
+  const data = await res.json();
+  document.getElementById("limits-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  loadPstnLimits();
+});
+
 async function loadPstnPermissions() {
   const res = await fetch("/api/pstn-permissions");
   const data = await res.json();
@@ -1187,6 +1271,8 @@ class Handler(BaseHTTPRequestHandler):
                 extensions.append({"ext": e["ext"], "name": e["name"],
                                     "tier": p["tier"], "allowed_numbers": p["allowed_numbers"]})
             self._json({"extensions": extensions})
+        elif self.path == "/api/pstn-limits":
+            self._json(get_limits())
         else:
             self._json({"error": "not found"}, 404)
 
@@ -1210,6 +1296,9 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = write_permission(
                 payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", "")
             )
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-limits":
+            ok, message = write_limits(payload.get("max_outbound", ""), payload.get("max_inbound", ""))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)

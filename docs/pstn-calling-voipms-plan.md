@@ -10,35 +10,44 @@ LAN variant). Generic SIP trunk add-on that defaults to VoIP.ms but isn't
 hardcoded to it — any provider supporting IP authentication works. Covers:
 
 - IP-authenticated trunk, US/NANP-only outbound dialplan, no catch-all.
-- A configurable concurrent-call cap (default 3, global not per-extension).
+- **Two independent concurrent-call caps**, one per direction (default 10
+  outbound / 10 inbound — bumped up from an initial default of 3 once roles
+  existed to gate who can even reach the trunk; "ability creep is real," so
+  the two caps stay the hard backstop regardless). Global per direction, not
+  per-extension.
 - **Three-tier per-extension permission model**: `internal` (default — no
   PSTN at all, but can always call/receive other extensions and internal
   ring groups), `restricted` (also only pre-approved US numbers, both
   directions), `full` (also any US number). Internal extension-to-extension
-  dialing is *never* gated by any tier.
-- **Permissions are live, not baked into the dialplan.** Stored in
-  `pstn-permissions.conf`, read by the dialplan via Asterisk's
-  `AST_CONFIG()` on every call — editing that file takes effect on the next
-  call, no restart, no reinstall. `services/pstn-trunk.sh`'s "update in
-  place" mode deliberately never touches it (same protection this repo's
-  update-mode convention already gives `.env`/firewall/Caddy config
+  dialing is *never* gated by any tier — deliberately, even though VoIP.ms
+  itself offers free SIP-to-SIP calling, to avoid routing purely-internal
+  calls through an extra external hop for no benefit.
+- **Permissions AND concurrency caps are both live, not baked into the
+  dialplan.** Stored in `pstn-permissions.conf` / `pstn-limits.conf`, read
+  by the dialplan via Asterisk's `AST_CONFIG()` on every call — editing
+  either file takes effect on the next call, no restart, no reinstall.
+  `services/pstn-trunk.sh`'s "update in place" mode deliberately never
+  touches either (same protection this repo's update-mode convention
+  already gives `.env`/firewall/Caddy config
   elsewhere) — only a "fresh" reinstall (with confirmation) or the web UI
   below change it.
 - A configurable **inbound ring-group** (one extension or several), each
   member's live tier/approved-numbers checked per inbound call via an
   unrolled per-member dialplan block (no AGI needed).
 - **`services/security-dashboard.sh` integration** — a "PSTN Trunk" tab
-  lists every extension (parsed from `pjsip.conf`) with its live tier and
-  approved numbers, editable with no restart. This is what makes the tier
-  model actually manageable day-to-day instead of needing a reinstall for
-  every roster change.
+  shows both concurrency caps and every extension (parsed from
+  `pjsip.conf`) with its live tier and approved numbers, all editable with
+  no restart. This is what makes the tier model and caps actually
+  manageable day-to-day instead of needing a reinstall for every change.
 - **ntfy alerts** on denied/rejected calls (immediate — permission denied,
-  number not approved, or concurrency cap hit) and spend/volume thresholds
-  (hourly check: once/month on a spend threshold, every hour on a call-burst
-  threshold).
-- Structural settings (server, DID, ring-group membership, cap, ntfy,
+  number not approved, or either concurrency cap hit) and spend/volume
+  thresholds (hourly check: once/month on a spend threshold, every hour on
+  a call-burst threshold).
+- Structural settings (server, DID, ring-group *membership*, ntfy,
   rate/thresholds) persist to `.pstn-trunk.env` so "update in place"
-  reapplies them without re-prompting.
+  reapplies them without re-prompting — the concurrency cap *numbers*
+  themselves are not structural, they live in `pstn-limits.conf` instead
+  (see above).
 
 `services/pstn-trunk.sh`'s own header comment explains how the trunk/dialplan
 config survives Easy Asterisk's regeneration, and why permissions are a
@@ -111,11 +120,14 @@ ceiling; only a concurrent-call cap bounds the *speed* of a breach. Treat
 the concurrent-call cap and spend/volume alert below as required before
 funding a live trunk, not optional hardening.
 
-**Implemented:** the concurrent-call cap in `services/pstn-trunk.sh` is a
-*global* cap (configurable, default max 3 outbound legs total via the trunk,
-via `GROUP()`/`GROUP_COUNT()` in the dialplan, shared across all extensions)
-— not per-extension. That was the explicit ask when this got built. The
-spend/volume alert is also implemented now: an hourly cron script reads a
+**Implemented:** the concurrent-call caps in `services/pstn-trunk.sh` are
+*global* per direction (default 10 outbound / 10 inbound, each tracked via
+its own `GROUP()`/`GROUP_COUNT()` in the dialplan, shared across all
+extensions) — not per-extension. Inbound didn't have a cap at all until
+this was pointed out as a gap (outbound's cap doesn't protect against an
+inbound call-flood, which also costs money per-minute on VoIP.ms) — both
+directions are covered symmetrically now. The spend/volume alert is also
+implemented: an hourly cron script reads a
 call log the dialplan appends to directly (not Asterisk's CDR — see the
 service file's own comments for why) and alerts via ntfy once per month when
 estimated spend crosses a threshold, and every hour that call volume in the
@@ -171,12 +183,13 @@ separately from that hourly check.
   plan and whether to add E911, pick a server/POP, fund the prepaid balance
   ($15 minimum for VoIP.ms), turn off auto-recharge. `services/pstn-trunk.sh`
   prompts for the server hostname, DID, allowed extensions, ring extensions,
-  concurrency cap, ntfy topic, and spend-alert settings at install time.
+  both concurrency caps, ntfy topic, and spend-alert settings at install
+  time (the cap *numbers* are then live/web-editable afterward — see above).
 - Defense-in-depth alongside the trunk:
-  - **Implemented:** a global concurrent-call cap in the dialplan
-    (`GROUP()`/`GROUP_COUNT()`, configurable, default max 3 outbound legs via
-    the trunk at once) so an unauthorized or compromised extension can't
-    open dozens of simultaneous outbound legs. Global, not per-extension —
+  - **Implemented:** independent outbound/inbound concurrent-call caps in
+    the dialplan (`GROUP()`/`GROUP_COUNT()`, default 10/10) so an
+    unauthorized or compromised extension can't open dozens of simultaneous
+    legs in either direction. Global per direction, not per-extension —
     see the note above.
   - **Implemented:** an outbound call-count/spend alert via ntfy — a
     self-contained call log (not Asterisk's CDR) plus an hourly cron script.
@@ -215,9 +228,11 @@ separately from that hourly check.
    the provider's IP authentication). Still unresolved: pick pay-per-minute
    vs. unlimited DID plan on VoIP.ms's side based on real expected volume,
    and decide on E911 (see cost estimate).
-5. ~~Concurrent-call cap~~ Done — configurable, default 3, global not
-   per-extension. ~~Spend/volume alert~~ Done — ntfy, hourly threshold +
-   burst check, plus immediate alerts on denied/rejected calls.
+5. ~~Concurrent-call cap~~ Done — both directions now (inbound was a real
+   gap, since it also costs money per-minute and outbound's cap doesn't
+   cover it), default 10/10, global not per-extension, live-editable via
+   `pstn-limits.conf`/web UI. ~~Spend/volume alert~~ Done — ntfy, hourly
+   threshold + burst check, plus immediate alerts on denied/rejected calls.
 6. Verify against a live VoIP.ms account: auto-recharge-off behavior at
    sign-up, and that the chosen POP server's actual source IP for inbound
    calls matches what `services/pstn-trunk.sh` resolved via DNS at install
