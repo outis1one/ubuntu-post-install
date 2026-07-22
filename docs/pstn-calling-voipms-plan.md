@@ -224,15 +224,86 @@ separately from that hourly check.
     legitimately-registered extension being used for toll fraud — nobody
     should assume CrowdSec alone already covers this.
 
-## Provider landscape (for reference — not chosen)
-- **SIP.US** — also prepaid, flat per-channel rate, built-in fraud
-  detection. Considered, not chosen.
+## Provider landscape (for reference)
+Looked at as alternatives to VoIP.ms specifically because VoIP.ms's own ToS
+confirms it *selectively* requires a government ID scan at signup (VPN/proxy
+use, certain number types, internal risk scoring — not universal, but real).
+None of these were verified to *never* require ID either; KYC requirements
+are trending industry-wide (FCC STIR/SHAKEN, Robocall Mitigation Database),
+so treat "no ID requirement found" as exactly that, not confirmation.
+
+- **DIDLogic** — **ruled out**: has a $20/month minimum, confirmed directly
+  by checking their portal (not something search results surfaced). Would
+  otherwise have needed zero code changes — same IP-auth model and
+  single-IP-per-regional-POP hostname pattern this service already handles.
+- **Anveo Direct** (anveodirect.com — a *different product* from plain
+  Anveo/anveo.com, its hosted-PBX sibling with monthly subscription tiers;
+  don't confuse the two, their pricing models aren't comparable) — leading
+  candidate. ~$0.001/min outbound, no minimum commitment, $25 minimum to
+  fund the account (close to VoIP.ms's $15). Confirmed via their current
+  official FAQ (fetched directly, not via search — search results had gone
+  stale on this exact point):
+  - IP authentication, no SIP registration — matches this service's
+    architecture with zero changes needed to the auth model.
+  - **No dial-prefix requirement** — a stale/outdated forum claim (found via
+    search) suggested one was needed; the *current* official FAQ's own
+    sample config shows plain number dialing, nothing prepended. Don't
+    trust that claim if it resurfaces.
+  - **Sends inbound signaling from multiple fixed IPs**, not one:
+    `169.48.232.158`, `204.216.109.55`, `176.9.39.206`, `72.9.149.25` (per
+    their FAQ as of this writing — confirmed different from what web search
+    surfaced independently, which was a different, apparently stale set of
+    5 IPs). This is what prompted the multi-IP `identify` support below.
+  - STIR/SHAKEN signing is handled by Anveo as intermediate provider for
+    personal use (originating your own calls, not reselling to customers) —
+    no FCC registration/certificate needed on our side.
+  - Still open: does Anveo actually block *new* outbound calls in real time
+    at $0 balance (matching VoIP.ms's documented behavior), or only enforce
+    via the recurring-fee grace-period mechanism their FAQ describes? Not
+    confirmed either way — ask their support before funding a real account,
+    since it's the crux of the toll-fraud backstop assumption.
+- **SIP.US** — prepaid, but a flat ~$24.95/mo per-channel (unlimited minutes
+  on that channel) model, not pay-per-minute — **not actually
+  similarly-priced** at this project's volume (100 min/month costs ~$1-3/mo
+  pay-per-minute vs. $24.95/mo flat). Notable anyway for automated real-time
+  fraud detection (kills in-progress unauthorized calls, auto-disables
+  international calling on suspicious activity) — a provider-side version of
+  what this repo hand-built in the dialplan, if that trade-off (higher
+  price, less to maintain yourself) ever appeals.
 - Several providers (Nextiva, IDT Express) advertise AI/ML-based fraud
   monitoring as a second layer on top of normal billing — an extra net, not
   a substitute for a hard prepaid ceiling.
 - Most providers don't market an explicit "spending cap" feature — the
   prepaid-balance + auto-recharge-off pattern is the de facto mechanism
   across the space, VoIP.ms included.
+
+## Multi-provider support beyond VoIP.ms — implemented
+`services/pstn-trunk.sh` now generalizes two things that were originally
+built VoIP.ms-shaped, driven directly by researching Anveo Direct as an
+alternative:
+- **Multiple inbound `identify` match IPs**, not just one. The install
+  prompt still auto-resolves the server hostname to an IP (VoIP.ms's
+  one-POP-one-hostname model), but now also asks for any *additional* known
+  source IPs a provider might publish (Anveo Direct's case) — PJSIP allows
+  repeating `match=` within a single `identify` object to build one match
+  set against the trunk endpoint, so this needed no new config objects, just
+  a loop emitting one `match=` line per IP.
+- No dial-prefix support was added — turned out not to be needed for Anveo
+  Direct once verified against their current official FAQ rather than a
+  stale search result. If a future provider genuinely needs one, that's the
+  next generalization point (a prefix prepended to `${EXTEN}` before
+  `Dial()`).
+
+**Bug caught while testing this**: `.pstn-trunk.env` (the structural
+settings file "update in place" reapplies) was being written with unquoted
+values. Harmless as long as every value happened to be a single word, but a
+multi-IP list (always space-separated once there's more than one) or a
+multi-word provider name (e.g. "Anveo Direct") broke `source`-ing it
+entirely — bash treats the second word as a command to run ("Direct:
+command not found"). This was a latent bug that predates the multi-IP work
+(a multi-extension ring group has the same shape), only surfaced by
+actually exercising the update-mode round trip instead of just inspecting
+generator output. Fixed by quoting every value in that heredoc.
 
 ## Open items for whoever picks this up next
 1. ~~Decide: new `services/pstn-trunk.sh`...~~ Done — separate service file,
