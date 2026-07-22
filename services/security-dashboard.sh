@@ -206,13 +206,19 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** (only if \`services/pstn-trunk.sh\` is installed) — the
+- **PSTN Trunk** — detects whether \`services/pstn-trunk.sh\`'s dialplan is
+  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a clear
+  "not installed" message instead of the caps/tiers editor if not, so it
+  never shows real-looking-but-unenforced defaults. When installed: the
   outbound/inbound concurrent-call caps, and every known extension (parsed
   from \`pjsip.conf\`) with its current permission tier (internal /
   restricted / full) and, for restricted, its approved numbers — all
   editable live, no Asterisk restart, no reinstall. Writes directly to
   \`pstn-limits.conf\` / \`pstn-permissions.conf\`, which the dialplan reads
-  fresh on every call.
+  fresh on every call. The spend-cap kill-switch and international-calling
+  allow-list are deliberately **not** managed here — CLI-only, via
+  \`sudo ./setup.sh pstn-trunk\` — since both are more security-sensitive
+  than what this tab already exposes.
 - Link to the Asterisk web admin itself (doesn't embed it, just links out).
 
 ## Manage
@@ -908,6 +914,18 @@ def write_permission(ext, tier, numbers_raw):
 LIMIT_RE = re.compile(r"^\d+$")
 
 
+def pstn_installed():
+    """True only once services/pstn-trunk.sh has actually wired the dialplan
+    in (pstn-trunk-dialplan.conf existing), not just because base Asterisk is
+    present — pjsip.conf/extensions.conf exist either way, so extension names
+    alone can't tell us this. Without this check the tab would show a real
+    extension list and a default-but-unenforced 10/10 cap even when there is
+    no PSTN trunk at all."""
+    if not ASTERISK_CONFIG_DIR:
+        return False
+    return os.path.isfile(os.path.join(ASTERISK_CONFIG_DIR, "pstn-trunk-dialplan.conf"))
+
+
 def get_limits():
     """Current outbound/inbound concurrent-call caps. Defaults (10/10) match
     what the dialplan itself falls back to (via AST_CONFIG()+IF()) if this
@@ -973,6 +991,9 @@ INDEX_HTML = """<!doctype html>
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #23262f; }
   th { color: #9aa4b2; font-weight: 600; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: #e6e6e6; }
+  th.sortable .arrow { opacity: 0.5; font-size: 0.75em; margin-left: 0.25em; }
   .sev-Error { color: #ff6b6b; }
   .sev-Warning { color: #f5b342; }
   .sev-Informational { color: #7fbf7f; }
@@ -1006,7 +1027,15 @@ INDEX_HTML = """<!doctype html>
   <div id="tab-crowdsec" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Active bans</h3>
-      <table id="dec-table"><thead><tr><th>IP/Range</th><th>Scenario</th><th>Network / Carrier</th><th>Country</th><th>Duration</th><th>Origin</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="dec-table"><thead><tr>
+        <th class="sortable" data-sort="value">IP/Range</th>
+        <th class="sortable" data-sort="scenario">Scenario</th>
+        <th class="sortable" data-sort="carrier">Network / Carrier</th>
+        <th class="sortable" data-sort="country">Country</th>
+        <th class="sortable" data-sort="duration">Duration</th>
+        <th class="sortable" data-sort="origin">Origin</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
       <h3 style="margin-top:0">Asterisk brute-force ASN exemptions</h3>
@@ -1020,6 +1049,11 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="tab-pstn" style="display:none">
+    <div class="card" id="pstn-not-installed" style="display:none">
+      <h3 style="margin-top:0">PSTN trunk not installed</h3>
+      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). Nothing below is enforced yet; install it first, then this tab will manage the real permission tiers and concurrency caps.</p>
+    </div>
+    <div id="pstn-installed-cards" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Concurrent-call caps</h3>
       <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes apply live, on the next call.</p>
@@ -1041,6 +1075,7 @@ INDEX_HTML = """<!doctype html>
       <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th></th></tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
+    </div>
   </div>
 </main>
 <script>
@@ -1052,7 +1087,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); }
+    if (btn.dataset.tab === "pstn") { loadPstnStatus(); }
   });
 });
 
@@ -1070,12 +1105,44 @@ async function loadSecurity() {
 }
 
 let lastDecisions = [];
+let decSort = { key: null, dir: 1 };
 
-async function loadDecisions() {
-  const res = await fetch("/api/decisions");
-  lastDecisions = await res.json();
+// Go-style duration strings ("3h59m59.62s", "-1" for permanent) don't sort
+// correctly as text, so parse to seconds for the Duration column; permanent
+// bans (-1 or unparseable) sort as Infinity, i.e. last in ascending order.
+function durationSeconds(s) {
+  if (!s || s === "-1") return Infinity;
+  const m = String(s).match(/^(-?\d+h)?(\d+m)?(\d+(?:\.\d+)?s)?$/);
+  if (!m || !(m[1] || m[2] || m[3])) return Infinity;
+  const h = parseFloat(m[1]) || 0, mi = parseFloat(m[2]) || 0, se = parseFloat(m[3]) || 0;
+  return h * 3600 + mi * 60 + se;
+}
+
+function decSortValue(d, key) {
+  switch (key) {
+    case "carrier": return (d.as_name || d.as_number || "").toLowerCase();
+    case "duration": return durationSeconds(d.duration);
+    default: return (d[key] || "").toString().toLowerCase();
+  }
+}
+
+function renderDecisions() {
+  let rows = lastDecisions.slice();
+  if (decSort.key) {
+    rows.sort((a, b) => {
+      const av = decSortValue(a, decSort.key), bv = decSortValue(b, decSort.key);
+      if (av < bv) return -1 * decSort.dir;
+      if (av > bv) return 1 * decSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#dec-table th.sortable .arrow").forEach(a => a.remove());
+  if (decSort.key) {
+    const th = document.querySelector(`#dec-table th[data-sort="${decSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${decSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
   const tbody = document.querySelector("#dec-table tbody");
-  tbody.innerHTML = lastDecisions.map(d => `<tr>
+  tbody.innerHTML = rows.map(d => `<tr>
     <td>${esc(d.value)}</td>
     <td>${esc(d.scenario)}</td>
     <td>${d.as_number ? esc(d.as_number) + (d.as_name ? " — " + esc(d.as_name) : "") : ""}</td>
@@ -1087,6 +1154,21 @@ async function loadDecisions() {
       ${d.as_number ? `<button class="action" onclick="exemptAsn('${esc(d.as_number)}')">Exempt ASN</button>` : ""}
     </td>
   </tr>`).join("") || "<tr><td colspan=7 class=muted>No active bans.</td></tr>";
+}
+
+document.querySelectorAll("#dec-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    decSort.dir = (decSort.key === key) ? -decSort.dir : 1;
+    decSort.key = key;
+    renderDecisions();
+  });
+});
+
+async function loadDecisions() {
+  const res = await fetch("/api/decisions");
+  lastDecisions = await res.json();
+  renderDecisions();
 }
 
 async function unban(id) {
@@ -1151,6 +1233,14 @@ async function banAsn(asn) {
   document.getElementById("msg").textContent = parts.join(" — ");
   loadAsnExempt();
   loadDecisions();
+}
+
+async function loadPstnStatus() {
+  const res = await fetch("/api/pstn-status");
+  const data = await res.json();
+  document.getElementById("pstn-not-installed").style.display = data.installed ? "none" : "";
+  document.getElementById("pstn-installed-cards").style.display = data.installed ? "" : "none";
+  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); }
 }
 
 async function loadPstnLimits() {
@@ -1273,6 +1363,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
+        elif self.path == "/api/pstn-status":
+            self._json({"installed": pstn_installed()})
         else:
             self._json({"error": "not found"}, 404)
 

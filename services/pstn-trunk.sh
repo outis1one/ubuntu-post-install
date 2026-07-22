@@ -232,6 +232,8 @@ _pstn_write_dialplan_include() {
 ; since "full" means "any US number," not "any NANP-shaped number."
 
 exten => _1NXXNXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+ same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
+ same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_AREA_CODE=${EXTEN:1:3})
  same => n,GotoIf($[${REGEX("^(242|246|264|268|284|340|345|441|473|649|658|664|670|671|684|721|758|767|784|787|809|829|849|868|869|876|939)$" ${PSTN_AREA_CODE})} = 1]?pstn_intl_blocked,1)
  same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
@@ -248,6 +250,45 @@ exten => _NXXNXXXXX,1,NoOp(Assuming NANP - adding leading 1)
 
 exten => pstn_intl_blocked,1,NoOp(PSTN outbound call to ${EXTEN} blocked - non-US/premium NANP area code ${PSTN_AREA_CODE})
 __ALERT_DENY_INTL_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
+
+exten => pstn_killed,1,NoOp(PSTN trunk - spend-cap kill-switch is tripped, rejecting outbound call)
+__ALERT_KILLED_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
+
+; International (non-NANP) dialing — US "011" prefix convention. Gated on
+; BOTH full tier (same as domestic) AND the live international allow-list
+; (pstn-intl-allowed.conf), managed ONLY via the CLI installer, never the
+; Security Dashboard web UI — see _pstn_run_international_step. The
+; allow-list holds admin-entered country calling codes (the PATTERN side of
+; the REGEX() below); the caller-dialed digits are always the STRING being
+; tested, never the reverse, same safe direction as every other permission
+; check in this file. Reuses pstn_check_busy for the actual dial once a
+; country check passes — same concurrency cap and call-log accounting as
+; domestic calls (the estimated per-minute RATE assumed there is a US rate
+; and will under/over-estimate true international cost; treat the spend
+; figures as even less precise for international minutes than domestic).
+exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+ same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
+ same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
+ same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_intl_check_country,1)
+ same => n,NoOp(Denied intl - ${PSTN_CALLER} tier ${PSTN_TIER} not eligible for international calling)
+__ALERT_DENY_INTL_TIER_LINE__
+ same => n,Busy(15)
+ same => n,Hangup()
+
+exten => pstn_intl_check_country,1,Set(PSTN_INTL_ALLOWED=${AST_CONFIG(pstn-intl-allowed.conf,countries,allowed_codes)})
+ same => n,Set(PSTN_INTL_DIGITS=${EXTEN:3})
+ same => n,GotoIf($["${PSTN_INTL_ALLOWED}" = ""]?pstn_intl_country_denied,1)
+ same => n,GotoIf($[${REGEX("^(${PSTN_INTL_ALLOWED})" ${PSTN_INTL_DIGITS})} = 1]?pstn_check_busy,1)
+ same => n,Goto(pstn_intl_country_denied,1)
+
+exten => pstn_intl_country_denied,1,NoOp(Denied intl - ${EXTEN} not on the current international allow-list)
+__ALERT_DENY_INTL_COUNTRY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
@@ -282,8 +323,11 @@ EOF
         sed -i "s#__ALERT_DENY_INTL_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call blocked - non-US/premium NANP area code.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_DENY_NUMBER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound call denied - number not pre-approved.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_BUSY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: outbound concurrent-call cap reached - a call was rejected.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_KILLED_LINE__# same => n,System(curl -m 5 -s -H 'Priority: urgent' -d 'PSTN trunk: outbound call rejected - spend-cap kill-switch is tripped.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_INTL_TIER_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: international call denied - extension is not full-tier.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_INTL_COUNTRY_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: international call denied - country not on the current allow-list.' '${_esc_url}' >/dev/null 2>\\&1 \\&)#" "$FILE"
     else
-        sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_INTL_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d" "$FILE"
+        sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_INTL_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d; /__ALERT_KILLED_LINE__/d; /__ALERT_DENY_INTL_TIER_LINE__/d; /__ALERT_DENY_INTL_COUNTRY_LINE__/d" "$FILE"
     fi
 
     # ── Inbound: [from-pstn-trunk], one unrolled block per ring-group member.
@@ -294,6 +338,8 @@ EOF
 
 [from-pstn-trunk]
 exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)})
+ same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
+ same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
  same => n,Set(PSTN_RING_LIST=)
  same => n,Set(PSTN_RING_SEP=)
 EOF
@@ -323,14 +369,19 @@ exten => pstn_in_busy,1,NoOp(PSTN trunk - inbound concurrent-call cap reached, r
 __ALERT_BUSY_IN_LINE__
  same => n,Busy(15)
  same => n,Hangup()
+
+exten => pstn_in_killed,1,NoOp(PSTN trunk - spend-cap kill-switch is tripped, rejecting inbound call)
+__ALERT_KILLED_IN_LINE__
+ same => n,Hangup()
 EOF
 
     if [[ -n "$NTFY_URL" ]]; then
         local _esc_url2="${NTFY_URL//&/\\&}"
         sed -i "s#__ALERT_DENY_INBOUND_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound call rejected - caller not approved for any ring target.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_BUSY_IN_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound concurrent-call cap reached - a call was rejected.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_KILLED_IN_LINE__# same => n,System(curl -m 5 -s -H 'Priority: urgent' -d 'PSTN trunk: inbound call rejected - spend-cap kill-switch is tripped.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
     else
-        sed -i "/__ALERT_DENY_INBOUND_LINE__/d; /__ALERT_BUSY_IN_LINE__/d" "$FILE"
+        sed -i "/__ALERT_DENY_INBOUND_LINE__/d; /__ALERT_BUSY_IN_LINE__/d; /__ALERT_KILLED_IN_LINE__/d" "$FILE"
     fi
 }
 
@@ -357,27 +408,35 @@ _pstn_write_limits_file() {
 # ── Shared: initial permission tiers (fresh install / explicit reset only —
 # "update in place" never calls this, matching how .env/firewall/Caddy config
 # are protected elsewhere in this repo; see file-level comment above) ──────
-# Args: FILE, space-separated FULL_EXTS, then "ext" "pipe|separated|numbers"
-# pairs for each restricted extension.
+# Args: FILE, space-separated FULL_EXTS, space-separated MESSAGING_EXTS, then
+# "ext" "pipe|separated|numbers" pairs for each restricted extension.
 _pstn_write_permissions_file() {
-    local FILE="$1" FULL_EXTS="$2"
-    shift 2
+    local FILE="$1" FULL_EXTS="$2" MESSAGING_EXTS="$3"
+    shift 3
+    local _written_exts=""
     {
-        echo "; PSTN permission tiers — internal / restricted / full."
+        echo "; PSTN permission tiers — internal / restricted / full — PLUS an independent"
+        echo "; 'messaging' flag for Asterisk's native internal SIP MESSAGE texting (no"
+        echo "; carrier SMS, no PSTN, no cost — a separate axis from PSTN calling, since"
+        echo "; the risk profile is different: an extension can be internal-tier for"
+        echo "; calling and still messaging-enabled, or vice versa)."
         echo "; Read LIVE by the dialplan on every call (AST_CONFIG()) — no Asterisk"
         echo "; restart needed when this changes. Edit here directly, via the Security"
         echo "; Dashboard web UI's \"PSTN Trunk\" tab (if installed), or by re-running"
         echo "; 'sudo ./setup.sh pstn-trunk' and choosing a FRESH reinstall (\"update in"
         echo "; place\" leaves this file alone on purpose)."
-        echo "; Any extension not listed here is internal-only (no PSTN) by default —"
-        echo "; it can still call/receive other Asterisk extensions and join internal"
-        echo "; ring groups, just not the PSTN trunk."
+        echo "; Any extension not listed here is internal-only (no PSTN) AND"
+        echo "; messaging-disabled by default — it can still call/receive other Asterisk"
+        echo "; extensions and join internal ring groups, just not the PSTN trunk or"
+        echo "; internal texting."
         echo ""
         local _ext
         for _ext in $FULL_EXTS; do
             echo "[$_ext]"
             echo "tier=full"
+            [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             echo ""
+            _written_exts="$_written_exts $_ext"
         done
         while [[ $# -gt 0 ]]; do
             _ext="$1"; local _nums="$2"
@@ -385,63 +444,449 @@ _pstn_write_permissions_file() {
             echo "[$_ext]"
             echo "tier=restricted"
             echo "allowed_numbers=${_nums}"
+            [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             echo ""
+            _written_exts="$_written_exts $_ext"
+        done
+        for _ext in $MESSAGING_EXTS; do
+            if [[ " $_written_exts " != *" $_ext "* ]]; then
+                echo "[$_ext]"
+                echo "messaging=yes"
+                echo ""
+            fi
         done
     } > "$FILE"
     chmod 664 "$FILE"
 }
 
-# ── Shared: periodic spend/volume checker (run hourly via cron) ────────────
+# ── Shared: kill-switch state (fresh install / explicit reset only — same
+# "update never touches it" protection as pstn-permissions.conf/
+# pstn-limits.conf) ─────────────────────────────────────────────────────────
+_pstn_write_killswitch_file() {
+    local FILE="$1"
+    {
+        echo "; PSTN spend-cap kill-switch state. 'tripped=1' blocks ALL PSTN calling"
+        echo "; (in and out — internal Asterisk-to-Asterisk calling is unaffected), read"
+        echo "; LIVE by the dialplan (AST_CONFIG()) on every call attempt. Written"
+        echo "; automatically by pstn-trunk-usage-alert.sh once estimated monthly spend"
+        echo "; reaches the cap set during install/update — it does NOT reset on its own."
+        echo "; To clear a trip: re-run 'sudo ./setup.sh pstn-trunk', choose update mode,"
+        echo "; and answer yes when asked, or hand-edit this file back to tripped=0 (same"
+        echo "; 'safe to edit by hand' convention as pstn-permissions.conf/pstn-limits.conf)."
+        echo "; Deliberately NOT exposed on the Security Dashboard web UI — clearing a"
+        echo "; kill-switch is a CLI-only action, consistent with the international-"
+        echo "; calling toggle below, so a compromised/careless web session can't quietly"
+        echo "; re-enable spend after a trip."
+        echo ""
+        echo "[state]"
+        echo "tripped=0"
+    } > "$FILE"
+    chmod 664 "$FILE"
+}
+
+# ── Shared: international-calling allow-list (CLI-managed only — see
+# _pstn_manage_international/_pstn_run_international_step below) ───────────
+_pstn_write_intl_allowed_file() {
+    local FILE="$1" CODES="$2" NAMES="$3" EXPIRES="$4"
+    {
+        echo "; International-calling allow-list (country calling codes, beyond NANP/US)."
+        echo "; Read LIVE by the dialplan (AST_CONFIG()) on every _011 international call —"
+        echo "; no Asterisk restart needed. Managed ONLY from the CLI installer"
+        echo "; ('sudo ./setup.sh pstn-trunk' -> 'Review/change allowed international-"
+        echo "; calling countries now?'), deliberately NOT exposed on the Security"
+        echo "; Dashboard web UI — this widens which countries can be dialed/billed to at"
+        echo "; all, a more security-sensitive control than who's already allowed to use"
+        echo "; an already-fixed scope. pstn-trunk-usage-alert.sh actively clears this"
+        echo "; (re-blocking) once 'expires' has passed, and sends ntfy notices both the"
+        echo "; day of and at the moment of expiry."
+        echo ""
+        echo "[countries]"
+        echo "allowed_codes=${CODES}"
+        echo "allowed_names=${NAMES}"
+        echo "expires=${EXPIRES}"
+    } > "$FILE"
+    chmod 664 "$FILE"
+}
+
+_pstn_read_intl_current() {
+    local FILE="$1"
+    _PSTN_CUR_CODES=""
+    _PSTN_CUR_NAMES=""
+    _PSTN_CUR_EXPIRES=""
+    if [[ -f "$FILE" ]]; then
+        _PSTN_CUR_CODES="$(grep '^allowed_codes=' "$FILE" | head -1 | cut -d= -f2-)"
+        _PSTN_CUR_NAMES="$(grep '^allowed_names=' "$FILE" | head -1 | cut -d= -f2-)"
+        _PSTN_CUR_EXPIRES="$(grep '^expires=' "$FILE" | head -1 | cut -d= -f2-)"
+    fi
+}
+
+_pstn_print_intl_allowed() {
+    local FILE="$1"
+    _pstn_read_intl_current "$FILE"
+    echo ""
+    if [[ -n "$_PSTN_CUR_CODES" ]]; then
+        log_info "International calling currently ALLOWED to: ${_PSTN_CUR_NAMES//|/, }"
+        if [[ -n "$_PSTN_CUR_EXPIRES" ]]; then
+            log_info "  Expires: $_PSTN_CUR_EXPIRES (auto-revoked and re-blocked after this date)."
+        else
+            log_info "  No expiry set — stays allowed until you change it here again."
+        fi
+    else
+        log_info "International calling: no countries currently allowed (US/NANP only, per the tiers above)."
+    fi
+}
+
+# Continent -> country menu. Only reachable from the CLI (never the web
+# dashboard) and only ever invoked via _pstn_run_international_step, which
+# always asks the y/n gate first and always prints the resulting allow-list
+# exactly once afterward, regardless of the answer.
+_pstn_manage_international() {
+    local ASTERISK_DIR="$1"
+    local FILE="$ASTERISK_DIR/pstn-intl-allowed.conf"
+    mkdir -p "$ASTERISK_DIR"
+
+    _pstn_read_intl_current "$FILE"
+
+    local -A SELECTED=()
+    if [[ -n "$_PSTN_CUR_CODES" ]]; then
+        local -a _cur_codes_arr _cur_names_arr
+        IFS='|' read -ra _cur_codes_arr <<< "$_PSTN_CUR_CODES"
+        IFS='|' read -ra _cur_names_arr <<< "$_PSTN_CUR_NAMES"
+        local _k
+        for _k in "${!_cur_codes_arr[@]}"; do
+            SELECTED["${_cur_codes_arr[$_k]}"]="${_cur_names_arr[$_k]}"
+        done
+    fi
+
+    local -a NA=("Mexico|52" "Greenland|299")
+    local -a SA=("Brazil|55" "Argentina|54" "Colombia|57" "Chile|56" "Peru|51" "Ecuador|593" "Venezuela|58")
+    local -a EU=("United Kingdom|44" "Germany|49" "France|33" "Spain|34" "Italy|39" "Netherlands|31" "Ireland|353" "Portugal|351" "Poland|48" "Switzerland|41")
+    local -a ASIA=("India|91" "China|86" "Japan|81" "South Korea|82" "Philippines|63" "Israel|972" "United Arab Emirates|971" "Thailand|66" "Vietnam|84")
+    local -a AF=("Nigeria|234" "South Africa|27" "Egypt|20" "Kenya|254" "Morocco|212")
+    local -a OC=("Australia|61" "New Zealand|64")
+
+    echo ""
+    echo "  Select countries to allow international (non-NANP) calling to/from —"
+    echo "  nested by continent so the less-common calling codes stay out of the way"
+    echo "  until you need them. Only 'full'-tier extensions can use this regardless"
+    echo "  of which countries are allowed here."
+
+    local DONE=""
+    while [[ "$DONE" != "y" && "$DONE" != "Y" ]]; do
+        echo ""
+        echo "  Continents:"
+        echo "    1) North America (non-NANP)   2) South America   3) Europe"
+        echo "    4) Asia                       5) Africa           6) Oceania"
+        echo "    0) Enter a country/code manually (not listed above)"
+        local _cur_list="" _cc
+        for _cc in "${!SELECTED[@]}"; do _cur_list="${_cur_list}${_cur_list:+, }${SELECTED[$_cc]}"; done
+        echo "  Currently selected: ${_cur_list:-none}"
+        local _choice=""
+        prompt_text "  Continent number, 0, or 'd' when done:" "d" _choice
+        local -a _countries=()
+        local _cname=""
+        case "$_choice" in
+            d|D) DONE=y; continue ;;
+            0)
+                local _manual_name="" _manual_code=""
+                prompt_text "    Country name (for your reference):" "" _manual_name
+                prompt_text "    Country calling code (digits only, e.g. 44):" "" _manual_code
+                if [[ "$_manual_code" =~ ^[0-9]{1,4}$ ]]; then
+                    SELECTED["$_manual_code"]="${_manual_name:-Unnamed} (+$_manual_code)"
+                    log_success "Added ${_manual_name:-Unnamed} (+$_manual_code)."
+                else
+                    log_warning "Not a valid calling code — skipped."
+                fi
+                continue
+                ;;
+            1) _countries=("${NA[@]}"); _cname="North America" ;;
+            2) _countries=("${SA[@]}"); _cname="South America" ;;
+            3) _countries=("${EU[@]}"); _cname="Europe" ;;
+            4) _countries=("${ASIA[@]}"); _cname="Asia" ;;
+            5) _countries=("${AF[@]}"); _cname="Africa" ;;
+            6) _countries=("${OC[@]}"); _cname="Oceania" ;;
+            *) log_warning "Invalid choice."; continue ;;
+        esac
+
+        local _sub_done=""
+        while [[ "$_sub_done" != "y" && "$_sub_done" != "Y" ]]; do
+            echo ""
+            echo "  $_cname:"
+            local _j _entry _name _code _mark
+            for _j in "${!_countries[@]}"; do
+                _entry="${_countries[$_j]}"
+                _name="${_entry%%|*}"; _code="${_entry##*|}"
+                _mark=" "
+                [[ -n "${SELECTED[$_code]+x}" ]] && _mark="x"
+                echo "    $((_j+1))) [$_mark] $_name (+$_code)"
+            done
+            local _pick=""
+            prompt_text "    Toggle a number, or 'b' for back:" "b" _pick
+            if [[ "$_pick" == "b" || "$_pick" == "B" ]]; then
+                _sub_done=y
+            elif [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#_countries[@]} )); then
+                _entry="${_countries[$((_pick-1))]}"
+                _name="${_entry%%|*}"; _code="${_entry##*|}"
+                if [[ -n "${SELECTED[$_code]+x}" ]]; then
+                    unset 'SELECTED[$_code]'
+                    log_info "Removed $_name."
+                else
+                    SELECTED["$_code"]="$_name (+$_code)"
+                    log_info "Added $_name."
+                fi
+            else
+                log_warning "Invalid choice."
+            fi
+        done
+    done
+
+    local NEW_CODES="" NEW_NAMES="" _sep="" _code
+    for _code in "${!SELECTED[@]}"; do
+        NEW_CODES="${NEW_CODES}${_sep}${_code}"
+        NEW_NAMES="${NEW_NAMES}${_sep}${SELECTED[$_code]}"
+        _sep="|"
+    done
+
+    local NEW_EXPIRES=""
+    if [[ -n "$NEW_CODES" ]]; then
+        local WANT_EXPIRY=""
+        prompt_yn "  Auto-expire this international access? (y/n):" "y" WANT_EXPIRY
+        if [[ "$WANT_EXPIRY" =~ ^[Yy]$ ]]; then
+            local _days=""
+            prompt_text "    Expire after how many days:" "30" _days
+            [[ "$_days" =~ ^[0-9]+$ ]] || _days=30
+            NEW_EXPIRES="$(date -d "+${_days} days" +%Y-%m-%d)"
+            log_info "  Will auto-expire on $NEW_EXPIRES — you'll get an ntfy notice that day and again when it actually revokes."
+        fi
+    fi
+
+    _pstn_write_intl_allowed_file "$FILE" "$NEW_CODES" "$NEW_NAMES" "$NEW_EXPIRES"
+    chmod 664 "$FILE"
+}
+
+# Always asked, never skippable ("no bypassing the option" per design) —
+# both on fresh install AND on "update in place", unlike every other
+# structural prompt. Prints the resulting allow-list exactly once,
+# immediately after, regardless of the y/n answer — NOT repeated later
+# during the spend-cap prompts.
+_pstn_run_international_step() {
+    local ASTERISK_DIR="$1"
+    local FILE="$ASTERISK_DIR/pstn-intl-allowed.conf"
+    echo ""
+    log_info "International calling (beyond NANP/US) is OFF by default and can ONLY be"
+    log_info "managed from here (this CLI) — never from the Security Dashboard web UI."
+    log_info "It's a more security-sensitive control (widens which countries can be"
+    log_info "dialed/billed to at all) than anything already exposed there (which only"
+    log_info "governs who can use a scope that's already fixed)."
+    local WANT_INTL_CHANGE=""
+    prompt_yn "Review/change allowed international-calling countries now? (y/n):" "n" WANT_INTL_CHANGE
+    if [[ "$WANT_INTL_CHANGE" =~ ^[Yy]$ ]]; then
+        _pstn_manage_international "$ASTERISK_DIR"
+    fi
+    _pstn_print_intl_allowed "$FILE"
+}
+
+# Update-mode-only: pstn-trunk-killswitch.conf is never touched by "update"
+# (same protection as pstn-permissions.conf/pstn-limits.conf), so a trip
+# persists across settings updates on purpose — this is the CLI-only path to
+# clear it back out again once you've confirmed the overage was expected/
+# resolved.
+_pstn_check_killswitch_clear() {
+    local ASTERISK_DIR="$1"
+    local FILE="$ASTERISK_DIR/pstn-trunk-killswitch.conf"
+    [[ -f "$FILE" ]] || return 0
+    if grep -q '^tripped=1' "$FILE" 2>/dev/null; then
+        echo ""
+        log_warning "The spend-cap kill-switch is currently TRIPPED — ALL PSTN calling (in and"
+        log_warning "out) is blocked. It does not reset automatically."
+        local CLEAR=""
+        prompt_yn "Clear it now and resume PSTN calling? (y/n):" "n" CLEAR
+        if [[ "$CLEAR" =~ ^[Yy]$ ]]; then
+            sed -i 's/^tripped=.*/tripped=0/' "$FILE"
+            log_success "Kill-switch cleared — PSTN calling resumes immediately (live, no restart needed)."
+        else
+            log_info "Leaving the kill-switch tripped."
+        fi
+    fi
+}
+
+# ── Shared: periodic spend/volume/kill-switch/international-expiry checker
+# (run every minute via systemd timer, cron.d fallback — see
+# _pstn_install_periodic_timer above) ───────────────────────────────────────
 _pstn_write_usage_alert_script() {
-    local FILE="$1" EA_DIR="$2" RATE="$3" MONTH_THRESHOLD="$4" BURST_THRESHOLD="$5" NTFY_URL="$6"
+    local FILE="$1" EA_DIR="$2" ASTERISK_DIR="$3" RATE="$4" MONTH_THRESHOLD="$5" \
+          BURST_THRESHOLD="$6" MAX_MONTHLY_SPEND="$7" NTFY_URL="$8"
     cat > "$FILE" << 'EOF'
 #!/bin/bash
 # Auto-generated by services/pstn-trunk.sh — do not edit directly, re-run
-# the installer instead. Run hourly via /etc/cron.d/pstn-trunk-usage.
-# Reads the call log pstn-trunk-dialplan.conf appends to and alerts via
-# ntfy when month-to-date estimated spend crosses a threshold (alerted once
-# per month) or when call volume in the last hour looks like a burst.
+# the installer instead. Run every minute via a systemd timer
+# (pstn-trunk-usage.timer; cron.d fallback if systemd isn't available — see
+# _pstn_install_periodic_timer). Reads the call log pstn-trunk-dialplan.conf
+# appends to and:
+#   - alerts via ntfy when month-to-date estimated spend crosses
+#     MONTH_THRESHOLD (once per month), or call volume in the last hour
+#     looks like a burst;
+#   - trips the spend-cap kill-switch (pstn-trunk-killswitch.conf) once
+#     estimated spend reaches MAX_MONTHLY_SPEND — read LIVE by the dialplan
+#     on every call, blocking ALL PSTN calling (in and out) until manually
+#     cleared (does NOT reset automatically — see CLAUDE.md/README for how);
+#   - sends a loud (priority=urgent) ntfy warning once spend reaches 80% of
+#     that cap, distinct from and in addition to the trip alert itself;
+#   - actively re-blocks (clears) the international-calling allow-list once
+#     its expiry date has passed, with ntfy notices both the day of and at
+#     the moment it actually revokes.
+# These are estimates (call count/duration x an entered rate), not real
+# billing data, and only as fresh as the last run of this script (every
+# minute) — a safety net, not a substitute for the provider's own billing.
 
 LOG_FILE="__EA_DIR__/logs/pstn-trunk-calls.log"
 STATE_FILE="__EA_DIR__/.pstn-trunk-alert-state"
+WARN_STATE_FILE="__EA_DIR__/.pstn-trunk-warn-state"
+INTL_STATE_FILE="__EA_DIR__/.pstn-trunk-intl-state"
+KILLSWITCH_FILE="__ASTERISK_DIR__/pstn-trunk-killswitch.conf"
+INTL_FILE="__ASTERISK_DIR__/pstn-intl-allowed.conf"
 RATE="__PSTN_RATE__"
 MONTH_THRESHOLD="__PSTN_MONTH_THRESHOLD__"
 BURST_THRESHOLD="__PSTN_BURST_THRESHOLD__"
+MAX_MONTHLY_SPEND="__PSTN_MAX_MONTHLY_SPEND__"
 NTFY_URL="__PSTN_NTFY_URL__"
-
-[[ -f "$LOG_FILE" ]] || exit 0
-
-now_epoch=$(date +%s)
-current_month=$(date +%Y-%m)
-one_hour_ago=$((now_epoch - 3600))
-month_start_epoch=$(date -d "$(date +%Y-%m-01)" +%s)
-
-month_seconds=$(awk -F'|' -v start="$month_start_epoch" '$2=="out" && $1+0>=start {sum+=$5} END{print sum+0}' "$LOG_FILE")
-month_minutes=$(awk -v s="$month_seconds" 'BEGIN{printf "%.1f", s/60}')
-month_cost=$(awk -v m="$month_minutes" -v r="$RATE" 'BEGIN{printf "%.2f", m*r}')
-hour_calls=$(awk -F'|' -v start="$one_hour_ago" '$2=="out" && $1+0>=start {c++} END{print c+0}' "$LOG_FILE")
 
 send_ntfy() {
     [[ -n "$NTFY_URL" ]] && curl -m 5 -s -d "$1" "$NTFY_URL" >/dev/null 2>&1
 }
+send_ntfy_loud() {
+    [[ -n "$NTFY_URL" ]] && curl -m 5 -s -H "Priority: urgent" -H "Title: PSTN trunk alert" -d "$1" "$NTFY_URL" >/dev/null 2>&1
+}
 
-last_alert_month=""
-[[ -f "$STATE_FILE" ]] && last_alert_month=$(cat "$STATE_FILE")
+current_month=$(date +%Y-%m)
 
-if awk -v c="$month_cost" -v t="$MONTH_THRESHOLD" 'BEGIN{exit !(c>=t)}'; then
-    if [[ "$last_alert_month" != "$current_month" ]]; then
-        send_ntfy "PSTN trunk: estimated spend this month (\$${month_cost}) has crossed the \$${MONTH_THRESHOLD} threshold. ${month_minutes} minutes so far."
-        echo "$current_month" > "$STATE_FILE"
+if [[ -f "$LOG_FILE" ]]; then
+    now_epoch=$(date +%s)
+    one_hour_ago=$((now_epoch - 3600))
+    month_start_epoch=$(date -d "$(date +%Y-%m-01)" +%s)
+
+    month_seconds=$(awk -F'|' -v start="$month_start_epoch" '$2=="out" && $1+0>=start {sum+=$5} END{print sum+0}' "$LOG_FILE")
+    month_minutes=$(awk -v s="$month_seconds" 'BEGIN{printf "%.1f", s/60}')
+    month_cost=$(awk -v m="$month_minutes" -v r="$RATE" 'BEGIN{printf "%.2f", m*r}')
+    hour_calls=$(awk -F'|' -v start="$one_hour_ago" '$2=="out" && $1+0>=start {c++} END{print c+0}' "$LOG_FILE")
+
+    last_alert_month=""
+    [[ -f "$STATE_FILE" ]] && last_alert_month=$(cat "$STATE_FILE")
+
+    if awk -v c="$month_cost" -v t="$MONTH_THRESHOLD" 'BEGIN{exit !(c>=t)}'; then
+        if [[ "$last_alert_month" != "$current_month" ]]; then
+            send_ntfy "PSTN trunk: estimated spend this month (\$${month_cost}) has crossed the \$${MONTH_THRESHOLD} threshold. ${month_minutes} minutes so far."
+            echo "$current_month" > "$STATE_FILE"
+        fi
+    fi
+
+    if [[ "$hour_calls" -ge "$BURST_THRESHOLD" ]]; then
+        send_ntfy "PSTN trunk: $hour_calls outbound calls placed in the last hour - check for unusual activity."
+    fi
+
+    # ── Spend-cap kill-switch: trip, or warn once approaching it ──────────
+    # MAX_MONTHLY_SPEND=0 means the kill-switch is disabled (not configured).
+    if awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(m+0>0)}'; then
+        already_tripped="0"
+        [[ -f "$KILLSWITCH_FILE" ]] && grep -q '^tripped=1' "$KILLSWITCH_FILE" && already_tripped="1"
+
+        if [[ "$already_tripped" != "1" ]] && awk -v c="$month_cost" -v m="$MAX_MONTHLY_SPEND" 'BEGIN{exit !(c>=m)}'; then
+            cat > "$KILLSWITCH_FILE" << KS
+[state]
+tripped=1
+KS
+            send_ntfy_loud "PSTN trunk: SPEND-CAP KILL-SWITCH TRIPPED. Estimated spend this month (\$${month_cost}) reached the \$${MAX_MONTHLY_SPEND} cap. ALL PSTN calling (in and out) is now blocked - internal Asterisk calling is unaffected. This does NOT reset automatically - clear it with 'sudo ./setup.sh pstn-trunk' (update mode)."
+        elif [[ "$already_tripped" != "1" ]]; then
+            warn_threshold=$(awk -v m="$MAX_MONTHLY_SPEND" 'BEGIN{printf "%.2f", m*0.8}')
+            if awk -v c="$month_cost" -v t="$warn_threshold" 'BEGIN{exit !(c>=t)}'; then
+                last_warn_month=""
+                [[ -f "$WARN_STATE_FILE" ]] && last_warn_month=$(cat "$WARN_STATE_FILE")
+                if [[ "$last_warn_month" != "$current_month" ]]; then
+                    send_ntfy_loud "PSTN trunk: approaching the spend cap - estimated spend this month (\$${month_cost}) is at 80%+ of the \$${MAX_MONTHLY_SPEND} kill-switch cap. PSTN calling will be BLOCKED automatically if it reaches \$${MAX_MONTHLY_SPEND}."
+                    echo "$current_month" > "$WARN_STATE_FILE"
+                fi
+            fi
+        fi
     fi
 fi
 
-if [[ "$hour_calls" -ge "$BURST_THRESHOLD" ]]; then
-    send_ntfy "PSTN trunk: $hour_calls outbound calls placed in the last hour - check for unusual activity."
+# ── International allow-list: expiry notices + active re-block ────────────
+if [[ -f "$INTL_FILE" ]]; then
+    intl_codes=$(grep '^allowed_codes=' "$INTL_FILE" | head -1 | cut -d= -f2-)
+    intl_expires=$(grep '^expires=' "$INTL_FILE" | head -1 | cut -d= -f2-)
+    today=$(date +%Y-%m-%d)
+    if [[ -n "$intl_codes" && -n "$intl_expires" ]]; then
+        last_intl_notice=""
+        [[ -f "$INTL_STATE_FILE" ]] && last_intl_notice=$(cat "$INTL_STATE_FILE")
+        if [[ "$today" == "$intl_expires" && "$last_intl_notice" != "day-of:$intl_expires" ]]; then
+            send_ntfy "PSTN trunk: international calling access expires TODAY ($intl_expires)."
+            echo "day-of:$intl_expires" > "$INTL_STATE_FILE"
+        fi
+        if [[ "$today" > "$intl_expires" ]]; then
+            sed -i 's/^allowed_codes=.*/allowed_codes=/; s/^allowed_names=.*/allowed_names=/; s/^expires=.*/expires=/' "$INTL_FILE"
+            send_ntfy "PSTN trunk: international calling access EXPIRED ($intl_expires) and has been revoked/re-blocked automatically."
+            echo "expired:$intl_expires" > "$INTL_STATE_FILE"
+        fi
+    fi
 fi
 EOF
-    sed -i "s#__EA_DIR__#${EA_DIR}#g; s/__PSTN_RATE__/${RATE}/g; s/__PSTN_MONTH_THRESHOLD__/${MONTH_THRESHOLD}/g; s/__PSTN_BURST_THRESHOLD__/${BURST_THRESHOLD}/g" "$FILE"
+    sed -i "s#__EA_DIR__#${EA_DIR}#g; s#__ASTERISK_DIR__#${ASTERISK_DIR}#g; s/__PSTN_RATE__/${RATE}/g; s/__PSTN_MONTH_THRESHOLD__/${MONTH_THRESHOLD}/g; s/__PSTN_BURST_THRESHOLD__/${BURST_THRESHOLD}/g; s/__PSTN_MAX_MONTHLY_SPEND__/${MAX_MONTHLY_SPEND}/g" "$FILE"
     sed -i "s#__PSTN_NTFY_URL__#${NTFY_URL}#g" "$FILE"
     chmod 755 "$FILE"
+}
+
+# ── Shared: per-minute periodic check (systemd timer, cron.d fallback) ─────
+# Runs pstn-trunk-usage-alert.sh far more often than the old hourly cron.d
+# job — every minute — since it's also the enforcement point for the
+# spend-cap kill-switch (see _pstn_write_usage_alert_script below): the
+# gap between a check and the next one is the window where an overage
+# could still happen before calling actually gets blocked, so a tighter
+# interval directly shrinks that exposure. Idempotent: safe to call again
+# on "update in place" to migrate an older install off the old cron.d job.
+_pstn_install_periodic_timer() {
+    local EA_DIR="$1"
+    mkdir -p "$EA_DIR/logs"
+
+    # Older versions of this service installed an hourly cron.d job under
+    # this same name — remove it so there's only ever one scheduler.
+    [[ -f /etc/cron.d/pstn-trunk-usage ]] && rm -f /etc/cron.d/pstn-trunk-usage
+
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        cat > /etc/systemd/system/pstn-trunk-usage.service << SVCEOF
+[Unit]
+Description=PSTN trunk spend/volume/kill-switch/international-expiry check
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $EA_DIR/pstn-trunk-usage-alert.sh
+StandardOutput=append:$EA_DIR/logs/pstn-trunk-usage-alert.log
+StandardError=append:$EA_DIR/logs/pstn-trunk-usage-alert.log
+SVCEOF
+
+        cat > /etc/systemd/system/pstn-trunk-usage.timer << SVCEOF
+[Unit]
+Description=Run the PSTN trunk usage check every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+SVCEOF
+
+        systemctl daemon-reload
+        systemctl enable --now pstn-trunk-usage.timer
+        log_success "Per-minute spend/volume/kill-switch check installed (systemd timer)."
+    elif command -v cron >/dev/null 2>&1 || [[ -d /etc/cron.d ]]; then
+        cat > /etc/cron.d/pstn-trunk-usage << CRON
+* * * * * root /bin/bash $EA_DIR/pstn-trunk-usage-alert.sh >> $EA_DIR/logs/pstn-trunk-usage-alert.log 2>&1
+CRON
+        log_success "Per-minute spend/volume/kill-switch check installed (cron.d fallback — systemd not detected)."
+    else
+        log_warning "Neither systemd nor cron available — run $EA_DIR/pstn-trunk-usage-alert.sh manually/periodically for spend/volume/kill-switch checks."
+    fi
 }
 
 # ── Shared: structural settings only (used by fresh install AND update) ────
@@ -451,14 +896,15 @@ _pstn_apply_settings() {
     local EA_DIR="$1" ASTERISK_DIR="$2"
     local SERVER="$3" SERVER_IPS="$4" DID="$5"
     local RING_EXTS="$6" NTFY_URL="$7" RATE="$8" MONTH_THRESHOLD="$9" BURST_THRESHOLD="${10}"
-    local PROVIDER_NAME="${11}"
+    local PROVIDER_NAME="${11}" MAX_MONTHLY_SPEND="${12:-0}"
 
     _pstn_patch_vendor_files "$EA_DIR" || return 1
 
     mkdir -p "$ASTERISK_DIR"
     _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IPS" "$DID"
     _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$RING_EXTS" "$NTFY_URL"
-    _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$NTFY_URL"
+    _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$ASTERISK_DIR" \
+        "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
     chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf"
 
@@ -478,17 +924,11 @@ NTFY_URL="${NTFY_URL}"
 RATE_PER_MIN="${RATE}"
 MONTH_THRESHOLD="${MONTH_THRESHOLD}"
 BURST_THRESHOLD="${BURST_THRESHOLD}"
+MAX_MONTHLY_SPEND="${MAX_MONTHLY_SPEND}"
 ENV
     chown "$ACTUAL_USER:$ACTUAL_USER" "$EA_DIR/.pstn-trunk.env" 2>/dev/null || true
 
-    if command -v cron >/dev/null 2>&1 || [[ -d /etc/cron.d ]]; then
-        cat > /etc/cron.d/pstn-trunk-usage << CRON
-0 * * * * root /bin/bash $EA_DIR/pstn-trunk-usage-alert.sh >> $EA_DIR/logs/pstn-trunk-usage-alert.log 2>&1
-CRON
-        log_success "Hourly spend/volume check installed (cron.d)."
-    else
-        log_warning "cron not available — run $EA_DIR/pstn-trunk-usage-alert.sh manually/periodically for spend/volume alerts."
-    fi
+    _pstn_install_periodic_timer "$EA_DIR"
 }
 
 install_pstn-trunk() {
@@ -508,6 +948,7 @@ install_pstn-trunk() {
     local DIALPLAN_INCLUDE="$ASTERISK_DIR/pstn-trunk-dialplan.conf"
     local PERMISSIONS_FILE="$ASTERISK_DIR/pstn-permissions.conf"
     local LIMITS_FILE="$ASTERISK_DIR/pstn-limits.conf"
+    local KILLSWITCH_FILE="$ASTERISK_DIR/pstn-trunk-killswitch.conf"
     local SETTINGS_FILE="$EA_DIR/.pstn-trunk.env"
     local CONTAINER_NAME="easy-asterisk"
     [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
@@ -516,16 +957,21 @@ install_pstn-trunk() {
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
         echo "[DRY-RUN] Would prompt for: SIP provider name (default VoIP.ms), server/POP hostname, DID,"
         echo "[DRY-RUN]   full-PSTN extensions, restricted-PSTN extensions + their approved numbers,"
+        echo "[DRY-RUN]   internal SIP messaging extensions (separate from PSTN calling permission),"
         echo "[DRY-RUN]   max concurrent outbound/inbound calls (default 10/10), inbound ring-group extensions,"
-        echo "[DRY-RUN]   ntfy alert topic (optional), per-minute rate + monthly/hourly alert thresholds"
+        echo "[DRY-RUN]   ntfy alert topic (optional), international-calling allow-list (CLI-only,"
+        echo "[DRY-RUN]   always asked, never on the web dashboard), per-minute rate + monthly/hourly"
+        echo "[DRY-RUN]   alert thresholds, and an optional hard monthly spend-cap kill-switch"
         echo "[DRY-RUN] Would resolve the server hostname to an IP, plus prompt for any additional"
         echo "[DRY-RUN]   known source IPs (some providers publish a fixed list), for inbound call matching"
         echo "[DRY-RUN] Would patch vendor generator functions to #include the trunk config"
-        echo "[DRY-RUN] Would write pjsip/dialplan includes, pstn-permissions.conf + pstn-limits.conf"
-        echo "[DRY-RUN]   (fresh install only), and an hourly usage-alert script + cron.d entry"
+        echo "[DRY-RUN] Would write pjsip/dialplan includes, pstn-permissions.conf, pstn-limits.conf,"
+        echo "[DRY-RUN]   and pstn-trunk-killswitch.conf (fresh install only), plus a per-minute"
+        echo "[DRY-RUN]   usage-alert script installed via a systemd timer (cron.d fallback)"
         echo "[DRY-RUN] Would offer 'update in place' (structural settings only — never touches"
-        echo "[DRY-RUN]   pstn-permissions.conf or pstn-limits.conf) instead of a fresh install if"
-        echo "[DRY-RUN]   already configured"
+        echo "[DRY-RUN]   pstn-permissions.conf, pstn-limits.conf, or the kill-switch trip state)"
+        echo "[DRY-RUN]   instead of a fresh install if already configured; the international-calling"
+        echo "[DRY-RUN]   review/change question is still asked every run either way"
         echo "[DRY-RUN] Would restart the asterisk container to apply"
         return 0
     fi
@@ -570,15 +1016,19 @@ install_pstn-trunk() {
                 if [[ -f "$SETTINGS_FILE" ]]; then
                     # shellcheck disable=SC1090
                     source "$SETTINGS_FILE"
+                    _pstn_check_killswitch_clear "$ASTERISK_DIR"
                     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
                         "$TRUNK_SERVER" "$TRUNK_SERVER_IPS" "$TRUNK_DID" \
                         "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
-                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
+                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "${MAX_MONTHLY_SPEND:-0}" || return 1
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
                         && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
                     log_info "pstn-permissions.conf and pstn-limits.conf were NOT touched — edit them"
                     log_info "directly, via the Security Dashboard, or choose FRESH reinstall to reset them."
+                    # Always asked, every run, update mode included — see
+                    # _pstn_run_international_step's own comment for why.
+                    _pstn_run_international_step "$ASTERISK_DIR"
                     return 0
                 else
                     log_warning "No $SETTINGS_FILE found (pre-dates this settings-file version) — falling back to a fresh install (every prompt below)."
@@ -592,7 +1042,8 @@ install_pstn-trunk() {
                 if [[ -f "$PERMISSIONS_FILE" || -f "$LIMITS_FILE" ]]; then
                     log_warning "pstn-permissions.conf and/or pstn-limits.conf already exist and may have"
                     log_warning "been edited since (directly, or via the Security Dashboard). A fresh"
-                    log_warning "reinstall OVERWRITES both with whatever you enter below."
+                    log_warning "reinstall OVERWRITES both with whatever you enter below, and also resets"
+                    log_warning "the spend-cap kill-switch back to untripped."
                     local _confirm_reset=""
                     prompt_yn "Continue and reset permission tiers + concurrency caps? (y/n):" "n" _confirm_reset
                     if [[ ! "$_confirm_reset" =~ ^[Yy]$ ]]; then
@@ -712,6 +1163,19 @@ install_pstn-trunk() {
         return 1
     fi
 
+    # ── Internal SIP messaging — a separate axis from PSTN calling ─────────
+    # Asterisk's native SIP MESSAGE (extension-to-extension texting) has no
+    # cost/carrier involvement at all, unlike PSTN calling, so it gets its
+    # own independent flag in pstn-permissions.conf rather than being folded
+    # into the internal/restricted/full tiers above — an extension can be
+    # "internal" for calling (no PSTN) and still messaging-enabled, or vice
+    # versa. Off by default, same "opt in" posture as PSTN access.
+    echo ""
+    echo "  Asterisk also supports native SIP texting between extensions (no carrier"
+    echo "  SMS, no PSTN, no cost) — a separate permission from PSTN calling above."
+    local MESSAGING_EXTS=""
+    prompt_text "Extensions allowed to use internal SIP messaging (space-separated, blank = none):" "" MESSAGING_EXTS
+
     echo ""
     local WANT_NTFY=""
     prompt_yn "Send an ntfy alert when a call is denied (permission tier/approved-number check failed) or rejected (concurrency cap hit)? (y/n):" "y" WANT_NTFY
@@ -735,6 +1199,10 @@ install_pstn-trunk() {
         prompt_text "  ntfy topic URL:" "$_ntfy_default" NTFY_URL
     fi
 
+    # Always asked, every run, no exceptions — see _pstn_run_international_step's
+    # own comment for why this can't be skipped like everything else here.
+    _pstn_run_international_step "$ASTERISK_DIR"
+
     echo ""
     log_info "Spend/volume alert settings (used only to estimate cost and flag unusual usage —"
     log_info "not billing-accurate, just a safety net)."
@@ -745,13 +1213,38 @@ install_pstn-trunk() {
     local BURST_THRESHOLD=""
     prompt_text "  Alert if more than this many outbound calls happen in one hour:" "10" BURST_THRESHOLD
 
+    echo ""
+    log_warning "Spend-cap kill-switch: a HARD stop, not just an alert. Once estimated spend"
+    log_warning "this month reaches the cap below, ALL PSTN calling (in and out) is blocked"
+    log_warning "until you manually clear it by re-running this installer (update mode) — it"
+    log_warning "does NOT reset automatically next month. Internal Asterisk-to-Asterisk"
+    log_warning "calling is never affected."
+    log_warning "Based on estimated cost (call count/duration x the rate above), not your"
+    log_warning "provider's real billing data, and checked every minute, not instantly — a"
+    log_warning "strong safety net, not an absolute guarantee against any overage."
+    local WANT_KILLSWITCH=""
+    prompt_yn "Enable a hard monthly spend-cap kill-switch? (y/n):" "y" WANT_KILLSWITCH
+    local MAX_MONTHLY_SPEND="0"
+    if [[ "$WANT_KILLSWITCH" =~ ^[Yy]$ ]]; then
+        prompt_text "  Monthly spend cap in USD (ALL PSTN calling blocked once reached):" "15" MAX_MONTHLY_SPEND
+        if [[ ! "$MAX_MONTHLY_SPEND" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            log_warning "Not a number — defaulting to 15."
+            MAX_MONTHLY_SPEND="15"
+        fi
+        log_info "You'll get a loud ntfy alert at 80% of this cap, and another (also loud) when it trips."
+    else
+        MAX_MONTHLY_SPEND="0"
+        log_info "Kill-switch disabled — the spend alerts above still notify you, but calling won't be auto-blocked."
+    fi
+
     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
         "$TRUNK_SERVER" "$TRUNK_SERVER_IPS" "$TRUNK_DID" \
         "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
-        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" || return 1
+        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "$MAX_MONTHLY_SPEND" || return 1
 
-    _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "${RESTRICTED_ARGS[@]}"
+    _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "$MESSAGING_EXTS" "${RESTRICTED_ARGS[@]}"
     _pstn_write_limits_file "$LIMITS_FILE" "$MAX_OUTBOUND" "$MAX_INBOUND"
+    _pstn_write_killswitch_file "$KILLSWITCH_FILE"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
 
     # No new firewall rules: the base install already opens SIP (5060/5061)
@@ -761,6 +1254,47 @@ install_pstn-trunk() {
 
     # ── Docs (separate file — the base install already owns README.md in
     # this same directory via write_readme, so don't overwrite it) ─────────
+    # Kill-switch/international-allowlist blurbs are built into plain
+    # variables first, not inline $(...) inside the heredoc below — a
+    # heredoc nested inside a command substitution that's itself inside
+    # another heredoc doesn't parse in bash (confirmed: "syntax error near
+    # unexpected token `||'" when tried directly).
+    local KILLSWITCH_DOC=""
+    if [[ "$MAX_MONTHLY_SPEND" != "0" ]]; then
+        KILLSWITCH_DOC="**Enabled — \$${MAX_MONTHLY_SPEND}/month.** Once \`pstn-trunk-usage-alert.sh\`
+estimates month-to-date spend has reached this cap, it writes
+\`tripped=1\` to \`config/asterisk/pstn-trunk-killswitch.conf\` — read
+**live** by the dialplan on every PSTN call attempt (in AND out; internal
+Asterisk-to-Asterisk calling is never affected) and blocks it immediately
+with a loud (priority=urgent) ntfy alert. You also get a separate loud ntfy
+warning once spend reaches 80% of this cap, before it actually trips.
+
+**This does NOT reset automatically** — once tripped, it stays tripped
+until you clear it yourself: re-run \`sudo ./setup.sh pstn-trunk\`, choose
+update mode, and answer yes when asked. This is deliberately a CLI-only
+action, not exposed on the Security Dashboard web UI, so a compromised or
+careless web session can't quietly re-enable spend after a trip.
+
+Based on estimated cost, not real billing data, and checked once a minute —
+a strong safety net, not an absolute guarantee against any overage."
+    else
+        KILLSWITCH_DOC="**Disabled.** The spend alerts above still notify you, but PSTN calling won't be auto-blocked. Enable it by re-running \`sudo ./setup.sh pstn-trunk\` (update mode)."
+    fi
+
+    _pstn_read_intl_current "$ASTERISK_DIR/pstn-intl-allowed.conf"
+    local INTL_DOC=""
+    if [[ -n "$_PSTN_CUR_CODES" ]]; then
+        INTL_DOC="**Currently allowed:** ${_PSTN_CUR_NAMES//|/, }
+"
+        if [[ -n "$_PSTN_CUR_EXPIRES" ]]; then
+            INTL_DOC="${INTL_DOC}**Expires:** $_PSTN_CUR_EXPIRES — auto-revoked and re-blocked after this date (with an ntfy notice both the day of and at the moment it expires)."
+        else
+            INTL_DOC="${INTL_DOC}**No expiry set** — stays allowed until changed again from the CLI."
+        fi
+    else
+        INTL_DOC="**No countries currently allowed** — outbound/inbound PSTN calling is US/NANP-only."
+    fi
+
     local DOC_FILE="$EA_DIR/README-pstn-trunk.md"
     cat > "$DOC_FILE" << MD
 # SIP PSTN trunk (add-on to $ASTERISK_KIND)
@@ -783,10 +1317,12 @@ background, cost estimate, and toll-fraud reasoning.
 | Restricted-PSTN extensions | ${RESTRICTED_EXTS:-none} |
 | Concurrency caps | ${MAX_OUTBOUND} outbound / ${MAX_INBOUND} inbound simultaneous calls (live — see \`pstn-limits.conf\` below) |
 | Inbound ring-group | ${RING_EXTS} |
+| Internal SIP messaging extensions | ${MESSAGING_EXTS:-none} (separate from PSTN calling permission — see below) |
 | ntfy alerts | ${NTFY_URL:-disabled} |
 | Estimated rate | \$${RATE_PER_MIN}/min |
 | Monthly spend alert threshold | \$${MONTH_THRESHOLD} |
 | Hourly burst alert threshold | ${BURST_THRESHOLD} calls/hour |
+| Spend-cap kill-switch | $([ "$MAX_MONTHLY_SPEND" != "0" ] && echo "\$${MAX_MONTHLY_SPEND}/month — blocks ALL PSTN calling once reached" || echo "disabled") |
 
 ## Non-US NANP area codes are blocked, not just "anything outside NANP"
 
@@ -877,26 +1413,64 @@ without touching \`pstn-permissions.conf\` or \`pstn-limits.conf\`).
 
 ## Spend/volume alerts
 
-\`pstn-trunk-usage-alert.sh\` runs hourly (\`/etc/cron.d/pstn-trunk-usage\`) and
-reads \`logs/pstn-trunk-calls.log\` (appended to directly by the dialplan, not
-Asterisk's own CDR — a deliberate choice to avoid depending on whether this
-image's CDR modules are enabled/configured, and to sidestep CDR CSV's
-comma-quoting). It sends an ntfy alert:
+\`pstn-trunk-usage-alert.sh\` runs **every minute** (\`pstn-trunk-usage.timer\`,
+a systemd timer — falls back to a cron.d entry if systemd isn't available)
+and reads \`logs/pstn-trunk-calls.log\` (appended to directly by the
+dialplan, not Asterisk's own CDR — a deliberate choice to avoid depending on
+whether this image's CDR modules are enabled/configured, and to sidestep CDR
+CSV's comma-quoting). It sends an ntfy alert:
 
 - **Once per calendar month** the first time estimated spend crosses
   \$${MONTH_THRESHOLD} (state tracked in \`.pstn-trunk-alert-state\` so it
-  doesn't repeat every hour).
-- **Every hour** that outbound call volume exceeds ${BURST_THRESHOLD}
-  calls/hour — this is the faster tripwire for a burst/abuse scenario,
+  doesn't repeat every minute).
+- **Every run** that outbound call volume in the last hour exceeds
+  ${BURST_THRESHOLD} calls — the faster tripwire for a burst/abuse scenario,
   independent of whether it's crossed the monthly dollar threshold yet.
 
 Separately, denied calls (no permission / number not pre-approved) and
-rejected calls (either concurrency cap hit) alert **immediately**, not on
-the hourly schedule.
+rejected calls (either concurrency cap or the kill-switch) alert
+**immediately** from the dialplan itself, not on the periodic schedule.
 
 These are cost *estimates* (call count/duration × your entered rate), not
-real billing data — treat them as a safety net, not a substitute for
-checking your provider's own balance/usage dashboard.
+real billing data, and only as fresh as the last check (every minute) — a
+safety net, not a substitute for checking your provider's own balance/usage
+dashboard.
+
+## Spend-cap kill-switch
+
+$KILLSWITCH_DOC
+
+## International calling (beyond NANP/US)
+
+$INTL_DOC
+
+Managed **only** from the CLI (\`sudo ./setup.sh pstn-trunk\` — asked on every
+run, fresh install or update, with no way to skip the question, though you
+can always answer no to leave things unchanged), deliberately never exposed
+on the Security Dashboard web UI: this widens which countries can be
+dialed/billed to at all, a more security-sensitive control than who's
+already allowed to use an already-fixed scope. Only \`full\`-tier extensions
+can place these calls regardless of which countries are allowed. Stored in
+\`config/asterisk/pstn-intl-allowed.conf\`, read live the same way as
+permission tiers.
+
+## Internal SIP messaging
+
+Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
+no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
+extension in \`pstn-permissions.conf\`, independent of the PSTN calling
+tiers above — off by default, same "opt in" posture. Currently enabled for:
+${MESSAGING_EXTS:-none}.
+
+**Known gap:** this installer writes the permission flag (live-editable,
+same mechanism as the calling tiers), but the actual SIP \`MESSAGE\` routing
+dialplan wiring depends on how Easy Asterisk's own generated
+\`extensions.conf\`/\`pjsip.conf\` route inbound messages, which needs to be
+verified against a live install before it's safely automated here — shipping
+a guessed pattern risked either silently not working or interfering with
+call-routing precedence in the same \`[intercom]\` context. Treat the
+permission flag as ready for a dashboard/CLI-managed allow-list once that
+routing is confirmed, not as fully wired yet.
 
 ## Managing this from a web UI
 

@@ -342,8 +342,10 @@ generator output. Fixed by quoting every value in that heredoc.
 5. ~~Concurrent-call cap~~ Done — both directions now (inbound was a real
    gap, since it also costs money per-minute and outbound's cap doesn't
    cover it), default 10/10, global not per-extension, live-editable via
-   `pstn-limits.conf`/web UI. ~~Spend/volume alert~~ Done — ntfy, hourly
-   threshold + burst check, plus immediate alerts on denied/rejected calls.
+   `pstn-limits.conf`/web UI. ~~Spend/volume alert~~ Done — ntfy, monthly
+   threshold + hourly burst check, run **every minute** (systemd timer, not
+   hourly cron — see item 8), plus immediate alerts on denied/rejected
+   calls.
 6. Verify against a live VoIP.ms account (still not done — only their wiki
    + ToS text has been read, see "Decision so far" above for what that
    turned up): confirm new outbound calls actually get blocked at $0
@@ -362,3 +364,63 @@ generator output. Fixed by quoting every value in that heredoc.
    maximum call duration. Worth setting on any Anveo Direct account as a
    provider-side backstop independent of this repo's own dialplan code —
    not automatable from here since it's their web UI, not a config file.
+8. ~~Spend-cap kill-switch~~ Done — a genuinely hard stop, not just an
+   alert: once `pstn-trunk-usage-alert.sh` estimates month-to-date spend
+   has reached an admin-set cap (prompted at install/update, `0` = disabled),
+   it writes `tripped=1` to `pstn-trunk-killswitch.conf`, read live by the
+   dialplan on *every* PSTN call attempt (both directions — internal
+   Asterisk-to-Asterisk calling is untouched) and blocked immediately with a
+   loud (`Priority: urgent`) ntfy alert. A separate loud warning fires once
+   spend reaches 80% of the cap, before it trips. **Does not auto-reset** —
+   requires manually clearing it via the CLI installer (update mode), by
+   design, so a compromised/careless web session can't quietly re-enable
+   spend after a trip. Honesty caveat carried over from the original spend
+   estimate: this is estimate-based (call count/duration × an entered
+   rate), not real billing data, and only as fresh as the last check — now
+   every minute (see item 9) rather than hourly, shrinking but not
+   eliminating the reaction-time gap between an overage happening and
+   calling actually getting blocked.
+9. ~~Hourly cron → per-minute systemd timer~~ Done —
+   `pstn-trunk-usage.timer`/`.service` (falls back to a cron.d entry if
+   systemd isn't available), running the same usage-alert script every
+   minute instead of hourly. Directly motivated by item 8: the periodic
+   check is now also the kill-switch's enforcement point, so the interval
+   between checks is the exposure window, and a tighter interval shrinks it.
+10. ~~International calling (beyond NANP/US)~~ Done — CLI-only (never the
+    Security Dashboard web UI, on purpose: this widens which countries can
+    be dialed/billed to at all, a more security-sensitive control than
+    who's already allowed to use an already-fixed scope), continent →
+    country menu (`_pstn_manage_international` in `services/pstn-trunk.sh`),
+    always asked every run with no way to skip the *question* itself
+    (though answering "no" leaves the existing allow-list untouched), with
+    the resulting allow-list printed exactly once right after — not
+    repeated during the spend-cap prompts, a correction from an earlier
+    draft of this design. Optional auto-expiry with two ntfy notices (day
+    of, and at the moment of expiry) and active re-blocking (the periodic
+    script clears the allow-list once past `expires`, it doesn't just
+    notify). Dialing uses the US `011` prefix convention (`_011X.` dialplan
+    pattern); allowed country codes are the REGEX() *pattern* side (admin-
+    controlled), dialed digits are always the *string* being tested — same
+    safe direction as every other permission check in this file. Only
+    `full`-tier extensions can use it regardless of which countries are
+    allowed.
+11. Internal SIP `MESSAGE` (native Asterisk texting, no carrier SMS/cost) —
+    **partially done**. The permission layer is real and live-editable: a
+    `messaging=yes` flag per extension in `pstn-permissions.conf`,
+    independent of the PSTN calling tiers (an extension can be
+    internal-tier for calling and still messaging-enabled, or vice versa),
+    prompted at install time. **Not done**: the actual dialplan wiring that
+    would make Asterisk *enforce* this flag on inbound `MESSAGE` requests.
+    Reasoned through but deliberately not shipped: Easy Asterisk dispatches
+    messages through the same `[intercom]` context calls use (no
+    `message_context` override), and whether a hand-written pattern there
+    would take precedence over — or conflict with — Easy Asterisk's own
+    generated per-device dial patterns in that same context isn't something
+    that can be safely determined without a live install to test against.
+    Shipping a guessed pattern risked either silently not working or, worse,
+    interfering with call-routing precedence for the same extensions.
+    Treat this the same way as the VoIP.ms live-account verification in
+    item 6 above: a real gap, flagged rather than papered over, not a
+    hypothetical. Next step for whoever picks this up: verify message
+    routing behavior against a live Easy Asterisk container, then wire the
+    dialplan gate using the existing flag.
