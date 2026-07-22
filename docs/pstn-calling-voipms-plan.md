@@ -431,3 +431,47 @@ generator output. Fixed by quoting every value in that heredoc.
     hypothetical. Next step for whoever picks this up: verify message
     routing behavior against a live Easy Asterisk container, then wire the
     dialplan gate using the existing flag.
+12. Anveo Direct's real-time \$0-balance blocking, confirmed — support reply
+    (MFonk, 7/22/2026): "all calls (incoming and outgoing) will be blocked"
+    at \$0, in real time, not just via a recurring-fee grace period. This
+    directly answers the question this doc used to flag as a live
+    verification gap (see the Anveo Direct provider notes above) and
+    validates the outermost, actually-hard layer of the defense-in-depth
+    stack — everything else in this file (dialplan restrictions, the
+    kill-switch below) is a second layer on top of that, not a replacement
+    for it.
+13. ~~Kill-switch: blended rate estimate~~ Done — per-country international
+    rates. The kill-switch/spend-alert estimate used one flat `RATE` for
+    every outbound minute, domestic or international, which badly
+    under/over-estimates international cost (rates for other countries are
+    rarely close to the ~$0.01/min US rate). Now the CLI country menu also
+    asks for a per-minute rate when a country is added (admin-entered, not
+    fetched live — no confirmed rates API exists for either supported
+    provider), stored alongside the code/name in `pstn-intl-allowed.conf`.
+    `pstn-trunk-usage-alert.sh` buckets each month's outbound call log into
+    domestic vs. per-country-international (longest-calling-code-prefix
+    match against the dialed digits after "011") and prices each bucket at
+    its own rate before summing. An international call to a code that's no
+    longer on the allow-list is excluded from the estimate entirely (a
+    known, minor undercount) since there's no rate left to charge it at.
+14. ~~Kill-switch: in-progress calls not stopped~~ Done — active hangup.
+    Previously, a call already connected when the spend cap was crossed
+    just kept running (and costing) until it ended naturally — the
+    dialplan only gates the *start* of a call, and the periodic check
+    can't retroactively un-place one. Now, every run of
+    `pstn-trunk-usage-alert.sh` while the kill-switch is tripped (not just
+    the run that trips it, closing a race where a call starts just before
+    the flag goes live) also does `docker exec ... asterisk -rx "core show
+    channels concise"`, filters for the trunk endpoint's active channels,
+    and force-hangs each one up via `channel request hangup` — hanging up
+    the trunk-side leg of a bridged call tears down both legs. This is
+    deliberately placed OUTSIDE the "does the call log exist" guard, since
+    the sweep must still run even if the log is missing/rotated (caught by
+    testing: an earlier version nested it inside that guard and the sweep
+    silently never fired without a log file present). Bounds worst-case
+    overage on an in-progress call to roughly one check interval, not
+    open-ended. Still not a real-billing guarantee — see the "How
+    bulletproof is this?" section `services/pstn-trunk.sh` writes into
+    `README-pstn-trunk.md` for the full honest breakdown of what's actually
+    hard (the provider's own $0-balance block) vs. estimate-based (this
+    kill-switch).
