@@ -277,6 +277,7 @@ _pstn_write_dialplan_include() {
 ; since "full" means "any US number," not "any NANP-shaped number."
 
 exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL} to ${EXTEN})
+ same => n,Set(PSTN_DIALED=${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_AREA_CODE=${EXTEN:1:3})
@@ -294,7 +295,7 @@ __ALERT_DENY_TIER_LINE__
 exten => _NXXNXXXXXX,1,NoOp(Assuming NANP - adding leading 1)
  same => n,Goto(1${EXTEN},1)
 
-exten => pstn_intl_blocked,1,NoOp(PSTN outbound call to ${EXTEN} blocked - non-US/premium NANP area code ${PSTN_AREA_CODE})
+exten => pstn_intl_blocked,1,NoOp(PSTN outbound call to ${PSTN_DIALED} blocked - non-US/premium NANP area code ${PSTN_AREA_CODE})
 __ALERT_DENY_INTL_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -320,6 +321,7 @@ __ALERT_KILLED_LINE__
 ; domestic RATE — still an estimate (rates you entered, not fetched live),
 ; but no longer blended across two very different rate scales.
 exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL} to ${EXTEN})
+ same => n,Set(PSTN_DIALED=${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
@@ -332,19 +334,19 @@ __ALERT_DENY_INTL_TIER_LINE__
  same => n,Hangup()
 
 exten => pstn_intl_check_country,1,Set(PSTN_INTL_ALLOWED=${AST_CONFIG(pstn-intl-allowed.conf,countries,allowed_codes)})
- same => n,Set(PSTN_INTL_DIGITS=${EXTEN:3})
+ same => n,Set(PSTN_INTL_DIGITS=${PSTN_DIALED:3})
  same => n,GotoIf($["${PSTN_INTL_ALLOWED}" = ""]?pstn_intl_country_denied,1)
  same => n,GotoIf($[${REGEX("^(${PSTN_INTL_ALLOWED})" ${PSTN_INTL_DIGITS})} = 1]?pstn_check_busy,1)
  same => n,Goto(pstn_intl_country_denied,1)
 
-exten => pstn_intl_country_denied,1,NoOp(Denied intl - ${EXTEN} not on the current international allow-list)
+exten => pstn_intl_country_denied,1,NoOp(Denied intl - ${PSTN_DIALED} not on the current international allow-list)
 __ALERT_DENY_INTL_COUNTRY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
 exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_numbers)})
- same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${EXTEN})} = 1]?pstn_check_busy,1)
- same => n,NoOp(Denied - ${EXTEN} not on ${PSTN_CALLER}'s approved number list)
+ same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${PSTN_DIALED})} = 1]?pstn_check_busy,1)
+ same => n,NoOp(Denied - ${PSTN_DIALED} not on ${PSTN_CALLER}'s approved number list)
 __ALERT_DENY_NUMBER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -356,9 +358,9 @@ exten => pstn_check_busy,1,Set(PSTN_MAX_OUT=${AST_CONFIG(pstn-limits.conf,limits
  same => n,Set(PSTN_PERSONAL_CID=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},personal_did)})
  same => n,Set(CALLERID(num)=${IF($["${PSTN_PERSONAL_CID}" = ""]?__PSTN_DID__:${PSTN_PERSONAL_CID})})
  same => n,Set(PSTN_START=${EPOCH})
- same => n,Dial(PJSIP/${EXTEN}@pstn-trunk,60)
+ same => n,Dial(PJSIP/${PSTN_DIALED}@pstn-trunk,60)
  same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
- same => n,System(printf '%s|out|%s|%s|%s\n' "${PSTN_START}" "${PSTN_CALLER}" "${EXTEN}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
+ same => n,System(printf '%s|out|%s|%s|%s\n' "${PSTN_START}" "${PSTN_CALLER}" "${PSTN_DIALED}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
  same => n,Hangup()
 
 exten => pstn_busy,1,NoOp(PSTN trunk - outbound concurrent-call cap reached, rejecting)
@@ -389,6 +391,7 @@ EOF
 
 [from-pstn-trunk]
 exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
+ same => n,Set(PSTN_DID_CALLED=${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
  same => n,Set(PSTN_PERSONAL_OWNER=${AST_CONFIG(pstn-personal-dids.conf,${EXTEN},owner)})
@@ -436,7 +439,7 @@ exten => pstn_personal_inbound,1,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissio
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
  same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${CALLERID(num)})}=1]?pstn_personal_ring,1)
- same => n,NoOp(Denied - personal DID ${EXTEN}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
+ same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
  same => n,Hangup()
 
@@ -447,7 +450,7 @@ exten => pstn_personal_ring,1,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limi
  same => n,Set(PSTN_START=${EPOCH})
  same => n,Dial(PJSIP/${PSTN_PERSONAL_OWNER},20)
  same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
- same => n,System(printf '%s|in|%s|%s|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${EXTEN}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
+ same => n,System(printf '%s|in|%s|%s|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${PSTN_DID_CALLED}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
  same => n,Hangup()
 EOF
 
