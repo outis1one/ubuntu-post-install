@@ -195,7 +195,8 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
-  (wrong password, unknown extension, etc.) with timestamp/account/remote IP.
+  (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
+  filterable per column (each header has its own text filter, live as you type).
 - **CrowdSec** — current bans (\`cscli decisions list\`), a delete/unban button
   per entry, carrier/ASN + country columns, and management of the ASN-exempt
   Asterisk brute-force scenarios (see \`services/crowdsec.sh\`'s "Exempt
@@ -214,8 +215,14 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   Asterisk's native SIP texting, independent of PSTN calling entirely (no
   cost, no carrier, no DID, no dependency on \`services/pstn-trunk.sh\`
   having been run — see its "Known gap" note on messaging for what this
-  flag does and doesn't do yet at the Asterisk level). Below that, the
-  rest of the tab detects whether \`services/pstn-trunk.sh\`'s dialplan is
+  flag does and doesn't do yet at the Asterisk level). Right below it, a
+  **Groups** card (also always available) lets you name a set of
+  extensions and bulk-enable/disable messaging for all of them at once —
+  a management convenience only, not a runtime concept: applying an action
+  just writes the same per-extension \`pstn-permissions.conf\` key each
+  member's own checkbox would, and membership changes never retroactively
+  affect anything already applied. Below that, the rest of the tab detects
+  whether \`services/pstn-trunk.sh\`'s dialplan is
   actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a
   clear "not installed" message instead of the calling-permissions editor
   if not, so it never shows real-looking-but-unenforced defaults. When
@@ -1112,6 +1119,103 @@ def write_messaging(ext, enabled):
     return True, "Saved"
 
 
+GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9_ -]{1,40}$")
+
+GROUPS_HEADER = (
+    "; Named extension groups - a management convenience only, NEVER read by\n"
+    "; the dialplan itself (which only ever looks at per-extension keys in\n"
+    "; pstn-permissions.conf - see that file). Applying a group action (e.g.\n"
+    "; \"enable messaging\") writes those same per-extension keys for every\n"
+    "; CURRENT member, exactly as if each had been checked individually - it's\n"
+    "; a one-time bulk write, not an ongoing binding. Editing membership here\n"
+    "; does not retroactively change anything already applied to former\n"
+    "; members, and adding someone to a group does not automatically apply\n"
+    "; the group's settings - use the dashboard's \"Enable/Disable\" actions\n"
+    "; for that, any time membership changes.\n\n"
+)
+
+
+def _groups_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "pstn-groups.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _read_groups_cp():
+    cp = configparser.ConfigParser(delimiters=("=",))
+    path = _groups_path()
+    if path and os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def list_groups():
+    """[{"name": ..., "members": [ext, ...]}], sorted by name."""
+    cp = _read_groups_cp()
+    result = []
+    for section in cp.sections():
+        members_raw = cp.get(section, "members", fallback="")
+        members = [m.strip() for m in members_raw.split(",") if m.strip()]
+        result.append({"name": section, "members": members})
+    result.sort(key=lambda g: g["name"].lower())
+    return result
+
+
+def write_group(name, members):
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    name = str(name).strip()
+    if not GROUP_NAME_RE.match(name):
+        return False, "Group name must be 1-40 characters (letters, digits, spaces, - or _)"
+    clean_members = sorted(set(str(m).strip() for m in members if EXTEN_RE.match(str(m).strip())))
+
+    cp = _read_groups_cp()
+    if not cp.has_section(name):
+        cp.add_section(name)
+    cp.set(name, "members", ",".join(clean_members))
+
+    ok, err = _write_ini_cp(_groups_path(), GROUPS_HEADER, cp)
+    if not ok:
+        return False, err
+    return True, "Saved group '%s' with %d member(s)" % (name, len(clean_members))
+
+
+def delete_group(name):
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    name = str(name).strip()
+    cp = _read_groups_cp()
+    if cp.has_section(name):
+        cp.remove_section(name)
+    ok, err = _write_ini_cp(_groups_path(), GROUPS_HEADER, cp)
+    if not ok:
+        return False, err
+    return True, "Deleted group '%s' (members' own settings were not changed)" % name
+
+
+def apply_group_messaging(name, enabled):
+    """Sets messaging=<enabled> for every CURRENT member of the group, one
+    at a time via write_messaging() - the exact same write path an
+    individual checkbox uses. Returns a summary of how many succeeded."""
+    groups = {g["name"]: g["members"] for g in list_groups()}
+    if name not in groups:
+        return False, "Group not found"
+    members = groups[name]
+    if not members:
+        return True, "Group '%s' has no members - nothing to change" % name
+    failed = []
+    for ext in members:
+        ok, _msg = write_messaging(ext, enabled)
+        if not ok:
+            failed.append(ext)
+    if failed:
+        return False, "Applied to %d/%d member(s) - failed: %s" % (
+            len(members) - len(failed), len(members), ", ".join(failed))
+    return True, "Messaging %s for all %d member(s) of '%s'" % (
+        "enabled" if enabled else "disabled", len(members), name)
+
+
 LIMIT_RE = re.compile(r"^\d+$")
 
 
@@ -1307,6 +1411,8 @@ INDEX_HTML = """<!doctype html>
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover { color: #e6e6e6; }
   th.sortable .arrow { opacity: 0.5; font-size: 0.75em; margin-left: 0.25em; }
+  .filter-row th { padding-top: 0; padding-bottom: 0.5rem; font-weight: normal; }
+  .filter-row input { width: 100%; box-sizing: border-box; background: #0f1115; border: 1px solid #2a2e38; color: #e6e6e6; border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.8rem; }
   .sev-Error { color: #ff6b6b; }
   .sev-Warning { color: #f5b342; }
   .sev-Informational { color: #7fbf7f; }
@@ -1334,7 +1440,16 @@ INDEX_HTML = """<!doctype html>
   <div id="tab-security">
     <div class="card">
       <p class="muted">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
-      <table id="sec-table"><thead><tr><th>Time</th><th>Event</th><th>Account</th><th>Remote</th><th>Severity</th></tr></thead><tbody></tbody></table>
+      <table id="sec-table"><thead>
+        <tr><th>Time</th><th>Event</th><th>Account</th><th>Remote</th><th>Severity</th></tr>
+        <tr class="filter-row">
+          <th><input type="text" class="sec-filter" data-field="timestamp" placeholder="filter…"></th>
+          <th><input type="text" class="sec-filter" data-field="event" placeholder="filter…"></th>
+          <th><input type="text" class="sec-filter" data-field="account" placeholder="filter…"></th>
+          <th><input type="text" class="sec-filter" data-field="remote" placeholder="filter…"></th>
+          <th><input type="text" class="sec-filter" data-field="severity" placeholder="filter…"></th>
+        </tr>
+      </thead><tbody></tbody></table>
     </div>
   </div>
   <div id="tab-crowdsec" style="display:none">
@@ -1369,6 +1484,19 @@ INDEX_HTML = """<!doctype html>
       </p>
       <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
       <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Groups</h3>
+      <p class="muted">
+        Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own checkbox above would, one time — it isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied.
+      </p>
+      <div class="row">
+        <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
+        <button class="action" id="grp-save">Save group</button>
+      </div>
+      <div id="grp-members" class="row" style="flex-wrap:wrap;margin-top:0.5rem"></div>
+      <table id="grp-table" style="margin-top:0.75rem"><thead><tr><th>Group</th><th>Members</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
     <div class="card" id="pstn-not-installed" style="display:none">
       <h3 style="margin-top:0">PSTN trunk not installed</h3>
@@ -1424,21 +1552,39 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); }
+    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); loadGroups(); }
   });
 });
 
-async function loadSecurity() {
-  const res = await fetch("/api/security-events");
-  const events = await res.json();
+let lastSecurityEvents = [];
+
+function renderSecurity() {
+  const filters = {};
+  document.querySelectorAll(".sec-filter").forEach(inp => {
+    const v = inp.value.trim().toLowerCase();
+    if (v) filters[inp.dataset.field] = v;
+  });
+  const rows = lastSecurityEvents.filter(e =>
+    Object.entries(filters).every(([field, v]) => (e[field] || "").toLowerCase().includes(v))
+  );
   const tbody = document.querySelector("#sec-table tbody");
-  tbody.innerHTML = events.map(e => `<tr>
+  tbody.innerHTML = rows.map(e => `<tr>
     <td>${esc(e.timestamp)}</td>
     <td>${esc(e.event)}</td>
     <td>${esc(e.account)}</td>
     <td>${esc(e.remote)}</td>
     <td class="sev-${esc(e.severity)}">${esc(e.severity)}</td>
-  </tr>`).join("") || "<tr><td colspan=5 class=muted>No events found.</td></tr>";
+  </tr>`).join("") || `<tr><td colspan=5 class=muted>${lastSecurityEvents.length ? "No events match the current filters." : "No events found."}</td></tr>`;
+}
+
+document.querySelectorAll(".sec-filter").forEach(inp => {
+  inp.addEventListener("input", renderSecurity);
+});
+
+async function loadSecurity() {
+  const res = await fetch("/api/security-events");
+  lastSecurityEvents = await res.json();
+  renderSecurity();
 }
 
 let lastDecisions = [];
@@ -1594,6 +1740,14 @@ async function loadMessaging() {
   const res = await fetch("/api/pstn-permissions");
   const data = await res.json();
   const exts = data.extensions || [];
+
+  const grpMembers = document.getElementById("grp-members");
+  grpMembers.innerHTML = exts.map(e => `
+    <label class="muted" style="white-space:nowrap">
+      <input type="checkbox" class="grp-member-cb" value="${esc(e.ext)}"> ${esc(e.ext)} — ${esc(e.name)}
+    </label>
+  `).join("") || '<span class="muted">No extensions found</span>';
+
   const tbody = document.querySelector("#msg-table tbody");
   if (!exts.length) {
     tbody.innerHTML = '<tr><td colspan=4 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
@@ -1617,6 +1771,66 @@ async function saveMessagingRow(ext) {
   const data = await res.json();
   document.getElementById("msg-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
   loadMessaging();
+}
+
+let lastGroups = [];
+
+async function loadGroups() {
+  const res = await fetch("/api/pstn-groups");
+  const data = await res.json();
+  lastGroups = data.groups || [];
+  const tbody = document.querySelector("#grp-table tbody");
+  tbody.innerHTML = lastGroups.map(g => `<tr data-group="${esc(g.name)}">
+    <td>${esc(g.name)}</td>
+    <td>${g.members.map(esc).join(", ") || '<span class="muted">none</span>'}</td>
+    <td>
+      <button class="action" onclick="editGroup('${esc(g.name)}')">Edit</button>
+      <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', true)">Enable messaging</button>
+      <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', false)">Disable messaging</button>
+      <button class="action" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
+    </td>
+  </tr>`).join("") || '<tr><td colspan=3 class=muted>No groups yet.</td></tr>';
+}
+
+function editGroup(name) {
+  const g = lastGroups.find(x => x.name === name);
+  if (!g) return;
+  document.getElementById("grp-name").value = g.name;
+  document.querySelectorAll(".grp-member-cb").forEach(cb => { cb.checked = g.members.includes(cb.value); });
+}
+
+document.getElementById("grp-save").addEventListener("click", async () => {
+  const name = document.getElementById("grp-name").value.trim();
+  const members = Array.from(document.querySelectorAll(".grp-member-cb:checked")).map(cb => cb.value);
+  const res = await fetch("/api/pstn-groups", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: name, members: members}),
+  });
+  const data = await res.json();
+  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  loadGroups();
+});
+
+async function applyGroupMessaging(name, enabled) {
+  if (!confirm(`${enabled ? "Enable" : "Disable"} messaging for every current member of "${name}"?`)) return;
+  const res = await fetch("/api/pstn-groups/apply-messaging", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: name, enabled: enabled}),
+  });
+  const data = await res.json();
+  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Applied" : "Failed");
+  loadMessaging();
+}
+
+async function deleteGroup(name) {
+  if (!confirm(`Delete group "${name}"? This does not change any member's current settings.`)) return;
+  const res = await fetch("/api/pstn-groups/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: name}),
+  });
+  const data = await res.json();
+  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  loadGroups();
 }
 
 document.getElementById("limits-save").addEventListener("click", async () => {
@@ -1781,6 +1995,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"dids": dids})
         elif self.path == "/api/pstn-status":
             self._json({"installed": pstn_installed()})
+        elif self.path == "/api/pstn-groups":
+            self._json({"groups": list_groups()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -1817,6 +2033,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-messaging":
             ok, message = write_messaging(payload.get("ext", ""), bool(payload.get("enabled", False)))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-groups":
+            ok, message = write_group(payload.get("name", ""), payload.get("members", []))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-groups/delete":
+            ok, message = delete_group(payload.get("name", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-groups/apply-messaging":
+            ok, message = apply_group_messaging(payload.get("name", ""), bool(payload.get("enabled", False)))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)
