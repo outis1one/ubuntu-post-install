@@ -276,7 +276,7 @@ _pstn_write_dialplan_include() {
 ; reachable" rule, not something even a "full" tier extension can override,
 ; since "full" means "any US number," not "any NANP-shaped number."
 
-exten => _1NXXNXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_AREA_CODE=${EXTEN:1:3})
@@ -290,7 +290,7 @@ __ALERT_DENY_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
-exten => _NXXNXXXXX,1,NoOp(Assuming NANP - adding leading 1)
+exten => _NXXNXXXXXX,1,NoOp(Assuming NANP - adding leading 1)
  same => n,Goto(1${EXTEN},1)
 
 exten => pstn_intl_blocked,1,NoOp(PSTN outbound call to ${EXTEN} blocked - non-US/premium NANP area code ${PSTN_AREA_CODE})
@@ -1651,7 +1651,7 @@ background, cost estimate, and toll-fraud reasoning.
 | Provider | ${PROVIDER_NAME} |
 | Server/POP | ${TRUNK_SERVER} (inbound match IPs: ${TRUNK_SERVER_IPS}) |
 | DID | ${TRUNK_DID} |
-| Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all, minus 27 non-US/premium NANP area codes (see below) |
+| Outbound scope | US/NANP only — \`_1NXXNXXXXXX\` / \`_NXXNXXXXXX\` patterns, no catch-all, minus 27 non-US/premium NANP area codes (see below) |
 | Permission tiers, messaging, personal numbers | Managed live via the Security Dashboard's PSTN Trunk tab — not set at install, so not shown here (this file isn't regenerated when you change them there). Everyone starts at \`internal\` (no PSTN, no messaging) until granted. |
 | Concurrency caps | ${MAX_OUTBOUND} outbound / ${MAX_INBOUND} inbound simultaneous calls (live — see \`pstn-limits.conf\` below) |
 | Inbound ring-group | ${RING_EXTS} |
@@ -1682,7 +1682,7 @@ American Samoa (684), Sint Maarten (721), Saint Lucia (758), Dominica
 
 If you have a legitimate reason to call one of these (e.g. family in Puerto
 Rico), remove that entry from the `REGEX()` pattern in
-`pstn-trunk-dialplan.conf`'s `_1NXXNXXXXX` extension — it'll be
+`pstn-trunk-dialplan.conf`'s `_1NXXNXXXXXX` extension — it'll be
 regenerated exactly the same way on the next reinstall/update, so note the
 change somewhere you'll remember it, or keep a local diff.
 
