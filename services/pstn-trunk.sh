@@ -1315,12 +1315,15 @@ install_pstn-trunk() {
             log_warning "requires a verified/Anveo-owned number as Caller-ID — any DID you order"
             log_warning "through them satisfies that automatically (see this service's personal-"
             log_warning "number feature for assigning a specific one per extension)."
-            log_warning "UNVERIFIED: Anveo's own outbound-trunk page documents dialing as"
-            log_warning "[PREFIX]PHONENUMBER@sbc.anveo.com (a per-trunk prefix) — this contradicts"
-            log_warning "an earlier no-prefix-needed finding from their FAQ. This dialplan dials"
-            log_warning "the bare number, no prefix. Check whether your configured trunk's Prefix"
-            log_warning "field can be left blank before relying on this — if it can't, outbound"
-            log_warning "calls through that trunk won't match and will fail."
+            log_info "Confirmed live (2026-07-23): the trunk's own Dialing Prefix field has no"
+            log_info "required-field marker on Anveo's Edit Call Termination Trunk screen — it's"
+            log_info "optional. Leave it blank; this dialplan dials the bare number, no prefix."
+            log_warning "Anveo Direct also separates two different 'trunk' concepts — don't confuse them:"
+            log_warning "an Outbound Service (Call Termination) Trunk handles calls OUT (IP-authenticated,"
+            log_warning "what this installer configures), while inbound routing for a DID is a SEPARATE"
+            log_warning "'SIP Trunk' object (Account -> the DID's Call Options tab -> Destination SIP"
+            log_warning "Trunk) that forwards to a SIP URI — e.g. \$[E164]\$@<this box's public IP>:5060."
+            log_warning "Create both in Anveo's portal; this installer only handles the Asterisk side."
             ;;
         2)
             _default_provider_name="VoIP.ms"
@@ -1377,27 +1380,68 @@ install_pstn-trunk() {
 
     # ── Permission tiers ───────────────────────────────────────────────────
     echo ""
-    echo "  Three tiers, per extension:"
+    echo "  Three PSTN permission tiers. Below, you'll enter EXTENSION NUMBERS at each"
+    echo "  prompt (e.g. 999, 213) — never the tier name itself:"
     echo "    internal   — call/receive other Asterisk extensions + internal ring"
-    echo "                 groups only. No PSTN at all. Default for anything not"
-    echo "                 listed below."
+    echo "                 groups only. No PSTN at all. The default for any extension"
+    echo "                 not entered at either prompt below — nothing to type for it."
     echo "    restricted — internal, PLUS call/receive ONLY pre-approved US numbers."
     echo "    full       — internal, PLUS call/receive ANY US number."
-    echo "  These are managed LIVE after install (pstn-permissions.conf) — via the"
-    echo "  Security Dashboard web UI if installed, or by hand — with no restart or"
-    echo "  reinstall needed to change them later."
+    echo "  Live-editable after install (pstn-permissions.conf) — via the Security"
+    echo "  Dashboard web UI if installed, or by hand — no restart/reinstall needed."
     local FULL_EXTS=""
-    prompt_text "Full-PSTN extensions (space-separated, blank = none):" "" FULL_EXTS
+    prompt_text "Extension NUMBERS to grant FULL PSTN access (space-separated, e.g. '999 213', blank = none):" "" FULL_EXTS
 
     local RESTRICTED_EXTS=""
-    prompt_text "Restricted-PSTN extensions (space-separated, blank = none):" "" RESTRICTED_EXTS
+    prompt_text "Extension NUMBERS to grant RESTRICTED PSTN access (space-separated, e.g. '301', blank = none):" "" RESTRICTED_EXTS
 
     local RESTRICTED_ARGS=()
     if [[ -n "$RESTRICTED_EXTS" ]]; then
+        # Shared pool, entered once — faster than retyping the same numbers
+        # per extension when several extensions overlap. Picking per
+        # extension then uses a whiptail checklist (multi-select, toggle
+        # with space) against this pool if whiptail is available and this
+        # isn't an unattended run; otherwise falls back to typing numbers
+        # directly (or "all" for the whole pool) per extension, same as
+        # before this existed.
+        echo ""
+        echo "  Optional: enter a shared pool of approved numbers ONCE below, then pick"
+        echo "  which ones apply to each restricted extension next — instead of retyping"
+        echo "  the same numbers for every extension that shares them."
+        local MASTER_NUMS_RAW="" MASTER_NUMS=()
+        prompt_text "  Approved-numbers pool (comma/space-separated, 11-digit US numbers, e.g. '15551234567 15559876543', blank = enter per-extension instead):" "" MASTER_NUMS_RAW
+        if [[ -n "$MASTER_NUMS_RAW" ]]; then
+            local _pool_n
+            while IFS= read -r _pool_n; do
+                [[ -n "$_pool_n" ]] && MASTER_NUMS+=("$_pool_n")
+            done < <(echo "$MASTER_NUMS_RAW" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | sort -u)
+            if [[ ${#MASTER_NUMS[@]} -eq 0 ]]; then
+                log_warning "No valid 11-digit numbers found in that pool — falling back to per-extension entry."
+            else
+                log_success "Pool: ${#MASTER_NUMS[@]} number(s) — ${MASTER_NUMS[*]}"
+            fi
+        fi
+
         local _ext _raw_nums _clean_nums
         for _ext in $RESTRICTED_EXTS; do
-            prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567):" "" _raw_nums
-            _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
+            _clean_nums=""
+            if [[ ${#MASTER_NUMS[@]} -gt 0 ]] && command -v whiptail >/dev/null 2>&1 && [[ "$UNATTENDED" != true ]]; then
+                local _wt_args=() _wt_n _selected
+                for _wt_n in "${MASTER_NUMS[@]}"; do
+                    _wt_args+=("$_wt_n" "" "off")
+                done
+                _selected="$(whiptail --title "Extension $_ext" --checklist \
+                    "Approved numbers for extension $_ext (space to toggle, Enter to confirm):" \
+                    20 70 10 "${_wt_args[@]}" 3>&1 1>&2 2>&3)"
+                [[ -n "$_selected" ]] && _clean_nums="$(echo "$_selected" | tr -d '"' | tr ' ' '\n' | paste -sd'|' -)"
+            else
+                prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567, or 'all' for the whole pool above):" "" _raw_nums
+                if [[ "$_raw_nums" == "all" && ${#MASTER_NUMS[@]} -gt 0 ]]; then
+                    _clean_nums="$(printf '%s\n' "${MASTER_NUMS[@]}" | paste -sd'|' -)"
+                else
+                    _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
+                fi
+            fi
             if [[ -z "$_clean_nums" ]]; then
                 log_warning "No valid 11-digit numbers entered for $_ext — it will be restricted with an EMPTY"
                 log_warning "approved list, meaning no PSTN number can currently reach/be reached by it until"
@@ -1517,8 +1561,16 @@ install_pstn-trunk() {
     echo ""
     log_info "Spend/volume alert settings (used only to estimate cost and flag unusual usage —"
     log_info "not billing-accurate, just a safety net)."
+    # Confirmed live (2026-07-23) against Anveo Direct's own "Prime" rate card
+    # (the route set selected on the outbound trunk's Custom LCR config,
+    # "Get Routes/Carriers from: All Prime Routes"): standard US-to-US
+    # domestic is $0.00388/min, billed per-second — that CSV is the actual
+    # rate an Anveo Direct Prime trunk pays, not an estimate. VoIP.ms's own
+    # rate is still an unconfirmed ballpark.
+    local _default_rate="0.01"
+    [[ "$_provider_choice" == "1" ]] && _default_rate="0.00388"
     local RATE_PER_MIN=""
-    prompt_text "  Outbound per-minute rate in USD (check your provider's published rate — e.g. VoIP.ms US is ~0.01, Anveo Direct US is ~0.001):" "0.01" RATE_PER_MIN
+    prompt_text "  Outbound per-minute rate in USD (check your provider's published rate — e.g. VoIP.ms US is ~0.01, Anveo Direct US Prime rate is 0.00388 confirmed):" "$_default_rate" RATE_PER_MIN
     local MONTH_THRESHOLD=""
     prompt_text "  Alert once when estimated spend this month reaches (USD):" "10" MONTH_THRESHOLD
     local BURST_THRESHOLD=""

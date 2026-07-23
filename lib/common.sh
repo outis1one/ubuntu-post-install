@@ -413,21 +413,28 @@ validate_password() {
 
 # Prompt yes/no, honoring unattended.  prompt_yn "Question?" "default" VARNAME
 prompt_yn() {
-    local question="$1" default="$2" varname="$3" response
+    local question="$1" default="$2" varname="$3" response hint=""
     if [ "$UNATTENDED" = true ]; then
         eval "$varname='$default'"; echo "$question [auto: $default]"; return
     fi
-    read -p "$question " response
-    eval "$varname='$response'"
+    # Confirmed live: this used to have no fallback to $default at all here —
+    # pressing Enter on a stated "(y/n): y" default silently set the variable
+    # to an EMPTY string, not "y", so every downstream `[[ "$VAR" =~ ^[Yy]$ ]]`
+    # check treated "just press Enter to accept the default" as a no. Every
+    # prompt_yn call in every service was affected.
+    [ -n "$default" ] && hint=" [$default]"
+    read -p "${question}${hint} " response
+    eval "$varname='${response:-$default}'"
 }
 
 # Prompt text, honoring unattended.  prompt_text "Question?" "default" VARNAME
 prompt_text() {
-    local question="$1" default="$2" varname="$3" response
+    local question="$1" default="$2" varname="$3" response hint=""
     if [ "$UNATTENDED" = true ]; then
         eval "$varname='$default'"; echo "$question [auto: $default]"; return
     fi
-    read -p "$question " response
+    [ -n "$default" ] && hint=" [$default]"
+    read -p "${question}${hint} " response
     eval "$varname='${response:-$default}'"
 }
 
