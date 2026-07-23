@@ -925,6 +925,51 @@ def list_extensions():
     return extensions
 
 
+def _write_ini_cp(path, header, cp):
+    """Shared temp-write-then-rename for every live-editable PSTN conf file —
+    one copy of the atomic-write/error-handling logic instead of repeating
+    it per file. Returns (ok, error_message_or_None)."""
+    if not path:
+        return False, "No Asterisk install detected on this box"
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(header)
+            cp.write(f)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, "Failed writing %s: %s" % (path, e)
+    return True, None
+
+
+PERMISSIONS_HEADER = (
+    "; PSTN permission tiers - internal / restricted / full - PLUS two\n"
+    "; independent per-extension axes: messaging (internal SIP MESSAGE\n"
+    "; texting) and personal_did (outbound Caller-ID override; inbound\n"
+    "; routing for personal DIDs lives in pstn-personal-dids.conf).\n"
+    "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
+    "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
+    "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
+    "; never touches this file, only a fresh reinstall does.\n"
+    "; Any extension not listed here is internal-only (no PSTN) by default.\n\n"
+)
+
+PERSONAL_DIDS_HEADER = (
+    "; Personal DID -> owner-extension mapping. Read LIVE by the dialplan\n"
+    "; (AST_CONFIG()) on every inbound call - no restart needed. Managed here\n"
+    "; (Security Dashboard); also safe to edit by hand. Kept in sync with\n"
+    "; pstn-permissions.conf's personal_did= field automatically by\n"
+    "; write_personal_did()/remove_personal_did() below - editing this file\n"
+    "; by hand also requires updating that field yourself to match.\n"
+    "; 'sudo ./setup.sh pstn-trunk' update mode never touches this file, only\n"
+    "; a fresh reinstall does.\n\n"
+)
+
+
 def _permissions_path():
     return os.path.join(ASTERISK_CONFIG_DIR, "pstn-permissions.conf") if ASTERISK_CONFIG_DIR else None
 
@@ -980,8 +1025,20 @@ def write_permission(ext, tier, numbers_raw):
 
     cp = _read_permissions_cp()
     if tier == "internal":
+        # Only drop the tier/allowed_numbers keys, NOT the whole section —
+        # an extension can independently have messaging=yes and/or a
+        # personal_did assigned, and those must survive a tier change back
+        # to internal. Confirmed live as a real bug: cp.remove_section(ext)
+        # here used to silently discard both whenever tier was set to
+        # internal. Only remove the section itself once nothing else is
+        # left in it.
         if cp.has_section(ext):
-            cp.remove_section(ext)
+            if cp.has_option(ext, "tier"):
+                cp.remove_option(ext, "tier")
+            if cp.has_option(ext, "allowed_numbers"):
+                cp.remove_option(ext, "allowed_numbers")
+            if not cp.options(ext):
+                cp.remove_section(ext)
     else:
         if not cp.has_section(ext):
             cp.add_section(ext)
@@ -991,26 +1048,9 @@ def write_permission(ext, tier, numbers_raw):
         elif cp.has_option(ext, "allowed_numbers"):
             cp.remove_option(ext, "allowed_numbers")
 
-    path = _permissions_path()
-    tmp_path = path + ".tmp"
-    try:
-        with open(tmp_path, "w") as f:
-            f.write(
-                "; PSTN permission tiers - internal / restricted / full.\n"
-                "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
-                "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
-                "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
-                "; never touches this file, only a fresh reinstall does.\n"
-                "; Any extension not listed here is internal-only (no PSTN) by default.\n\n"
-            )
-            cp.write(f)
-        os.replace(tmp_path, path)
-    except OSError as e:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return False, "Failed writing %s: %s" % (path, e)
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
+    if not ok:
+        return False, err
 
     if tier == "restricted" and not clean_numbers:
         return True, "Saved as restricted with an EMPTY approved list — no PSTN number can reach/be reached by it yet."
@@ -1081,6 +1121,118 @@ def write_limits(max_outbound, max_inbound):
             pass
         return False, "Failed writing %s: %s" % (path, e)
     return True, "Saved"
+
+
+PERSONAL_DID_RE = re.compile(r"^\d{10}$")
+
+
+def _personal_dids_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "pstn-personal-dids.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _read_personal_dids_cp():
+    cp = configparser.ConfigParser(delimiters=("=",))
+    path = _personal_dids_path()
+    if path and os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def list_personal_dids():
+    """[{"did": ..., "owner": ...}] for every currently-assigned personal
+    DID, sorted by DID."""
+    cp = _read_personal_dids_cp()
+    result = []
+    for section in cp.sections():
+        if not PERSONAL_DID_RE.match(section):
+            continue
+        result.append({"did": section, "owner": cp.get(section, "owner", fallback="")})
+    result.sort(key=lambda d: d["did"])
+    return result
+
+
+def write_personal_did(did, owner):
+    """Assigns did -> owner, keeping pstn-personal-dids.conf (inbound
+    routing, read by the dialplan) and pstn-permissions.conf's
+    personal_did= (outbound Caller-ID override) in sync. One owner has at
+    most one personal_did (AST_CONFIG() returns a single value per key), so
+    reassigning a DID to a new owner drops the previous owner's claim on
+    it, and giving an extension a new personal DID drops whichever one it
+    had before — this always leaves a clean 1:1 mapping in both files,
+    rather than requiring the caller to clean up the old assignment
+    itself."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    did = str(did).strip()
+    owner = str(owner).strip()
+    if not PERSONAL_DID_RE.match(did):
+        return False, "DID must be a 10-digit US number"
+    if not EXTEN_RE.match(owner):
+        return False, "Invalid owner extension"
+
+    dids_cp = _read_personal_dids_cp()
+    perms_cp = _read_permissions_cp()
+
+    for section in perms_cp.sections():
+        if section != owner and perms_cp.get(section, "personal_did", fallback="") == did:
+            perms_cp.remove_option(section, "personal_did")
+            if not perms_cp.options(section):
+                perms_cp.remove_section(section)
+
+    for section in list(dids_cp.sections()):
+        if section != did and dids_cp.get(section, "owner", fallback="") == owner:
+            dids_cp.remove_section(section)
+
+    if not dids_cp.has_section(did):
+        dids_cp.add_section(did)
+    dids_cp.set(did, "owner", owner)
+
+    if not perms_cp.has_section(owner):
+        perms_cp.add_section(owner)
+    perms_cp.set(owner, "personal_did", did)
+
+    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
+    if not ok:
+        return False, err
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
+    if not ok:
+        return False, err
+
+    owner_tier = perms_cp.get(owner, "tier", fallback="internal")
+    if owner_tier not in ("full", "restricted"):
+        return True, "Assigned %s to extension %s - note: %s is internal-tier, so it won't actually receive calls on this DID until you also grant it full or restricted tier." % (did, owner, owner)
+    return True, "Assigned %s to extension %s" % (did, owner)
+
+
+def remove_personal_did(did):
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    did = str(did).strip()
+    if not PERSONAL_DID_RE.match(did):
+        return False, "Invalid DID"
+
+    dids_cp = _read_personal_dids_cp()
+    perms_cp = _read_permissions_cp()
+
+    if dids_cp.has_section(did):
+        dids_cp.remove_section(did)
+
+    for section in perms_cp.sections():
+        if perms_cp.get(section, "personal_did", fallback="") == did:
+            perms_cp.remove_option(section, "personal_did")
+            if not perms_cp.options(section):
+                perms_cp.remove_section(section)
+
+    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
+    if not ok:
+        return False, err
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
+    if not ok:
+        return False, err
+    return True, "Removed %s" % did
 
 
 INDEX_HTML = """<!doctype html>
@@ -1180,6 +1332,19 @@ INDEX_HTML = """<!doctype html>
       </p>
       <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th></th></tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Personal numbers</h3>
+      <p class="muted">
+        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. The shared DID/ring-group keeps working regardless.
+      </p>
+      <div class="row">
+        <input type="text" id="pd-did" placeholder="DID, e.g. 15551234567" style="width:12rem">
+        <select id="pd-owner"></select>
+        <button class="action" id="pd-save">Assign</button>
+      </div>
+      <table id="pd-table" style="margin-top:0.75rem"><thead><tr><th>DID</th><th>Owner</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
     </div>
   </div>
@@ -1346,7 +1511,7 @@ async function loadPstnStatus() {
   const data = await res.json();
   document.getElementById("pstn-not-installed").style.display = data.installed ? "none" : "";
   document.getElementById("pstn-installed-cards").style.display = data.installed ? "" : "none";
-  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); }
+  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
 }
 
 async function loadPstnLimits() {
@@ -1372,6 +1537,11 @@ async function loadPstnPermissions() {
   const res = await fetch("/api/pstn-permissions");
   const data = await res.json();
   const exts = data.extensions || [];
+
+  const ownerSel = document.getElementById("pd-owner");
+  ownerSel.innerHTML = exts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("")
+    || '<option value="">No extensions found</option>';
+
   const tbody = document.querySelector("#pstn-table tbody");
   if (!exts.length) {
     tbody.innerHTML = '<tr><td colspan=5 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
@@ -1409,6 +1579,42 @@ async function savePstnPermission(ext) {
   const data = await res.json();
   document.getElementById("pstn-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
   loadPstnPermissions();
+}
+
+async function loadPersonalDids() {
+  const res = await fetch("/api/pstn-personal-dids");
+  const data = await res.json();
+  const dids = data.dids || [];
+  const tbody = document.querySelector("#pd-table tbody");
+  tbody.innerHTML = dids.map(d => `<tr>
+    <td>${esc(d.did)}</td>
+    <td>${esc(d.owner)}${d.owner_name ? " — " + esc(d.owner_name) : ""}</td>
+    <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
+  </tr>`).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+}
+
+document.getElementById("pd-save").addEventListener("click", async () => {
+  const did = document.getElementById("pd-did").value.trim();
+  const owner = document.getElementById("pd-owner").value;
+  const res = await fetch("/api/pstn-personal-dids", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did, owner: owner}),
+  });
+  const data = await res.json();
+  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) document.getElementById("pd-did").value = "";
+  loadPersonalDids();
+});
+
+async function removePersonalDid(did) {
+  if (!confirm("Remove personal number " + did + "? Its owner falls back to the shared trunk DID for outbound Caller-ID, and this DID stops routing anywhere until reassigned.")) return;
+  const res = await fetch("/api/pstn-personal-dids/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did}),
+  });
+  const data = await res.json();
+  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  loadPersonalDids();
 }
 
 const adminUrl = "__ASTERISK_ADMIN_URL__";
@@ -1469,6 +1675,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
+        elif self.path == "/api/pstn-personal-dids":
+            names = {e["ext"]: e["name"] for e in list_extensions()}
+            dids = [dict(d, owner_name=names.get(d["owner"], "")) for d in list_personal_dids()]
+            self._json({"dids": dids})
         elif self.path == "/api/pstn-status":
             self._json({"installed": pstn_installed()})
         else:
@@ -1497,6 +1707,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-limits":
             ok, message = write_limits(payload.get("max_outbound", ""), payload.get("max_inbound", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-personal-dids":
+            ok, message = write_personal_did(payload.get("did", ""), payload.get("owner", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-personal-dids/delete":
+            ok, message = remove_personal_did(payload.get("did", ""))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)

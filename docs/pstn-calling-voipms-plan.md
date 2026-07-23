@@ -475,3 +475,32 @@ generator output. Fixed by quoting every value in that heredoc.
     `README-pstn-trunk.md` for the full honest breakdown of what's actually
     hard (the provider's own $0-balance block) vs. estimate-based (this
     kill-switch).
+15. ~~Multiple DIDs, one per extension ("personal numbers")~~ Done —
+    additive to the existing shared trunk DID/ring-group, not a
+    replacement. Anveo Direct's DID pricing (~$0.15/mo + $0.25 setup on the
+    Per Minute plan) makes "everyone gets their own number" genuinely cheap
+    at personal-use volumes, and multiple DIDs sharing one trunk/account is
+    exactly what that plan is built for (10 dedicated incoming channels
+    bundled in). New `pstn-personal-dids.conf` (DID -> owner extension,
+    read live by the dialplan for inbound routing) plus a `personal_did=`
+    field per extension in `pstn-permissions.conf` (the outbound Caller-ID
+    override) — both kept in sync automatically by a single write path
+    (CLI prompt at install/update, or the Security Dashboard's "PSTN
+    Trunk" tab), never requiring the admin to hand-edit both files
+    consistently. Inbound: a call to a personal DID routes straight to its
+    owner, checked against the *owner's own* tier/approved-numbers — no
+    ring-group fallback, since a personal DID isn't the shared line.
+    Outbound: `pstn_check_busy` (the one shared exit point for both
+    domestic and international dialing) looks up the calling extension's
+    `personal_did` and uses it as `CALLERID(num)` instead of the shared
+    trunk DID when one is assigned. A personal DID assigned to an
+    internal-tier extension is accepted but silently never rings anyone
+    until that extension is also granted full/restricted tier — both the
+    CLI and the dashboard warn about this at assignment time rather than
+    blocking it, matching this repo's general permissive-with-warnings
+    style. Caught and fixed a real bug while building this: the
+    dashboard's `write_permission()` did `cp.remove_section(ext)` when
+    tier was set to "internal", which silently discarded any
+    `messaging=yes` or `personal_did=` already on that extension — fixed
+    to remove only the tier/allowed_numbers keys, dropping the section
+    only once nothing else is left in it.
