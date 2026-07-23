@@ -208,18 +208,22 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** — detects whether \`services/pstn-trunk.sh\`'s dialplan is
-  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a clear
-  "not installed" message instead of the caps/tiers editor if not, so it
-  never shows real-looking-but-unenforced defaults. When installed: the
-  outbound/inbound concurrent-call caps, and every known extension (parsed
-  from \`pjsip.conf\`) with its current permission tier (internal /
-  restricted / full), for restricted its approved numbers, and its
-  internal-SIP-messaging flag (independent of the calling tier — see
-  \`services/pstn-trunk.sh\`'s "Known gap" note on messaging for what this
-  flag does and doesn't do yet) — all editable live, no Asterisk restart,
-  no reinstall. Also manages personal-number assignments (DID -> owner
-  extension), additive to the shared trunk DID. Writes directly to
+- **PSTN Trunk** — an "Internal SIP messaging" card at the top is always
+  available, whether or not a PSTN trunk has ever been installed: a
+  checkbox per known extension (parsed from \`pjsip.conf\`) for
+  Asterisk's native SIP texting, independent of PSTN calling entirely (no
+  cost, no carrier, no DID, no dependency on \`services/pstn-trunk.sh\`
+  having been run — see its "Known gap" note on messaging for what this
+  flag does and doesn't do yet at the Asterisk level). Below that, the
+  rest of the tab detects whether \`services/pstn-trunk.sh\`'s dialplan is
+  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a
+  clear "not installed" message instead of the calling-permissions editor
+  if not, so it never shows real-looking-but-unenforced defaults. When
+  installed: the outbound/inbound concurrent-call caps, and every known
+  extension's permission tier (internal / restricted / full) and, for
+  restricted, its approved numbers — all editable live, no Asterisk
+  restart, no reinstall. Also manages personal-number assignments (DID ->
+  owner extension), additive to the shared trunk DID. Writes directly to
   \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
   which the dialplan reads fresh on every call. The spend-cap kill-switch
   and international-calling allow-list are deliberately **not** managed
@@ -1077,6 +1081,37 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     return True, "Saved"
 
 
+def write_messaging(ext, enabled):
+    """Sets/clears just the messaging flag for one extension, leaving any
+    tier/allowed_numbers/personal_did untouched. This is the write path for
+    the standalone "Internal SIP messaging" card, which works whether or
+    not a PSTN trunk has ever been installed — messaging has no dependency
+    on one (no cost, no carrier, no DID), unlike the calling-permissions
+    table this dashboard otherwise gates behind pstn_installed(). Creates
+    pstn-permissions.conf from scratch if it doesn't exist yet."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    ext = str(ext).strip()
+    if not EXTEN_RE.match(ext):
+        return False, "Invalid extension"
+
+    cp = _read_permissions_cp()
+    if enabled:
+        if not cp.has_section(ext):
+            cp.add_section(ext)
+        cp.set(ext, "messaging", "yes")
+    elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
+        cp.remove_option(ext, "messaging")
+
+    if cp.has_section(ext) and not cp.options(ext):
+        cp.remove_section(ext)
+
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
+    if not ok:
+        return False, err
+    return True, "Saved"
+
+
 LIMIT_RE = re.compile(r"^\d+$")
 
 
@@ -1327,9 +1362,17 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="tab-pstn" style="display:none">
+    <div class="card">
+      <h3 style="margin-top:0">Internal SIP messaging</h3>
+      <p class="muted">
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install.
+      </p>
+      <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
     <div class="card" id="pstn-not-installed" style="display:none">
       <h3 style="margin-top:0">PSTN trunk not installed</h3>
-      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). Nothing below is enforced yet; install it first, then this tab will manage the real permission tiers and concurrency caps.</p>
+      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging above works independently of this.</p>
     </div>
     <div id="pstn-installed-cards" style="display:none">
     <div class="card">
@@ -1381,7 +1424,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnStatus(); }
+    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); }
   });
 });
 
@@ -1542,6 +1585,38 @@ async function loadPstnLimits() {
   const data = await res.json();
   document.getElementById("limit-out").value = data.max_outbound;
   document.getElementById("limit-in").value = data.max_inbound;
+}
+
+// Independent of pstn_installed() — messaging has no dependency on a PSTN
+// trunk existing, unlike everything else in this tab, so this loads/saves
+// regardless of whether services/pstn-trunk.sh has ever been run.
+async function loadMessaging() {
+  const res = await fetch("/api/pstn-permissions");
+  const data = await res.json();
+  const exts = data.extensions || [];
+  const tbody = document.querySelector("#msg-table tbody");
+  if (!exts.length) {
+    tbody.innerHTML = '<tr><td colspan=4 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
+    return;
+  }
+  tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
+    <td>${esc(e.ext)}</td>
+    <td>${esc(e.name)}</td>
+    <td style="text-align:center"><input type="checkbox" class="msg-enabled" ${e.messaging ? "checked" : ""}></td>
+    <td><button class="action" onclick="saveMessagingRow('${esc(e.ext)}')">Save</button></td>
+  </tr>`).join("");
+}
+
+async function saveMessagingRow(ext) {
+  const row = document.querySelector(`#msg-table tr[data-ext="${ext}"]`);
+  const enabled = row.querySelector(".msg-enabled").checked;
+  const res = await fetch("/api/pstn-messaging", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ext: ext, enabled: enabled}),
+  });
+  const data = await res.json();
+  document.getElementById("msg-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
+  loadMessaging();
 }
 
 document.getElementById("limits-save").addEventListener("click", async () => {
@@ -1739,6 +1814,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-personal-dids/delete":
             ok, message = remove_personal_did(payload.get("did", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-messaging":
+            ok, message = write_messaging(payload.get("ext", ""), bool(payload.get("enabled", False)))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)

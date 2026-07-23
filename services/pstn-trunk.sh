@@ -1817,9 +1817,10 @@ no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
 tiers above — off by default, same "opt in" posture. Currently enabled for:
 ${MESSAGING_EXTS:-none}. Live-editable any time via the Security
-Dashboard's "PSTN Trunk" tab (a checkbox per extension, right in the same
-table as the calling tiers) — no need to re-run this installer just to
-change who can message.
+Dashboard's "PSTN Trunk" tab, in its own always-available "Internal SIP
+messaging" card — no need to re-run this installer, and no dependency on
+this trunk (or any PSTN trunk at all) being installed, unlike the
+calling-permissions table below it in that same tab.
 
 **Won't show up in Easy Asterisk's own web admin, by design** — same as
 the PSTN calling tiers, this is a permission this repo layers on top,
