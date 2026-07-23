@@ -208,19 +208,27 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** — detects whether \`services/pstn-trunk.sh\`'s dialplan is
-  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a clear
-  "not installed" message instead of the caps/tiers editor if not, so it
-  never shows real-looking-but-unenforced defaults. When installed: the
-  outbound/inbound concurrent-call caps, and every known extension (parsed
-  from \`pjsip.conf\`) with its current permission tier (internal /
-  restricted / full) and, for restricted, its approved numbers — all
-  editable live, no Asterisk restart, no reinstall. Writes directly to
-  \`pstn-limits.conf\` / \`pstn-permissions.conf\`, which the dialplan reads
-  fresh on every call. The spend-cap kill-switch and international-calling
-  allow-list are deliberately **not** managed here — CLI-only, via
-  \`sudo ./setup.sh pstn-trunk\` — since both are more security-sensitive
-  than what this tab already exposes.
+- **PSTN Trunk** — an "Internal SIP messaging" card at the top is always
+  available, whether or not a PSTN trunk has ever been installed: a
+  checkbox per known extension (parsed from \`pjsip.conf\`) for
+  Asterisk's native SIP texting, independent of PSTN calling entirely (no
+  cost, no carrier, no DID, no dependency on \`services/pstn-trunk.sh\`
+  having been run — see its "Known gap" note on messaging for what this
+  flag does and doesn't do yet at the Asterisk level). Below that, the
+  rest of the tab detects whether \`services/pstn-trunk.sh\`'s dialplan is
+  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a
+  clear "not installed" message instead of the calling-permissions editor
+  if not, so it never shows real-looking-but-unenforced defaults. When
+  installed: the outbound/inbound concurrent-call caps, and every known
+  extension's permission tier (internal / restricted / full) and, for
+  restricted, its approved numbers — all editable live, no Asterisk
+  restart, no reinstall. Also manages personal-number assignments (DID ->
+  owner extension), additive to the shared trunk DID. Writes directly to
+  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
+  which the dialplan reads fresh on every call. The spend-cap kill-switch
+  and international-calling allow-list are deliberately **not** managed
+  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
+  security-sensitive than what this tab already exposes.
 - Link to the Asterisk web admin itself (doesn't embed it, just links out).
 
 ## Manage
@@ -925,6 +933,51 @@ def list_extensions():
     return extensions
 
 
+def _write_ini_cp(path, header, cp):
+    """Shared temp-write-then-rename for every live-editable PSTN conf file —
+    one copy of the atomic-write/error-handling logic instead of repeating
+    it per file. Returns (ok, error_message_or_None)."""
+    if not path:
+        return False, "No Asterisk install detected on this box"
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            f.write(header)
+            cp.write(f)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        return False, "Failed writing %s: %s" % (path, e)
+    return True, None
+
+
+PERMISSIONS_HEADER = (
+    "; PSTN permission tiers - internal / restricted / full - PLUS two\n"
+    "; independent per-extension axes: messaging (internal SIP MESSAGE\n"
+    "; texting) and personal_did (outbound Caller-ID override; inbound\n"
+    "; routing for personal DIDs lives in pstn-personal-dids.conf).\n"
+    "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
+    "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
+    "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
+    "; never touches this file, only a fresh reinstall does.\n"
+    "; Any extension not listed here is internal-only (no PSTN) by default.\n\n"
+)
+
+PERSONAL_DIDS_HEADER = (
+    "; Personal DID -> owner-extension mapping. Read LIVE by the dialplan\n"
+    "; (AST_CONFIG()) on every inbound call - no restart needed. Managed here\n"
+    "; (Security Dashboard); also safe to edit by hand. Kept in sync with\n"
+    "; pstn-permissions.conf's personal_did= field automatically by\n"
+    "; write_personal_did()/remove_personal_did() below - editing this file\n"
+    "; by hand also requires updating that field yourself to match.\n"
+    "; 'sudo ./setup.sh pstn-trunk' update mode never touches this file, only\n"
+    "; a fresh reinstall does.\n\n"
+)
+
+
 def _permissions_path():
     return os.path.join(ASTERISK_CONFIG_DIR, "pstn-permissions.conf") if ASTERISK_CONFIG_DIR else None
 
@@ -941,12 +994,13 @@ def _read_permissions_cp():
 
 
 def get_all_permissions():
-    """{ext: {"tier": ..., "allowed_numbers": "num|num|..."}} for every
-    extension with a non-internal tier on record. Extensions with no section
-    are implicitly "internal" — the dialplan's AST_CONFIG() lookup treats a
-    missing section as empty/denied the same way, so there's nothing to
-    return for them here; the UI fills in "internal" as the default for any
-    known extension (from list_extensions()) not present in this dict."""
+    """{ext: {"tier": ..., "allowed_numbers": "num|num|...", "messaging":
+    bool}} for every extension with a non-default record. Extensions with
+    no section are implicitly "internal"/messaging-disabled — the
+    dialplan's AST_CONFIG() lookup treats a missing section/key as empty/
+    denied the same way, so there's nothing to return for them here; the
+    UI fills in the defaults for any known extension (from
+    list_extensions()) not present in this dict."""
     cp = _read_permissions_cp()
     result = {}
     for section in cp.sections():
@@ -955,12 +1009,17 @@ def get_all_permissions():
         result[section] = {
             "tier": cp.get(section, "tier", fallback="internal"),
             "allowed_numbers": cp.get(section, "allowed_numbers", fallback=""),
+            "messaging": cp.getboolean(section, "messaging", fallback=False),
         }
     return result
 
 
-def write_permission(ext, tier, numbers_raw):
-    """Saves one extension's tier + (for restricted) approved-number list.
+def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
+    """Saves one extension's tier + (for restricted) approved-number list +
+    messaging flag in one action — messaging is an independent axis from
+    the calling tier (see pstn-trunk.sh's file-level comment: an extension
+    can be internal-tier for calling and still messaging-enabled, or vice
+    versa), so it's set/cleared regardless of which tier branch runs below.
     Numbers are normalized to a pipe-separated list of 11-digit US numbers —
     pipe, not comma, because the dialplan uses this value directly as a
     REGEX() alternation pattern (see services/pstn-trunk.sh's file-level
@@ -980,8 +1039,17 @@ def write_permission(ext, tier, numbers_raw):
 
     cp = _read_permissions_cp()
     if tier == "internal":
+        # Only drop the tier/allowed_numbers keys, NOT the whole section —
+        # an extension can independently have messaging=yes and/or a
+        # personal_did assigned, and those must survive a tier change back
+        # to internal. Confirmed live as a real bug: cp.remove_section(ext)
+        # here used to silently discard both whenever tier was set to
+        # internal.
         if cp.has_section(ext):
-            cp.remove_section(ext)
+            if cp.has_option(ext, "tier"):
+                cp.remove_option(ext, "tier")
+            if cp.has_option(ext, "allowed_numbers"):
+                cp.remove_option(ext, "allowed_numbers")
     else:
         if not cp.has_section(ext):
             cp.add_section(ext)
@@ -991,29 +1059,56 @@ def write_permission(ext, tier, numbers_raw):
         elif cp.has_option(ext, "allowed_numbers"):
             cp.remove_option(ext, "allowed_numbers")
 
-    path = _permissions_path()
-    tmp_path = path + ".tmp"
-    try:
-        with open(tmp_path, "w") as f:
-            f.write(
-                "; PSTN permission tiers - internal / restricted / full.\n"
-                "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
-                "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
-                "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
-                "; never touches this file, only a fresh reinstall does.\n"
-                "; Any extension not listed here is internal-only (no PSTN) by default.\n\n"
-            )
-            cp.write(f)
-        os.replace(tmp_path, path)
-    except OSError as e:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        return False, "Failed writing %s: %s" % (path, e)
+    if messaging_enabled:
+        if not cp.has_section(ext):
+            cp.add_section(ext)
+        cp.set(ext, "messaging", "yes")
+    elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
+        cp.remove_option(ext, "messaging")
+
+    # Drop the section entirely once nothing (tier, numbers, messaging,
+    # personal_did) is left in it — only reached this way when tier is
+    # internal, messaging is off, and no personal_did was ever assigned.
+    if cp.has_section(ext) and not cp.options(ext):
+        cp.remove_section(ext)
+
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
+    if not ok:
+        return False, err
 
     if tier == "restricted" and not clean_numbers:
         return True, "Saved as restricted with an EMPTY approved list — no PSTN number can reach/be reached by it yet."
+    return True, "Saved"
+
+
+def write_messaging(ext, enabled):
+    """Sets/clears just the messaging flag for one extension, leaving any
+    tier/allowed_numbers/personal_did untouched. This is the write path for
+    the standalone "Internal SIP messaging" card, which works whether or
+    not a PSTN trunk has ever been installed — messaging has no dependency
+    on one (no cost, no carrier, no DID), unlike the calling-permissions
+    table this dashboard otherwise gates behind pstn_installed(). Creates
+    pstn-permissions.conf from scratch if it doesn't exist yet."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    ext = str(ext).strip()
+    if not EXTEN_RE.match(ext):
+        return False, "Invalid extension"
+
+    cp = _read_permissions_cp()
+    if enabled:
+        if not cp.has_section(ext):
+            cp.add_section(ext)
+        cp.set(ext, "messaging", "yes")
+    elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
+        cp.remove_option(ext, "messaging")
+
+    if cp.has_section(ext) and not cp.options(ext):
+        cp.remove_section(ext)
+
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
+    if not ok:
+        return False, err
     return True, "Saved"
 
 
@@ -1081,6 +1176,118 @@ def write_limits(max_outbound, max_inbound):
             pass
         return False, "Failed writing %s: %s" % (path, e)
     return True, "Saved"
+
+
+PERSONAL_DID_RE = re.compile(r"^\d{10}$")
+
+
+def _personal_dids_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "pstn-personal-dids.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _read_personal_dids_cp():
+    cp = configparser.ConfigParser(delimiters=("=",))
+    path = _personal_dids_path()
+    if path and os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def list_personal_dids():
+    """[{"did": ..., "owner": ...}] for every currently-assigned personal
+    DID, sorted by DID."""
+    cp = _read_personal_dids_cp()
+    result = []
+    for section in cp.sections():
+        if not PERSONAL_DID_RE.match(section):
+            continue
+        result.append({"did": section, "owner": cp.get(section, "owner", fallback="")})
+    result.sort(key=lambda d: d["did"])
+    return result
+
+
+def write_personal_did(did, owner):
+    """Assigns did -> owner, keeping pstn-personal-dids.conf (inbound
+    routing, read by the dialplan) and pstn-permissions.conf's
+    personal_did= (outbound Caller-ID override) in sync. One owner has at
+    most one personal_did (AST_CONFIG() returns a single value per key), so
+    reassigning a DID to a new owner drops the previous owner's claim on
+    it, and giving an extension a new personal DID drops whichever one it
+    had before — this always leaves a clean 1:1 mapping in both files,
+    rather than requiring the caller to clean up the old assignment
+    itself."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    did = str(did).strip()
+    owner = str(owner).strip()
+    if not PERSONAL_DID_RE.match(did):
+        return False, "DID must be a 10-digit US number"
+    if not EXTEN_RE.match(owner):
+        return False, "Invalid owner extension"
+
+    dids_cp = _read_personal_dids_cp()
+    perms_cp = _read_permissions_cp()
+
+    for section in perms_cp.sections():
+        if section != owner and perms_cp.get(section, "personal_did", fallback="") == did:
+            perms_cp.remove_option(section, "personal_did")
+            if not perms_cp.options(section):
+                perms_cp.remove_section(section)
+
+    for section in list(dids_cp.sections()):
+        if section != did and dids_cp.get(section, "owner", fallback="") == owner:
+            dids_cp.remove_section(section)
+
+    if not dids_cp.has_section(did):
+        dids_cp.add_section(did)
+    dids_cp.set(did, "owner", owner)
+
+    if not perms_cp.has_section(owner):
+        perms_cp.add_section(owner)
+    perms_cp.set(owner, "personal_did", did)
+
+    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
+    if not ok:
+        return False, err
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
+    if not ok:
+        return False, err
+
+    owner_tier = perms_cp.get(owner, "tier", fallback="internal")
+    if owner_tier not in ("full", "restricted"):
+        return True, "Assigned %s to extension %s - note: %s is internal-tier, so it won't actually receive calls on this DID until you also grant it full or restricted tier." % (did, owner, owner)
+    return True, "Assigned %s to extension %s" % (did, owner)
+
+
+def remove_personal_did(did):
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    did = str(did).strip()
+    if not PERSONAL_DID_RE.match(did):
+        return False, "Invalid DID"
+
+    dids_cp = _read_personal_dids_cp()
+    perms_cp = _read_permissions_cp()
+
+    if dids_cp.has_section(did):
+        dids_cp.remove_section(did)
+
+    for section in perms_cp.sections():
+        if perms_cp.get(section, "personal_did", fallback="") == did:
+            perms_cp.remove_option(section, "personal_did")
+            if not perms_cp.options(section):
+                perms_cp.remove_section(section)
+
+    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
+    if not ok:
+        return False, err
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
+    if not ok:
+        return False, err
+    return True, "Removed %s" % did
 
 
 INDEX_HTML = """<!doctype html>
@@ -1155,9 +1362,17 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="tab-pstn" style="display:none">
+    <div class="card">
+      <h3 style="margin-top:0">Internal SIP messaging</h3>
+      <p class="muted">
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install.
+      </p>
+      <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
     <div class="card" id="pstn-not-installed" style="display:none">
       <h3 style="margin-top:0">PSTN trunk not installed</h3>
-      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). Nothing below is enforced yet; install it first, then this tab will manage the real permission tiers and concurrency caps.</p>
+      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging above works independently of this.</p>
     </div>
     <div id="pstn-installed-cards" style="display:none">
     <div class="card">
@@ -1178,8 +1393,24 @@ INDEX_HTML = """<!doctype html>
         <b>full</b> — internal, plus any US number.
         Changes apply live, on the next call — no Asterisk restart needed.
       </p>
-      <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th></th></tr></thead><tbody></tbody></table>
+      <p class="muted">
+        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install — see this service's README.
+      </p>
+      <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th>Messaging</th><th></th></tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Personal numbers</h3>
+      <p class="muted">
+        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. The shared DID/ring-group keeps working regardless.
+      </p>
+      <div class="row">
+        <input type="text" id="pd-did" placeholder="DID, e.g. 15551234567" style="width:12rem">
+        <select id="pd-owner"></select>
+        <button class="action" id="pd-save">Assign</button>
+      </div>
+      <table id="pd-table" style="margin-top:0.75rem"><thead><tr><th>DID</th><th>Owner</th><th></th></tr></thead><tbody></tbody></table>
+      <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
     </div>
   </div>
@@ -1193,7 +1424,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnStatus(); }
+    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); }
   });
 });
 
@@ -1346,7 +1577,7 @@ async function loadPstnStatus() {
   const data = await res.json();
   document.getElementById("pstn-not-installed").style.display = data.installed ? "none" : "";
   document.getElementById("pstn-installed-cards").style.display = data.installed ? "" : "none";
-  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); }
+  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
 }
 
 async function loadPstnLimits() {
@@ -1354,6 +1585,38 @@ async function loadPstnLimits() {
   const data = await res.json();
   document.getElementById("limit-out").value = data.max_outbound;
   document.getElementById("limit-in").value = data.max_inbound;
+}
+
+// Independent of pstn_installed() — messaging has no dependency on a PSTN
+// trunk existing, unlike everything else in this tab, so this loads/saves
+// regardless of whether services/pstn-trunk.sh has ever been run.
+async function loadMessaging() {
+  const res = await fetch("/api/pstn-permissions");
+  const data = await res.json();
+  const exts = data.extensions || [];
+  const tbody = document.querySelector("#msg-table tbody");
+  if (!exts.length) {
+    tbody.innerHTML = '<tr><td colspan=4 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
+    return;
+  }
+  tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
+    <td>${esc(e.ext)}</td>
+    <td>${esc(e.name)}</td>
+    <td style="text-align:center"><input type="checkbox" class="msg-enabled" ${e.messaging ? "checked" : ""}></td>
+    <td><button class="action" onclick="saveMessagingRow('${esc(e.ext)}')">Save</button></td>
+  </tr>`).join("");
+}
+
+async function saveMessagingRow(ext) {
+  const row = document.querySelector(`#msg-table tr[data-ext="${ext}"]`);
+  const enabled = row.querySelector(".msg-enabled").checked;
+  const res = await fetch("/api/pstn-messaging", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ext: ext, enabled: enabled}),
+  });
+  const data = await res.json();
+  document.getElementById("msg-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
+  loadMessaging();
 }
 
 document.getElementById("limits-save").addEventListener("click", async () => {
@@ -1372,9 +1635,14 @@ async function loadPstnPermissions() {
   const res = await fetch("/api/pstn-permissions");
   const data = await res.json();
   const exts = data.extensions || [];
+
+  const ownerSel = document.getElementById("pd-owner");
+  ownerSel.innerHTML = exts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("")
+    || '<option value="">No extensions found</option>';
+
   const tbody = document.querySelector("#pstn-table tbody");
   if (!exts.length) {
-    tbody.innerHTML = '<tr><td colspan=5 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
+    tbody.innerHTML = '<tr><td colspan=6 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
     return;
   }
   tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
@@ -1388,6 +1656,7 @@ async function loadPstnPermissions() {
       </select>
     </td>
     <td><input type="text" class="pstn-numbers" value="${esc(e.allowed_numbers)}" placeholder="15551234567,15559876543" ${e.tier === "restricted" ? "" : "disabled"}></td>
+    <td style="text-align:center"><input type="checkbox" class="pstn-messaging" ${e.messaging ? "checked" : ""}></td>
     <td><button class="action" onclick="savePstnPermission('${esc(e.ext)}')">Save</button></td>
   </tr>`).join("");
 
@@ -1402,13 +1671,50 @@ async function savePstnPermission(ext) {
   const row = document.querySelector(`#pstn-table tr[data-ext="${ext}"]`);
   const tier = row.querySelector(".pstn-tier").value;
   const numbers = row.querySelector(".pstn-numbers").value;
+  const messaging = row.querySelector(".pstn-messaging").checked;
   const res = await fetch("/api/pstn-permissions", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ext: ext, tier: tier, allowed_numbers: numbers}),
+    body: JSON.stringify({ext: ext, tier: tier, allowed_numbers: numbers, messaging: messaging}),
   });
   const data = await res.json();
   document.getElementById("pstn-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
   loadPstnPermissions();
+}
+
+async function loadPersonalDids() {
+  const res = await fetch("/api/pstn-personal-dids");
+  const data = await res.json();
+  const dids = data.dids || [];
+  const tbody = document.querySelector("#pd-table tbody");
+  tbody.innerHTML = dids.map(d => `<tr>
+    <td>${esc(d.did)}</td>
+    <td>${esc(d.owner)}${d.owner_name ? " — " + esc(d.owner_name) : ""}</td>
+    <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
+  </tr>`).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+}
+
+document.getElementById("pd-save").addEventListener("click", async () => {
+  const did = document.getElementById("pd-did").value.trim();
+  const owner = document.getElementById("pd-owner").value;
+  const res = await fetch("/api/pstn-personal-dids", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did, owner: owner}),
+  });
+  const data = await res.json();
+  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) document.getElementById("pd-did").value = "";
+  loadPersonalDids();
+});
+
+async function removePersonalDid(did) {
+  if (!confirm("Remove personal number " + did + "? Its owner falls back to the shared trunk DID for outbound Caller-ID, and this DID stops routing anywhere until reassigned.")) return;
+  const res = await fetch("/api/pstn-personal-dids/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did}),
+  });
+  const data = await res.json();
+  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  loadPersonalDids();
 }
 
 const adminUrl = "__ASTERISK_ADMIN_URL__";
@@ -1463,12 +1769,16 @@ class Handler(BaseHTTPRequestHandler):
             perms = get_all_permissions()
             extensions = []
             for e in list_extensions():
-                p = perms.get(e["ext"], {"tier": "internal", "allowed_numbers": ""})
-                extensions.append({"ext": e["ext"], "name": e["name"],
-                                    "tier": p["tier"], "allowed_numbers": p["allowed_numbers"]})
+                p = perms.get(e["ext"], {"tier": "internal", "allowed_numbers": "", "messaging": False})
+                extensions.append({"ext": e["ext"], "name": e["name"], "tier": p["tier"],
+                                    "allowed_numbers": p["allowed_numbers"], "messaging": p["messaging"]})
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
+        elif self.path == "/api/pstn-personal-dids":
+            names = {e["ext"]: e["name"] for e in list_extensions()}
+            dids = [dict(d, owner_name=names.get(d["owner"], "")) for d in list_personal_dids()]
+            self._json({"dids": dids})
         elif self.path == "/api/pstn-status":
             self._json({"installed": pstn_installed()})
         else:
@@ -1492,11 +1802,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(ban_asn(payload.get("asn", "")))
         elif self.path == "/api/pstn-permissions":
             ok, message = write_permission(
-                payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", "")
+                payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", ""),
+                bool(payload.get("messaging", False))
             )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-limits":
             ok, message = write_limits(payload.get("max_outbound", ""), payload.get("max_inbound", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-personal-dids":
+            ok, message = write_personal_did(payload.get("did", ""), payload.get("owner", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-personal-dids/delete":
+            ok, message = remove_personal_did(payload.get("did", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-messaging":
+            ok, message = write_messaging(payload.get("ext", ""), bool(payload.get("enabled", False)))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)

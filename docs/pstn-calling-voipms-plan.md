@@ -416,8 +416,15 @@ generator output. Fixed by quoting every value in that heredoc.
     `messaging=yes` flag per extension in `pstn-permissions.conf`,
     independent of the PSTN calling tiers (an extension can be
     internal-tier for calling and still messaging-enabled, or vice versa),
-    prompted at install time. **Not done**: the actual dialplan wiring that
-    would make Asterisk *enforce* this flag on inbound `MESSAGE` requests.
+    prompted at install time AND now a checkbox right in the Security
+    Dashboard's PSTN Trunk permissions table (alongside tier/approved-
+    numbers) — no need to re-run the CLI installer just to change who can
+    message. Confirmed it correctly survives tier changes and personal-DID
+    assignment/removal on the same extension (this is what surfaced the
+    tier=internal section-wipe bug fixed above). **Not done**: the actual
+    dialplan wiring that would make Asterisk *enforce* this flag on
+    inbound `MESSAGE` requests — this flag currently does nothing at the
+    Asterisk level yet, it's groundwork.
     Reasoned through but deliberately not shipped: Easy Asterisk dispatches
     messages through the same `[intercom]` context calls use (no
     `message_context` override), and whether a hand-written pattern there
@@ -475,3 +482,59 @@ generator output. Fixed by quoting every value in that heredoc.
     `README-pstn-trunk.md` for the full honest breakdown of what's actually
     hard (the provider's own $0-balance block) vs. estimate-based (this
     kill-switch).
+15. ~~Multiple DIDs, one per extension ("personal numbers")~~ Done —
+    additive to the existing shared trunk DID/ring-group, not a
+    replacement. Anveo Direct's DID pricing (~$0.15/mo + $0.25 setup on the
+    Per Minute plan) makes "everyone gets their own number" genuinely cheap
+    at personal-use volumes, and multiple DIDs sharing one trunk/account is
+    exactly what that plan is built for (10 dedicated incoming channels
+    bundled in). New `pstn-personal-dids.conf` (DID -> owner extension,
+    read live by the dialplan for inbound routing) plus a `personal_did=`
+    field per extension in `pstn-permissions.conf` (the outbound Caller-ID
+    override) — both kept in sync automatically by a single write path
+    (CLI prompt at install/update, or the Security Dashboard's "PSTN
+    Trunk" tab), never requiring the admin to hand-edit both files
+    consistently. Inbound: a call to a personal DID routes straight to its
+    owner, checked against the *owner's own* tier/approved-numbers — no
+    ring-group fallback, since a personal DID isn't the shared line.
+    Outbound: `pstn_check_busy` (the one shared exit point for both
+    domestic and international dialing) looks up the calling extension's
+    `personal_did` and uses it as `CALLERID(num)` instead of the shared
+    trunk DID when one is assigned. A personal DID assigned to an
+    internal-tier extension is accepted but silently never rings anyone
+    until that extension is also granted full/restricted tier — both the
+    CLI and the dashboard warn about this at assignment time rather than
+    blocking it, matching this repo's general permissive-with-warnings
+    style. Caught and fixed a real bug while building this: the
+    dashboard's `write_permission()` did `cp.remove_section(ext)` when
+    tier was set to "internal", which silently discarded any
+    `messaging=yes` or `personal_did=` already on that extension — fixed
+    to remove only the tier/allowed_numbers keys, dropping the section
+    only once nothing else is left in it.
+16. Known-provider quick-pick — Done. A "1) Anveo Direct / 2) VoIP.ms /
+    3) manual" choice at the top of the provider prompts pre-fills known
+    values (Anveo Direct: `sbc.anveo.com`, the 4 published signaling IPs;
+    VoIP.ms: just the provider name) — every value stays editable at each
+    prompt, so this changes defaults only, never behavior. Extensions/
+    users remain fully independent of this service either way — they're
+    created through the base Asterisk install's own device management,
+    and `pstn-trunk.sh` only grants PSTN permissions/personal numbers to
+    extensions that already exist.
+17. **Open, unresolved**: Anveo Direct's own "Outbound Trunks" configuration
+    page documents outbound dialing as `[PREFIX]PHONENUMBER@sbc.anveo.com`
+    — a per-trunk custom prefix. This directly contradicts the earlier
+    "no dial prefix needed" finding sourced from their FAQ (see the Anveo
+    Direct provider notes above). Not resolved either way: whether the
+    Prefix field can be left blank when creating an outbound Call
+    Termination trunk in their portal. This dialplan dials the bare
+    number with no prefix, matching the FAQ-sourced finding — if the
+    Prefix field turns out to require a non-empty value, outbound calls
+    through that trunk won't match and will fail, and this installer
+    would need a `PREFIX` setting threaded into `${EXTEN}` before
+    `Dial()`. Flagged with a loud warning in the CLI's Anveo Direct
+    quick-pick rather than silently trusting the older finding. Also
+    unresolved: a Trial Anveo Direct account shows its own "$2 / 30 days"
+    spending limit and "$2 minimum account balance" in the portal —
+    unclear whether either changes once the account is verified/funded
+    beyond Trial status; this sits below and independent of anything this
+    repo's own kill-switch enforces.

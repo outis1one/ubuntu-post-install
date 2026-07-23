@@ -11,9 +11,9 @@
 # never gated by any of the above, regardless of tier — the trunk is purely
 # an additional path out to/in from the real phone network.
 #
-# Defaults to VoIP.ms (see docs/pstn-calling-voipms-plan.md for the design/
-# cost background this is built from) but isn't hardcoded to it — any SIP
-# trunk provider that supports IP authentication works the same way.
+# Provider-agnostic — any SIP trunk provider that supports IP authentication
+# works the same way. VoIP.ms and Anveo Direct are both confirmed working;
+# see docs/pstn-calling-voipms-plan.md for the design/cost background.
 #
 # Requires an existing services/asterisk-digital-ocean.sh OR services/asterisk.sh
 # install — this adds a PSTN trunk on top of one of them and does not stand
@@ -23,7 +23,7 @@
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/asterisk — US-only, per-extension permission tiers, spend/volume alerts (defaults to VoIP.ms)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/asterisk — US-only, per-extension permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
 # Easy Asterisk (the vendor project asterisk-digital-ocean.sh/asterisk.sh
@@ -306,7 +306,8 @@ exten => pstn_check_busy,1,Set(PSTN_MAX_OUT=${AST_CONFIG(pstn-limits.conf,limits
  same => n,Set(PSTN_MAX_OUT=${IF($["${PSTN_MAX_OUT}" = ""]?10:${PSTN_MAX_OUT})})
  same => n,GotoIf($[${GROUP_COUNT(pstn-out)} >= ${PSTN_MAX_OUT}]?pstn_busy,1)
  same => n,Set(GROUP()=pstn-out)
- same => n,Set(CALLERID(num)=__PSTN_DID__)
+ same => n,Set(PSTN_PERSONAL_CID=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},personal_did)})
+ same => n,Set(CALLERID(num)=${IF($["${PSTN_PERSONAL_CID}" = ""]?__PSTN_DID__:${PSTN_PERSONAL_CID})})
  same => n,Set(PSTN_START=${EPOCH})
  same => n,Dial(PJSIP/${EXTEN}@pstn-trunk,60)
  same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
@@ -340,9 +341,11 @@ EOF
     cat >> "$FILE" << 'EOF'
 
 [from-pstn-trunk]
-exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)})
+exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
+ same => n,Set(PSTN_PERSONAL_OWNER=${AST_CONFIG(pstn-personal-dids.conf,${EXTEN},owner)})
+ same => n,GotoIf($["${PSTN_PERSONAL_OWNER}" != ""]?pstn_personal_inbound,1)
  same => n,Set(PSTN_RING_LIST=)
  same => n,Set(PSTN_RING_SEP=)
 EOF
@@ -376,6 +379,29 @@ __ALERT_BUSY_IN_LINE__
 exten => pstn_in_killed,1,NoOp(PSTN trunk - spend-cap kill-switch is tripped, rejecting inbound call)
 __ALERT_KILLED_IN_LINE__
  same => n,Hangup()
+
+; Personal DID inbound routing — rings ONLY the assigned owner, gated by
+; that owner's own tier/approved-numbers (same check every ring-group
+; member gets, just for a single specific target instead of a list, and
+; with no fallback to the shared ring-group if the owner can't take this
+; call — it's their own number, not the shared line).
+exten => pstn_personal_inbound,1,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
+ same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
+ same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
+ same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${CALLERID(num)})}=1]?pstn_personal_ring,1)
+ same => n,NoOp(Denied - personal DID ${EXTEN}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
+__ALERT_DENY_PERSONAL_LINE__
+ same => n,Hangup()
+
+exten => pstn_personal_ring,1,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
+ same => n,Set(PSTN_MAX_IN=${IF($["${PSTN_MAX_IN}" = ""]?10:${PSTN_MAX_IN})})
+ same => n,GotoIf($[${GROUP_COUNT(pstn-in)} >= ${PSTN_MAX_IN}]?pstn_in_busy,1)
+ same => n,Set(GROUP()=pstn-in)
+ same => n,Set(PSTN_START=${EPOCH})
+ same => n,Dial(PJSIP/${PSTN_PERSONAL_OWNER},20)
+ same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
+ same => n,System(printf '%s|in|%s|%s|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${EXTEN}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
+ same => n,Hangup()
 EOF
 
     if [[ -n "$NTFY_URL" ]]; then
@@ -383,8 +409,9 @@ EOF
         sed -i "s#__ALERT_DENY_INBOUND_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound call rejected - caller not approved for any ring target.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_BUSY_IN_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound concurrent-call cap reached - a call was rejected.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
         sed -i "s#__ALERT_KILLED_IN_LINE__# same => n,System(curl -m 5 -s -H 'Priority: urgent' -d 'PSTN trunk: inbound call rejected - spend-cap kill-switch is tripped.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
+        sed -i "s#__ALERT_DENY_PERSONAL_LINE__# same => n,System(curl -m 5 -s -d 'PSTN trunk: inbound call to a personal DID rejected - owner not authorized for this caller.' '${_esc_url2}' >/dev/null 2>\\&1 \\&)#" "$FILE"
     else
-        sed -i "/__ALERT_DENY_INBOUND_LINE__/d; /__ALERT_BUSY_IN_LINE__/d; /__ALERT_KILLED_IN_LINE__/d" "$FILE"
+        sed -i "/__ALERT_DENY_INBOUND_LINE__/d; /__ALERT_BUSY_IN_LINE__/d; /__ALERT_KILLED_IN_LINE__/d; /__ALERT_DENY_PERSONAL_LINE__/d" "$FILE"
     fi
 }
 
@@ -411,18 +438,30 @@ _pstn_write_limits_file() {
 # ── Shared: initial permission tiers (fresh install / explicit reset only —
 # "update in place" never calls this, matching how .env/firewall/Caddy config
 # are protected elsewhere in this repo; see file-level comment above) ──────
-# Args: FILE, space-separated FULL_EXTS, space-separated MESSAGING_EXTS, then
-# "ext" "pipe|separated|numbers" pairs for each restricted extension.
+# Args: FILE, space-separated FULL_EXTS, space-separated MESSAGING_EXTS,
+# space-separated "ext=did" PERSONAL_DID_ASSIGNMENTS, then "ext"
+# "pipe|separated|numbers" pairs for each restricted extension.
 _pstn_write_permissions_file() {
-    local FILE="$1" FULL_EXTS="$2" MESSAGING_EXTS="$3"
-    shift 3
+    local FILE="$1" FULL_EXTS="$2" MESSAGING_EXTS="$3" PERSONAL_DID_ASSIGNMENTS="$4"
+    shift 4
+    local -A _personal_did_map=()
+    local _pd_token
+    for _pd_token in $PERSONAL_DID_ASSIGNMENTS; do
+        _personal_did_map["${_pd_token%%=*}"]="${_pd_token#*=}"
+    done
     local _written_exts=""
     {
-        echo "; PSTN permission tiers — internal / restricted / full — PLUS an independent"
-        echo "; 'messaging' flag for Asterisk's native internal SIP MESSAGE texting (no"
-        echo "; carrier SMS, no PSTN, no cost — a separate axis from PSTN calling, since"
-        echo "; the risk profile is different: an extension can be internal-tier for"
-        echo "; calling and still messaging-enabled, or vice versa)."
+        echo "; PSTN permission tiers — internal / restricted / full — PLUS two independent"
+        echo "; axes per extension:"
+        echo "; - 'messaging' for Asterisk's native internal SIP MESSAGE texting (no carrier"
+        echo "; SMS, no PSTN, no cost — a separate axis from PSTN calling, since the risk"
+        echo "; profile is different: an extension can be internal-tier for calling and"
+        echo "; still messaging-enabled, or vice versa)."
+        echo "; - 'personal_did' assigns this extension its own DID (see"
+        echo "; pstn-personal-dids.conf, which the dialplan reads for inbound routing —"
+        echo "; this key here is only the OUTBOUND Caller-ID override). A personal DID"
+        echo "; only actually rings anyone if its owner is also full or restricted tier —"
+        echo "; internal tier means no PSTN either way, personal DID or not."
         echo "; Read LIVE by the dialplan on every call (AST_CONFIG()) — no Asterisk"
         echo "; restart needed when this changes. Edit here directly, via the Security"
         echo "; Dashboard web UI's \"PSTN Trunk\" tab (if installed), or by re-running"
@@ -438,6 +477,7 @@ _pstn_write_permissions_file() {
             echo "[$_ext]"
             echo "tier=full"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
+            [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
             echo ""
             _written_exts="$_written_exts $_ext"
         done
@@ -448,6 +488,7 @@ _pstn_write_permissions_file() {
             echo "tier=restricted"
             echo "allowed_numbers=${_nums}"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
+            [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
             echo ""
             _written_exts="$_written_exts $_ext"
         done
@@ -455,8 +496,47 @@ _pstn_write_permissions_file() {
             if [[ " $_written_exts " != *" $_ext "* ]]; then
                 echo "[$_ext]"
                 echo "messaging=yes"
+                [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
+                echo ""
+                _written_exts="$_written_exts $_ext"
+            fi
+        done
+        for _ext in "${!_personal_did_map[@]}"; do
+            if [[ " $_written_exts " != *" $_ext "* ]]; then
+                echo "[$_ext]"
+                echo "personal_did=${_personal_did_map[$_ext]}"
                 echo ""
             fi
+        done
+    } > "$FILE"
+    chmod 664 "$FILE"
+}
+
+# ── Shared: personal DID -> owner-extension mapping (fresh install / explicit
+# reset only — same "update never touches it" protection as
+# pstn-permissions.conf). Args: FILE, then "did" "owner" pairs.
+_pstn_write_personal_dids_file() {
+    local FILE="$1"
+    shift
+    {
+        echo "; Personal DID -> owner-extension mapping. Read LIVE by the dialplan"
+        echo "; (AST_CONFIG()) on every inbound call — no restart needed. An inbound call"
+        echo "; to a DID listed here routes directly to its owner, checked against the"
+        echo "; owner's OWN tier/approved-numbers in pstn-permissions.conf — no ring-group"
+        echo "; fallback, since this is that extension's own number, not the shared line."
+        echo "; The matching outbound Caller-ID override lives in pstn-permissions.conf"
+        echo "; ('personal_did=' per extension) — kept in sync automatically whenever a"
+        echo "; DID is assigned/removed via the CLI installer or the Security Dashboard's"
+        echo "; PSTN Trunk tab, rather than hand-editing both files separately."
+        echo "; The shared trunk DID keeps working as the main/ring-group line regardless"
+        echo "; of anything assigned here."
+        echo ""
+        while [[ $# -gt 0 ]]; do
+            local _did="$1" _owner="$2"
+            shift 2
+            echo "[$_did]"
+            echo "owner=$_owner"
+            echo ""
         done
     } > "$FILE"
     chmod 664 "$FILE"
@@ -1090,16 +1170,20 @@ install_pstn-trunk() {
     local PERMISSIONS_FILE="$ASTERISK_DIR/pstn-permissions.conf"
     local LIMITS_FILE="$ASTERISK_DIR/pstn-limits.conf"
     local KILLSWITCH_FILE="$ASTERISK_DIR/pstn-trunk-killswitch.conf"
+    local PERSONAL_DIDS_FILE="$ASTERISK_DIR/pstn-personal-dids.conf"
     local SETTINGS_FILE="$EA_DIR/.pstn-trunk.env"
     local CONTAINER_NAME="easy-asterisk"
     [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
-        echo "[DRY-RUN] Would prompt for: SIP provider name (default VoIP.ms), server/POP hostname, DID,"
+        echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct/VoIP.ms pre-fill known"
+        echo "[DRY-RUN]   server/signaling-IP values; still editable) or manual entry, SIP provider name, DID,"
         echo "[DRY-RUN]   full-PSTN extensions, restricted-PSTN extensions + their approved numbers,"
         echo "[DRY-RUN]   internal SIP messaging extensions (separate from PSTN calling permission),"
-        echo "[DRY-RUN]   max concurrent outbound/inbound calls (default 10/10), inbound ring-group extensions,"
+        echo "[DRY-RUN]   optional personal-number assignments (DID -> owner extension, additive to the"
+        echo "[DRY-RUN]   shared trunk DID), max concurrent outbound/inbound calls (default 10/10),"
+        echo "[DRY-RUN]   inbound ring-group extensions,"
         echo "[DRY-RUN]   ntfy alert topic (optional), international-calling allow-list (CLI-only,"
         echo "[DRY-RUN]   always asked, never on the web dashboard), per-minute rate + monthly/hourly"
         echo "[DRY-RUN]   alert thresholds, and an optional hard monthly spend-cap kill-switch"
@@ -1133,15 +1217,17 @@ install_pstn-trunk() {
         log_warning "A static IP from your ISP avoids that; asterisk-digital-ocean sidesteps it entirely."
     fi
 
-    log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (defaults to VoIP.ms)."
+    log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (any IP-authenticated provider —"
+    log_info "VoIP.ms and Anveo Direct are both confirmed working; see docs/pstn-calling-voipms-plan.md)."
     log_info "US-only outbound (NANP dialplan), a concurrent-call cap, per-extension permission"
     log_info "tiers, an inbound ring-group, and ntfy alerts on denied/rejected calls plus"
     log_info "spend/volume checks."
     echo ""
     log_warning "Before continuing, on your provider's side you should already have: created an"
     log_warning "account, funded and set up prepaid billing with auto-recharge OFF (VoIP.ms: Client"
-    log_warning "Area -> Balance Management), ordered a DID with IP authentication pointed at this"
-    log_warning "box's public IP, and picked a server/POP. Also restrict outbound routing to"
+    log_warning "Area -> Balance Management; Anveo Direct: fund the account balance directly),"
+    log_warning "ordered a DID with IP authentication pointed at this box's public IP, and picked"
+    log_warning "a server/POP. Also restrict outbound routing to"
     log_warning "US/NANP on the provider's own side if it offers that — this dialplan is the second,"
     log_warning "independent layer, not a substitute for the first."
     log_warning "See docs/pstn-calling-voipms-plan.md for the full background."
@@ -1199,11 +1285,53 @@ install_pstn-trunk() {
 
     # ── Prompts — provider account details aren't scriptable, set up manually
     # on the provider's own site first (see warning above) ───────────────────
+    # Known-provider quick-path: only pre-fills the defaults below (still
+    # fully editable at each prompt) — doesn't change any dialplan/auth
+    # behavior, which stays provider-generic either way.
+    echo "  Known/tested providers — this only pre-fills the defaults below (server"
+    echo "  hostname, signaling IPs, account-setup reminders); every value is still"
+    echo "  editable at each prompt."
+    echo "    1) Anveo Direct"
+    echo "    2) VoIP.ms"
+    echo "    3) Something else / manual entry"
+    local _provider_choice=""
+    prompt_text "Choice (1/2/3):" "3" _provider_choice
+
+    local _default_provider_name="" _default_server="" _default_extra_ips=""
+    case "$_provider_choice" in
+        1)
+            _default_provider_name="Anveo Direct"
+            _default_server="sbc.anveo.com"
+            _default_extra_ips="169.48.232.158 204.216.109.55 176.9.39.206 72.9.149.25"
+            echo ""
+            log_info "Anveo Direct known values pre-filled below (hostname, 4 published signaling IPs)."
+            log_warning "Before continuing: create/verify your account at"
+            log_warning "  https://www.anveo.com/account.asp?account_type=direct"
+            log_warning "fund it, order a DID, and configure at least one outbound Call"
+            log_warning "Termination trunk in Anveo's own portal (Outbound Trunks page). A Trial"
+            log_warning "account shows its own \$2/30-day spend limit and \$2 minimum balance —"
+            log_warning "separate from anything this installer enforces; confirm with Anveo"
+            log_warning "support whether those change once verified/funded. Their CallerID policy"
+            log_warning "requires a verified/Anveo-owned number as Caller-ID — any DID you order"
+            log_warning "through them satisfies that automatically (see this service's personal-"
+            log_warning "number feature for assigning a specific one per extension)."
+            log_warning "UNVERIFIED: Anveo's own outbound-trunk page documents dialing as"
+            log_warning "[PREFIX]PHONENUMBER@sbc.anveo.com (a per-trunk prefix) — this contradicts"
+            log_warning "an earlier no-prefix-needed finding from their FAQ. This dialplan dials"
+            log_warning "the bare number, no prefix. Check whether your configured trunk's Prefix"
+            log_warning "field can be left blank before relying on this — if it can't, outbound"
+            log_warning "calls through that trunk won't match and will fail."
+            ;;
+        2)
+            _default_provider_name="VoIP.ms"
+            ;;
+    esac
+
     local PROVIDER_NAME=""
-    prompt_text "SIP trunk provider name (for your reference/docs only):" "VoIP.ms" PROVIDER_NAME
+    prompt_text "SIP trunk provider name (for your reference/docs only — e.g. VoIP.ms, Anveo Direct):" "$_default_provider_name" PROVIDER_NAME
 
     local TRUNK_SERVER=""
-    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms — pick the one closest to this box from your provider's server list):" "" TRUNK_SERVER
+    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms, sbc.anveo.com for Anveo Direct — pick the one closest to this box from your provider's server list):" "$_default_server" TRUNK_SERVER
     if [[ -z "$TRUNK_SERVER" ]]; then
         log_error "A server hostname is required — aborting."
         return 1
@@ -1228,7 +1356,7 @@ install_pstn-trunk() {
     # dial out to) — the resolved IP above always gets included, this just
     # adds any others the provider documents.
     local EXTRA_IPS=""
-    prompt_text "Any additional known source IPs for inbound calls, space-separated (check your provider's docs — e.g. a firewall/signaling IP list; blank if the resolved IP above is the only one):" "" EXTRA_IPS
+    prompt_text "Any additional known source IPs for inbound calls, space-separated (check your provider's docs — e.g. a firewall/signaling IP list; blank if the resolved IP above is the only one):" "$_default_extra_ips" EXTRA_IPS
     local _octet='(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
     local _ip_re="^${_octet}\\.${_octet}\\.${_octet}\\.${_octet}\$"
     local TRUNK_SERVER_IPS="$TRUNK_SERVER_IP" _ip
@@ -1317,6 +1445,48 @@ install_pstn-trunk() {
     local MESSAGING_EXTS=""
     prompt_text "Extensions allowed to use internal SIP messaging (space-separated, blank = none):" "" MESSAGING_EXTS
 
+    # ── Personal numbers — optional, additive to the shared trunk DID ──────
+    # Multiple DIDs can share this one trunk/account. Assigning one to a
+    # specific extension makes inbound calls to it ring ONLY that extension
+    # (still gated by that extension's own tier/approved-numbers — a
+    # personal DID doesn't bypass PSTN permission, it just narrows routing
+    # from "the shared ring group" to "this one owner"), and makes that
+    # extension's outbound calls show its own DID as Caller-ID instead of
+    # the shared one. The shared DID/ring-group above is unaffected either
+    # way — this is purely additive.
+    echo ""
+    echo "  Personal numbers (optional): assign specific DIDs to specific extensions."
+    echo "  Inbound calls to that DID ring only its owner; outbound calls from that"
+    echo "  extension show its own DID as Caller-ID. Requires the owner to also be"
+    echo "  full or restricted tier to actually receive anything on it."
+    local WANT_PERSONAL_DIDS=""
+    prompt_yn "Assign any personal DIDs now? (y/n):" "n" WANT_PERSONAL_DIDS
+    local PERSONAL_DID_PAIRS=() PERSONAL_DID_ASSIGNMENTS=""
+    if [[ "$WANT_PERSONAL_DIDS" =~ ^[Yy]$ ]]; then
+        local _pd_more="y"
+        while [[ "$_pd_more" =~ ^[Yy]$ ]]; do
+            local _pd_did="" _pd_owner=""
+            prompt_text "  DID (10-digit US number, digits only):" "" _pd_did
+            if [[ "$_pd_did" =~ ^[0-9]{10}$ ]]; then
+                prompt_text "  Owner extension for $_pd_did:" "" _pd_owner
+                if [[ "$_pd_owner" =~ ^[0-9]+$ ]]; then
+                    PERSONAL_DID_PAIRS+=("$_pd_did" "$_pd_owner")
+                    PERSONAL_DID_ASSIGNMENTS="${PERSONAL_DID_ASSIGNMENTS} ${_pd_owner}=${_pd_did}"
+                    if [[ " $FULL_EXTS $RESTRICTED_EXTS " != *" $_pd_owner "* ]]; then
+                        log_warning "Extension $_pd_owner isn't full/restricted tier yet — it won't actually"
+                        log_warning "receive calls on $_pd_did until you also grant it one of those tiers."
+                    fi
+                    log_success "Will assign $_pd_did to extension $_pd_owner."
+                else
+                    log_warning "Not a valid extension — skipped."
+                fi
+            else
+                log_warning "Not a valid 10-digit DID — skipped."
+            fi
+            prompt_yn "  Assign another? (y/n):" "n" _pd_more
+        done
+    fi
+
     echo ""
     local WANT_NTFY=""
     prompt_yn "Send an ntfy alert when a call is denied (permission tier/approved-number check failed) or rejected (concurrency cap hit)? (y/n):" "y" WANT_NTFY
@@ -1348,7 +1518,7 @@ install_pstn-trunk() {
     log_info "Spend/volume alert settings (used only to estimate cost and flag unusual usage —"
     log_info "not billing-accurate, just a safety net)."
     local RATE_PER_MIN=""
-    prompt_text "  Outbound per-minute rate in USD (VoIP.ms US rate is 0.01):" "0.01" RATE_PER_MIN
+    prompt_text "  Outbound per-minute rate in USD (check your provider's published rate — e.g. VoIP.ms US is ~0.01, Anveo Direct US is ~0.001):" "0.01" RATE_PER_MIN
     local MONTH_THRESHOLD=""
     prompt_text "  Alert once when estimated spend this month reaches (USD):" "10" MONTH_THRESHOLD
     local BURST_THRESHOLD=""
@@ -1383,9 +1553,10 @@ install_pstn-trunk() {
         "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
         "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "$MAX_MONTHLY_SPEND" "$CONTAINER_NAME" || return 1
 
-    _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "$MESSAGING_EXTS" "${RESTRICTED_ARGS[@]}"
+    _pstn_write_permissions_file "$PERMISSIONS_FILE" "$FULL_EXTS" "$MESSAGING_EXTS" "$PERSONAL_DID_ASSIGNMENTS" "${RESTRICTED_ARGS[@]}"
     _pstn_write_limits_file "$LIMITS_FILE" "$MAX_OUTBOUND" "$MAX_INBOUND"
     _pstn_write_killswitch_file "$KILLSWITCH_FILE"
+    _pstn_write_personal_dids_file "$PERSONAL_DIDS_FILE" "${PERSONAL_DID_PAIRS[@]}"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
 
     # No new firewall rules: the base install already opens SIP (5060/5061)
@@ -1461,9 +1632,10 @@ a strong safety net, not an absolute guarantee against any overage. See
     cat > "$DOC_FILE" << MD
 # SIP PSTN trunk (add-on to $ASTERISK_KIND)
 
-US-only outbound PSTN calling over a SIP trunk (defaults to VoIP.ms, works
-with any IP-authenticated provider), per-extension permission tiers, a
-configurable concurrent-call cap, and an inbound ring-group. See
+US-only outbound PSTN calling over a SIP trunk (any IP-authenticated
+provider — VoIP.ms and Anveo Direct both confirmed working), per-extension
+permission tiers, a configurable concurrent-call cap, and an inbound
+ring-group. See
 \`docs/pstn-calling-voipms-plan.md\` in the repo for the full design
 background, cost estimate, and toll-fraud reasoning.
 
@@ -1644,25 +1816,56 @@ Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
 no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
 tiers above — off by default, same "opt in" posture. Currently enabled for:
-${MESSAGING_EXTS:-none}.
+${MESSAGING_EXTS:-none}. Live-editable any time via the Security
+Dashboard's "PSTN Trunk" tab, in its own always-available "Internal SIP
+messaging" card — no need to re-run this installer, and no dependency on
+this trunk (or any PSTN trunk at all) being installed, unlike the
+calling-permissions table below it in that same tab.
 
-**Known gap:** this installer writes the permission flag (live-editable,
-same mechanism as the calling tiers), but the actual SIP \`MESSAGE\` routing
-dialplan wiring depends on how Easy Asterisk's own generated
-\`extensions.conf\`/\`pjsip.conf\` route inbound messages, which needs to be
-verified against a live install before it's safely automated here — shipping
-a guessed pattern risked either silently not working or interfering with
-call-routing precedence in the same \`[intercom]\` context. Treat the
-permission flag as ready for a dashboard/CLI-managed allow-list once that
-routing is confirmed, not as fully wired yet.
+**Won't show up in Easy Asterisk's own web admin, by design** — same as
+the PSTN calling tiers, this is a permission this repo layers on top,
+not an Easy Asterisk feature, so it's only manageable here or via the
+Security Dashboard.
+
+**Known gap:** the flag above is real and live-editable, but the actual
+SIP \`MESSAGE\` routing dialplan wiring — does Asterisk actually deliver/
+gate a message using this flag — depends on how Easy Asterisk's own
+generated \`extensions.conf\`/\`pjsip.conf\` route inbound messages, which
+needs to be verified against a live install before it's safely automated
+here. Shipping a guessed pattern risked either silently not working or
+interfering with call-routing precedence in the same \`[intercom]\`
+context, so it hasn't been guessed at. If you want this working end to
+end, the fastest path is checking a few things on a live box (e.g.
+whether an endpoint has \`message_context\` set, and what happens when you
+send a test SIP MESSAGE to one) so the dialplan gate can be built against
+real behavior instead of assumption — ask if you want to walk through
+that.
+
+## Personal numbers
+
+Multiple DIDs can share this one trunk/account — assign one to a specific
+extension and inbound calls to it route straight to that owner, still
+gated by the owner's own tier/approved-numbers (no ring-group fallback,
+since it's that extension's own line, not the shared one), while that
+extension's outbound calls show its own DID as Caller-ID instead of the
+shared trunk DID above. Entirely additive: the shared DID/ring-group keeps
+working for everyone regardless of what's assigned here.
+
+$([ "${#PERSONAL_DID_PAIRS[@]}" -gt 0 ] && { local _i; for ((_i=0; _i<${#PERSONAL_DID_PAIRS[@]}; _i+=2)); do echo "- \`${PERSONAL_DID_PAIRS[$_i]}\` -> extension ${PERSONAL_DID_PAIRS[$_i+1]}"; done; } || echo "None assigned yet.")
+
+Stored in \`config/asterisk/pstn-personal-dids.conf\` (DID -> owner, read live
+by the dialplan for inbound routing) and a \`personal_did=\` field per
+extension in \`pstn-permissions.conf\` (the outbound Caller-ID override) —
+both kept in sync automatically by the CLI installer and the Security
+Dashboard's "PSTN Trunk" tab, live, no restart needed.
 
 ## Managing this from a web UI
 
 If \`services/security-dashboard.sh\` is installed, its "PSTN Trunk" tab
-shows both the per-extension permission tiers and the outbound/inbound
-concurrency caps, all editable live — no restart, no reinstall. Install/
-update it any time with \`sudo ./setup.sh security-dashboard\`; it
-auto-detects this install.
+shows the per-extension permission tiers, the outbound/inbound concurrency
+caps, and personal-number assignments, all editable live — no restart, no
+reinstall. Install/update it any time with \`sudo ./setup.sh
+security-dashboard\`; it auto-detects this install.
 
 ## Manual edits
 
