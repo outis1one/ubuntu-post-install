@@ -588,6 +588,19 @@ if [[ "$found" != "1" ]]; then
     exit 1
 fi
 
+# Self-healing: the hub-original crowdsecurity/asterisk_bf /
+# asterisk_user_enum scenarios have no ASN awareness at all, so if they're
+# still enabled alongside the exempt forks above, they independently ban
+# the same traffic regardless of anything just written — the exemption
+# above would silently do nothing. crowdsec.sh's original install is
+# supposed to disable them (--force, since they're crowdsecurity/asterisk
+# collection members), but an install from before that fix shipped (or one
+# where that step failed silently) would still have them active. Re-assert
+# it on every save rather than trusting it was ever done correctly once —
+# confirmed live: an install where this step had silently failed kept
+# banning an exempted ASN under the hub-original scenario name.
+cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum --force 2>/dev/null || true
+
 if ! systemctl restart crowdsec; then
     echo "Wrote ASN list but failed to restart CrowdSec" >&2
     exit 2
@@ -646,18 +659,43 @@ TIER_RE = re.compile(r"^(internal|restricted|full)$")
 NUMBER_RE = re.compile(r"^\d{11}$")
 
 
+SECURITY_LOG_TAIL_BYTES = 2 * 1024 * 1024  # comfortably enough for 5000 lines
+
+
 def parse_security_log(limit=200):
     """Tail ASTERISK_LOG and return the most recent SecurityEvent lines,
     newest first, as dicts. Missing file / no lines -> empty list, never an
-    error — this is a convenience view, not load-bearing."""
+    error — this is a convenience view, not load-bearing.
+
+    Reads only a bounded byte window from the END of the file, not the whole
+    thing — this log is Asterisk's unrotated console/security output and can
+    grow to multiple GB. The previous version did f.readlines() (loads the
+    ENTIRE file into memory) before slicing the last 5000 lines, and this
+    tab polls every 30 seconds from the browser. Confirmed live: on a 1GB-RAM
+    droplet with a 1.4GB log file, that ballooned this "stdlib only,
+    deliberately lightweight" process to 677MB RSS / 1.8GB peak swap, which
+    left CrowdSec unable to even start (boot timeout) and contributed
+    directly to the droplet becoming unresponsive. Bounding this to a fixed
+    ~2MB window keeps memory use constant regardless of how large the log
+    file grows.
+    """
     if not ASTERISK_LOG or not os.path.isfile(ASTERISK_LOG):
         return []
     events = []
     try:
-        with open(ASTERISK_LOG, "r", errors="replace") as f:
-            lines = f.readlines()[-5000:]  # cap how much we ever scan
+        with open(ASTERISK_LOG, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - SECURITY_LOG_TAIL_BYTES)
+            f.seek(start)
+            data = f.read()
     except OSError:
         return []
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]  # first line is likely truncated mid-line
+    lines = lines[-5000:]
     for line in lines:
         if "SecurityEvent=" not in line:
             continue

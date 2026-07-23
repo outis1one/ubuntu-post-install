@@ -263,8 +263,24 @@ ASTENUM
 
                 # Disable the hub originals so they don't double-process the
                 # same events alongside the ASN-exempt forks written above.
-                sudo cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum 2>/dev/null || true
-                echo "  ✓ Wrote ASN-exempt local forks; disabled the hub originals"
+                # --force is required: these scenarios came in as part of the
+                # crowdsecurity/asterisk collection, and cscli refuses to
+                # remove/disable a collection member without it. Confirmed
+                # live: without --force this failed silently (stderr
+                # suppressed, "|| true" swallowed the non-zero exit), leaving
+                # the un-exempted hub original running side-by-side with the
+                # ASN-exempt fork the entire time — the fork's exemption
+                # never actually took effect for anyone, since the original
+                # scenario kept independently banning the same traffic with
+                # no ASN awareness at all.
+                if sudo cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum --force 2>/dev/null; then
+                    echo "  ✓ Wrote ASN-exempt local forks; disabled the hub originals"
+                else
+                    log_warning "Failed to disable the hub-original asterisk_bf/asterisk_user_enum scenarios —"
+                    log_warning "the ASN exemption below will NOT take effect until this is resolved. Run:"
+                    log_warning "  sudo cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum --force"
+                    log_warning "  sudo systemctl restart crowdsec"
+                fi
                 echo "  ℹ Exempted ASNs: $ASN_LIST — SSH/web/geo-allowlist scenarios are unaffected"
                 echo "  ℹ Edit /etc/crowdsec/scenarios/local-asterisk_*.yaml to add/remove ASNs later"
                 echo "    (then: sudo systemctl restart crowdsec)"
