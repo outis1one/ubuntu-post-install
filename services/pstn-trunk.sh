@@ -252,6 +252,14 @@ MEMBER
 # embedded-delimiter risk since every field here is digits/hostnames).
 _pstn_write_dialplan_include() {
     local FILE="$1" DID="$2" RING_EXTS="$3" NTFY_URL="$4"
+    # Dedupe: a repeated extension (typo, copy-paste, or a settings file
+    # edited by hand) would otherwise generate two identical ring<ext>/
+    # skip<ext> priority labels in the same [from-pstn-trunk] extension.
+    # Confirmed live: Asterisk doesn't error on the duplicate labels, it
+    # silently resolves Goto() to the wrong one and loops between the two
+    # blocks forever — the call never reaches the actual Dial(), and no
+    # ring/notification ever happens, with no error anywhere to point at it.
+    RING_EXTS="$(echo "$RING_EXTS" | xargs -n1 | awk '!seen[$0]++' | xargs)"
     cat > "$FILE" << 'EOF'
 ; PSTN outbound/inbound — US-only (NANP). Concurrent-call caps (both
 ; directions) AND tiered permissions (internal / restricted / full) are read
