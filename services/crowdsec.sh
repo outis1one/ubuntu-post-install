@@ -110,6 +110,41 @@ install_crowdsec() {
         return 0
     fi
 
+    # ── Existing install? Offer update-in-place instead of a full reconfigure ─
+    # Everything below (ASN exemptions, geo-allowlist, ntfy, remote LAPI) is
+    # additive/idempotent at the file level, but there was no gate at all
+    # here before — every rerun re-asked all four optional questions
+    # unconditionally, which reads as "reconfigure" rather than "update" even
+    # though nothing already-configured was actually being destroyed.
+    local _REMOTE_LAPI_PENDING=""
+    local ASK_OPTIONAL=true
+    if command -v cscli &> /dev/null; then
+        echo "  CrowdSec is already installed."
+        local CS_MODE=""
+        prompt_reinstall_mode CS_MODE 2>/dev/null || {
+            # prompt_reinstall_mode isn't defined in the standalone stub — fall
+            # back to a plain yes/no when run outside the full repo.
+            local _r=""
+            prompt_yn "  Reconfigure the optional settings below (ASN exemptions, geo-allowlist, ntfy, remote LAPI)? (y/n):" "n" _r
+            [ "$_r" = "y" ] || [ "$_r" = "Y" ] && CS_MODE="fresh" || CS_MODE="update"
+        }
+        case "$CS_MODE" in
+            update)
+                ASK_OPTIONAL=false
+                log_info "Refreshing agent/collections/acquisitions only — ASN exemptions,"
+                log_info "geo-allowlist, ntfy alerts, and remote-LAPI settings are left exactly as"
+                log_info "they are. Choose 'fresh' instead to revisit any of those."
+                ;;
+            cancel)
+                log_info "Leaving the existing CrowdSec install as-is."
+                return 0
+                ;;
+            fresh)
+                log_info "Proceeding with a full reconfigure — every optional prompt below runs again."
+                ;;
+        esac
+    fi
+
     # ── 1. Install the CrowdSec agent ────────────────────────────────────────
     if command -v cscli &> /dev/null; then
         echo "  ✓ CrowdSec is already installed"
@@ -198,7 +233,9 @@ labels:
         # the hub originals so there's no double-processing of the same events.
         echo ""
         local ASN_EXEMPT=""
-        prompt_yn "Exempt specific carrier ASNs from Asterisk brute-force bans only? (y/n):" "n" ASN_EXEMPT
+        if [ "$ASK_OPTIONAL" = true ]; then
+            prompt_yn "Exempt specific carrier ASNs from Asterisk brute-force bans only? (y/n):" "n" ASN_EXEMPT
+        fi
         if [ "$ASN_EXEMPT" = "y" ] || [ "$ASN_EXEMPT" = "Y" ]; then
             sudo cscli collections install crowdsecurity/geoip-enrich 2>/dev/null || true
             echo "  ASNs observed live: T-Mobile 21928, Starlink 14593. A carrier can operate"
@@ -295,7 +332,9 @@ ASTENUM
     echo "      https://app.crowdsec.net/"
     echo ""
     local GEO_ALLOWLIST=""
-    prompt_yn "Restrict Caddy-fronted web traffic to North America + Europe only (block every other country)? Does NOT affect SSH. (y/n):" "n" GEO_ALLOWLIST
+    if [ "$ASK_OPTIONAL" = true ]; then
+        prompt_yn "Restrict Caddy-fronted web traffic to North America + Europe only (block every other country)? Does NOT affect SSH. (y/n):" "n" GEO_ALLOWLIST
+    fi
     if [ "$GEO_ALLOWLIST" = "y" ] || [ "$GEO_ALLOWLIST" = "Y" ]; then
         echo "  Installing geoip-enrich (tags every event with a country code; no MaxMind"
         echo "  account needed — CrowdSec bundles its own redistributable GeoLite2 data)..."
@@ -353,7 +392,9 @@ labels:
     # ── 7. Optional: push ban alerts to ntfy ─────────────────────────────────
     echo ""
     local CS_NTFY=""
-    prompt_yn "Send CrowdSec ban alerts to an ntfy topic? (y/n):" "n" CS_NTFY
+    if [ "$ASK_OPTIONAL" = true ]; then
+        prompt_yn "Send CrowdSec ban alerts to an ntfy topic? (y/n):" "n" CS_NTFY
+    fi
     if [ "$CS_NTFY" = "y" ] || [ "$CS_NTFY" = "Y" ]; then
         # Prefer a locally-installed ntfy's own base-url as the default, if one
         # exists and actually looks configured (not still the placeholder
@@ -420,8 +461,10 @@ headers:
     # of every box running its own. Useful if you already have CrowdSec on
     # a homelab and don't want a second LAPI+SQLite DB on this droplet.
     echo ""
-    local USE_REMOTE_LAPI="" _REMOTE_LAPI_PENDING=""
-    prompt_yn "Point this agent at a remote/central LAPI instead of running its own (e.g. one already on a homelab)? (y/n):" "n" USE_REMOTE_LAPI
+    local USE_REMOTE_LAPI=""
+    if [ "$ASK_OPTIONAL" = true ]; then
+        prompt_yn "Point this agent at a remote/central LAPI instead of running its own (e.g. one already on a homelab)? (y/n):" "n" USE_REMOTE_LAPI
+    fi
     if [ "$USE_REMOTE_LAPI" = "y" ] || [ "$USE_REMOTE_LAPI" = "Y" ]; then
         echo ""
         echo "  This registers this machine and disables its local API server."
@@ -505,6 +548,14 @@ install. The real configuration lives under `/etc/crowdsec`.
 - Pulls **community IP reputation** blocklists so known-bad IPs are blocked
   before they ever touch your services.
 - Optionally enriches events with **geo/ASN** data for geo-blocking.
+
+## Rerunning this script
+
+Rerunning offers **update** (refreshes the agent/collections/acquisitions
+only — ASN exemptions, geo-allowlist, ntfy, and remote-LAPI settings are left
+exactly as they are) or **fresh** (revisit every optional prompt again, same
+as a first install). Nothing here is destructive either way — "fresh" only
+overwrites a setting if you actually answer its prompt differently.
 
 ## Key commands
 

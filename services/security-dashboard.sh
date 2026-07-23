@@ -141,7 +141,7 @@ install_security-dashboard() {
                 prompt_yn "Reconfigure this dashboard's Caddy protection (Authelia domain, or add/rotate an independent Basic Auth layer)? (y/n):" "n" _reconf
                 if [[ "$_reconf" =~ ^[Yy]$ ]]; then
                     _secdash_remove_caddy_block "$DASHBOARD_PORT"
-                    _secdash_configure_caddy "$DASHBOARD_PORT"
+                    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
                 fi
                 return 0
                 ;;
@@ -184,7 +184,7 @@ install_security-dashboard() {
     # _secdash_configure_caddy so "update" mode can also offer to reconfigure
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
-    _secdash_configure_caddy "$DASHBOARD_PORT"
+    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
 
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
@@ -236,7 +236,20 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   and international-calling allow-list are deliberately **not** managed
   here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
   security-sensitive than what this tab already exposes.
-- Link to the Asterisk web admin itself (doesn't embed it, just links out).
+- **Asterisk Admin** — an embedded, lazy-loaded iframe of the real Asterisk
+  web admin (only fetched the first time you open the tab), plus an
+  "open in a new tab" fallback link that's always there regardless. Only
+  shows up once an Asterisk install is detected. If a local Caddy install is
+  found for both this dashboard and the Asterisk admin's own domain, install
+  automatically patches the admin's Caddy site block from
+  `X-Frame-Options` to a `Content-Security-Policy: frame-ancestors` entry
+  naming only this dashboard's domain, so the browser actually allows the
+  frame — every other site is still refused framing exactly as before. This
+  is best-effort (it depends on matching the exact header line
+  `services/asterisk-digital-ocean.sh` itself writes, and hasn't been
+  confirmed against Authelia's own portal-framing behavior on a live
+  install) — if the tab shows a blank frame, use the fallback link and check
+  this service's own log output from install time for a manual one-line fix.
 
 ## Manage
 \`\`\`
@@ -378,7 +391,7 @@ SUDOERS
 # retroactively) using the exact same code path as a fresh install, instead
 # of hand-patching a live Caddyfile block in place.
 _secdash_configure_caddy() {
-    local DASHBOARD_PORT="$1"
+    local DASHBOARD_PORT="$1" ADMIN_URL="${2:-}"
 
     echo ""
     if ! command -v docker &>/dev/null || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
@@ -508,6 +521,66 @@ CADDYBLOCK
         if declare -f ufw_allow_from_caddy_net >/dev/null 2>&1; then
             ufw_allow_from_caddy_net "${DASHBOARD_PORT}"
         fi
+    fi
+
+    _secdash_allow_asterisk_admin_iframe "$ADMIN_URL" "$SD_DOMAIN"
+}
+
+# Best-effort: lets the dashboard's "Asterisk Admin" tab iframe-embed the
+# real Asterisk web admin, by swapping that domain's own Caddy site block
+# from X-Frame-Options to a CSP frame-ancestors entry naming ONLY this
+# dashboard's domain — every other site is still refused framing exactly as
+# before, this just relaxes it for the one origin that's supposed to embed
+# it. Best-effort because it depends on finding the exact
+# X-Frame-Options line services/asterisk-digital-ocean.sh itself generates,
+# inside a live Caddyfile it doesn't own — if that block was hand-edited
+# since, or doesn't exist yet (Asterisk installed after this dashboard, or
+# no local Caddy at all), this silently does nothing and the tab's "open in
+# a new tab" fallback link still works either way.
+_secdash_allow_asterisk_admin_iframe() {
+    local ADMIN_URL="$1" SD_DOMAIN="$2"
+    [ -n "$ADMIN_URL" ] || return 0
+    [ -n "$SD_DOMAIN" ] || return 0
+    command -v docker &>/dev/null || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$" || return 0
+
+    local ADMIN_DOMAIN="${ADMIN_URL#https://}"
+    ADMIN_DOMAIN="${ADMIN_DOMAIN#http://}"
+    local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$CADDY_FILE" ] || return 0
+    grep -q "^${ADMIN_DOMAIN} {" "$CADDY_FILE" || return 0
+
+    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$CADDY_FILE"; then
+        return 0   # already patched for this exact dashboard domain
+    fi
+
+    local CSP_LINE="        Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
+    local TMP_FILE
+    TMP_FILE="$(mktemp)"
+    awk -v domain="${ADMIN_DOMAIN} {" -v csp="$CSP_LINE" '
+        BEGIN { in_block = 0; patched = 0 }
+        index($0, domain) == 1 { in_block = 1 }
+        in_block && !patched && /X-Frame-Options/ { print csp; patched = 1; next }
+        { print }
+        in_block && /^}/ { in_block = 0 }
+    ' "$CADDY_FILE" > "$TMP_FILE"
+
+    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$TMP_FILE"; then
+        cp "$CADDY_FILE" "$CADDY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+        mv "$TMP_FILE" "$CADDY_FILE"
+        docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+        if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || docker restart caddy &>/dev/null; then
+            log_success "Asterisk web admin (${ADMIN_DOMAIN}) now allows embedding from https://${SD_DOMAIN} — the dashboard's Asterisk Admin tab should load it."
+        else
+            log_warning "Caddyfile patched, but reload/restart failed — check: docker logs caddy"
+        fi
+    else
+        rm -f "$TMP_FILE"
+        log_warning "Couldn't find an X-Frame-Options line in ${ADMIN_DOMAIN}'s Caddy block to patch —"
+        log_warning "the dashboard's Asterisk Admin tab will show a blank frame. Add this line yourself"
+        log_warning "inside that domain's 'header { }' block in $CADDY_FILE, replacing X-Frame-Options:"
+        log_warning "  Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
+        log_warning "then: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
     fi
 }
 
@@ -1433,8 +1506,8 @@ INDEX_HTML = """<!doctype html>
     <button class="tab-btn active" data-tab="security">Security Log</button>
     <button class="tab-btn" data-tab="crowdsec">CrowdSec</button>
     <button class="tab-btn" data-tab="pstn">PSTN Trunk</button>
+    <button class="tab-btn" id="asterisk-tab-btn" data-tab="asterisk" style="display:none">Asterisk Admin</button>
   </nav>
-  <a id="admin-link" href="#" target="_blank" style="display:none">Asterisk Web Admin &#8599;</a>
 </header>
 <main>
   <div id="tab-security">
@@ -1480,7 +1553,7 @@ INDEX_HTML = """<!doctype html>
     <div class="card">
       <h3 style="margin-top:0">Internal SIP messaging</h3>
       <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install.
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
       </p>
       <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
       <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
@@ -1522,7 +1595,7 @@ INDEX_HTML = """<!doctype html>
         Changes apply live, on the next call — no Asterisk restart needed.
       </p>
       <p class="muted">
-        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install — see this service's README.
+        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
       </p>
       <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th>Messaging</th><th></th></tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
@@ -1542,17 +1615,35 @@ INDEX_HTML = """<!doctype html>
     </div>
     </div>
   </div>
+  <div id="tab-asterisk" style="display:none">
+    <div class="card">
+      <p class="muted">
+        Embedded — not a copy, this is the real Asterisk web admin loaded live in a frame.
+        If it logs you in separately (its own Authelia domain, or Basic Auth), that's expected —
+        it's still a genuinely separate site under the hood.
+        <a id="admin-link-fallback" href="#" target="_blank">Open in a new tab instead &#8599;</a>
+      </p>
+      <iframe id="admin-iframe" style="width:100%;height:80vh;border:1px solid #2a2e38;border-radius:8px;background:#0f1115"></iframe>
+    </div>
+  </div>
 </main>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "crowdsec", "pstn"];
+const TABS = ["security", "crowdsec", "pstn", "asterisk"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
     if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); loadGroups(); }
+    if (btn.dataset.tab === "asterisk") {
+      // Lazy-loaded — only fetched the first time this tab is opened, not
+      // on every dashboard page load (avoids an extra login prompt/request
+      // to a separate site for people who never open this tab).
+      const frame = document.getElementById("admin-iframe");
+      if (!frame.src && adminUrl) frame.src = adminUrl;
+    }
   });
 });
 
@@ -1933,9 +2024,8 @@ async function removePersonalDid(did) {
 
 const adminUrl = "__ASTERISK_ADMIN_URL__";
 if (adminUrl) {
-  const link = document.getElementById("admin-link");
-  link.href = adminUrl;
-  link.style.display = "";
+  document.getElementById("asterisk-tab-btn").style.display = "";
+  document.getElementById("admin-link-fallback").href = adminUrl;
 }
 
 loadSecurity();

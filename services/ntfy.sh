@@ -260,12 +260,26 @@ base-url: "${NTFY_BASE_URL:-https://ntfy.example.com}"  # UPDATE to your actual 
 cache-file: /var/cache/ntfy/cache.db
 cache-duration: 12h
 auth-file: /var/cache/ntfy/auth.db
-auth-default-access: deny-all
+# read-write, not deny-all: with an auth-file present, ntfy auth-checks every
+# request, and deny-all blocks anonymous publish/subscribe on EVERY topic
+# unless you separately create a user and grant a per-topic ACL (nothing in
+# this installer, crowdsec.sh, or pstn-trunk.sh does that) — every ntfy alert
+# they curl to a topic silently 403s, and a plain phone subscription gets
+# nothing, with no visible error either side. read-write matches public
+# ntfy.sh's own model instead: anyone who knows/guesses the topic name can
+# read/publish it, so treat topic names as a shared secret (long/random for
+# anything sensitive) rather than relying on auth you'd have to wire up
+# per-script. Confirmed live: this was the actual cause of a self-hosted
+# instance never delivering alerts despite a correct topic subscription.
+auth-default-access: read-write
 behind-proxy: true
 NTFY_CFG
         [[ -n "$NTFY_BASE_URL" ]] \
             && log_info "base-url set to $NTFY_BASE_URL — update if domain changes" \
             || log_warning "base-url set to placeholder — edit config/server.yml after install"
+        log_info "auth-default-access: read-write — topics are open to anyone who knows the"
+        log_info "topic name (same model as public ntfy.sh). Use long/random topic names for"
+        log_info "anything sensitive, or lock down individual topics later with 'ntfy access'."
     fi
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$NTFY_DIR"
@@ -287,6 +301,19 @@ phone or browser.
 ## Usage
 - Send a notification: \`curl -d "Hello!" localhost:8090/mytopic\`
 - Subscribe on phone: ntfy app -> Add subscription -> localhost:8090/mytopic
+
+## Access model
+\`auth-default-access: read-write\` — anyone who knows a topic name can read
+and publish to it, same as public ntfy.sh. There's no per-script login wired
+up (crowdsec.sh, pstn-trunk.sh, etc. all just \`curl -d ... \$topic_url\` with
+no auth), so this is what makes those alerts actually arrive. Treat topic
+names as a shared secret — use long/random ones for anything sensitive — or
+lock a specific topic down individually:
+\`\`\`
+docker exec ntfy ntfy user add myuser
+docker exec ntfy ntfy access myuser mytopic read-write
+docker exec ntfy ntfy access everyone mytopic deny
+\`\`\`
 
 ## Data
 - Config: ./config (mounted to /etc/ntfy)
