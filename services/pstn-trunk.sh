@@ -1397,10 +1397,51 @@ install_pstn-trunk() {
 
     local RESTRICTED_ARGS=()
     if [[ -n "$RESTRICTED_EXTS" ]]; then
+        # Shared pool, entered once — faster than retyping the same numbers
+        # per extension when several extensions overlap. Picking per
+        # extension then uses a whiptail checklist (multi-select, toggle
+        # with space) against this pool if whiptail is available and this
+        # isn't an unattended run; otherwise falls back to typing numbers
+        # directly (or "all" for the whole pool) per extension, same as
+        # before this existed.
+        echo ""
+        echo "  Optional: enter a shared pool of approved numbers ONCE below, then pick"
+        echo "  which ones apply to each restricted extension next — instead of retyping"
+        echo "  the same numbers for every extension that shares them."
+        local MASTER_NUMS_RAW="" MASTER_NUMS=()
+        prompt_text "  Approved-numbers pool (comma/space-separated, 11-digit US numbers, e.g. '15551234567 15559876543', blank = enter per-extension instead):" "" MASTER_NUMS_RAW
+        if [[ -n "$MASTER_NUMS_RAW" ]]; then
+            local _pool_n
+            while IFS= read -r _pool_n; do
+                [[ -n "$_pool_n" ]] && MASTER_NUMS+=("$_pool_n")
+            done < <(echo "$MASTER_NUMS_RAW" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | sort -u)
+            if [[ ${#MASTER_NUMS[@]} -eq 0 ]]; then
+                log_warning "No valid 11-digit numbers found in that pool — falling back to per-extension entry."
+            else
+                log_success "Pool: ${#MASTER_NUMS[@]} number(s) — ${MASTER_NUMS[*]}"
+            fi
+        fi
+
         local _ext _raw_nums _clean_nums
         for _ext in $RESTRICTED_EXTS; do
-            prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567):" "" _raw_nums
-            _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
+            _clean_nums=""
+            if [[ ${#MASTER_NUMS[@]} -gt 0 ]] && command -v whiptail >/dev/null 2>&1 && [[ "$UNATTENDED" != true ]]; then
+                local _wt_args=() _wt_n _selected
+                for _wt_n in "${MASTER_NUMS[@]}"; do
+                    _wt_args+=("$_wt_n" "" "off")
+                done
+                _selected="$(whiptail --title "Extension $_ext" --checklist \
+                    "Approved numbers for extension $_ext (space to toggle, Enter to confirm):" \
+                    20 70 10 "${_wt_args[@]}" 3>&1 1>&2 2>&3)"
+                [[ -n "$_selected" ]] && _clean_nums="$(echo "$_selected" | tr -d '"' | tr ' ' '\n' | paste -sd'|' -)"
+            else
+                prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567, or 'all' for the whole pool above):" "" _raw_nums
+                if [[ "$_raw_nums" == "all" && ${#MASTER_NUMS[@]} -gt 0 ]]; then
+                    _clean_nums="$(printf '%s\n' "${MASTER_NUMS[@]}" | paste -sd'|' -)"
+                else
+                    _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
+                fi
+            fi
             if [[ -z "$_clean_nums" ]]; then
                 log_warning "No valid 11-digit numbers entered for $_ext — it will be restricted with an EMPTY"
                 log_warning "approved list, meaning no PSTN number can currently reach/be reached by it until"
