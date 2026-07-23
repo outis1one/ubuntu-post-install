@@ -1553,7 +1553,7 @@ INDEX_HTML = """<!doctype html>
     <div class="card">
       <h3 style="margin-top:0">Internal SIP messaging</h3>
       <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install.
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
       </p>
       <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
       <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
@@ -1595,7 +1595,7 @@ INDEX_HTML = """<!doctype html>
         Changes apply live, on the next call — no Asterisk restart needed.
       </p>
       <p class="muted">
-        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Note: this flag is live-editable here, but whether Asterisk actually delivers/gates messages using it depends on dialplan wiring not yet verified against a live install — see this service's README.
+        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
       </p>
       <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th>Messaging</th><th></th></tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
