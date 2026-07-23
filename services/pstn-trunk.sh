@@ -276,12 +276,13 @@ _pstn_write_dialplan_include() {
 ; reachable" rule, not something even a "full" tier extension can override,
 ; since "full" means "any US number," not "any NANP-shaped number."
 
-exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_AREA_CODE=${EXTEN:1:3})
  same => n,GotoIf($[${REGEX("^(242|246|264|268|284|340|345|441|473|649|658|664|670|671|684|721|758|767|784|787|809|829|849|868|869|876|939)$" ${PSTN_AREA_CODE})} = 1]?pstn_intl_blocked,1)
- same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
+ same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
+ same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
  same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_check_busy,1)
  same => n,GotoIf($["${PSTN_TIER}" = "restricted"]?pstn_check_allow_out,1)
@@ -318,10 +319,11 @@ __ALERT_KILLED_LINE__
 ; admin-entered rate (pstn-intl-allowed.conf's allowed_rates), not the flat
 ; domestic RATE — still an estimate (rates you entered, not fetched live),
 ; but no longer blended across two very different rate scales.
-exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL(peername)} to ${EXTEN})
+exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
- same => n,Set(PSTN_CALLER=${CHANNEL(peername)})
+ same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
+ same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
  same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_intl_check_country,1)
  same => n,NoOp(Denied intl - ${PSTN_CALLER} tier ${PSTN_TIER} not eligible for international calling)
