@@ -1561,8 +1561,16 @@ install_pstn-trunk() {
     echo ""
     log_info "Spend/volume alert settings (used only to estimate cost and flag unusual usage —"
     log_info "not billing-accurate, just a safety net)."
+    # Confirmed live (2026-07-23) against Anveo Direct's own "Prime" rate card
+    # (the route set selected on the outbound trunk's Custom LCR config,
+    # "Get Routes/Carriers from: All Prime Routes"): standard US-to-US
+    # domestic is $0.00388/min, billed per-second — that CSV is the actual
+    # rate an Anveo Direct Prime trunk pays, not an estimate. VoIP.ms's own
+    # rate is still an unconfirmed ballpark.
+    local _default_rate="0.01"
+    [[ "$_provider_choice" == "1" ]] && _default_rate="0.00388"
     local RATE_PER_MIN=""
-    prompt_text "  Outbound per-minute rate in USD (check your provider's published rate — e.g. VoIP.ms US is ~0.01, Anveo Direct US is ~0.001):" "0.01" RATE_PER_MIN
+    prompt_text "  Outbound per-minute rate in USD (check your provider's published rate — e.g. VoIP.ms US is ~0.01, Anveo Direct US Prime rate is 0.00388 confirmed):" "$_default_rate" RATE_PER_MIN
     local MONTH_THRESHOLD=""
     prompt_text "  Alert once when estimated spend this month reaches (USD):" "10" MONTH_THRESHOLD
     local BURST_THRESHOLD=""
