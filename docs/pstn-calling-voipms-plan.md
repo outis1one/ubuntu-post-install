@@ -416,8 +416,15 @@ generator output. Fixed by quoting every value in that heredoc.
     `messaging=yes` flag per extension in `pstn-permissions.conf`,
     independent of the PSTN calling tiers (an extension can be
     internal-tier for calling and still messaging-enabled, or vice versa),
-    prompted at install time. **Not done**: the actual dialplan wiring that
-    would make Asterisk *enforce* this flag on inbound `MESSAGE` requests.
+    prompted at install time AND now a checkbox right in the Security
+    Dashboard's PSTN Trunk permissions table (alongside tier/approved-
+    numbers) — no need to re-run the CLI installer just to change who can
+    message. Confirmed it correctly survives tier changes and personal-DID
+    assignment/removal on the same extension (this is what surfaced the
+    tier=internal section-wipe bug fixed above). **Not done**: the actual
+    dialplan wiring that would make Asterisk *enforce* this flag on
+    inbound `MESSAGE` requests — this flag currently does nothing at the
+    Asterisk level yet, it's groundwork.
     Reasoned through but deliberately not shipped: Easy Asterisk dispatches
     messages through the same `[intercom]` context calls use (no
     `message_context` override), and whether a hand-written pattern there

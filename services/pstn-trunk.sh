@@ -1816,17 +1816,29 @@ Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
 no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
 tiers above — off by default, same "opt in" posture. Currently enabled for:
-${MESSAGING_EXTS:-none}.
+${MESSAGING_EXTS:-none}. Live-editable any time via the Security
+Dashboard's "PSTN Trunk" tab (a checkbox per extension, right in the same
+table as the calling tiers) — no need to re-run this installer just to
+change who can message.
 
-**Known gap:** this installer writes the permission flag (live-editable,
-same mechanism as the calling tiers), but the actual SIP \`MESSAGE\` routing
-dialplan wiring depends on how Easy Asterisk's own generated
-\`extensions.conf\`/\`pjsip.conf\` route inbound messages, which needs to be
-verified against a live install before it's safely automated here — shipping
-a guessed pattern risked either silently not working or interfering with
-call-routing precedence in the same \`[intercom]\` context. Treat the
-permission flag as ready for a dashboard/CLI-managed allow-list once that
-routing is confirmed, not as fully wired yet.
+**Won't show up in Easy Asterisk's own web admin, by design** — same as
+the PSTN calling tiers, this is a permission this repo layers on top,
+not an Easy Asterisk feature, so it's only manageable here or via the
+Security Dashboard.
+
+**Known gap:** the flag above is real and live-editable, but the actual
+SIP \`MESSAGE\` routing dialplan wiring — does Asterisk actually deliver/
+gate a message using this flag — depends on how Easy Asterisk's own
+generated \`extensions.conf\`/\`pjsip.conf\` route inbound messages, which
+needs to be verified against a live install before it's safely automated
+here. Shipping a guessed pattern risked either silently not working or
+interfering with call-routing precedence in the same \`[intercom]\`
+context, so it hasn't been guessed at. If you want this working end to
+end, the fastest path is checking a few things on a live box (e.g.
+whether an endpoint has \`message_context\` set, and what happens when you
+send a test SIP MESSAGE to one) so the dialplan gate can be built against
+real behavior instead of assumption — ask if you want to walk through
+that.
 
 ## Personal numbers
 
