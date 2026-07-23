@@ -588,6 +588,19 @@ if [[ "$found" != "1" ]]; then
     exit 1
 fi
 
+# Self-healing: the hub-original crowdsecurity/asterisk_bf /
+# asterisk_user_enum scenarios have no ASN awareness at all, so if they're
+# still enabled alongside the exempt forks above, they independently ban
+# the same traffic regardless of anything just written — the exemption
+# above would silently do nothing. crowdsec.sh's original install is
+# supposed to disable them (--force, since they're crowdsecurity/asterisk
+# collection members), but an install from before that fix shipped (or one
+# where that step failed silently) would still have them active. Re-assert
+# it on every save rather than trusting it was ever done correctly once —
+# confirmed live: an install where this step had silently failed kept
+# banning an exempted ASN under the hub-original scenario name.
+cscli scenarios remove crowdsecurity/asterisk_bf crowdsecurity/asterisk_user_enum --force 2>/dev/null || true
+
 if ! systemctl restart crowdsec; then
     echo "Wrote ASN list but failed to restart CrowdSec" >&2
     exit 2
