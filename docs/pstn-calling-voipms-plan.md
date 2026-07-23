@@ -174,7 +174,7 @@ separately from that hourly check.
   server hostname, and DID are all prompted at install time (VoIP.ms is only
   the suggested default), so any provider supporting IP auth works.
 - An outbound dialplan route matching US numbers only — **implemented**:
-  `_1NXXNXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXX` (10-digit,
+  `_1NXXNXXXXXX` (11-digit NANP with leading 1) and `_NXXNXXXXXX` (10-digit,
   auto-prefixed with 1), both routed to the trunk. No catch-all `_X.`
   pattern. **Also implemented**: an explicit block on the 27 NANP area
   codes that aren't actually US (Caribbean/Atlantic nations + US
@@ -331,10 +331,20 @@ generator output. Fixed by quoting every value in that heredoc.
 1. ~~Decide: new `services/pstn-trunk.sh`...~~ Done — separate service file,
    generalized to any IP-auth SIP provider (VoIP.ms is just the default).
 2. ~~IP auth vs. registration~~ Done — IP authentication, no password stored.
-3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXX` / `_NXXNXXXXX`. ~~NANP
+3. ~~Exact NANP dial pattern(s)~~ Done — `_1NXXNXXXXXX` / `_NXXNXXXXXX`. ~~NANP
    ≠ US gap~~ Done — 27 Caribbean/territory area codes explicitly blocked
    (see toll-fraud nuance above); this was a real, live gap in the design
    for a while, not a hypothetical.
+   **Real bug, confirmed live (2026-07-23):** both patterns shipped one
+   digit short (`_1NXXNXXXXX` / `_NXXNXXXXX` — 10/9 characters instead of
+   the correct 11/10), so Asterisk's exact-length pattern matching never
+   matched a real NANP number at all. Every outbound test call failed with
+   "extension not found in context 'intercom'" — looked exactly like a
+   config-loading problem (and several genuinely were, along the way: a
+   stale settings file, the #include never reaching the live config) but
+   the actual root cause underneath all of that was this one missing `X`.
+   Found by dumping `dialplan show intercom` and counting characters by
+   hand against a real dialed number, not by inspection alone.
 4. ~~Inbound~~ Done — rings a configurable list of extensions (ring-group
    supported), each checked live per-call against its own tier. ~~Permission
    model~~ Done — superseded the original flat allow-list with a 3-tier
