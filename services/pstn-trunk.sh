@@ -1288,13 +1288,28 @@ install_pstn-trunk() {
         case "$REINSTALL_MODE" in
             update)
                 if [[ -f "$SETTINGS_FILE" ]]; then
+                    # Guard against a malformed/legacy settings file crashing the
+                    # whole install under setup.sh's `set -u` — this file is
+                    # machine-generated and should only ever hold plain
+                    # KEY="value" assignments, but confirmed live: an older/
+                    # partially-written copy can leave a stray unexpanded
+                    # reference behind, and nounset treats any unset-variable
+                    # reference on `source` as fatal, killing the entire script.
+                    set +u
                     # shellcheck disable=SC1090
                     source "$SETTINGS_FILE"
+                    set -u
+                    if [[ -z "${TRUNK_SERVER:-}" || -z "${TRUNK_DID:-}" ]]; then
+                        log_error "$SETTINGS_FILE is missing required values (TRUNK_SERVER/TRUNK_DID) —"
+                        log_error "it may be from an older or corrupted version. Re-run and choose FRESH"
+                        log_error "reinstall, or fix $SETTINGS_FILE by hand first."
+                        return 1
+                    fi
                     _pstn_check_killswitch_clear "$ASTERISK_DIR"
                     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
-                        "$TRUNK_SERVER" "$TRUNK_SERVER_IPS" "$TRUNK_DID" \
-                        "$RING_EXTS" "$NTFY_URL" "$RATE_PER_MIN" \
-                        "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$PROVIDER_NAME" "${MAX_MONTHLY_SPEND:-0}" "$CONTAINER_NAME" || return 1
+                        "$TRUNK_SERVER" "${TRUNK_SERVER_IPS:-}" "$TRUNK_DID" \
+                        "${RING_EXTS:-}" "${NTFY_URL:-}" "${RATE_PER_MIN:-0.01}" \
+                        "${MONTH_THRESHOLD:-10}" "${BURST_THRESHOLD:-10}" "${PROVIDER_NAME:-unknown}" "${MAX_MONTHLY_SPEND:-0}" "${CONTAINER_NAME:-easy-asterisk-do}" || return 1
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
                         && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
