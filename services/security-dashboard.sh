@@ -1606,7 +1606,7 @@ INDEX_HTML = """<!doctype html>
         Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. The shared DID/ring-group keeps working regardless.
       </p>
       <div class="row">
-        <input type="text" id="pd-did" placeholder="DID, e.g. 15551234567" style="width:12rem">
+        <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits, no leading 1)" style="width:12rem">
         <select id="pd-owner"></select>
         <button class="action" id="pd-save">Assign</button>
       </div>
