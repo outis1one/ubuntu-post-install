@@ -1380,20 +1380,20 @@ install_pstn-trunk() {
 
     # ── Permission tiers ───────────────────────────────────────────────────
     echo ""
-    echo "  Three tiers, per extension:"
+    echo "  Three PSTN permission tiers. Below, you'll enter EXTENSION NUMBERS at each"
+    echo "  prompt (e.g. 999, 213) — never the tier name itself:"
     echo "    internal   — call/receive other Asterisk extensions + internal ring"
-    echo "                 groups only. No PSTN at all. Default for anything not"
-    echo "                 listed below."
+    echo "                 groups only. No PSTN at all. The default for any extension"
+    echo "                 not entered at either prompt below — nothing to type for it."
     echo "    restricted — internal, PLUS call/receive ONLY pre-approved US numbers."
     echo "    full       — internal, PLUS call/receive ANY US number."
-    echo "  These are managed LIVE after install (pstn-permissions.conf) — via the"
-    echo "  Security Dashboard web UI if installed, or by hand — with no restart or"
-    echo "  reinstall needed to change them later."
+    echo "  Live-editable after install (pstn-permissions.conf) — via the Security"
+    echo "  Dashboard web UI if installed, or by hand — no restart/reinstall needed."
     local FULL_EXTS=""
-    prompt_text "Full-PSTN extensions (space-separated, blank = none):" "" FULL_EXTS
+    prompt_text "Extension NUMBERS to grant FULL PSTN access (space-separated, e.g. '999 213', blank = none):" "" FULL_EXTS
 
     local RESTRICTED_EXTS=""
-    prompt_text "Restricted-PSTN extensions (space-separated, blank = none):" "" RESTRICTED_EXTS
+    prompt_text "Extension NUMBERS to grant RESTRICTED PSTN access (space-separated, e.g. '301', blank = none):" "" RESTRICTED_EXTS
 
     local RESTRICTED_ARGS=()
     if [[ -n "$RESTRICTED_EXTS" ]]; then
