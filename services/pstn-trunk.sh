@@ -1224,14 +1224,13 @@ install_pstn-trunk() {
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
         echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct/VoIP.ms pre-fill known"
         echo "[DRY-RUN]   server/signaling-IP values; still editable) or manual entry, SIP provider name, DID,"
-        echo "[DRY-RUN]   full-PSTN extensions, restricted-PSTN extensions + their approved numbers,"
-        echo "[DRY-RUN]   internal SIP messaging extensions (separate from PSTN calling permission),"
-        echo "[DRY-RUN]   optional personal-number assignments (DID -> owner extension, additive to the"
-        echo "[DRY-RUN]   shared trunk DID), max concurrent outbound/inbound calls (default 10/10),"
-        echo "[DRY-RUN]   inbound ring-group extensions,"
+        echo "[DRY-RUN]   max concurrent outbound/inbound calls (default 10/10), inbound ring-group extensions,"
         echo "[DRY-RUN]   ntfy alert topic (optional), international-calling allow-list (CLI-only,"
         echo "[DRY-RUN]   always asked, never on the web dashboard), per-minute rate + monthly/hourly"
         echo "[DRY-RUN]   alert thresholds, and an optional hard monthly spend-cap kill-switch"
+        echo "[DRY-RUN] Would NOT prompt for who can call/be called, messaging, or personal numbers —"
+        echo "[DRY-RUN]   all managed live via the Security Dashboard's PSTN Trunk tab instead; every"
+        echo "[DRY-RUN]   extension defaults to 'internal' (no PSTN, no messaging) until granted there"
         echo "[DRY-RUN] Would resolve the server hostname to an IP, plus prompt for any additional"
         echo "[DRY-RUN]   known source IPs (some providers publish a fixed list), for inbound call matching"
         echo "[DRY-RUN] Would patch vendor generator functions to #include the trunk config"
@@ -1427,78 +1426,25 @@ install_pstn-trunk() {
         return 1
     fi
 
-    # ── Permission tiers ───────────────────────────────────────────────────
+    # ── Permission tiers, messaging, personal numbers — all managed via the
+    # Security Dashboard, not prompted here ────────────────────────────────
+    # This used to prompt for full/restricted extensions, approved numbers,
+    # messaging extensions, and personal-DID assignments right here at
+    # install time. All four are live-editable, no-restart-needed settings
+    # in pstn-permissions.conf / pstn-personal-dids.conf that the Security
+    # Dashboard's PSTN Trunk tab already manages end to end — duplicating
+    # that as a wall of CLI prompts (that you'd then have to redo via a full
+    # reinstall to change) added friction the dashboard already solves
+    # better. Every extension defaults to "internal" (no PSTN, no
+    # messaging, no personal number) until granted otherwise there.
     echo ""
-    echo "  Three PSTN permission tiers. Below, you'll enter EXTENSION NUMBERS at each"
-    echo "  prompt (e.g. 999, 213) — never the tier name itself:"
-    echo "    internal   — call/receive other Asterisk extensions + internal ring"
-    echo "                 groups only. No PSTN at all. The default for any extension"
-    echo "                 not entered at either prompt below — nothing to type for it."
-    echo "    restricted — internal, PLUS call/receive ONLY pre-approved US numbers."
-    echo "    full       — internal, PLUS call/receive ANY US number."
-    echo "  Live-editable after install (pstn-permissions.conf) — via the Security"
-    echo "  Dashboard web UI if installed, or by hand — no restart/reinstall needed."
-    local FULL_EXTS=""
-    prompt_text "Extension NUMBERS to grant FULL PSTN access (space-separated, e.g. '999 213', blank = none):" "" FULL_EXTS
-
-    local RESTRICTED_EXTS=""
-    prompt_text "Extension NUMBERS to grant RESTRICTED PSTN access (space-separated, e.g. '301', blank = none):" "" RESTRICTED_EXTS
-
-    local RESTRICTED_ARGS=()
-    if [[ -n "$RESTRICTED_EXTS" ]]; then
-        # Shared pool, entered once — faster than retyping the same numbers
-        # per extension when several extensions overlap. Picking per
-        # extension then uses a whiptail checklist (multi-select, toggle
-        # with space) against this pool if whiptail is available and this
-        # isn't an unattended run; otherwise falls back to typing numbers
-        # directly (or "all" for the whole pool) per extension, same as
-        # before this existed.
-        echo ""
-        echo "  Optional: enter a shared pool of approved numbers ONCE below, then pick"
-        echo "  which ones apply to each restricted extension next — instead of retyping"
-        echo "  the same numbers for every extension that shares them."
-        local MASTER_NUMS_RAW="" MASTER_NUMS=()
-        prompt_text "  Approved-numbers pool (comma/space-separated, 11-digit US numbers, e.g. '15551234567 15559876543', blank = enter per-extension instead):" "" MASTER_NUMS_RAW
-        if [[ -n "$MASTER_NUMS_RAW" ]]; then
-            local _pool_n
-            while IFS= read -r _pool_n; do
-                [[ -n "$_pool_n" ]] && MASTER_NUMS+=("$_pool_n")
-            done < <(echo "$MASTER_NUMS_RAW" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | sort -u)
-            if [[ ${#MASTER_NUMS[@]} -eq 0 ]]; then
-                log_warning "No valid 11-digit numbers found in that pool — falling back to per-extension entry."
-            else
-                log_success "Pool: ${#MASTER_NUMS[@]} number(s) — ${MASTER_NUMS[*]}"
-            fi
-        fi
-
-        local _ext _raw_nums _clean_nums
-        for _ext in $RESTRICTED_EXTS; do
-            _clean_nums=""
-            if [[ ${#MASTER_NUMS[@]} -gt 0 ]] && command -v whiptail >/dev/null 2>&1 && [[ "$UNATTENDED" != true ]]; then
-                local _wt_args=() _wt_n _selected
-                for _wt_n in "${MASTER_NUMS[@]}"; do
-                    _wt_args+=("$_wt_n" "" "off")
-                done
-                _selected="$(whiptail --title "Extension $_ext" --checklist \
-                    "Approved numbers for extension $_ext (space to toggle, Enter to confirm):" \
-                    20 70 10 "${_wt_args[@]}" 3>&1 1>&2 2>&3)"
-                [[ -n "$_selected" ]] && _clean_nums="$(echo "$_selected" | tr -d '"' | tr ' ' '\n' | paste -sd'|' -)"
-            else
-                prompt_text "  Approved numbers for extension $_ext (comma/space-separated, 11-digit US numbers, e.g. 15551234567, or 'all' for the whole pool above):" "" _raw_nums
-                if [[ "$_raw_nums" == "all" && ${#MASTER_NUMS[@]} -gt 0 ]]; then
-                    _clean_nums="$(printf '%s\n' "${MASTER_NUMS[@]}" | paste -sd'|' -)"
-                else
-                    _clean_nums="$(echo "$_raw_nums" | tr ', ' '\n\n' | grep -E '^[0-9]{11}$' | paste -sd'|' - 2>/dev/null)"
-                fi
-            fi
-            if [[ -z "$_clean_nums" ]]; then
-                log_warning "No valid 11-digit numbers entered for $_ext — it will be restricted with an EMPTY"
-                log_warning "approved list, meaning no PSTN number can currently reach/be reached by it until"
-                log_warning "you add some (via the Security Dashboard or by editing pstn-permissions.conf)."
-            fi
-            RESTRICTED_ARGS+=("$_ext" "$_clean_nums")
-        done
-    fi
+    log_info "Who can call/be called, internal SIP messaging, and personal numbers are"
+    log_info "all managed from the Security Dashboard's PSTN Trunk tab (not here) — install"
+    log_info "it if you haven't: sudo ./setup.sh security-dashboard. Every extension starts"
+    log_info "at 'internal' (no PSTN, no messaging) until you grant it there; changes apply"
+    log_info "live, no restart or reinstall needed."
+    local FULL_EXTS="" RESTRICTED_EXTS="" RESTRICTED_ARGS=()
+    local MESSAGING_EXTS="" PERSONAL_DID_PAIRS=() PERSONAL_DID_ASSIGNMENTS=""
 
     echo ""
     echo "  Concurrent-call caps (both directions) are also live — changeable later via"
@@ -1516,68 +1462,11 @@ install_pstn-trunk() {
         MAX_INBOUND=10
     fi
 
-    local _suggested_ring
-    _suggested_ring="$(echo "$FULL_EXTS $RESTRICTED_EXTS" | xargs)"
     local RING_EXTS=""
-    prompt_text "Extensions to ring for inbound PSTN calls (space-separated — one, or several for a ring group; only full/restricted-tier members will actually ring):" "$_suggested_ring" RING_EXTS
+    prompt_text "Extensions to ring for inbound PSTN calls (space-separated — one, or several for a ring group; only full/restricted-tier members will actually ring, once granted via the dashboard):" "" RING_EXTS
     if [[ -z "$RING_EXTS" ]]; then
         log_error "At least one extension is required for inbound routing — aborting."
         return 1
-    fi
-
-    # ── Internal SIP messaging — a separate axis from PSTN calling ─────────
-    # Asterisk's native SIP MESSAGE (extension-to-extension texting) has no
-    # cost/carrier involvement at all, unlike PSTN calling, so it gets its
-    # own independent flag in pstn-permissions.conf rather than being folded
-    # into the internal/restricted/full tiers above — an extension can be
-    # "internal" for calling (no PSTN) and still messaging-enabled, or vice
-    # versa. Off by default, same "opt in" posture as PSTN access.
-    echo ""
-    echo "  Asterisk also supports native SIP texting between extensions (no carrier"
-    echo "  SMS, no PSTN, no cost) — a separate permission from PSTN calling above."
-    local MESSAGING_EXTS=""
-    prompt_text "Extensions allowed to use internal SIP messaging (space-separated, blank = none):" "" MESSAGING_EXTS
-
-    # ── Personal numbers — optional, additive to the shared trunk DID ──────
-    # Multiple DIDs can share this one trunk/account. Assigning one to a
-    # specific extension makes inbound calls to it ring ONLY that extension
-    # (still gated by that extension's own tier/approved-numbers — a
-    # personal DID doesn't bypass PSTN permission, it just narrows routing
-    # from "the shared ring group" to "this one owner"), and makes that
-    # extension's outbound calls show its own DID as Caller-ID instead of
-    # the shared one. The shared DID/ring-group above is unaffected either
-    # way — this is purely additive.
-    echo ""
-    echo "  Personal numbers (optional): assign specific DIDs to specific extensions."
-    echo "  Inbound calls to that DID ring only its owner; outbound calls from that"
-    echo "  extension show its own DID as Caller-ID. Requires the owner to also be"
-    echo "  full or restricted tier to actually receive anything on it."
-    local WANT_PERSONAL_DIDS=""
-    prompt_yn "Assign any personal DIDs now? (y/n):" "n" WANT_PERSONAL_DIDS
-    local PERSONAL_DID_PAIRS=() PERSONAL_DID_ASSIGNMENTS=""
-    if [[ "$WANT_PERSONAL_DIDS" =~ ^[Yy]$ ]]; then
-        local _pd_more="y"
-        while [[ "$_pd_more" =~ ^[Yy]$ ]]; do
-            local _pd_did="" _pd_owner=""
-            prompt_text "  DID (10-digit US number, digits only):" "" _pd_did
-            if [[ "$_pd_did" =~ ^[0-9]{10}$ ]]; then
-                prompt_text "  Owner extension for $_pd_did:" "" _pd_owner
-                if [[ "$_pd_owner" =~ ^[0-9]+$ ]]; then
-                    PERSONAL_DID_PAIRS+=("$_pd_did" "$_pd_owner")
-                    PERSONAL_DID_ASSIGNMENTS="${PERSONAL_DID_ASSIGNMENTS} ${_pd_owner}=${_pd_did}"
-                    if [[ " $FULL_EXTS $RESTRICTED_EXTS " != *" $_pd_owner "* ]]; then
-                        log_warning "Extension $_pd_owner isn't full/restricted tier yet — it won't actually"
-                        log_warning "receive calls on $_pd_did until you also grant it one of those tiers."
-                    fi
-                    log_success "Will assign $_pd_did to extension $_pd_owner."
-                else
-                    log_warning "Not a valid extension — skipped."
-                fi
-            else
-                log_warning "Not a valid 10-digit DID — skipped."
-            fi
-            prompt_yn "  Assign another? (y/n):" "n" _pd_more
-        done
     fi
 
     echo ""
@@ -1748,11 +1637,9 @@ background, cost estimate, and toll-fraud reasoning.
 | Server/POP | ${TRUNK_SERVER} (inbound match IPs: ${TRUNK_SERVER_IPS}) |
 | DID | ${TRUNK_DID} |
 | Outbound scope | US/NANP only — \`_1NXXNXXXXX\` / \`_NXXNXXXXX\` patterns, no catch-all, minus 27 non-US/premium NANP area codes (see below) |
-| Full-PSTN extensions | ${FULL_EXTS:-none} |
-| Restricted-PSTN extensions | ${RESTRICTED_EXTS:-none} |
+| Permission tiers, messaging, personal numbers | Managed live via the Security Dashboard's PSTN Trunk tab — not set at install, so not shown here (this file isn't regenerated when you change them there). Everyone starts at \`internal\` (no PSTN, no messaging) until granted. |
 | Concurrency caps | ${MAX_OUTBOUND} outbound / ${MAX_INBOUND} inbound simultaneous calls (live — see \`pstn-limits.conf\` below) |
 | Inbound ring-group | ${RING_EXTS} |
-| Internal SIP messaging extensions | ${MESSAGING_EXTS:-none} (separate from PSTN calling permission — see below) |
 | ntfy alerts | ${NTFY_URL:-disabled} |
 | Estimated rate | \$${RATE_PER_MIN}/min |
 | Monthly spend alert threshold | \$${MONTH_THRESHOLD} |
@@ -1916,31 +1803,19 @@ permission tiers.
 Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
 no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
-tiers above — off by default, same "opt in" posture. Currently enabled for:
-${MESSAGING_EXTS:-none}. Live-editable any time via the Security
-Dashboard's "PSTN Trunk" tab, in its own always-available "Internal SIP
-messaging" card — no need to re-run this installer, and no dependency on
-this trunk (or any PSTN trunk at all) being installed, unlike the
-calling-permissions table below it in that same tab.
+tiers above — off by default, same "opt in" posture. Live-editable any
+time via the Security Dashboard's "PSTN Trunk" tab, in its own
+always-available "Internal SIP messaging" card — no dependency on this
+trunk (or any PSTN trunk at all) being installed.
 
-**Won't show up in Easy Asterisk's own web admin, by design** — same as
-the PSTN calling tiers, this is a permission this repo layers on top,
-not an Easy Asterisk feature, so it's only manageable here or via the
-Security Dashboard.
-
-**Known gap:** the flag above is real and live-editable, but the actual
-SIP \`MESSAGE\` routing dialplan wiring — does Asterisk actually deliver/
-gate a message using this flag — depends on how Easy Asterisk's own
-generated \`extensions.conf\`/\`pjsip.conf\` route inbound messages, which
-needs to be verified against a live install before it's safely automated
-here. Shipping a guessed pattern risked either silently not working or
-interfering with call-routing precedence in the same \`[intercom]\`
-context, so it hasn't been guessed at. If you want this working end to
-end, the fastest path is checking a few things on a live box (e.g.
-whether an endpoint has \`message_context\` set, and what happens when you
-send a test SIP MESSAGE to one) so the dialplan gate can be built against
-real behavior instead of assumption — ask if you want to walk through
-that.
+Actually enforced, not just a flag — \`services/asterisk-digital-ocean.sh\`
+(and \`services/asterisk.sh\` for the LAN edition) routes messages through a
+dedicated \`[sip-messaging]\` dialplan context (separate from \`[intercom]\`'s
+own per-device call routing, so there's no collision risk) and checks this
+same flag via \`AST_CONFIG()\` before delivering. One caveat still flagged
+rather than papered over: the \`MESSAGE(from)\` sender-extraction hasn't
+been confirmed against real MESSAGE traffic on a live install — it fails
+closed (denies) if it ever parses wrong, but worth a live test.
 
 ## Personal numbers
 
@@ -2026,10 +1901,12 @@ MD
     echo "  DID:                   $TRUNK_DID"
     echo "  Outbound:              US/NANP only, max $MAX_OUTBOUND concurrent calls"
     echo "  Inbound:               max $MAX_INBOUND concurrent calls"
-    echo "  Full-PSTN extensions:  ${FULL_EXTS:-none}"
-    echo "  Restricted extensions: ${RESTRICTED_EXTS:-none}"
     echo "  Inbound ring-group:    $RING_EXTS"
     echo "  ntfy alerts:           ${NTFY_URL:-disabled}"
     echo "  Docs:                  $DOC_FILE"
+    echo ""
+    log_info "Everyone's at 'internal' tier (no PSTN, no messaging) until you grant access"
+    log_info "via the Security Dashboard's PSTN Trunk tab — sudo ./setup.sh security-dashboard"
+    log_info "if it isn't installed yet."
     echo ""
 }
