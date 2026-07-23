@@ -270,6 +270,29 @@ _asterisk_do_refresh_vendor_files() {
     fi
 }
 
+# ── Shared: log rotation for logs/full (unbounded otherwise) ──────────────
+# Confirmed live: with no rotation, this file grew to 1.4GB in about 3 days
+# on a busy box (SIP scanning noise is constant on the public internet) —
+# a real disk-exhaustion risk on a small droplet, and separately made the
+# Security Dashboard balloon to 600+MB RAM/GBs of swap reading it every 30s
+# before that was fixed to only read a bounded tail (see
+# services/security-dashboard.sh). copytruncate avoids needing to signal
+# Asterisk to reopen its log file — it has a long-held file descriptor on
+# this path and no reload mechanism this installer can reach from the host.
+_asterisk_do_write_logrotate() {
+    local _ea_dir="$1"
+    cat > /etc/logrotate.d/asterisk-digital-ocean << LOGROTATE
+$_ea_dir/logs/full {
+    size 100M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE
+}
+
 # ── Shared: docker-compose.yml ─────────────────────────────────────────────
 # Same reasoning as above — one copy of the template used by both fresh
 # installs and updates. Must be called with $PWD already at $EA_DIR.
@@ -379,6 +402,7 @@ install_asterisk-digital-ocean() {
 
                 _asterisk_do_refresh_vendor_files
                 _asterisk_do_write_compose
+                _asterisk_do_write_logrotate "$EA_DIR"
 
                 log_info "Rebuilding and restarting containers..."
                 if docker compose up -d --build --force-recreate; then
@@ -447,6 +471,7 @@ install_asterisk-digital-ocean() {
     cd "$EA_DIR" || return 1
 
     _asterisk_do_refresh_vendor_files
+    _asterisk_do_write_logrotate "$EA_DIR"
 
     # ── DigitalOcean droplet detection ────────────────────────────────────────
     # A droplet's own public IP/ID are readable, unauthenticated, from the
