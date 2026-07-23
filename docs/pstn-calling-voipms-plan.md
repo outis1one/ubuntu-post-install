@@ -504,3 +504,30 @@ generator output. Fixed by quoting every value in that heredoc.
     `messaging=yes` or `personal_did=` already on that extension — fixed
     to remove only the tier/allowed_numbers keys, dropping the section
     only once nothing else is left in it.
+16. Known-provider quick-pick — Done. A "1) Anveo Direct / 2) VoIP.ms /
+    3) manual" choice at the top of the provider prompts pre-fills known
+    values (Anveo Direct: `sbc.anveo.com`, the 4 published signaling IPs;
+    VoIP.ms: just the provider name) — every value stays editable at each
+    prompt, so this changes defaults only, never behavior. Extensions/
+    users remain fully independent of this service either way — they're
+    created through the base Asterisk install's own device management,
+    and `pstn-trunk.sh` only grants PSTN permissions/personal numbers to
+    extensions that already exist.
+17. **Open, unresolved**: Anveo Direct's own "Outbound Trunks" configuration
+    page documents outbound dialing as `[PREFIX]PHONENUMBER@sbc.anveo.com`
+    — a per-trunk custom prefix. This directly contradicts the earlier
+    "no dial prefix needed" finding sourced from their FAQ (see the Anveo
+    Direct provider notes above). Not resolved either way: whether the
+    Prefix field can be left blank when creating an outbound Call
+    Termination trunk in their portal. This dialplan dials the bare
+    number with no prefix, matching the FAQ-sourced finding — if the
+    Prefix field turns out to require a non-empty value, outbound calls
+    through that trunk won't match and will fail, and this installer
+    would need a `PREFIX` setting threaded into `${EXTEN}` before
+    `Dial()`. Flagged with a loud warning in the CLI's Anveo Direct
+    quick-pick rather than silently trusting the older finding. Also
+    unresolved: a Trial Anveo Direct account shows its own "$2 / 30 days"
+    spending limit and "$2 minimum account balance" in the portal —
+    unclear whether either changes once the account is verified/funded
+    beyond Trial status; this sits below and independent of anything this
+    repo's own kill-switch enforces.

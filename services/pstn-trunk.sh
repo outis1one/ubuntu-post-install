@@ -1177,10 +1177,13 @@ install_pstn-trunk() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
-        echo "[DRY-RUN] Would prompt for: SIP provider name (any IP-authenticated provider), server/POP hostname, DID,"
+        echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct/VoIP.ms pre-fill known"
+        echo "[DRY-RUN]   server/signaling-IP values; still editable) or manual entry, SIP provider name, DID,"
         echo "[DRY-RUN]   full-PSTN extensions, restricted-PSTN extensions + their approved numbers,"
         echo "[DRY-RUN]   internal SIP messaging extensions (separate from PSTN calling permission),"
-        echo "[DRY-RUN]   max concurrent outbound/inbound calls (default 10/10), inbound ring-group extensions,"
+        echo "[DRY-RUN]   optional personal-number assignments (DID -> owner extension, additive to the"
+        echo "[DRY-RUN]   shared trunk DID), max concurrent outbound/inbound calls (default 10/10),"
+        echo "[DRY-RUN]   inbound ring-group extensions,"
         echo "[DRY-RUN]   ntfy alert topic (optional), international-calling allow-list (CLI-only,"
         echo "[DRY-RUN]   always asked, never on the web dashboard), per-minute rate + monthly/hourly"
         echo "[DRY-RUN]   alert thresholds, and an optional hard monthly spend-cap kill-switch"
@@ -1282,11 +1285,53 @@ install_pstn-trunk() {
 
     # ── Prompts — provider account details aren't scriptable, set up manually
     # on the provider's own site first (see warning above) ───────────────────
+    # Known-provider quick-path: only pre-fills the defaults below (still
+    # fully editable at each prompt) — doesn't change any dialplan/auth
+    # behavior, which stays provider-generic either way.
+    echo "  Known/tested providers — this only pre-fills the defaults below (server"
+    echo "  hostname, signaling IPs, account-setup reminders); every value is still"
+    echo "  editable at each prompt."
+    echo "    1) Anveo Direct"
+    echo "    2) VoIP.ms"
+    echo "    3) Something else / manual entry"
+    local _provider_choice=""
+    prompt_text "Choice (1/2/3):" "3" _provider_choice
+
+    local _default_provider_name="" _default_server="" _default_extra_ips=""
+    case "$_provider_choice" in
+        1)
+            _default_provider_name="Anveo Direct"
+            _default_server="sbc.anveo.com"
+            _default_extra_ips="169.48.232.158 204.216.109.55 176.9.39.206 72.9.149.25"
+            echo ""
+            log_info "Anveo Direct known values pre-filled below (hostname, 4 published signaling IPs)."
+            log_warning "Before continuing: create/verify your account at"
+            log_warning "  https://www.anveo.com/account.asp?account_type=direct"
+            log_warning "fund it, order a DID, and configure at least one outbound Call"
+            log_warning "Termination trunk in Anveo's own portal (Outbound Trunks page). A Trial"
+            log_warning "account shows its own \$2/30-day spend limit and \$2 minimum balance —"
+            log_warning "separate from anything this installer enforces; confirm with Anveo"
+            log_warning "support whether those change once verified/funded. Their CallerID policy"
+            log_warning "requires a verified/Anveo-owned number as Caller-ID — any DID you order"
+            log_warning "through them satisfies that automatically (see this service's personal-"
+            log_warning "number feature for assigning a specific one per extension)."
+            log_warning "UNVERIFIED: Anveo's own outbound-trunk page documents dialing as"
+            log_warning "[PREFIX]PHONENUMBER@sbc.anveo.com (a per-trunk prefix) — this contradicts"
+            log_warning "an earlier no-prefix-needed finding from their FAQ. This dialplan dials"
+            log_warning "the bare number, no prefix. Check whether your configured trunk's Prefix"
+            log_warning "field can be left blank before relying on this — if it can't, outbound"
+            log_warning "calls through that trunk won't match and will fail."
+            ;;
+        2)
+            _default_provider_name="VoIP.ms"
+            ;;
+    esac
+
     local PROVIDER_NAME=""
-    prompt_text "SIP trunk provider name (for your reference/docs only — e.g. VoIP.ms, Anveo Direct):" "" PROVIDER_NAME
+    prompt_text "SIP trunk provider name (for your reference/docs only — e.g. VoIP.ms, Anveo Direct):" "$_default_provider_name" PROVIDER_NAME
 
     local TRUNK_SERVER=""
-    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms — pick the one closest to this box from your provider's server list):" "" TRUNK_SERVER
+    prompt_text "Server/POP hostname (e.g. atlanta2.voip.ms for VoIP.ms, sbc.anveo.com for Anveo Direct — pick the one closest to this box from your provider's server list):" "$_default_server" TRUNK_SERVER
     if [[ -z "$TRUNK_SERVER" ]]; then
         log_error "A server hostname is required — aborting."
         return 1
@@ -1311,7 +1356,7 @@ install_pstn-trunk() {
     # dial out to) — the resolved IP above always gets included, this just
     # adds any others the provider documents.
     local EXTRA_IPS=""
-    prompt_text "Any additional known source IPs for inbound calls, space-separated (check your provider's docs — e.g. a firewall/signaling IP list; blank if the resolved IP above is the only one):" "" EXTRA_IPS
+    prompt_text "Any additional known source IPs for inbound calls, space-separated (check your provider's docs — e.g. a firewall/signaling IP list; blank if the resolved IP above is the only one):" "$_default_extra_ips" EXTRA_IPS
     local _octet='(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
     local _ip_re="^${_octet}\\.${_octet}\\.${_octet}\\.${_octet}\$"
     local TRUNK_SERVER_IPS="$TRUNK_SERVER_IP" _ip
