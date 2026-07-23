@@ -109,6 +109,51 @@ _pstn_patch_vendor_files() {
     log_success "Vendor generator functions patched to include the PSTN trunk config."
 }
 
+# ── Shared: force the #include lines into the LIVE config files ────────────
+# Confirmed live (2026-07-23): _pstn_patch_vendor_files above patches the
+# *generator functions* so a FUTURE full regeneration includes the trunk
+# config — but Easy Asterisk's entrypoint only calls generate_pjsip_conf()/
+# rebuild_dialplan() when pjsip.conf/extensions.conf DON'T ALREADY EXIST
+# (docker/entrypoint.sh guards both behind `[[ ! -f ... ]]`). Any box that
+# already has devices configured — which is the common case, since this
+# service is added on top of an existing Asterisk install — never
+# regenerates either file on a plain `docker compose restart`, so the
+# #include lines patched into the generator never actually reach the live
+# files. Confirmed by a real failure: an outbound call got "extension not
+# found in context 'intercom'" because pstn-trunk-dialplan.conf was never
+# actually #include'd, despite the generator patch having succeeded.
+# This directly patches the LIVE files too (idempotent, same anchors), so
+# it takes effect immediately regardless of whether Easy Asterisk ever
+# regenerates them on its own.
+_pstn_ensure_live_includes() {
+    local ASTERISK_DIR="$1" CONTAINER_NAME="$2"
+    local PJSIP_LIVE="$ASTERISK_DIR/pjsip.conf"
+    local EXT_LIVE="$ASTERISK_DIR/extensions.conf"
+
+    if [[ -f "$PJSIP_LIVE" ]] && ! grep -q 'pstn-trunk-pjsip.conf' "$PJSIP_LIVE"; then
+        if grep -q '^user_agent=EasyAsterisk$' "$PJSIP_LIVE"; then
+            sed -i '/^user_agent=EasyAsterisk$/a #include pstn-trunk-pjsip.conf' "$PJSIP_LIVE"
+            log_success "Patched the trunk's #include directly into the live pjsip.conf."
+        else
+            log_warning "Couldn't find 'user_agent=EasyAsterisk' in the live pjsip.conf — add"
+            log_warning "'#include pstn-trunk-pjsip.conf' manually after [global], then reload."
+        fi
+    fi
+
+    if [[ -f "$EXT_LIVE" ]] && ! grep -q 'pstn-trunk-dialplan.conf' "$EXT_LIVE"; then
+        if grep -q '^\[intercom\]$' "$EXT_LIVE"; then
+            sed -i '/^\[intercom\]$/a #include pstn-trunk-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the trunk's #include directly into the live extensions.conf."
+        else
+            log_warning "Couldn't find '[intercom]' in the live extensions.conf — add"
+            log_warning "'#include pstn-trunk-dialplan.conf' manually, then reload."
+        fi
+    fi
+
+    docker exec "$CONTAINER_NAME" asterisk -rx "module reload res_pjsip.so" &>/dev/null || true
+    docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
+}
+
 # ── Shared: pjsip trunk config (aor/identify/endpoint, IP-authenticated) ───
 # SERVER_IPS is space-separated — one IP is the common case (one POP, one
 # hostname resolution, e.g. VoIP.ms), but some providers (e.g. Anveo Direct)
@@ -1197,7 +1242,10 @@ install_pstn-trunk() {
         echo "[DRY-RUN]   pstn-permissions.conf, pstn-limits.conf, or the kill-switch trip state)"
         echo "[DRY-RUN]   instead of a fresh install if already configured; the international-calling"
         echo "[DRY-RUN]   review/change question is still asked every run either way"
-        echo "[DRY-RUN] Would restart the asterisk container to apply"
+        echo "[DRY-RUN] Would restart the asterisk container to apply, AND directly patch the live"
+        echo "[DRY-RUN]   pjsip.conf/extensions.conf with the #include lines regardless — Easy Asterisk"
+        echo "[DRY-RUN]   only regenerates those files if they don't already exist, so an existing"
+        echo "[DRY-RUN]   install (the common case) would otherwise never actually load the trunk config"
         return 0
     fi
 
@@ -1251,6 +1299,7 @@ install_pstn-trunk() {
                     ( cd "$EA_DIR" && docker compose restart asterisk ) \
                         && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
                         || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
+                    _pstn_ensure_live_includes "$ASTERISK_DIR" "$CONTAINER_NAME"
                     log_info "pstn-permissions.conf and pstn-limits.conf were NOT touched — edit them"
                     log_info "directly, via the Security Dashboard, or choose FRESH reinstall to reset them."
                     # Always asked, every run, update mode included — see
@@ -1963,6 +2012,12 @@ MD
     else
         log_info "Apply later with: docker compose -f $EA_DIR/docker-compose.yml restart asterisk"
     fi
+    # Patches the live config files directly regardless of the restart choice
+    # above — see _pstn_ensure_live_includes's own comment for why this is
+    # necessary even after a restart, on a box that already had devices
+    # configured. Its final reload commands just no-op harmlessly if
+    # Asterisk isn't up yet (e.g. restart declined above).
+    _pstn_ensure_live_includes "$ASTERISK_DIR" "$CONTAINER_NAME"
 
     echo ""
     log_success "PSTN trunk configured."

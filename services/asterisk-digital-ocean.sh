@@ -469,6 +469,30 @@ _asterisk_do_patch_messaging_vendor_files() {
     log_success "Vendor generator functions patched for internal SIP messaging."
 }
 
+# Confirmed live (2026-07-23, via a real pstn-trunk.sh failure that hit this
+# same mechanism): the vendor-generator patch above only takes effect on a
+# FUTURE regeneration, and Easy Asterisk's own entrypoint only regenerates
+# extensions.conf if it doesn't already exist (docker/entrypoint.sh guards
+# it behind `[[ ! -f ... ]]`) — a box that already has devices configured,
+# which is the normal case here, never regenerates it on a plain restart.
+# Patches the LIVE file directly instead, so it takes effect immediately
+# regardless of whether Easy Asterisk ever regenerates it on its own.
+_asterisk_do_ensure_live_messaging_include() {
+    local EA_DIR="$1"
+    local EXT_LIVE="$EA_DIR/config/asterisk/extensions.conf"
+    [[ -f "$EXT_LIVE" ]] || return 0
+    if ! grep -q 'messaging-dialplan.conf' "$EXT_LIVE"; then
+        if grep -q '^\[intercom\]$' "$EXT_LIVE"; then
+            sed -i '/^\[intercom\]$/a #include messaging-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the messaging #include directly into the live extensions.conf."
+        else
+            log_warning "Couldn't find '[intercom]' in the live extensions.conf — add"
+            log_warning "'#include messaging-dialplan.conf' manually, then: docker exec easy-asterisk-do asterisk -rx \"dialplan reload\""
+        fi
+    fi
+    docker exec easy-asterisk-do asterisk -rx "dialplan reload" &>/dev/null || true
+}
+
 # One-time migration for devices that already existed before the patch above
 # — new devices pick up message_context=sip-messaging automatically from now
 # on, but anything already in pjsip.conf was written before that existed.
@@ -741,6 +765,7 @@ install_asterisk-digital-ocean() {
                 _asterisk_do_write_logrotate "$EA_DIR"
                 _asterisk_do_patch_messaging_vendor_files "$EA_DIR"
                 _asterisk_do_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+                _asterisk_do_ensure_live_messaging_include "$EA_DIR"
                 _asterisk_do_migrate_existing_devices_message_context "$EA_DIR/config/asterisk/pjsip.conf"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
@@ -817,6 +842,7 @@ install_asterisk-digital-ocean() {
     _asterisk_do_write_logrotate "$EA_DIR"
     _asterisk_do_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_do_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+    _asterisk_do_ensure_live_messaging_include "$EA_DIR"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
     chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
