@@ -1458,9 +1458,11 @@ install_pstn-trunk() {
         echo "[DRY-RUN]   pstn-permissions.conf, pstn-limits.conf, or the kill-switch trip state)"
         echo "[DRY-RUN]   instead of a fresh install if already configured; the international-calling"
         echo "[DRY-RUN]   review/change question is still asked every run either way"
-        echo "[DRY-RUN] Would restart the asterisk container to apply, AND directly patch the live"
-        echo "[DRY-RUN]   pjsip.conf/extensions.conf with the #include lines regardless — Easy Asterisk"
-        echo "[DRY-RUN]   only regenerates those files if they don't already exist, so an existing"
+        echo "[DRY-RUN] Fresh install: would prompt to restart the asterisk container to apply."
+        echo "[DRY-RUN] Update in place: applies live instead — no restart, no dropped calls."
+        echo "[DRY-RUN] Either way, directly patches the live pjsip.conf/extensions.conf with the"
+        echo "[DRY-RUN]   #include lines and reloads res_pjsip/dialplan — Easy Asterisk only"
+        echo "[DRY-RUN]   regenerates those files if they don't already exist, so an existing"
         echo "[DRY-RUN]   install (the common case) would otherwise never actually load the trunk config"
         return 0
     fi
@@ -1528,10 +1530,19 @@ install_pstn-trunk() {
                         "$TRUNK_SERVER" "${TRUNK_SERVER_IPS:-}" "$TRUNK_DID" \
                         "${RING_EXTS:-}" "${NTFY_URL:-}" "${RATE_PER_MIN:-0.01}" \
                         "${MONTH_THRESHOLD:-10}" "${BURST_THRESHOLD:-10}" "${PROVIDER_NAME:-unknown}" "${MAX_MONTHLY_SPEND:-0}" "${CONTAINER_NAME:-easy-asterisk-do}" || return 1
-                    ( cd "$EA_DIR" && docker compose restart asterisk ) \
-                        && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
-                        || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
+                    # No container restart here — _pstn_ensure_live_includes's
+                    # module/dialplan reload below already applies everything
+                    # _pstn_apply_settings just wrote (trunk pjsip/dialplan
+                    # includes, the group-ring script) live, without dropping
+                    # any calls already in progress. A full restart doesn't
+                    # accomplish anything the reload doesn't, and this is the
+                    # "update in place" path — it shouldn't be more disruptive
+                    # than it has to be. Confirmed live: this used to restart
+                    # unconditionally here, redundant with (and disruptive on
+                    # top of) the rebuild+restart asterisk[-digital-ocean].sh
+                    # already just ran when this runs chained from there.
                     _pstn_ensure_live_includes "$ASTERISK_DIR" "$CONTAINER_NAME"
+                    log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)."
                     log_info "pstn-permissions.conf and pstn-limits.conf were NOT touched — edit them"
                     log_info "directly, via the Security Dashboard, or choose FRESH reinstall to reset them."
                     # Always asked, every run, update mode included — see
