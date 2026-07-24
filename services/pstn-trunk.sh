@@ -1211,6 +1211,101 @@ ENV
     _pstn_install_periodic_timer "$EA_DIR"
 }
 
+# Simple "press Enter to continue" pause — the portal steps below happen in
+# a browser, not this terminal, so there's nothing to validate; this just
+# gates pacing. Auto-skips under UNATTENDED (prompt_text's own behavior).
+_pstn_wait_continue() {
+    local _msg="$1" _ignored=""
+    prompt_text "  $_msg" "" _ignored
+}
+
+# ── Anveo Direct walkthrough ────────────────────────────────────────────────
+# Every value/field below is confirmed working end-to-end against a real
+# account and a real call (both directions) — see
+# docs/anveo-direct-setup-guide.md for the full narrative this was built
+# from, including every bug that was hit and fixed along the way to get
+# here. Nothing here is automatable (it's a real account behind a browser),
+# so this walks the account-side steps with a pause between each, then lets
+# the rest of this installer's existing prompts (DID, ring group, etc.)
+# handle the Asterisk side as normal.
+_pstn_anveo_walkthrough() {
+    local _pub_ip=""
+    _pub_ip="$(curl -fsS -4 --max-time 3 ifconfig.me 2>/dev/null || true)"
+    [[ -z "$_pub_ip" ]] && _pub_ip="<this box's public IP — run: curl -4 ifconfig.me>"
+
+    echo ""
+    log_info "Anveo Direct walkthrough — each step below happens in Anveo's own portal,"
+    log_info "not this terminal. Press Enter after each one to move to the next. Every"
+    log_info "value given here is confirmed to work, not a guess."
+
+    echo ""
+    echo "  Step 1/5 — Account"
+    echo "    https://www.anveo.com/account.asp?account_type=direct"
+    echo "  Create/verify your account, then fund the balance directly (NOT a"
+    echo "  subscription plan) — \$25 is plenty to start. Bank transfers can take a"
+    echo "  few hours to clear. Two account-level caps to know about, both separate"
+    echo "  from anything this installer enforces:"
+    echo "    - Trial limits: 2 concurrent outbound calls, \$2/30-day spend cap, \$2"
+    echo "      minimum balance — a 'request higher limits' link sits next to"
+    echo "      CallerID Policies once you're funded."
+    echo "    - Phone-numbers cap: most new accounts can manage up to 2 DIDs;"
+    echo "      raising it means contacting Anveo support (they may ask for a tax"
+    echo "      ID — your call whether that trade-off is worth it)."
+    echo "  CallerID policy: outbound Caller-ID must be a verified/Anveo-owned"
+    echo "  number — any DID you order through them satisfies this automatically."
+    _pstn_wait_continue "Press Enter once your account is created and funded:"
+
+    echo ""
+    echo "  Step 2/5 — Order a DID"
+    echo "  Order a phone number choosing the 'Per Minute' rate plan — NOT Prime."
+    echo "  Per Minute bundles 10 dedicated incoming channels at \$0.004/min with no"
+    echo "  separate trunk fee; Prime is free incoming but requires a separate,"
+    echo "  flat monthly-fee trunk product you don't need."
+    _pstn_wait_continue "Press Enter once you've ordered a DID:"
+
+    echo ""
+    echo "  Step 3/5 — Outbound Service (Call Termination) Trunk"
+    echo "  Skip this step if you already have one from a previous number — one"
+    echo "  trunk serves every DID on the account, this only needs doing once."
+    echo "  Outbound Trunks -> Add a new Call Termination Trunk:"
+    echo "    Title:                   any label"
+    echo "    Dialing Prefix:          leave BLANK (confirmed not required)"
+    echo "    Authorized IP Addresses: ${_pub_ip}"
+    echo "    Rate Cap:                optional, e.g. \$1/min (a safety ceiling only —"
+    echo "                             domestic calls run far below this)"
+    echo "    Concurrent Calls Limit:  your choice (the Trial account's own 2-call"
+    echo "                             cap from Step 1 overrides this until lifted)"
+    echo "    Call Routing Method:     leave 'Custom Least Cost Routing Model' and"
+    echo "                             all its sub-fields exactly as defaulted"
+    _pstn_wait_continue "Press Enter once the trunk is created:"
+
+    echo ""
+    echo "  Step 4/5 — SIP Trunk (inbound forwarding) — one per DID"
+    echo "  A SEPARATE object from the Outbound trunk above — don't confuse them;"
+    echo "  this is what actually makes inbound calls to THIS DID ring anywhere."
+    echo "    Trunk Name: any label"
+    echo "    Primary:    SIP URI -> \$[E164]\$@${_pub_ip}:5060"
+    echo "    Failover:   leave blank"
+    echo "  Then open this DID's own Call Options tab -> Destination SIP Trunk ->"
+    echo "  select the SIP Trunk you just created -> Save."
+    _pstn_wait_continue "Press Enter once done:"
+
+    echo ""
+    echo "  Step 5/5 — Confirmed rate"
+    echo "  Standard US-to-US domestic on the Prime rate card (the route set this"
+    echo "  trunk's Custom LCR pulls from by default) is \$0.00388/min, billed"
+    echo "  per-second — already the default a few prompts from now, no need to"
+    echo "  look it up yourself unless you want to double-check it."
+    _pstn_wait_continue "Press Enter to continue:"
+
+    echo ""
+    log_success "Portal setup done. The rest of this installer configures the Asterisk side."
+    log_info "One more thing for after this finishes: grant PSTN access (and, if you"
+    log_info "want, this DID as a personal number) to the right extension via the"
+    log_info "Security Dashboard's PSTN Trunk tab — every extension starts at 'internal'"
+    log_info "(no PSTN access) until you do."
+}
+
 install_pstn-trunk() {
     require_docker || return 1
 
@@ -1236,7 +1331,9 @@ install_pstn-trunk() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
-        echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct/VoIP.ms pre-fill known"
+        echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct runs a full 5-step"
+        echo "[DRY-RUN]   interactive portal walkthrough — account/funding, DID ordering, both trunk"
+        echo "[DRY-RUN]   objects, confirmed rate — pausing for Enter between each; VoIP.ms pre-fills known"
         echo "[DRY-RUN]   server/signaling-IP values; still editable) or manual entry, SIP provider name, DID,"
         echo "[DRY-RUN]   max concurrent outbound/inbound calls (default 10/10), inbound ring-group extensions,"
         echo "[DRY-RUN]   ntfy alert topic (optional), international-calling allow-list (CLI-only,"
@@ -1279,7 +1376,8 @@ install_pstn-trunk() {
     fi
 
     log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (any IP-authenticated provider —"
-    log_info "VoIP.ms and Anveo Direct are both confirmed working; see docs/pstn-calling-voipms-plan.md)."
+    log_info "VoIP.ms and Anveo Direct are both confirmed working; see docs/pstn-calling-voipms-plan.md"
+    log_info "and, for Anveo Direct specifically, docs/anveo-direct-setup-guide.md)."
     log_info "US-only outbound (NANP dialplan), a concurrent-call cap, per-extension permission"
     log_info "tiers, an inbound ring-group, and ntfy alerts on denied/rejected calls plus"
     log_info "spend/volume checks."
@@ -1380,27 +1478,7 @@ install_pstn-trunk() {
             _default_provider_name="Anveo Direct"
             _default_server="sbc.anveo.com"
             _default_extra_ips="169.48.232.158 204.216.109.55 176.9.39.206 72.9.149.25"
-            echo ""
-            log_info "Anveo Direct known values pre-filled below (hostname, 4 published signaling IPs)."
-            log_warning "Before continuing: create/verify your account at"
-            log_warning "  https://www.anveo.com/account.asp?account_type=direct"
-            log_warning "fund it, order a DID, and configure at least one outbound Call"
-            log_warning "Termination trunk in Anveo's own portal (Outbound Trunks page). A Trial"
-            log_warning "account shows its own \$2/30-day spend limit and \$2 minimum balance —"
-            log_warning "separate from anything this installer enforces; confirm with Anveo"
-            log_warning "support whether those change once verified/funded. Their CallerID policy"
-            log_warning "requires a verified/Anveo-owned number as Caller-ID — any DID you order"
-            log_warning "through them satisfies that automatically (see this service's personal-"
-            log_warning "number feature for assigning a specific one per extension)."
-            log_info "Confirmed live (2026-07-23): the trunk's own Dialing Prefix field has no"
-            log_info "required-field marker on Anveo's Edit Call Termination Trunk screen — it's"
-            log_info "optional. Leave it blank; this dialplan dials the bare number, no prefix."
-            log_warning "Anveo Direct also separates two different 'trunk' concepts — don't confuse them:"
-            log_warning "an Outbound Service (Call Termination) Trunk handles calls OUT (IP-authenticated,"
-            log_warning "what this installer configures), while inbound routing for a DID is a SEPARATE"
-            log_warning "'SIP Trunk' object (Account -> the DID's Call Options tab -> Destination SIP"
-            log_warning "Trunk) that forwards to a SIP URI — e.g. \$[E164]\$@<this box's public IP>:5060."
-            log_warning "Create both in Anveo's portal; this installer only handles the Asterisk side."
+            _pstn_anveo_walkthrough
             ;;
         2)
             _default_provider_name="VoIP.ms"
