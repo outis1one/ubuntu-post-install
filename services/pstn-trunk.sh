@@ -106,6 +106,24 @@ _pstn_patch_vendor_files() {
         fi
     done
 
+    # Inbound dialplan lives in its OWN #include'd file, separate from
+    # pstn-trunk-dialplan.conf above — see _pstn_write_inbound_dialplan_include's
+    # comment for why. Anchored on the outbound include (added just above,
+    # so it's already present) rather than re-anchoring on '[intercom]',
+    # purely so the two land next to each other in the generated file.
+    for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
+        if ! grep -q 'pstn-trunk-inbound-dialplan.conf' "$f"; then
+            if grep -q '^#include pstn-trunk-dialplan.conf$' "$f"; then
+                sed -i '/^#include pstn-trunk-dialplan.conf$/a #include pstn-trunk-inbound-dialplan.conf' "$f"
+            elif grep -q '^\[intercom\]$' "$f"; then
+                sed -i '/^\[intercom\]$/a #include pstn-trunk-inbound-dialplan.conf' "$f"
+            else
+                log_warning "$(basename "$f"): neither the outbound include nor '[intercom]' anchor found — vendor template changed upstream."
+                log_warning "  Add '#include pstn-trunk-inbound-dialplan.conf' manually after [intercom] in this file's extensions.conf heredoc."
+            fi
+        fi
+    done
+
     log_success "Vendor generator functions patched to include the PSTN trunk config."
 }
 
@@ -150,8 +168,40 @@ _pstn_ensure_live_includes() {
         fi
     fi
 
+    # Inbound lives in its OWN #include'd file — see
+    # _pstn_write_inbound_dialplan_include's comment for why it can't share
+    # pstn-trunk-dialplan.conf. Anchor on the outbound include so the two
+    # sit together; fall back to '[intercom]' if that's somehow not there.
+    if [[ -f "$EXT_LIVE" ]] && ! grep -q 'pstn-trunk-inbound-dialplan.conf' "$EXT_LIVE"; then
+        if grep -q '^#include pstn-trunk-dialplan.conf$' "$EXT_LIVE"; then
+            sed -i '/^#include pstn-trunk-dialplan.conf$/a #include pstn-trunk-inbound-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the inbound trunk's #include directly into the live extensions.conf."
+        elif grep -q '^\[intercom\]$' "$EXT_LIVE"; then
+            sed -i '/^\[intercom\]$/a #include pstn-trunk-inbound-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the inbound trunk's #include directly into the live extensions.conf."
+        else
+            log_warning "Couldn't find an anchor for the inbound include in the live extensions.conf — add"
+            log_warning "'#include pstn-trunk-inbound-dialplan.conf' manually, then reload."
+        fi
+    fi
+
     docker exec "$CONTAINER_NAME" asterisk -rx "module reload res_pjsip.so" &>/dev/null || true
     docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
+
+    # Confirmed live (2026-07-24): the two commands above were run with all
+    # output suppressed, so a previous version of this function reported
+    # "[OK] Patched..." unconditionally even when the reload silently failed
+    # to actually create the from-pstn-trunk context (root cause turned out
+    # to be the single-file structure fixed above, but there was no way to
+    # tell from the install log alone — only manual `dialplan show
+    # from-pstn-trunk` on the box revealed it). Verify the reload actually
+    # produced the context and say so plainly if it didn't, instead of
+    # silently trusting the reload command's own exit status.
+    if ! docker exec "$CONTAINER_NAME" asterisk -rx "dialplan show from-pstn-trunk" 2>/dev/null | grep -q "'_X\.'"; then
+        log_warning "Reloaded the dialplan, but 'from-pstn-trunk' still has no matching"
+        log_warning "extension — inbound PSTN calls will get an immediate SIP rejection."
+        log_warning "Check: docker exec $CONTAINER_NAME asterisk -rx \"dialplan show from-pstn-trunk\""
+    fi
 }
 
 # ── Shared: pjsip trunk config (aor/identify/endpoint, IP-authenticated) ───
@@ -251,24 +301,20 @@ MEMBER
 # CDR CSV's comma-quoting entirely (our own pipe-delimited format has no
 # embedded-delimiter risk since every field here is digits/hostnames).
 _pstn_write_dialplan_include() {
-    local FILE="$1" DID="$2" RING_EXTS="$3" NTFY_URL="$4"
-    # Dedupe: a repeated extension (typo, copy-paste, or a settings file
-    # edited by hand) would otherwise generate two identical ring<ext>/
-    # skip<ext> priority labels in the same [from-pstn-trunk] extension.
-    # Confirmed live: Asterisk doesn't error on the duplicate labels, it
-    # silently resolves Goto() to the wrong one and loops between the two
-    # blocks forever — the call never reaches the actual Dial(), and no
-    # ring/notification ever happens, with no error anywhere to point at it.
-    RING_EXTS="$(echo "$RING_EXTS" | xargs -n1 | awk '!seen[$0]++' | xargs)"
+    local FILE="$1" DID="$2" NTFY_URL="$3"
     cat > "$FILE" << 'EOF'
-; PSTN outbound/inbound — US-only (NANP). Concurrent-call caps (both
-; directions) AND tiered permissions (internal / restricted / full) are read
-; LIVE from pstn-limits.conf / pstn-permissions.conf via AST_CONFIG() — edit
+; PSTN outbound — US-only (NANP). Concurrent-call caps AND tiered
+; permissions (internal / restricted / full) are read LIVE from
+; pstn-limits.conf / pstn-permissions.conf via AST_CONFIG() — edit
 ; either there, or via the Security Dashboard web UI, with no restart
 ; needed. Regenerated by services/pstn-trunk.sh — edit there, not here
 ; directly, or a reinstall/update will overwrite this file (pstn-limits.conf
 ; and pstn-permissions.conf are NOT touched by "update", only by a "fresh"
 ; reinstall or the web UI).
+;
+; Inbound routing lives in pstn-trunk-inbound-dialplan.conf, a SEPARATE
+; #include'd file — see _pstn_write_inbound_dialplan_include's comment for
+; why it can't live in this same file.
 ;
 ; No catch-all pattern here on purpose: only these two NANP patterns route
 ; to the trunk, so an unauthorized or compromised extension can't reach
@@ -390,25 +436,68 @@ EOF
     else
         sed -i "/__ALERT_DENY_TIER_LINE__/d; /__ALERT_DENY_INTL_LINE__/d; /__ALERT_DENY_NUMBER_LINE__/d; /__ALERT_BUSY_LINE__/d; /__ALERT_KILLED_LINE__/d; /__ALERT_DENY_INTL_TIER_LINE__/d; /__ALERT_DENY_INTL_COUNTRY_LINE__/d" "$FILE"
     fi
+}
 
-    # ── Inbound: [from-pstn-trunk], one unrolled block per ring-group member.
-    # Permission check (is anyone in the ring group authorized for this
-    # caller) happens before the concurrency check, mirroring outbound's
-    # own ordering (permission gate, then busy gate).
-    #
-    # PSTN_CALLERID_NORM below mirrors what outbound's _NXXNXXXXXX pattern
-    # already does (Goto 1${EXTEN} to add a leading "1" before any tier/
-    # allowed_numbers check) but for the inbound direction: allowed_numbers
-    # is always stored 11-digit (dashboard's NUMBER_RE requires exactly 11
-    # digits), but a provider's inbound Caller-ID isn't guaranteed to include
-    # the leading "1" — confirmed live: Anveo delivered a bare 10-digit
-    # CALLERID(num), so every restricted-tier check against it failed on
-    # a plain digit-count mismatch (11-digit pattern vs. 10-digit string),
-    # regardless of whether the number itself was genuinely on the list.
-    # Every restricted-tier comparison below (ring-group members, personal-
-    # DID owner, group-owned personal DID) uses this normalized value
-    # instead of raw ${CALLERID(num)}.
-    cat >> "$FILE" << 'EOF'
+# ── Shared: inbound dialplan ([from-pstn-trunk]) — its OWN #include'd file ──
+# This MUST be a separate file from pstn-trunk-dialplan.conf (outbound,
+# above), not a second section appended to it. Confirmed live (2026-07-24):
+# when both lived in one file — outbound content continuing [intercom]
+# first, then a "[from-pstn-trunk]" header later in the SAME file — NONE of
+# it loaded. Not just the inbound section: `dialplan show intercom` showed
+# zero of the outbound NANP patterns either, and `dialplan show
+# from-pstn-trunk` reported the context didn't exist at all, with no
+# warning or error anywhere (config log, full log, or the reload command's
+# own output) pointing at why. Meanwhile services/asterisk-digital-ocean.sh's
+# messaging-dialplan.conf — #include'd via the exact same mechanism, right
+# after [intercom] in the same extensions.conf — loaded fine every time.
+# The one structural difference: messaging-dialplan.conf's first real line
+# IS its own context header ([sip-messaging]); it never tries to continue
+# [intercom] first. Splitting this file the same way (nothing before
+# [from-pstn-trunk] except comments) fixed it. Root cause inside Asterisk's
+# config loader not fully understood — but this file must keep starting
+# with [from-pstn-trunk] and nothing that continues an ambient context
+# before it, or the failure comes back.
+#
+# One unrolled block per ring-group member. Permission check (is anyone in
+# the ring group authorized for this caller) happens before the concurrency
+# check, mirroring outbound's own ordering (permission gate, then busy
+# gate).
+#
+# PSTN_CALLERID_NORM below mirrors what outbound's _NXXNXXXXXX pattern
+# already does (Goto 1${EXTEN} to add a leading "1" before any tier/
+# allowed_numbers check) but for the inbound direction: allowed_numbers
+# is always stored 11-digit (dashboard's NUMBER_RE requires exactly 11
+# digits), but a provider's inbound Caller-ID isn't guaranteed to include
+# the leading "1" — confirmed live: Anveo delivered a bare 10-digit
+# CALLERID(num), so every restricted-tier check against it failed on
+# a plain digit-count mismatch (11-digit pattern vs. 10-digit string),
+# regardless of whether the number itself was genuinely on the list.
+# Every restricted-tier comparison below (ring-group members, personal-
+# DID owner, group-owned personal DID) uses this normalized value
+# instead of raw ${CALLERID(num)}.
+_pstn_write_inbound_dialplan_include() {
+    local FILE="$1" RING_EXTS="$2" NTFY_URL="$3"
+    # Dedupe: a repeated extension (typo, copy-paste, or a settings file
+    # edited by hand) would otherwise generate two identical ring<ext>/
+    # skip<ext> priority labels in the same [from-pstn-trunk] extension.
+    # Confirmed live: Asterisk doesn't error on the duplicate labels, it
+    # silently resolves Goto() to the wrong one and loops between the two
+    # blocks forever — the call never reaches the actual Dial(), and no
+    # ring/notification ever happens, with no error anywhere to point at it.
+    RING_EXTS="$(echo "$RING_EXTS" | xargs -n1 | awk '!seen[$0]++' | xargs)"
+    cat > "$FILE" << 'EOF'
+; PSTN inbound routing ([from-pstn-trunk]) — kept in its OWN file, separate
+; from pstn-trunk-dialplan.conf's outbound content. See
+; _pstn_write_inbound_dialplan_include's comment in services/pstn-trunk.sh
+; for why: a combined file silently failed to load ANY content (outbound
+; included) the one time this was tried. Regenerated by
+; services/pstn-trunk.sh — edit there, not here directly, or a
+; reinstall/update will overwrite this file.
+;
+; Concurrent-call caps AND tiered permissions (internal / restricted /
+; full) are read LIVE from pstn-limits.conf / pstn-permissions.conf via
+; AST_CONFIG() — edit either there, or via the Security Dashboard web UI,
+; with no restart needed.
 
 [from-pstn-trunk]
 exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
@@ -1333,12 +1422,14 @@ _pstn_apply_settings() {
 
     mkdir -p "$ASTERISK_DIR"
     _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IPS" "$DID"
-    _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$RING_EXTS" "$NTFY_URL"
+    _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$NTFY_URL"
+    _pstn_write_inbound_dialplan_include "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf" "$RING_EXTS" "$NTFY_URL"
     _pstn_write_personal_group_ring_script "$ASTERISK_DIR/pstn-personal-group-ring.sh"
     _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$ASTERISK_DIR" \
         "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL" "$CONTAINER_NAME"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
-    chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf"
+    chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf" \
+        "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf"
     chmod 755 "$ASTERISK_DIR/pstn-personal-group-ring.sh"
 
     # Values are double-quoted: this file is `source`d back in on "update"
@@ -1994,11 +2085,17 @@ hand-edited files. Trunk/dialplan config here lives in files of its own,
 
 - \`config/asterisk/pstn-trunk-pjsip.conf\` — the trunk's \`aor\`/\`identify\`/
   \`endpoint\` sections (IP-authenticated, no password stored).
-- \`config/asterisk/pstn-trunk-dialplan.conf\` — NANP-only outbound routing,
-  ntfy alert hooks, and the \`[from-pstn-trunk]\` inbound context. Reads
-  permission tiers from \`pstn-permissions.conf\` and concurrency caps from
-  \`pstn-limits.conf\` (both above) live, rather than baking either in,
-  specifically so they can change without touching this file.
+- \`config/asterisk/pstn-trunk-dialplan.conf\` — NANP-only outbound routing
+  and ntfy alert hooks.
+- \`config/asterisk/pstn-trunk-inbound-dialplan.conf\` — the
+  \`[from-pstn-trunk]\` inbound context (ring group + personal DID routing),
+  kept in its own file rather than appended to the outbound one above — a
+  combined file silently failed to load any of its content at all (see the
+  comment on \`_pstn_write_inbound_dialplan_include\` in
+  \`services/pstn-trunk.sh\`). Both dialplan files read permission tiers from
+  \`pstn-permissions.conf\` and concurrency caps from \`pstn-limits.conf\`
+  (both above) live, rather than baking either in, specifically so they can
+  change without touching these files.
 
 The \`#include\` lines themselves are patched into Easy Asterisk's *generator
 functions* (\`docker/entrypoint.sh\`, \`easy-asterisk.sh\`, and its versioned
@@ -2125,9 +2222,9 @@ security-dashboard\`; it auto-detects this install.
 ## Manual edits
 
 Don't hand-edit \`pstn-trunk-pjsip.conf\` / \`pstn-trunk-dialplan.conf\` /
-\`pstn-trunk-usage-alert.sh\` directly if you plan to re-run this installer
-later — it overwrites all three unconditionally from \`.pstn-trunk.env\` on
-both fresh and update. \`pstn-permissions.conf\` and \`pstn-limits.conf\` are
+\`pstn-trunk-inbound-dialplan.conf\` / \`pstn-trunk-usage-alert.sh\` directly
+if you plan to re-run this installer later — it overwrites all four
+unconditionally from \`.pstn-trunk.env\` on both fresh and update. \`pstn-permissions.conf\` and \`pstn-limits.conf\` are
 different — see "Permission tiers" / "Concurrent-call caps" above, both are
 safe to hand-edit any time. For one-off testing, restart the container
 instead of running the installer:
