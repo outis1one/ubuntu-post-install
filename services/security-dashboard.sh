@@ -194,52 +194,24 @@ protected page. Runs natively on the host (systemd service \`security-dashboard\
 not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
+The nav only ever shows tabs for things actually present on this box — no
+tab for a service you haven't installed. **Security Log** and **Extensions**
+are always there (they only need Asterisk itself, detected once at install
+time). **Asterisk Admin**, **PSTN Trunk**, and **CrowdSec** each check their
+own live install state on every page load and hide their own nav button
+entirely if not found, so this one page/URL scales from a bare LAN Asterisk
+box (just those first two tabs) up to a full droplet with a trunk and
+CrowdSec, without ever showing a tab for something that isn't set up.
+
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
   (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
-  filterable per column (each header has its own text filter, live as you type).
-- **CrowdSec** — current bans (\`cscli decisions list\`), a delete/unban button
-  per entry, carrier/ASN + country columns, and management of the ASN-exempt
-  Asterisk brute-force scenarios (see \`services/crowdsec.sh\`'s "Exempt
-  specific carrier ASNs" option) without SSHing in:
-  - **Currently-exempt ASNs** are listed with carrier name (resolved from
-    current bans, falling back to alert history for ASNs with no active ban
-    right now) regardless of when they were added.
-  - **Unwhitelist** removes an ASN from the exemption list — future Asterisk
-    auth failures from it are evaluated normally again.
-  - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
-    CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
-    where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** — a **Groups** card at the top (always available, whether
-  or not a PSTN trunk has ever been installed) lets you name a set of
-  extensions and bulk-enable/disable messaging for all of them at once —
-  a management convenience only, not a runtime concept: applying an action
-  just writes the same per-extension \`pstn-permissions.conf\` key each
-  member's own checkbox would, and membership changes never retroactively
-  affect anything already applied. Below that, the rest of the tab detects
-  whether \`services/pstn-trunk.sh\`'s dialplan is
-  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a
-  clear "not installed" message instead of the calling-permissions editor
-  if not, so it never shows real-looking-but-unenforced defaults. When
-  installed: the outbound/inbound concurrent-call caps, and every known
-  extension's permission tier (internal / restricted / full) and, for
-  restricted, its approved numbers — all editable live, no Asterisk
-  restart, no reinstall. Also manages personal-number assignments (DID ->
-  owner extension), additive to the shared trunk DID. Writes directly to
-  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
-  which the dialplan reads fresh on every call. The spend-cap kill-switch
-  and international-calling allow-list are deliberately **not** managed
-  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
-  security-sensitive than what this tab already exposes. An "Internal SIP
-  messaging" card at the **bottom** of the tab (a checkbox chip per known
-  extension, independent of PSTN calling entirely — no cost, no carrier, no
-  DID, no dependency on a PSTN trunk being installed) is always available
-  regardless of any of the above.
+  sortable per column (click a header to sort, click again to reverse).
 - **Asterisk Admin** — an embedded, lazy-loaded iframe of the real Asterisk
   web admin (only fetched the first time you open the tab), plus an
-  "open in a new tab" fallback link that's always there regardless. Only
-  shows up once an Asterisk install is detected. If a local Caddy install is
-  found for both this dashboard and the Asterisk admin's own domain, install
-  automatically patches the admin's Caddy site block from
+  "open in a new tab" fallback link that's always there regardless. Its nav
+  button only appears once an Asterisk install is detected. If a local Caddy
+  install is found for both this dashboard and the Asterisk admin's own
+  domain, install automatically patches the admin's Caddy site block from
   `X-Frame-Options` to a `Content-Security-Policy: frame-ancestors` entry
   naming only this dashboard's domain, so the browser actually allows the
   frame — every other site is still refused framing exactly as before. This
@@ -248,6 +220,43 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   confirmed against Authelia's own portal-framing behavior on a live
   install) — if the tab shows a blank frame, use the fallback link and check
   this service's own log output from install time for a manual one-line fix.
+- **Extensions** — always available, independent of any PSTN trunk. A
+  **Groups** card lets you name a set of extensions and bulk-enable/disable
+  messaging for all of them at once — a management convenience only, not a
+  runtime concept: applying an action just writes the same per-extension
+  \`pstn-permissions.conf\` key each member's own checkbox would, and
+  membership changes never retroactively affect anything already applied.
+  An **Internal SIP messaging** card (a checkbox chip per known extension,
+  independent of PSTN calling entirely — no cost, no carrier, no DID, no
+  dependency on a PSTN trunk being installed) sits below it.
+- **PSTN Trunk** — its nav button only appears once
+  \`services/pstn-trunk.sh\`'s dialplan is actually installed
+  (\`pstn-trunk-dialplan.conf\` present), so it never shows a
+  real-looking-but-unenforced editor. When present: the outbound/inbound
+  concurrent-call caps, and every known extension's permission tier
+  (internal / restricted / full) and, for restricted, its approved numbers —
+  all editable live, no Asterisk restart, no reinstall, sortable per column.
+  Also manages personal-number assignments (DID -> owner extension or
+  group), additive to the shared trunk DID. Writes directly to
+  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
+  which the dialplan reads fresh on every call. The spend-cap kill-switch
+  and international-calling allow-list are deliberately **not** managed
+  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
+  security-sensitive than what this tab already exposes.
+- **CrowdSec** — its nav button only appears once \`cscli\` is detected on
+  this host. Current bans (\`cscli decisions list\`), a delete/unban button
+  per entry, carrier/ASN + country columns (sortable per column), and
+  management of the ASN-exempt Asterisk brute-force scenarios (see
+  \`services/crowdsec.sh\`'s "Exempt specific carrier ASNs" option) without
+  SSHing in:
+  - **Currently-exempt ASNs** are listed with carrier name (resolved from
+    current bans, falling back to alert history for ASNs with no active ban
+    right now) regardless of when they were added.
+  - **Unwhitelist** removes an ASN from the exemption list — future Asterisk
+    auth failures from it are evaluated normally again.
+  - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
+    CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
+    where you don't want to wait for it to misbehave again.
 
 ## Manage
 \`\`\`
@@ -812,6 +821,14 @@ def run_sudo(args, timeout=15):
         return result.returncode == 0, result.stdout, result.stderr
     except (subprocess.TimeoutExpired, OSError) as e:
         return False, "", str(e)
+
+
+def crowdsec_installed():
+    """True if cscli is actually present on this host — mirrors
+    pstn_installed()'s approach of checking for the real thing rather than a
+    stored flag, so the CrowdSec tab tracks live state without needing this
+    dashboard reinstalled after CrowdSec is added or removed."""
+    return os.path.isfile("/usr/bin/cscli")
 
 
 def get_decisions():
@@ -1524,9 +1541,10 @@ INDEX_HTML = """<!doctype html>
   <h1>Security Dashboard</h1>
   <nav>
     <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" data-tab="crowdsec">CrowdSec</button>
-    <button class="tab-btn" data-tab="pstn">PSTN Trunk</button>
     <button class="tab-btn" id="asterisk-tab-btn" data-tab="asterisk" style="display:none">Asterisk Admin</button>
+    <button class="tab-btn" data-tab="extensions">Extensions</button>
+    <button class="tab-btn" id="pstn-tab-btn" data-tab="pstn" style="display:none">PSTN Trunk</button>
+    <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
 <main>
@@ -1566,7 +1584,7 @@ INDEX_HTML = """<!doctype html>
       <div id="msg"></div>
     </div>
   </div>
-  <div id="tab-pstn" style="display:none">
+  <div id="tab-extensions" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Groups</h3>
       <p class="muted">
@@ -1584,11 +1602,17 @@ INDEX_HTML = """<!doctype html>
       </tr></thead><tbody></tbody></table>
       <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    <div class="card" id="pstn-not-installed" style="display:none">
-      <h3 style="margin-top:0">PSTN trunk not installed</h3>
-      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging (bottom of this tab) works independently of this.</p>
+    <div class="card">
+      <h3 style="margin-top:0">Internal SIP messaging</h3>
+      <p class="muted">
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
+      </p>
+      <div id="msg-chips" class="chip-row"></div>
+      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
+      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    <div id="pstn-installed-cards" style="display:none">
+  </div>
+  <div id="tab-pstn" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Concurrent-call caps</h3>
       <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes apply live, on the next call.</p>
@@ -1608,7 +1632,7 @@ INDEX_HTML = """<!doctype html>
         Changes apply live, on the next call — no Asterisk restart needed.
       </p>
       <p class="muted">
-        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
+        <b>Messaging</b> — the same internal SIP texting flag as the Extensions tab's checkboxes, independent of the calling tier; this column is just a convenience for setting it alongside tier/numbers on one row. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
       </p>
       <table id="pstn-table"><thead><tr>
         <th class="sortable" data-sort="ext">Ext</th>
@@ -1637,16 +1661,6 @@ INDEX_HTML = """<!doctype html>
       </tr></thead><tbody></tbody></table>
       <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Internal SIP messaging</h3>
-      <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions above. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
-      </p>
-      <div id="msg-chips" class="chip-row"></div>
-      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
-      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
   </div>
   <div id="tab-asterisk" style="display:none">
     <div class="card">
@@ -1663,13 +1677,14 @@ INDEX_HTML = """<!doctype html>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "crowdsec", "pstn", "asterisk"];
+const TABS = ["security", "asterisk", "extensions", "pstn", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); loadGroups(); }
+    if (btn.dataset.tab === "extensions") { loadMessaging(); loadGroups(); }
+    if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
     if (btn.dataset.tab === "asterisk") {
       // Lazy-loaded — only fetched the first time this tab is opened, not
       // on every dashboard page load (avoids an extra login prompt/request
@@ -1854,12 +1869,20 @@ async function banAsn(asn) {
   loadDecisions();
 }
 
+// Gates the tab button itself (not just its content) — called once at page
+// load, same as loadCrowdsecStatus() below, so the nav never shows a tab for
+// something that isn't actually set up on this box.
 async function loadPstnStatus() {
   const res = await fetch("/api/pstn-status");
   const data = await res.json();
-  document.getElementById("pstn-not-installed").style.display = data.installed ? "none" : "";
-  document.getElementById("pstn-installed-cards").style.display = data.installed ? "" : "none";
+  document.getElementById("pstn-tab-btn").style.display = data.installed ? "" : "none";
   if (data.installed) { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
+}
+
+async function loadCrowdsecStatus() {
+  const res = await fetch("/api/crowdsec-status");
+  const data = await res.json();
+  document.getElementById("crowdsec-tab-btn").style.display = data.installed ? "" : "none";
 }
 
 async function loadPstnLimits() {
@@ -2187,6 +2210,8 @@ if (adminUrl) {
 loadSecurity();
 loadDecisions();
 loadAsnExempt();
+loadPstnStatus();
+loadCrowdsecStatus();
 setInterval(loadSecurity, 30000);
 setInterval(loadDecisions, 30000);
 </script>
@@ -2243,6 +2268,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"installed": pstn_installed()})
         elif self.path == "/api/pstn-groups":
             self._json({"groups": list_groups()})
+        elif self.path == "/api/crowdsec-status":
+            self._json({"installed": crowdsec_installed()})
         else:
             self._json({"error": "not found"}, 404)
 
