@@ -209,14 +209,8 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** — an "Internal SIP messaging" card at the top is always
-  available, whether or not a PSTN trunk has ever been installed: a
-  checkbox per known extension (parsed from \`pjsip.conf\`) for
-  Asterisk's native SIP texting, independent of PSTN calling entirely (no
-  cost, no carrier, no DID, no dependency on \`services/pstn-trunk.sh\`
-  having been run — see its "Known gap" note on messaging for what this
-  flag does and doesn't do yet at the Asterisk level). Right below it, a
-  **Groups** card (also always available) lets you name a set of
+- **PSTN Trunk** — a **Groups** card at the top (always available, whether
+  or not a PSTN trunk has ever been installed) lets you name a set of
   extensions and bulk-enable/disable messaging for all of them at once —
   a management convenience only, not a runtime concept: applying an action
   just writes the same per-extension \`pstn-permissions.conf\` key each
@@ -235,7 +229,11 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   which the dialplan reads fresh on every call. The spend-cap kill-switch
   and international-calling allow-list are deliberately **not** managed
   here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
-  security-sensitive than what this tab already exposes.
+  security-sensitive than what this tab already exposes. An "Internal SIP
+  messaging" card at the **bottom** of the tab (a checkbox chip per known
+  extension, independent of PSTN calling entirely — no cost, no carrier, no
+  DID, no dependency on a PSTN trunk being installed) is always available
+  regardless of any of the above.
 - **Asterisk Admin** — an embedded, lazy-loaded iframe of the real Asterisk
   web admin (only fetched the first time you open the tab), plus an
   "open in a new tab" fallback link that's always there regardless. Only
@@ -1506,8 +1504,8 @@ INDEX_HTML = """<!doctype html>
   th.sortable { cursor: pointer; user-select: none; }
   th.sortable:hover { color: #e6e6e6; }
   th.sortable .arrow { opacity: 0.5; font-size: 0.75em; margin-left: 0.25em; }
-  .filter-row th { padding-top: 0; padding-bottom: 0.5rem; font-weight: normal; }
-  .filter-row input { width: 100%; box-sizing: border-box; background: #0f1115; border: 1px solid #2a2e38; color: #e6e6e6; border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.8rem; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+  .chip-row label { white-space: nowrap; font-size: 0.85rem; color: #9aa4b2; }
   .sev-Error { color: #ff6b6b; }
   .sev-Warning { color: #f5b342; }
   .sev-Informational { color: #7fbf7f; }
@@ -1535,16 +1533,13 @@ INDEX_HTML = """<!doctype html>
   <div id="tab-security">
     <div class="card">
       <p class="muted">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
-      <table id="sec-table"><thead>
-        <tr><th>Time</th><th>Event</th><th>Account</th><th>Remote</th><th>Severity</th></tr>
-        <tr class="filter-row">
-          <th><input type="text" class="sec-filter" data-field="timestamp" placeholder="filter…"></th>
-          <th><input type="text" class="sec-filter" data-field="event" placeholder="filter…"></th>
-          <th><input type="text" class="sec-filter" data-field="account" placeholder="filter…"></th>
-          <th><input type="text" class="sec-filter" data-field="remote" placeholder="filter…"></th>
-          <th><input type="text" class="sec-filter" data-field="severity" placeholder="filter…"></th>
-        </tr>
-      </thead><tbody></tbody></table>
+      <table id="sec-table"><thead><tr>
+        <th class="sortable" data-sort="timestamp">Time</th>
+        <th class="sortable" data-sort="event">Event</th>
+        <th class="sortable" data-sort="account">Account</th>
+        <th class="sortable" data-sort="remote">Remote</th>
+        <th class="sortable" data-sort="severity">Severity</th>
+      </tr></thead><tbody></tbody></table>
     </div>
   </div>
   <div id="tab-crowdsec" style="display:none">
@@ -1573,14 +1568,6 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div id="tab-pstn" style="display:none">
     <div class="card">
-      <h3 style="margin-top:0">Internal SIP messaging</h3>
-      <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions below. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
-      </p>
-      <table id="msg-table"><thead><tr><th>Ext</th><th>Name</th><th>Enabled</th><th></th></tr></thead><tbody></tbody></table>
-      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
       <h3 style="margin-top:0">Groups</h3>
       <p class="muted">
         Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own checkbox above would, one time — it isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied.
@@ -1590,12 +1577,16 @@ INDEX_HTML = """<!doctype html>
         <button class="action" id="grp-save">Save group</button>
       </div>
       <div id="grp-members" class="row" style="flex-wrap:wrap;margin-top:0.5rem"></div>
-      <table id="grp-table" style="margin-top:0.75rem"><thead><tr><th>Group</th><th>Members</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="grp-table" style="margin-top:0.75rem"><thead><tr>
+        <th class="sortable" data-sort="name">Group</th>
+        <th class="sortable" data-sort="members">Members</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
       <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
     <div class="card" id="pstn-not-installed" style="display:none">
       <h3 style="margin-top:0">PSTN trunk not installed</h3>
-      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging above works independently of this.</p>
+      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging (bottom of this tab) works independently of this.</p>
     </div>
     <div id="pstn-installed-cards" style="display:none">
     <div class="card">
@@ -1619,7 +1610,14 @@ INDEX_HTML = """<!doctype html>
       <p class="muted">
         <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
       </p>
-      <table id="pstn-table"><thead><tr><th>Ext</th><th>Name</th><th>Tier</th><th>Approved numbers (restricted only)</th><th>Messaging</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="pstn-table"><thead><tr>
+        <th class="sortable" data-sort="ext">Ext</th>
+        <th class="sortable" data-sort="name">Name</th>
+        <th class="sortable" data-sort="tier">Tier</th>
+        <th>Approved numbers (restricted only)</th>
+        <th class="sortable" data-sort="messaging">Messaging</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
       <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
     <div class="card">
@@ -1632,9 +1630,22 @@ INDEX_HTML = """<!doctype html>
         <select id="pd-owner"></select>
         <button class="action" id="pd-save">Assign</button>
       </div>
-      <table id="pd-table" style="margin-top:0.75rem"><thead><tr><th>DID</th><th>Owner</th><th></th></tr></thead><tbody></tbody></table>
+      <table id="pd-table" style="margin-top:0.75rem"><thead><tr>
+        <th class="sortable" data-sort="did">DID</th>
+        <th class="sortable" data-sort="owner">Owner</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
       <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Internal SIP messaging</h3>
+      <p class="muted">
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions above. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
+      </p>
+      <div id="msg-chips" class="chip-row"></div>
+      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
+      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
   </div>
   <div id="tab-asterisk" style="display:none">
@@ -1670,16 +1681,23 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 });
 
 let lastSecurityEvents = [];
+let secSort = { key: null, dir: 1 };
 
 function renderSecurity() {
-  const filters = {};
-  document.querySelectorAll(".sec-filter").forEach(inp => {
-    const v = inp.value.trim().toLowerCase();
-    if (v) filters[inp.dataset.field] = v;
-  });
-  const rows = lastSecurityEvents.filter(e =>
-    Object.entries(filters).every(([field, v]) => (e[field] || "").toLowerCase().includes(v))
-  );
+  let rows = lastSecurityEvents.slice();
+  if (secSort.key) {
+    rows.sort((a, b) => {
+      const av = (a[secSort.key] || "").toLowerCase(), bv = (b[secSort.key] || "").toLowerCase();
+      if (av < bv) return -1 * secSort.dir;
+      if (av > bv) return 1 * secSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#sec-table th.sortable .arrow").forEach(a => a.remove());
+  if (secSort.key) {
+    const th = document.querySelector(`#sec-table th[data-sort="${secSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${secSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
   const tbody = document.querySelector("#sec-table tbody");
   tbody.innerHTML = rows.map(e => `<tr>
     <td>${esc(e.timestamp)}</td>
@@ -1687,11 +1705,16 @@ function renderSecurity() {
     <td>${esc(e.account)}</td>
     <td>${esc(e.remote)}</td>
     <td class="sev-${esc(e.severity)}">${esc(e.severity)}</td>
-  </tr>`).join("") || `<tr><td colspan=5 class=muted>${lastSecurityEvents.length ? "No events match the current filters." : "No events found."}</td></tr>`;
+  </tr>`).join("") || `<tr><td colspan=5 class=muted>No events found.</td></tr>`;
 }
 
-document.querySelectorAll(".sec-filter").forEach(inp => {
-  inp.addEventListener("input", renderSecurity);
+document.querySelectorAll("#sec-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    secSort.dir = (secSort.key === key) ? -secSort.dir : 1;
+    secSort.key = key;
+    renderSecurity();
+  });
 });
 
 async function loadSecurity() {
@@ -1861,39 +1884,52 @@ async function loadMessaging() {
     </label>
   `).join("") || '<span class="muted">No extensions found</span>';
 
-  const tbody = document.querySelector("#msg-table tbody");
-  if (!exts.length) {
-    tbody.innerHTML = '<tr><td colspan=4 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
-    return;
-  }
-  tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
-    <td>${esc(e.ext)}</td>
-    <td>${esc(e.name)}</td>
-    <td style="text-align:center"><input type="checkbox" class="msg-enabled" ${e.messaging ? "checked" : ""}></td>
-    <td><button class="action" onclick="saveMessagingRow('${esc(e.ext)}')">Save</button></td>
-  </tr>`).join("");
+  const chips = document.getElementById("msg-chips");
+  chips.innerHTML = exts.map(e => `
+    <label><input type="checkbox" class="msg-chip" data-ext="${esc(e.ext)}" ${e.messaging ? "checked" : ""}> ${esc(e.ext)} — ${esc(e.name)}</label>
+  `).join("") || '<span class="muted">No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</span>';
 }
 
-async function saveMessagingRow(ext) {
-  const row = document.querySelector(`#msg-table tr[data-ext="${ext}"]`);
-  const enabled = row.querySelector(".msg-enabled").checked;
-  const res = await fetch("/api/pstn-messaging", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ext: ext, enabled: enabled}),
-  });
-  const data = await res.json();
-  document.getElementById("msg-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
+document.getElementById("msg-save-all").addEventListener("click", async () => {
+  const checkboxes = Array.from(document.querySelectorAll(".msg-chip"));
+  const results = await Promise.all(checkboxes.map(cb =>
+    fetch("/api/pstn-messaging", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ext: cb.dataset.ext, enabled: cb.checked}),
+    }).then(r => r.json())
+  ));
+  const failed = results.filter(r => !r.ok);
+  document.getElementById("msg-msg").textContent = failed.length
+    ? `Saved with ${failed.length} error(s): ` + failed.map(r => r.message).join("; ")
+    : `Saved (${checkboxes.length} extension${checkboxes.length === 1 ? "" : "s"})`;
   loadMessaging();
-}
+});
 
 let lastGroups = [];
+let grpSort = { key: null, dir: 1 };
 
-async function loadGroups() {
-  const res = await fetch("/api/pstn-groups");
-  const data = await res.json();
-  lastGroups = data.groups || [];
+function grpSortValue(g, key) {
+  if (key === "members") return g.members.join(", ").toLowerCase();
+  return (g.name || "").toLowerCase();
+}
+
+function renderGroups() {
+  let rows = lastGroups.slice();
+  if (grpSort.key) {
+    rows.sort((a, b) => {
+      const av = grpSortValue(a, grpSort.key), bv = grpSortValue(b, grpSort.key);
+      if (av < bv) return -1 * grpSort.dir;
+      if (av > bv) return 1 * grpSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#grp-table th.sortable .arrow").forEach(a => a.remove());
+  if (grpSort.key) {
+    const th = document.querySelector(`#grp-table th[data-sort="${grpSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${grpSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
   const tbody = document.querySelector("#grp-table tbody");
-  tbody.innerHTML = lastGroups.map(g => `<tr data-group="${esc(g.name)}">
+  tbody.innerHTML = rows.map(g => `<tr data-group="${esc(g.name)}">
     <td>${esc(g.name)}</td>
     <td>${g.members.map(esc).join(", ") || '<span class="muted">none</span>'}</td>
     <td>
@@ -1903,6 +1939,22 @@ async function loadGroups() {
       <button class="action" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
     </td>
   </tr>`).join("") || '<tr><td colspan=3 class=muted>No groups yet.</td></tr>';
+}
+
+document.querySelectorAll("#grp-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    grpSort.dir = (grpSort.key === key) ? -grpSort.dir : 1;
+    grpSort.key = key;
+    renderGroups();
+  });
+});
+
+async function loadGroups() {
+  const res = await fetch("/api/pstn-groups");
+  const data = await res.json();
+  lastGroups = data.groups || [];
+  renderGroups();
 }
 
 function editGroup(name) {
@@ -1958,26 +2010,36 @@ document.getElementById("limits-save").addEventListener("click", async () => {
   loadPstnLimits();
 });
 
-async function loadPstnPermissions() {
-  const res = await fetch("/api/pstn-permissions");
-  const data = await res.json();
-  const exts = data.extensions || [];
+let lastPstnExts = [];
+let pstnSort = { key: null, dir: 1 };
 
-  const grpRes = await fetch("/api/pstn-groups");
-  const grpData = await grpRes.json();
-  const groups = grpData.groups || [];
+function pstnSortValue(e, key) {
+  if (key === "ext") return parseInt(e.ext, 10);
+  if (key === "messaging") return e.messaging ? 1 : 0;
+  return (e[key] || "").toString().toLowerCase();
+}
 
-  const ownerSel = document.getElementById("pd-owner");
-  const extOptions = exts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
-  const groupOptions = groups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
-  ownerSel.innerHTML = (extOptions + groupOptions) || '<option value="">No extensions found</option>';
-
+function renderPstnTable() {
   const tbody = document.querySelector("#pstn-table tbody");
-  if (!exts.length) {
+  if (!lastPstnExts.length) {
     tbody.innerHTML = '<tr><td colspan=6 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
     return;
   }
-  tbody.innerHTML = exts.map(e => `<tr data-ext="${esc(e.ext)}">
+  let rows = lastPstnExts.slice();
+  if (pstnSort.key) {
+    rows.sort((a, b) => {
+      const av = pstnSortValue(a, pstnSort.key), bv = pstnSortValue(b, pstnSort.key);
+      if (av < bv) return -1 * pstnSort.dir;
+      if (av > bv) return 1 * pstnSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#pstn-table th.sortable .arrow").forEach(a => a.remove());
+  if (pstnSort.key) {
+    const th = document.querySelector(`#pstn-table th[data-sort="${pstnSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${pstnSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  tbody.innerHTML = rows.map(e => `<tr data-ext="${esc(e.ext)}">
     <td>${esc(e.ext)}</td>
     <td>${esc(e.name)}</td>
     <td>
@@ -1999,6 +2061,32 @@ async function loadPstnPermissions() {
   });
 }
 
+document.querySelectorAll("#pstn-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    pstnSort.dir = (pstnSort.key === key) ? -pstnSort.dir : 1;
+    pstnSort.key = key;
+    renderPstnTable();
+  });
+});
+
+async function loadPstnPermissions() {
+  const res = await fetch("/api/pstn-permissions");
+  const data = await res.json();
+  lastPstnExts = data.extensions || [];
+
+  const grpRes = await fetch("/api/pstn-groups");
+  const grpData = await grpRes.json();
+  const groups = grpData.groups || [];
+
+  const ownerSel = document.getElementById("pd-owner");
+  const extOptions = lastPstnExts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
+  const groupOptions = groups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
+  ownerSel.innerHTML = (extOptions + groupOptions) || '<option value="">No extensions found</option>';
+
+  renderPstnTable();
+}
+
 async function savePstnPermission(ext) {
   const row = document.querySelector(`#pstn-table tr[data-ext="${ext}"]`);
   const tier = row.querySelector(".pstn-tier").value;
@@ -2013,12 +2101,32 @@ async function savePstnPermission(ext) {
   loadPstnPermissions();
 }
 
-async function loadPersonalDids() {
-  const res = await fetch("/api/pstn-personal-dids");
-  const data = await res.json();
-  const dids = data.dids || [];
+let lastPersonalDids = [];
+let pdSort = { key: null, dir: 1 };
+
+function pdSortValue(d, key) {
+  if (key === "did") return parseInt(d.did, 10);
+  if (key === "owner") return d.owner.startsWith("@") ? d.owner.slice(1).toLowerCase() : d.owner.toLowerCase();
+  return "";
+}
+
+function renderPersonalDids() {
+  let rows = lastPersonalDids.slice();
+  if (pdSort.key) {
+    rows.sort((a, b) => {
+      const av = pdSortValue(a, pdSort.key), bv = pdSortValue(b, pdSort.key);
+      if (av < bv) return -1 * pdSort.dir;
+      if (av > bv) return 1 * pdSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#pd-table th.sortable .arrow").forEach(a => a.remove());
+  if (pdSort.key) {
+    const th = document.querySelector(`#pd-table th[data-sort="${pdSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${pdSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
   const tbody = document.querySelector("#pd-table tbody");
-  tbody.innerHTML = dids.map(d => {
+  tbody.innerHTML = rows.map(d => {
     const ownerDisplay = d.owner.startsWith("@")
       ? "Group: " + esc(d.owner.slice(1))
       : esc(d.owner) + (d.owner_name ? " — " + esc(d.owner_name) : "");
@@ -2028,6 +2136,22 @@ async function loadPersonalDids() {
     <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
   </tr>`;
   }).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+}
+
+document.querySelectorAll("#pd-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    pdSort.dir = (pdSort.key === key) ? -pdSort.dir : 1;
+    pdSort.key = key;
+    renderPersonalDids();
+  });
+});
+
+async function loadPersonalDids() {
+  const res = await fetch("/api/pstn-personal-dids");
+  const data = await res.json();
+  lastPersonalDids = data.dids || [];
+  renderPersonalDids();
 }
 
 document.getElementById("pd-save").addEventListener("click", async () => {
