@@ -645,6 +645,44 @@ ENV
     log_info "never alerts by itself, since there's no prior state to compare against yet."
 }
 
+# See services/asterisk.sh's own copy for the full rationale — identical
+# here, just calling into the same install_security-dashboard/
+# install_pstn-trunk entry points (still independently registered/
+# invocable; this is a convenience layer on top, not a replacement).
+_asterisk_do_offer_dashboard_and_trunk() {
+    local EA_DIR="$1"
+
+    if ! declare -F install_security-dashboard >/dev/null 2>&1 && ! declare -F install_pstn-trunk >/dev/null 2>&1; then
+        log_info "Run this from the full ubuntu-post-install repo (not a standalone copy) to also"
+        log_info "get prompts here for the Security Dashboard and a PSTN trunk — skipping both."
+        return 0
+    fi
+
+    if declare -F install_security-dashboard >/dev/null 2>&1; then
+        echo ""
+        if [[ -f "$DOCKER_DIR/security-dashboard/app.py" ]]; then
+            log_info "Security Dashboard already installed — refreshing it too..."
+            install_security-dashboard
+        else
+            local _WANT_DASH=""
+            prompt_yn "Set up the Security Dashboard (Security Log, Extensions, Asterisk Admin, PSTN Trunk, CrowdSec — one page)? (y/n):" "y" _WANT_DASH
+            [[ "$_WANT_DASH" =~ ^[Yy]$ ]] && install_security-dashboard
+        fi
+    fi
+
+    if declare -F install_pstn-trunk >/dev/null 2>&1; then
+        echo ""
+        if [[ -f "$EA_DIR/config/asterisk/pstn-trunk-dialplan.conf" ]]; then
+            log_info "PSTN trunk already configured — refreshing it too..."
+            install_pstn-trunk
+        else
+            local _WANT_TRUNK=""
+            prompt_yn "Configure a real SIP/PSTN trunk (actual outside phone numbers, e.g. Anveo Direct/VoIP.ms)? (y/n):" "n" _WANT_TRUNK
+            [[ "$_WANT_TRUNK" =~ ^[Yy]$ ]] && install_pstn-trunk
+        fi
+    fi
+}
+
 # ── Shared: docker-compose.yml ─────────────────────────────────────────────
 # Same reasoning as above — one copy of the template used by both fresh
 # installs and updates. Must be called with $PWD already at $EA_DIR.
@@ -740,6 +778,9 @@ install_asterisk-digital-ocean() {
         echo "[DRY-RUN]   gated live on each sender's 'messaging' flag in pstn-permissions.conf (the"
         echo "[DRY-RUN]   same file/flag the Security Dashboard's checkbox writes) — independent of"
         echo "[DRY-RUN]   whether the PSTN trunk is installed; migrates any already-existing devices too"
+        echo "[DRY-RUN] Would offer to also set up the Security Dashboard and a PSTN trunk in this"
+        echo "[DRY-RUN]   same run (calling services/security-dashboard.sh / services/pstn-trunk.sh"
+        echo "[DRY-RUN]   directly — both stay independently invocable via their own service name too)"
         return 0
     fi
 
@@ -778,6 +819,7 @@ install_asterisk-digital-ocean() {
                 fi
 
                 _asterisk_do_run_presence_step "$EA_DIR"
+                _asterisk_do_offer_dashboard_and_trunk "$EA_DIR"
 
                 local _EXISTING_DOMAIN _EXISTING_PORT
                 _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
@@ -1424,6 +1466,8 @@ MD
             && log_success "Easy Asterisk (DO edition) started" \
             || log_warning "Start failed — check: docker compose logs"
     fi
+
+    _asterisk_do_offer_dashboard_and_trunk "$EA_DIR"
 
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""

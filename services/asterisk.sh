@@ -609,6 +609,53 @@ ENV
     log_info "never alerts by itself, since there's no prior state to compare against yet."
 }
 
+# Offers to add/refresh the Security Dashboard and a PSTN trunk as part of
+# this SAME run, instead of needing to separately remember and run
+# `sudo ./setup.sh security-dashboard` / `sudo ./setup.sh pstn-trunk`
+# afterward. Neither loses its own independent registration/invocability —
+# this is purely a convenience layer on top, called from both the fresh-
+# install and update-mode paths below. An already-installed piece is just
+# silently refreshed (install_security-dashboard/install_pstn-trunk each
+# have their own update/fresh/cancel reinstall-mode gate, so calling them
+# again here does the right thing automatically); a not-yet-installed piece
+# gets a one-line y/n instead of every detailed prompt firing unconditionally.
+_asterisk_offer_dashboard_and_trunk() {
+    local EA_DIR="$1"
+
+    # Only available when run through the full repo's setup.sh (which
+    # sources every services/*.sh file, including these two) — a standalone
+    # `sudo bash asterisk.sh` copy has neither function defined at all.
+    if ! declare -F install_security-dashboard >/dev/null 2>&1 && ! declare -F install_pstn-trunk >/dev/null 2>&1; then
+        log_info "Run this from the full ubuntu-post-install repo (not a standalone copy) to also"
+        log_info "get prompts here for the Security Dashboard and a PSTN trunk — skipping both."
+        return 0
+    fi
+
+    if declare -F install_security-dashboard >/dev/null 2>&1; then
+        echo ""
+        if [[ -f "$DOCKER_DIR/security-dashboard/app.py" ]]; then
+            log_info "Security Dashboard already installed — refreshing it too..."
+            install_security-dashboard
+        else
+            local _WANT_DASH=""
+            prompt_yn "Set up the Security Dashboard (Security Log, Extensions, Asterisk Admin, PSTN Trunk, CrowdSec — one page)? (y/n):" "y" _WANT_DASH
+            [[ "$_WANT_DASH" =~ ^[Yy]$ ]] && install_security-dashboard
+        fi
+    fi
+
+    if declare -F install_pstn-trunk >/dev/null 2>&1; then
+        echo ""
+        if [[ -f "$EA_DIR/config/asterisk/pstn-trunk-dialplan.conf" ]]; then
+            log_info "PSTN trunk already configured — refreshing it too..."
+            install_pstn-trunk
+        else
+            local _WANT_TRUNK=""
+            prompt_yn "Configure a real SIP/PSTN trunk (actual outside phone numbers, e.g. Anveo Direct/VoIP.ms)? (y/n):" "n" _WANT_TRUNK
+            [[ "$_WANT_TRUNK" =~ ^[Yy]$ ]] && install_pstn-trunk
+        fi
+    fi
+}
+
 # ── Shared: docker-compose.yml ─────────────────────────────────────────────
 # Same reasoning as above — one copy of the template used by both fresh
 # installs and updates. Must be called with $PWD already at $EA_DIR.
@@ -700,6 +747,9 @@ install_asterisk() {
         echo "[DRY-RUN] Would offer optional ntfy alerts on extension registration going offline/online"
         echo "[DRY-RUN]   (checked every 2 minutes via systemd timer, cron.d fallback; always asked,"
         echo "[DRY-RUN]   update mode included)"
+        echo "[DRY-RUN] Would offer to also set up the Security Dashboard and a PSTN trunk in this"
+        echo "[DRY-RUN]   same run (calling services/security-dashboard.sh / services/pstn-trunk.sh"
+        echo "[DRY-RUN]   directly — both stay independently invocable via their own service name too)"
         return 0
     fi
 
@@ -737,6 +787,7 @@ install_asterisk() {
                 fi
 
                 _asterisk_run_presence_step "$EA_DIR"
+                _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
                 local _EXISTING_DOMAIN _EXISTING_PORT
                 _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
@@ -1040,6 +1091,8 @@ MD
             && log_success "Easy Asterisk started" \
             || log_warning "Start failed — check: docker compose logs"
     fi
+
+    _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""
