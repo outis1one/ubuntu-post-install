@@ -478,12 +478,23 @@ EOF
 # PSTN_CALLERID_NORM below mirrors what outbound's _NXXNXXXXXX pattern
 # already does (Goto 1${EXTEN} to add a leading "1" before any tier/
 # allowed_numbers check) but for the inbound direction: allowed_numbers
-# is always stored 11-digit (dashboard's NUMBER_RE requires exactly 11
-# digits), but a provider's inbound Caller-ID isn't guaranteed to include
-# the leading "1" — confirmed live: Anveo delivered a bare 10-digit
-# CALLERID(num), so every restricted-tier check against it failed on
-# a plain digit-count mismatch (11-digit pattern vs. 10-digit string),
-# regardless of whether the number itself was genuinely on the list.
+# is always stored 11-digit, digits only (dashboard's NUMBER_RE requires
+# exactly 11 digits, no other characters), but a provider's inbound
+# Caller-ID isn't guaranteed to arrive in that exact shape. Two confirmed-
+# live gaps here, not just one:
+# - Anveo delivered a bare 10-digit CALLERID(num) with no leading "1", so
+#   every restricted-tier check against it failed on a plain digit-count
+#   mismatch (11-digit pattern vs. 10-digit string), regardless of whether
+#   the number itself was genuinely on the list.
+# - Separately, once trust_id_inbound=yes (see _pstn_write_pjsip_include)
+#   started surfacing the real caller identity instead of the endpoint's
+#   static callerid fallback, that real identity arrived "+E.164" style
+#   (a leading "+", e.g. "+15551234567") — 12 characters, so the LEN=10
+#   check never fires and the "+" is never stripped, leaving a value that
+#   can never match an 11-digit, digits-only allowed_numbers pattern no
+#   matter how correctly the number is whitelisted. PSTN_CID_RAW below
+#   strips a leading "+" first, THEN the existing 10-digit check runs
+#   against that.
 # Every restricted-tier comparison below (ring-group members, personal-
 # DID owner, group-owned personal DID) uses this normalized value
 # instead of raw ${CALLERID(num)}.
@@ -517,7 +528,8 @@ exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
  same => n,Set(PSTN_DID_10=${IF($[${LEN(${EXTEN})} = 11]?${EXTEN:1}:${EXTEN})})
- same => n,Set(PSTN_CALLERID_NORM=${IF($[${LEN(${CALLERID(num)})} = 10]?1${CALLERID(num)}:${CALLERID(num)})})
+ same => n,Set(PSTN_CID_RAW=${IF($["${CALLERID(num):0:1}" = "+"]?${CALLERID(num):1}:${CALLERID(num)})})
+ same => n,Set(PSTN_CALLERID_NORM=${IF($[${LEN(${PSTN_CID_RAW})} = 10]?1${PSTN_CID_RAW}:${PSTN_CID_RAW})})
  same => n,Set(PSTN_PERSONAL_OWNER=${AST_CONFIG(pstn-personal-dids.conf,${PSTN_DID_10},owner)})
  same => n,GotoIf($["${PSTN_PERSONAL_OWNER}" != ""]?pstn_personal_inbound,1)
  same => n,Set(PSTN_RING_LIST=)
@@ -673,11 +685,16 @@ CALLER="$1"
 GROUP="$2"
 CONF_DIR="/etc/asterisk"
 
-# allowed_numbers is always stored 11-digit (dashboard's NUMBER_RE requires
-# it); the dialplan already passes a normalized caller ID in here
-# (PSTN_CALLERID_NORM), but normalize again defensively — this script is
-# also useful to invoke by hand for testing, and a bare 10-digit caller ID
-# would otherwise never match any 11-digit allowed_numbers entry.
+# allowed_numbers is always stored 11-digit, digits only (dashboard's
+# NUMBER_RE requires it); the dialplan already passes a normalized caller ID
+# in here (PSTN_CALLERID_NORM), but normalize again defensively — this
+# script is also useful to invoke by hand for testing. Strip a leading "+"
+# first (real caller identity via trust_id_inbound can arrive "+E.164"
+# style, e.g. "+15551234567" — 12 characters, so it'd otherwise skip the
+# 10-digit check below and never match an 11-digit allowed_numbers entry
+# no matter how correctly the number is whitelisted), then a bare 10-digit
+# caller ID would otherwise never match any 11-digit allowed_numbers entry.
+CALLER="${CALLER#+}"
 [[ ${#CALLER} -eq 10 ]] && CALLER="1${CALLER}"
 
 _ini_get() {
