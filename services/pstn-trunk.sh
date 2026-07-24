@@ -583,30 +583,30 @@ __ALERT_KILLED_IN_LINE__
 ; live config files and applies the identical tier/allowed_numbers logic
 ; in a plain shell loop.
 ;
-; Every OTHER denial path in this file (outbound tier/number/intl/killswitch,
-; the shared ring-group's pstn_in_denied, this owner's own denial just
-; above) plays a proper Busy(15) tone before Hangup() — pstn_in_denied and
-; the personal-DID denial paths were missing that Busy() and fell straight
-; to a bare Hangup() on an unanswered channel instead, which chan_pjsip
-; does NOT map to "486 Busy Here" the way Busy() does. NOT yet confirmed
-; live against a real call, but this is a real, reproducible inconsistency
-; (grep this file for "Hangup()" without a preceding Busy() and these three
-; exits were the only inbound ones missing it) and is a plausible cause of
-; a caller hearing one ring and then an ambiguous fast-busy/call-failed
-; tone on what looks like a correctly-authorized group member: if the
-; group/tier/allowed_numbers config has ANY mismatch against the test
-; caller ID, the call was always going to be denied here regardless of
-; this fix — the missing Busy() just made a config problem sound like a
-; dialplan problem. Fixed below (Busy(15) added to all three inbound
-; denial exits). If a group-assigned personal number still goes straight
-; to busy after this, the NoOp() logged right after the SHELL() call in
-; pstn_personal_group_ring prints the resolved group name, caller ID, and
-; PSTN_RING_LIST — check `asterisk -rx "core show channels verbose"` / the
-; full log for that line first; an empty list there means the config (not
-; the dialplan) is the next thing to check — confirm the calling number is
-; in allowed_numbers for at least one CURRENT group member whose tier is
+; Every denial path in this file (outbound tier/number/intl/killswitch, the
+; shared ring-group's pstn_in_denied, the personal-DID owner and group
+; denials) plays a proper Busy(15) tone before Hangup(). pstn_in_denied and
+; the two personal-DID denial paths used to fall straight to a bare
+; Hangup() on an unanswered channel instead, which chan_pjsip does NOT map
+; to "486 Busy Here" the way Busy() does — making a config mismatch sound
+; like a dialplan failure. Confirmed live (2026-07-24): a group-owned
+; personal DID is now fully working end to end, ringing every authorized
+; member simultaneously, after this plus three other fixes found in the
+; same session (see _pstn_write_inbound_dialplan_include's file-split
+; comment, and _pstn_write_pjsip_include's trust_id_inbound/callerid
+; comment).
+;
+; If a group-assigned personal number goes straight to busy, the NoOp()
+; logged right after the SHELL() call in pstn_personal_group_ring prints
+; the resolved group name, caller ID, and PSTN_RING_LIST — check the
+; Asterisk console/full log for that line first. An empty list there means
+; the config, not the dialplan: confirm the calling number is in
+; allowed_numbers for at least one CURRENT group member whose tier is
 ; "restricted" or "full" in pstn-permissions.conf, and that the group's
-; members= line in pstn-groups.conf actually lists that extension.
+; members= line in pstn-groups.conf actually lists that extension. Note
+; that a dashboard edit may need the "Commit Changes" button (a container
+; restart — see restart_asterisk_container() in services/security-dashboard.sh)
+; before AST_CONFIG() actually returns the new value.
 exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?pstn_personal_group_ring,1)
  same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
@@ -672,6 +672,10 @@ EOF
 # Safe REGEX direction: $allowed is admin-entered (pstn-permissions.conf),
 # $caller is the incoming Caller-ID — pattern is always the admin data,
 # string is always the caller-controlled data, never the reverse.
+# Confirmed live (2026-07-24): SHELL() invoking this script from the
+# dialplan works end to end against a real inbound call — the returned
+# &-joined list rings every authorized member simultaneously, first to
+# answer wins, and unauthorized members are correctly skipped.
 _pstn_write_personal_group_ring_script() {
     local FILE="$1"
     cat > "$FILE" << 'SCRIPT'

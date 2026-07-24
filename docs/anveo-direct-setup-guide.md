@@ -216,13 +216,56 @@ installer, not configuration mistakes — listed here for context on what
   under `setup.sh`'s `set -u` on `source`. Now guarded and falls back to
   safe defaults, erroring clearly only if genuinely required fields are
   missing.
+- **The inbound `[from-pstn-trunk]` context never loaded at all** — it used
+  to share one `#include`'d file with the outbound dialplan, where the file
+  continued `[intercom]` first and only declared `[from-pstn-trunk]`
+  partway through. Asterisk silently failed to load the *entire* file
+  (outbound patterns included) with no error anywhere, so every inbound
+  call got "extension not found in context 'from-pstn-trunk'" and an
+  immediate SIP rejection. Inbound now lives in its own file that starts
+  with its context header, matching the structure of the messaging
+  dialplan that always loaded correctly.
+- **Every inbound call's Caller-ID arrived as the DID itself**, not the
+  real caller — the trunk endpoint pinned a static `callerid=<DID>` and
+  didn't set `trust_id_inbound`, so Asterisk ignored the identity Anveo
+  actually sends and fell back to that default. Every restricted-tier
+  `allowed_numbers` check was therefore unwinnable regardless of config.
+  Fixed by dropping the static default (redundant — the outbound dialplan
+  sets `CALLERID(num)` on the channel itself) and adding
+  `trust_id_inbound=yes`.
+- **A leading `+` broke whitelist matching** — once the fix above started
+  surfacing real caller identity, Anveo delivers it `+E.164` style
+  (`+15551234567`). The normalizer only added a leading `1` to 10-digit
+  values and never stripped the `+`, so a 12-character value could never
+  match an 11-digit, digits-only `allowed_numbers` entry no matter how
+  correctly the number was whitelisted. The `+` is now stripped in the
+  dialplan, the group-ring script, and the dashboard's admin-input side
+  (so pasting a number straight from a call log works too).
+- **Bare `Hangup()` on inbound denials** instead of `Busy(15)` — three
+  inbound denial paths didn't produce a proper "486 Busy Here", making a
+  correct permission denial sound like a generic call failure and
+  disguising config mismatches as dialplan bugs.
+
+## Dashboard changes may need "Commit Changes"
+
+Confirmed live: edits made in the Security Dashboard's PSTN Trunk tab
+(permission tiers, groups, personal-DID owners, limits) are written to disk
+immediately, but `AST_CONFIG()` in the dialplan has been observed still
+returning the *old* value until the Asterisk container is fully restarted —
+a `dialplan reload` / `module reload` is not enough. This contradicts the
+"reads fresh on every call, no restart needed" design premise these files
+otherwise rely on; root cause not established.
+
+The PSTN Trunk tab has a **Commit Changes (Restart Asterisk)** button for
+this, which appears after any save on that tab and warns if you navigate
+away with changes uncommitted. Existing calls are unaffected by the
+restart. If a change doesn't seem to be taking effect on a test call, press
+it before assuming the config itself is wrong.
 
 ## Still open
 
-- The 2-phone-number account cap (see step 1) blocks getting all 4
-  planned numbers until either Anveo lifts it or a tax ID is provided —
-  tabled for now.
-- The interactive CLI walkthrough (`pstn-trunk.sh` actually prompting
-  through account setup step by step, not just this static doc) hasn't
-  been built yet — this guide is the reference for building that once
-  there's appetite for it.
+- Nothing blocking. The two items previously listed here are both resolved:
+  the 2-phone-number account cap no longer applies (additional DIDs have
+  since been obtained), and the interactive CLI walkthrough was built —
+  see `_pstn_anveo_walkthrough` in `services/pstn-trunk.sh`, reachable from
+  the provider quick-pick when you choose Anveo Direct.
