@@ -1395,24 +1395,42 @@ def write_personal_did(did, owner):
     it, and giving an extension a new personal DID drops whichever one it
     had before — this always leaves a clean 1:1 mapping in both files,
     rather than requiring the caller to clean up the old assignment
-    itself."""
+    itself.
+
+    owner may also be a group reference, written as "@GroupName" (the '@'
+    makes it unambiguous against a same-named numeric extension - group
+    names are free text and could otherwise collide, e.g. a group literally
+    named "201"). A group-owned DID rings every CURRENT member whose own
+    tier/approved-numbers authorize the caller, computed fresh on every
+    call (see pstn-personal-group-ring.sh) rather than baked in at
+    assignment time - membership changes take effect immediately, unlike
+    the Groups card's other bulk actions. Group ownership has no single
+    extension to hang an outbound Caller-ID override on, so it never
+    touches pstn-permissions.conf the way a single-extension owner does."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     did = str(did).strip()
     owner = str(owner).strip()
     if not PERSONAL_DID_RE.match(did):
         return False, "DID must be a 10-digit US number"
-    if not EXTEN_RE.match(owner):
+
+    is_group = owner.startswith("@")
+    group_name = owner[1:] if is_group else ""
+    if is_group:
+        if not group_name or not _read_groups_cp().has_section(group_name):
+            return False, "Group '%s' not found" % group_name
+    elif not EXTEN_RE.match(owner):
         return False, "Invalid owner extension"
 
     dids_cp = _read_personal_dids_cp()
     perms_cp = _read_permissions_cp()
 
-    for section in perms_cp.sections():
-        if section != owner and perms_cp.get(section, "personal_did", fallback="") == did:
-            perms_cp.remove_option(section, "personal_did")
-            if not perms_cp.options(section):
-                perms_cp.remove_section(section)
+    if not is_group:
+        for section in perms_cp.sections():
+            if section != owner and perms_cp.get(section, "personal_did", fallback="") == did:
+                perms_cp.remove_option(section, "personal_did")
+                if not perms_cp.options(section):
+                    perms_cp.remove_section(section)
 
     for section in list(dids_cp.sections()):
         if section != did and dids_cp.get(section, "owner", fallback="") == owner:
@@ -1422,13 +1440,17 @@ def write_personal_did(did, owner):
         dids_cp.add_section(did)
     dids_cp.set(did, "owner", owner)
 
+    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
+    if not ok:
+        return False, err
+
+    if is_group:
+        return True, "Assigned %s to group %s" % (did, group_name)
+
     if not perms_cp.has_section(owner):
         perms_cp.add_section(owner)
     perms_cp.set(owner, "personal_did", did)
 
-    ok, err = _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
-    if not ok:
-        return False, err
     ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
     if not ok:
         return False, err
@@ -1603,7 +1625,7 @@ INDEX_HTML = """<!doctype html>
     <div class="card">
       <h3 style="margin-top:0">Personal numbers</h3>
       <p class="muted">
-        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. The shared DID/ring-group keeps working regardless.
+        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings (checked fresh on every call, so membership changes apply immediately); a group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.
       </p>
       <div class="row">
         <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits, no leading 1)" style="width:12rem">
@@ -1941,9 +1963,14 @@ async function loadPstnPermissions() {
   const data = await res.json();
   const exts = data.extensions || [];
 
+  const grpRes = await fetch("/api/pstn-groups");
+  const grpData = await grpRes.json();
+  const groups = grpData.groups || [];
+
   const ownerSel = document.getElementById("pd-owner");
-  ownerSel.innerHTML = exts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("")
-    || '<option value="">No extensions found</option>';
+  const extOptions = exts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
+  const groupOptions = groups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
+  ownerSel.innerHTML = (extOptions + groupOptions) || '<option value="">No extensions found</option>';
 
   const tbody = document.querySelector("#pstn-table tbody");
   if (!exts.length) {
@@ -1991,11 +2018,16 @@ async function loadPersonalDids() {
   const data = await res.json();
   const dids = data.dids || [];
   const tbody = document.querySelector("#pd-table tbody");
-  tbody.innerHTML = dids.map(d => `<tr>
+  tbody.innerHTML = dids.map(d => {
+    const ownerDisplay = d.owner.startsWith("@")
+      ? "Group: " + esc(d.owner.slice(1))
+      : esc(d.owner) + (d.owner_name ? " — " + esc(d.owner_name) : "");
+    return `<tr>
     <td>${esc(d.did)}</td>
-    <td>${esc(d.owner)}${d.owner_name ? " — " + esc(d.owner_name) : ""}</td>
+    <td>${ownerDisplay}</td>
     <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
-  </tr>`).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+  </tr>`;
+  }).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
 }
 
 document.getElementById("pd-save").addEventListener("click", async () => {
