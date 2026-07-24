@@ -223,7 +223,7 @@ _pstn_ring_member_block() {
  same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "full"]?ring__EXT__)
  same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_numbers)})
- same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${CALLERID(num)})}=1]?ring__EXT__)
+ same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?ring__EXT__)
  same => n,Goto(skip__EXT__)
  same => n(ring__EXT__),Set(PSTN_RING_LIST=${PSTN_RING_LIST}${PSTN_RING_SEP}PJSIP/__EXT__)
  same => n,Set(PSTN_RING_SEP=&)
@@ -395,6 +395,19 @@ EOF
     # Permission check (is anyone in the ring group authorized for this
     # caller) happens before the concurrency check, mirroring outbound's
     # own ordering (permission gate, then busy gate).
+    #
+    # PSTN_CALLERID_NORM below mirrors what outbound's _NXXNXXXXXX pattern
+    # already does (Goto 1${EXTEN} to add a leading "1" before any tier/
+    # allowed_numbers check) but for the inbound direction: allowed_numbers
+    # is always stored 11-digit (dashboard's NUMBER_RE requires exactly 11
+    # digits), but a provider's inbound Caller-ID isn't guaranteed to include
+    # the leading "1" — confirmed live: Anveo delivered a bare 10-digit
+    # CALLERID(num), so every restricted-tier check against it failed on
+    # a plain digit-count mismatch (11-digit pattern vs. 10-digit string),
+    # regardless of whether the number itself was genuinely on the list.
+    # Every restricted-tier comparison below (ring-group members, personal-
+    # DID owner, group-owned personal DID) uses this normalized value
+    # instead of raw ${CALLERID(num)}.
     cat >> "$FILE" << 'EOF'
 
 [from-pstn-trunk]
@@ -403,6 +416,7 @@ exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
  same => n,Set(PSTN_DID_10=${IF($[${LEN(${EXTEN})} = 11]?${EXTEN:1}:${EXTEN})})
+ same => n,Set(PSTN_CALLERID_NORM=${IF($[${LEN(${CALLERID(num)})} = 10]?1${CALLERID(num)}:${CALLERID(num)})})
  same => n,Set(PSTN_PERSONAL_OWNER=${AST_CONFIG(pstn-personal-dids.conf,${PSTN_DID_10},owner)})
  same => n,GotoIf($["${PSTN_PERSONAL_OWNER}" != ""]?pstn_personal_inbound,1)
  same => n,Set(PSTN_RING_LIST=)
@@ -460,13 +474,13 @@ exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?ps
  same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
  same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
- same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${CALLERID(num)})}=1]?pstn_personal_ring,1)
+ same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?pstn_personal_ring,1)
  same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
  same => n,Hangup()
 
 exten => pstn_personal_group_ring,1,Set(PSTN_GROUP_NAME=${CUT(PSTN_PERSONAL_OWNER,@,2)})
- same => n,Set(PSTN_RING_LIST=${SHELL(/etc/asterisk/pstn-personal-group-ring.sh "${CALLERID(num)}" "${PSTN_GROUP_NAME}")})
+ same => n,Set(PSTN_RING_LIST=${SHELL(/etc/asterisk/pstn-personal-group-ring.sh "${PSTN_CALLERID_NORM}" "${PSTN_GROUP_NAME}")})
  same => n,GotoIf($["${PSTN_RING_LIST}" = ""]?pstn_personal_denied_group,1)
  same => n,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
  same => n,Set(PSTN_MAX_IN=${IF($["${PSTN_MAX_IN}" = ""]?10:${PSTN_MAX_IN})})
@@ -530,6 +544,13 @@ _pstn_write_personal_group_ring_script() {
 CALLER="$1"
 GROUP="$2"
 CONF_DIR="/etc/asterisk"
+
+# allowed_numbers is always stored 11-digit (dashboard's NUMBER_RE requires
+# it); the dialplan already passes a normalized caller ID in here
+# (PSTN_CALLERID_NORM), but normalize again defensively — this script is
+# also useful to invoke by hand for testing, and a bare 10-digit caller ID
+# would otherwise never match any 11-digit allowed_numbers entry.
+[[ ${#CALLER} -eq 10 ]] && CALLER="1${CALLER}"
 
 _ini_get() {
     # _ini_get <file> <section> <key>
