@@ -314,38 +314,88 @@ README_MD
     echo ""
 }
 
+# Grants secdash execute-only traversal (via a POSIX ACL, not chmod) on
+# every ancestor directory between the filesystem root and _leaf, stopping
+# early once an ancestor is already reachable. Needed because DOCKER_DIR can
+# be /root/docker (any root-run droplet — a fully supported setup, not a
+# mistake) and some cloud images ship /root at a bare 700: no matter what
+# access the LEAF directory itself grants, secdash (a non-root system user)
+# can never reach through a blocking ancestor to get there. setfacl here
+# grants ONLY the ability to pass through a path already known in advance —
+# it does not grant listing that directory's contents or reading anything
+# else inside it.
+_secdash_grant_ancestor_traversal() {
+    local _svc_user="$1" _leaf="$2"
+    command -v setfacl >/dev/null 2>&1 || return 0
+    local _dir
+    _dir="$(dirname "$_leaf")"
+    while [[ "$_dir" != "/" && -n "$_dir" ]]; do
+        sudo -u "$_svc_user" test -x "$_dir" 2>/dev/null && break
+        setfacl -m "u:${_svc_user}:x" "$_dir" 2>/dev/null || true
+        _dir="$(dirname "$_dir")"
+    done
+}
+
 # Grants secdash read/write access to wherever Asterisk's config lives
-# without running the dashboard as root or the actual user — added to the
-# group that already owns those directories (ensure_docker_dir_ownership
-# elsewhere in this repo sets both owner AND group to ACTUAL_USER, so the log
-# dir and config dir normally share one group already; handled separately
-# anyway in case that ever changes). Separate function, called from both
-# "update" and fresh-install, so a PSTN trunk installed *after* this
-# dashboard (or an asterisk-digital-ocean/asterisk swap) reaches an existing
-# install on its next update instead of silently only applying to new ones.
+# without running the dashboard as root or the actual user. Separate
+# function, called from both "update" and fresh-install, so a PSTN trunk
+# installed *after* this dashboard (or an asterisk-digital-ocean/asterisk
+# swap) reaches an existing install on its next update instead of silently
+# only applying to new ones.
+#
+# Uses POSIX ACLs (setfacl), not chmod + group membership. Confirmed live:
+# the Asterisk container's own entrypoint runs `chown -R asterisk:asterisk
+# /etc/asterisk` on every container start/restart — and the numeric UID/GID
+# that resolves to inside the container can coincidentally collide with
+# unrelated system accounts on the host (observed: config/asterisk ending up
+# owned by messagebus:uuidd, neither of which secdash has any relationship
+# to), silently reverting whatever group grant was applied at install time.
+# `chown` does not touch ACL entries (only `chmod` recalculates the ACL
+# mask, and nothing in this flow calls chmod after install) — so an
+# ACL-based grant survives that reset instead of quietly breaking again on
+# the next container restart. `-d` (default ACL) makes new files/directories
+# created later (a regenerated dialplan file, a fresh personal-DID entry)
+# inherit the same grant automatically. Falls back to the old chmod/group
+# approach with a warning if the `acl` package isn't installed for some
+# reason (should always be present — installed below).
 _secdash_grant_asterisk_access() {
     local _svc_user="$1" _log_dir="$2" _config_dir="$3" _ea_config_dir="${4:-}"
+
+    command -v setfacl >/dev/null 2>&1 || run_cmd apt-get install -y acl >/dev/null 2>&1
+    local _have_acl=false
+    command -v setfacl >/dev/null 2>&1 && _have_acl=true
+    [ "$_have_acl" = true ] || log_warning "Package 'acl' unavailable — falling back to group-based access, which can silently break again whenever the Asterisk container re-chowns its own config directory. Install 'acl' and re-run to fix that properly."
+
     local _dir
     for _dir in "$_log_dir" "$_config_dir" "$_ea_config_dir"; do
         [ -n "$_dir" ] && [ -d "$_dir" ] || continue
-        local _group
-        _group="$(stat -c '%G' "$_dir" 2>/dev/null || echo "$ACTUAL_USER")"
-        usermod -aG "$_group" "$_svc_user" 2>/dev/null || true
-        chmod 750 "$_dir" 2>/dev/null || true
+        _secdash_grant_ancestor_traversal "$_svc_user" "$_dir"
+        if [ "$_have_acl" = true ]; then
+            setfacl -R -m "u:${_svc_user}:rX" "$_dir" 2>/dev/null || true
+            setfacl -R -d -m "u:${_svc_user}:rX" "$_dir" 2>/dev/null || true
+        else
+            local _group
+            _group="$(stat -c '%G' "$_dir" 2>/dev/null || echo "$ACTUAL_USER")"
+            usermod -aG "$_group" "$_svc_user" 2>/dev/null || true
+            chmod 750 "$_dir" 2>/dev/null || true
+        fi
     done
-    # pstn-permissions.conf specifically needs group WRITE (750 above is
-    # read+execute for the group, not write) — the file itself is written
-    # group-writable (664) by services/pstn-trunk.sh, but the containing
-    # directory also needs the group execute+write bit for a new file save
-    # (configparser writes a fresh temp file then renames it into place) to
-    # succeed. 770 only on the config dir, not the log dir (no reason for
-    # secdash to ever create files in the log dir). _ea_config_dir
-    # (categories.conf/rooms.conf) deliberately stays 750/read-only — the
-    # native Asterisk Admin tab writes those through `docker exec ... tee`
-    # instead (see the ea_* functions), not a direct host-side write, so
-    # there's no reason to grant this directory group-write at all.
+
+    # pstn-permissions.conf/pstn-limits.conf/pstn-personal-dids.conf need
+    # WRITE access on the containing directory too (configparser writes a
+    # fresh temp file then renames it into place) — only on the config dir,
+    # not the log dir (no reason for secdash to ever create files there).
+    # _ea_config_dir (categories.conf/rooms.conf) deliberately stays
+    # read-only — the native Asterisk Admin tab writes those through
+    # `docker exec ... tee` instead (see the ea_* functions), not a direct
+    # host-side write, so there's no reason to grant it write access at all.
     if [ -n "$_config_dir" ] && [ -d "$_config_dir" ]; then
-        chmod 770 "$_config_dir" 2>/dev/null || true
+        if [ "$_have_acl" = true ]; then
+            setfacl -m "u:${_svc_user}:rwx" "$_config_dir" 2>/dev/null || true
+            setfacl -d -m "u:${_svc_user}:rwx" "$_config_dir" 2>/dev/null || true
+        else
+            chmod 770 "$_config_dir" 2>/dev/null || true
+        fi
     fi
 }
 
