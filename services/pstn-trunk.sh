@@ -223,7 +223,7 @@ _pstn_ring_member_block() {
  same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "full"]?ring__EXT__)
  same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_numbers)})
- same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${CALLERID(num)})}=1]?ring__EXT__)
+ same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?ring__EXT__)
  same => n,Goto(skip__EXT__)
  same => n(ring__EXT__),Set(PSTN_RING_LIST=${PSTN_RING_LIST}${PSTN_RING_SEP}PJSIP/__EXT__)
  same => n,Set(PSTN_RING_SEP=&)
@@ -395,6 +395,19 @@ EOF
     # Permission check (is anyone in the ring group authorized for this
     # caller) happens before the concurrency check, mirroring outbound's
     # own ordering (permission gate, then busy gate).
+    #
+    # PSTN_CALLERID_NORM below mirrors what outbound's _NXXNXXXXXX pattern
+    # already does (Goto 1${EXTEN} to add a leading "1" before any tier/
+    # allowed_numbers check) but for the inbound direction: allowed_numbers
+    # is always stored 11-digit (dashboard's NUMBER_RE requires exactly 11
+    # digits), but a provider's inbound Caller-ID isn't guaranteed to include
+    # the leading "1" — confirmed live: Anveo delivered a bare 10-digit
+    # CALLERID(num), so every restricted-tier check against it failed on
+    # a plain digit-count mismatch (11-digit pattern vs. 10-digit string),
+    # regardless of whether the number itself was genuinely on the list.
+    # Every restricted-tier comparison below (ring-group members, personal-
+    # DID owner, group-owned personal DID) uses this normalized value
+    # instead of raw ${CALLERID(num)}.
     cat >> "$FILE" << 'EOF'
 
 [from-pstn-trunk]
@@ -403,6 +416,7 @@ exten => _X.,1,NoOp(Inbound PSTN call from ${CALLERID(num)} to ${EXTEN})
  same => n,Set(PSTN_KILLED=${AST_CONFIG(pstn-trunk-killswitch.conf,state,tripped)})
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_in_killed,1)
  same => n,Set(PSTN_DID_10=${IF($[${LEN(${EXTEN})} = 11]?${EXTEN:1}:${EXTEN})})
+ same => n,Set(PSTN_CALLERID_NORM=${IF($[${LEN(${CALLERID(num)})} = 10]?1${CALLERID(num)}:${CALLERID(num)})})
  same => n,Set(PSTN_PERSONAL_OWNER=${AST_CONFIG(pstn-personal-dids.conf,${PSTN_DID_10},owner)})
  same => n,GotoIf($["${PSTN_PERSONAL_OWNER}" != ""]?pstn_personal_inbound,1)
  same => n,Set(PSTN_RING_LIST=)
@@ -460,13 +474,13 @@ exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?ps
  same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
  same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
- same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${CALLERID(num)})}=1]?pstn_personal_ring,1)
+ same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?pstn_personal_ring,1)
  same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
  same => n,Hangup()
 
 exten => pstn_personal_group_ring,1,Set(PSTN_GROUP_NAME=${CUT(PSTN_PERSONAL_OWNER,@,2)})
- same => n,Set(PSTN_RING_LIST=${SHELL(/etc/asterisk/pstn-personal-group-ring.sh "${CALLERID(num)}" "${PSTN_GROUP_NAME}")})
+ same => n,Set(PSTN_RING_LIST=${SHELL(/etc/asterisk/pstn-personal-group-ring.sh "${PSTN_CALLERID_NORM}" "${PSTN_GROUP_NAME}")})
  same => n,GotoIf($["${PSTN_RING_LIST}" = ""]?pstn_personal_denied_group,1)
  same => n,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
  same => n,Set(PSTN_MAX_IN=${IF($["${PSTN_MAX_IN}" = ""]?10:${PSTN_MAX_IN})})
@@ -530,6 +544,13 @@ _pstn_write_personal_group_ring_script() {
 CALLER="$1"
 GROUP="$2"
 CONF_DIR="/etc/asterisk"
+
+# allowed_numbers is always stored 11-digit (dashboard's NUMBER_RE requires
+# it); the dialplan already passes a normalized caller ID in here
+# (PSTN_CALLERID_NORM), but normalize again defensively — this script is
+# also useful to invoke by hand for testing, and a bare 10-digit caller ID
+# would otherwise never match any 11-digit allowed_numbers entry.
+[[ ${#CALLER} -eq 10 ]] && CALLER="1${CALLER}"
 
 _ini_get() {
     # _ini_get <file> <section> <key>
@@ -1458,9 +1479,11 @@ install_pstn-trunk() {
         echo "[DRY-RUN]   pstn-permissions.conf, pstn-limits.conf, or the kill-switch trip state)"
         echo "[DRY-RUN]   instead of a fresh install if already configured; the international-calling"
         echo "[DRY-RUN]   review/change question is still asked every run either way"
-        echo "[DRY-RUN] Would restart the asterisk container to apply, AND directly patch the live"
-        echo "[DRY-RUN]   pjsip.conf/extensions.conf with the #include lines regardless — Easy Asterisk"
-        echo "[DRY-RUN]   only regenerates those files if they don't already exist, so an existing"
+        echo "[DRY-RUN] Fresh install: would prompt to restart the asterisk container to apply."
+        echo "[DRY-RUN] Update in place: applies live instead — no restart, no dropped calls."
+        echo "[DRY-RUN] Either way, directly patches the live pjsip.conf/extensions.conf with the"
+        echo "[DRY-RUN]   #include lines and reloads res_pjsip/dialplan — Easy Asterisk only"
+        echo "[DRY-RUN]   regenerates those files if they don't already exist, so an existing"
         echo "[DRY-RUN]   install (the common case) would otherwise never actually load the trunk config"
         return 0
     fi
@@ -1528,10 +1551,19 @@ install_pstn-trunk() {
                         "$TRUNK_SERVER" "${TRUNK_SERVER_IPS:-}" "$TRUNK_DID" \
                         "${RING_EXTS:-}" "${NTFY_URL:-}" "${RATE_PER_MIN:-0.01}" \
                         "${MONTH_THRESHOLD:-10}" "${BURST_THRESHOLD:-10}" "${PROVIDER_NAME:-unknown}" "${MAX_MONTHLY_SPEND:-0}" "${CONTAINER_NAME:-easy-asterisk-do}" || return 1
-                    ( cd "$EA_DIR" && docker compose restart asterisk ) \
-                        && log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)." \
-                        || log_warning "Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs asterisk"
+                    # No container restart here — _pstn_ensure_live_includes's
+                    # module/dialplan reload below already applies everything
+                    # _pstn_apply_settings just wrote (trunk pjsip/dialplan
+                    # includes, the group-ring script) live, without dropping
+                    # any calls already in progress. A full restart doesn't
+                    # accomplish anything the reload doesn't, and this is the
+                    # "update in place" path — it shouldn't be more disruptive
+                    # than it has to be. Confirmed live: this used to restart
+                    # unconditionally here, redundant with (and disruptive on
+                    # top of) the rebuild+restart asterisk[-digital-ocean].sh
+                    # already just ran when this runs chained from there.
                     _pstn_ensure_live_includes "$ASTERISK_DIR" "$CONTAINER_NAME"
+                    log_success "Updated — settings unchanged (server $TRUNK_SERVER, DID $TRUNK_DID, ring exts: $RING_EXTS)."
                     log_info "pstn-permissions.conf and pstn-limits.conf were NOT touched — edit them"
                     log_info "directly, via the Security Dashboard, or choose FRESH reinstall to reset them."
                     # Always asked, every run, update mode included — see
