@@ -223,6 +223,18 @@ _pstn_write_pjsip_include() {
 ; If inbound calls stop matching after a provider-side change, re-run this
 ; service to re-resolve/re-enter them, or add extra match= lines here by
 ; hand for additional known source IPs.
+;
+; No static callerid= default on the endpoint below, on purpose. Confirmed
+; live: with one set (pinned to the trunk DID, presumably meant only as a
+; belt-and-suspenders default for outbound — the outbound dialplan already
+; sets CALLERID(num) on the calling channel before Dial(), which is what
+; actually gets presented), every INBOUND call's CALLERID(num) came back
+; identical to the DID itself regardless of who really called — every
+; restricted-tier allowed_numbers check was structurally unwinnable, since
+; the caller ID Asterisk saw was never the real one. trust_id_inbound=yes
+; below instead tells Asterisk to honor identity info the provider actually
+; sends (P-Asserted-Identity/Remote-Party-ID, in addition to the From
+; header) for this trunk, so real inbound Caller-ID reaches the dialplan.
 
 [pstn-trunk]
 type=aor
@@ -247,7 +259,7 @@ allow=ulaw,alaw
 aors=pstn-trunk
 from_user=__PSTN_DID__
 from_domain=__PSTN_SERVER__
-callerid=__PSTN_DID__
+trust_id_inbound=yes
 direct_media=no
 EOF
     sed -i "s/__PSTN_SERVER__/${SERVER}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
