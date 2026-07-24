@@ -469,6 +469,75 @@ _asterisk_do_patch_messaging_vendor_files() {
     log_success "Vendor generator functions patched for internal SIP messaging."
 }
 
+# ── Shared: sub-path-aware web admin (for native Caddy path-proxying) ──────
+# See services/asterisk.sh's own copy of this pair of functions for the full
+# rationale (verified against the real vendored file: the admin's only
+# absolute-path reference anywhere is `const API_BASE = '/api';`, no other
+# hrefs/redirects, plain HTTP Basic Auth instead of a login-page flow) —
+# identical here since both services vendor the exact same easy-asterisk
+# source, just under this service's own `_asterisk_do_` naming.
+_asterisk_do_patch_webadmin_base_path() {
+    local EA_DIR="$1"
+    local EASY1="$EA_DIR/easy-asterisk.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+
+    local BASE_PATH_LINE="BASE_PATH = os.environ.get('WEBADMIN_BASE_PATH', '').rstrip('/')"
+    local REPLACE_LINE
+    REPLACE_LINE=$(cat <<'PYLINE'
+HTML_TEMPLATE = HTML_TEMPLATE.replace("const API_BASE = '/api';", "const API_BASE = '" + BASE_PATH + "/api';")
+PYLINE
+)
+
+    local f TMP_FILE
+    for f in "$EASY1" "$EASY2"; do
+        [[ -f "$f" ]] || continue
+        grep -q "WEBADMIN_BASE_PATH" "$f" && continue   # already patched
+
+        if ! grep -qF "PORT = int(os.environ.get('WEBADMIN_PORT', 8080))" "$f"; then
+            log_warning "$(basename "$f"): WEBADMIN_PORT anchor not found — vendor template changed upstream."
+            log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+            continue
+        fi
+        if ! grep -qF "class WebAdminHandler(http.server.BaseHTTPRequestHandler):" "$f"; then
+            log_warning "$(basename "$f"): WebAdminHandler anchor not found — vendor template changed upstream."
+            log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+            continue
+        fi
+
+        TMP_FILE="$(mktemp)"
+        awk -v base_line="$BASE_PATH_LINE" -v replace_line="$REPLACE_LINE" '
+            index($0, "PORT = int(os.environ.get(") == 1 {
+                print
+                print base_line
+                next
+            }
+            index($0, "class WebAdminHandler(http.server.BaseHTTPRequestHandler):") == 1 {
+                print replace_line
+                print ""
+            }
+            { print }
+        ' "$f" > "$TMP_FILE" && mv "$TMP_FILE" "$f"
+    done
+    log_success "Vendor web admin script patched for sub-path proxying support."
+}
+
+_asterisk_do_patch_webadmin_entrypoint_env() {
+    local EA_DIR="$1"
+    local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
+    [[ -f "$ENTRYPOINT" ]] || return 0
+    grep -q "WEBADMIN_BASE_PATH=" "$ENTRYPOINT" && return 0   # already patched
+
+    if grep -qF 'WEBADMIN_AUTH_DISABLED="${WEB_ADMIN_AUTH_DISABLED:-false}" \' "$ENTRYPOINT"; then
+        sed -i 's|WEBADMIN_AUTH_DISABLED="\${WEB_ADMIN_AUTH_DISABLED:-false}" \\|WEBADMIN_AUTH_DISABLED="${WEB_ADMIN_AUTH_DISABLED:-false}" \\\n    WEBADMIN_BASE_PATH="${WEB_ADMIN_BASE_PATH:-}" \\|' "$ENTRYPOINT"
+        log_success "Live entrypoint.sh patched to pass WEBADMIN_BASE_PATH through to the web admin."
+    else
+        log_warning "$(basename "$ENTRYPOINT"): WEBADMIN_AUTH_DISABLED anchor not found — vendor template changed upstream."
+        log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+    fi
+}
+
 # Confirmed live (2026-07-23, via a real pstn-trunk.sh failure that hit this
 # same mechanism): the vendor-generator patch above only takes effect on a
 # FUTURE regeneration, and Easy Asterisk's own entrypoint only regenerates
@@ -767,6 +836,9 @@ install_asterisk-digital-ocean() {
                 _asterisk_do_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
                 _asterisk_do_ensure_live_messaging_include "$EA_DIR"
                 _asterisk_do_migrate_existing_devices_message_context "$EA_DIR/config/asterisk/pjsip.conf"
+                _asterisk_do_patch_webadmin_base_path "$EA_DIR"
+                _asterisk_do_patch_webadmin_entrypoint_env "$EA_DIR"
+                grep -q '^WEB_ADMIN_BASE_PATH=' .env || echo 'WEB_ADMIN_BASE_PATH=' >> .env
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
@@ -843,6 +915,8 @@ install_asterisk-digital-ocean() {
     _asterisk_do_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_do_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
     _asterisk_do_ensure_live_messaging_include "$EA_DIR"
+    _asterisk_do_patch_webadmin_base_path "$EA_DIR"
+    _asterisk_do_patch_webadmin_entrypoint_env "$EA_DIR"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
     chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
@@ -907,6 +981,12 @@ install_asterisk-digital-ocean() {
         log_info "Port 8081 was already taken — web admin will use ${WEB_ADMIN_PORT_VAL} instead."
     fi
 
+    # If the Security Dashboard is already installed, it's going to front
+    # this admin natively at /asterisk-admin/ (see services/security-dashboard.sh) —
+    # pre-set the base path now so it works immediately, no update cycle needed.
+    local WEB_ADMIN_BASE_PATH_VAL=""
+    [[ -d "$DOCKER_DIR/security-dashboard" ]] && WEB_ADMIN_BASE_PATH_VAL="/asterisk-admin"
+
     # ── .env ──────────────────────────────────────────────────────────────────
     cat > .env << ENV
 # ── Domain ────────────────────────────────────────────────────
@@ -938,6 +1018,9 @@ VLAN_SUBNETS=
 # both firewall layers to match.
 WEB_ADMIN_PORT=${WEB_ADMIN_PORT_VAL}
 WEB_ADMIN_AUTH_DISABLED=false
+# Set to /asterisk-admin by the Security Dashboard when it fronts this admin
+# natively via Caddy path-proxying (no iframe) — leave empty otherwise.
+WEB_ADMIN_BASE_PATH=${WEB_ADMIN_BASE_PATH_VAL}
 ENV
     chmod 600 .env
 
@@ -959,6 +1042,27 @@ ENV
         log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL} (nothing for Caddy to do)."
     elif [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
         log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL}, SIP TLS stays self-signed."
+    elif [[ -d "$DOCKER_DIR/security-dashboard" ]]; then
+        # The dashboard owns fronting this admin instead — natively, at
+        # https://<dashboard-domain>/asterisk-admin/, via Caddy path-proxying
+        # (see services/security-dashboard.sh's _secdash_configure_caddy)
+        # rather than a separate site block here. The SIP-TLS-cert-sync
+        # requirement above only needs SOME active Caddy site block for
+        # DOMAIN_NAME to exist — it doesn't require THIS service's own block
+        # specifically — and the dashboard's own domain prompt defaults to
+        # this exact DOMAIN_NAME when it detects this droplet, so the common
+        # case still ends up with Caddy serving DOMAIN_NAME (satisfying SIP
+        # TLS) with no separate admin domain needed at all.
+        log_info "Security Dashboard detected — it fronts the Asterisk web admin natively"
+        log_info "at https://<dashboard-domain>/asterisk-admin/ (no iframe, one URL for both)."
+        log_info "Its own domain prompt defaults to this droplet's DOMAIN_NAME (${DOMAIN_NAME}),"
+        log_info "so SIP TLS still gets a real cert as long as you accept that default."
+        log_info "Re-run 'sudo ./setup.sh security-dashboard' (update mode) to reconfigure that."
+        # Caddy (whichever domain the dashboard ends up using) reaches this
+        # over the host's internal network either way — no need to also keep
+        # the port open to the public internet, same as the local-Caddy case
+        # just below.
+        WEB_ADMIN_PUBLIC_ACCESS_NEEDED=false
     else
         local EXTRA_BLOCK=""
         if [ -d "$DOCKER_DIR/authelia" ]; then

@@ -433,6 +433,96 @@ _asterisk_patch_messaging_vendor_files() {
     log_success "Vendor generator functions patched for internal SIP messaging."
 }
 
+# ── Shared: sub-path-aware web admin (for native Caddy path-proxying) ──────
+# The vendored web admin's own JS hardcodes `const API_BASE = '/api';` —
+# confirmed via grep against the actual vendored source: it's the ONLY
+# absolute-path reference anywhere in the admin's HTML/JS (no other hrefs,
+# no login-page redirect — it challenges with plain HTTP Basic Auth via a
+# 401/WWW-Authenticate response instead of a redirect flow). That one
+# hardcoded root path is what would break if this admin were ever reverse-
+# proxied on a sub-path (e.g. Caddy's `handle_path /asterisk-admin/*`)
+# instead of its own dedicated domain: the browser resolves each fetch()'s
+# absolute path against the current origin's ROOT, not the sub-path it was
+# actually served under, so every /api/... call 404s. This patches API_BASE
+# to prefix itself with a WEBADMIN_BASE_PATH env var (empty string = today's
+# behavior, completely unchanged) so a sub-path mount works correctly.
+# Verified against the real vendored file: patched output is
+# '/asterisk-admin/api' when the env var is set, and stays exactly '/api'
+# when it's unset — both confirmed by executing the patched module's
+# top-level code directly, not just eyeballing the diff.
+#
+# entrypoint.sh already regenerates this script UNCONDITIONALLY on every
+# container start (`easy-asterisk --write-web-admin-script`, no
+# `[[ ! -f ]]` guard unlike pjsip.conf/extensions.conf — confirmed in its
+# own source), so patching only the generator source here is sufficient;
+# no separate live-file patch is needed the way messaging needed one.
+_asterisk_patch_webadmin_base_path() {
+    local EA_DIR="$1"
+    local EASY1="$EA_DIR/easy-asterisk.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+
+    local BASE_PATH_LINE="BASE_PATH = os.environ.get('WEBADMIN_BASE_PATH', '').rstrip('/')"
+    local REPLACE_LINE
+    REPLACE_LINE=$(cat <<'PYLINE'
+HTML_TEMPLATE = HTML_TEMPLATE.replace("const API_BASE = '/api';", "const API_BASE = '" + BASE_PATH + "/api';")
+PYLINE
+)
+
+    local f TMP_FILE
+    for f in "$EASY1" "$EASY2"; do
+        [[ -f "$f" ]] || continue
+        grep -q "WEBADMIN_BASE_PATH" "$f" && continue   # already patched
+
+        if ! grep -qF "PORT = int(os.environ.get('WEBADMIN_PORT', 8080))" "$f"; then
+            log_warning "$(basename "$f"): WEBADMIN_PORT anchor not found — vendor template changed upstream."
+            log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+            continue
+        fi
+        if ! grep -qF "class WebAdminHandler(http.server.BaseHTTPRequestHandler):" "$f"; then
+            log_warning "$(basename "$f"): WebAdminHandler anchor not found — vendor template changed upstream."
+            log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+            continue
+        fi
+
+        TMP_FILE="$(mktemp)"
+        awk -v base_line="$BASE_PATH_LINE" -v replace_line="$REPLACE_LINE" '
+            index($0, "PORT = int(os.environ.get(") == 1 {
+                print
+                print base_line
+                next
+            }
+            index($0, "class WebAdminHandler(http.server.BaseHTTPRequestHandler):") == 1 {
+                print replace_line
+                print ""
+            }
+            { print }
+        ' "$f" > "$TMP_FILE" && mv "$TMP_FILE" "$f"
+    done
+    log_success "Vendor web admin script patched for sub-path proxying support."
+}
+
+# Companion to the above: entrypoint.sh explicitly passes only WEBADMIN_PORT
+# and WEBADMIN_AUTH_DISABLED as env vars to the web admin script (see its own
+# "Start Web Admin in background" step) — WEBADMIN_BASE_PATH needs the same
+# explicit pass-through, or the container's own WEB_ADMIN_BASE_PATH (from
+# .env) never actually reaches the Python process reading it.
+_asterisk_patch_webadmin_entrypoint_env() {
+    local EA_DIR="$1"
+    local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
+    [[ -f "$ENTRYPOINT" ]] || return 0
+    grep -q "WEBADMIN_BASE_PATH=" "$ENTRYPOINT" && return 0   # already patched
+
+    if grep -qF 'WEBADMIN_AUTH_DISABLED="${WEB_ADMIN_AUTH_DISABLED:-false}" \' "$ENTRYPOINT"; then
+        sed -i 's|WEBADMIN_AUTH_DISABLED="\${WEB_ADMIN_AUTH_DISABLED:-false}" \\|WEBADMIN_AUTH_DISABLED="${WEB_ADMIN_AUTH_DISABLED:-false}" \\\n    WEBADMIN_BASE_PATH="${WEB_ADMIN_BASE_PATH:-}" \\|' "$ENTRYPOINT"
+        log_success "Live entrypoint.sh patched to pass WEBADMIN_BASE_PATH through to the web admin."
+    else
+        log_warning "$(basename "$ENTRYPOINT"): WEBADMIN_AUTH_DISABLED anchor not found — vendor template changed upstream."
+        log_warning "  Sub-path proxying for the web admin won't work correctly until this is patched by hand."
+    fi
+}
+
 # Confirmed live (2026-07-23, via a real pstn-trunk.sh failure that hit this
 # same mechanism): the vendor-generator patch above only takes effect on a
 # FUTURE regeneration, and Easy Asterisk's own entrypoint only regenerates
@@ -726,6 +816,9 @@ install_asterisk() {
                 _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
                 _asterisk_ensure_live_messaging_include "$EA_DIR"
                 _asterisk_migrate_existing_devices_message_context "$EA_DIR/config/asterisk/pjsip.conf"
+                _asterisk_patch_webadmin_base_path "$EA_DIR"
+                _asterisk_patch_webadmin_entrypoint_env "$EA_DIR"
+                grep -q '^WEB_ADMIN_BASE_PATH=' .env || echo 'WEB_ADMIN_BASE_PATH=' >> .env
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
@@ -771,6 +864,8 @@ install_asterisk() {
     _asterisk_refresh_vendor_files
     _asterisk_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+    _asterisk_patch_webadmin_base_path "$EA_DIR"
+    _asterisk_patch_webadmin_entrypoint_env "$EA_DIR"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
     chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
@@ -841,6 +936,12 @@ install_asterisk() {
         log_info "Port 8081 was already taken — web admin will use ${WEB_ADMIN_PORT_VAL} instead."
     fi
 
+    # If the Security Dashboard is already installed, it's going to front
+    # this admin natively at /asterisk-admin/ (see services/security-dashboard.sh) —
+    # pre-set the base path now so it works immediately, no update cycle needed.
+    local WEB_ADMIN_BASE_PATH_VAL=""
+    [[ -d "$DOCKER_DIR/security-dashboard" ]] && WEB_ADMIN_BASE_PATH_VAL="/asterisk-admin"
+
     # ── .env ──────────────────────────────────────────────────────────────────
     cat > .env << ENV
 # ── Domain ────────────────────────────────────────────────────
@@ -871,6 +972,9 @@ VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 # any firewall rules to match.
 WEB_ADMIN_PORT=${WEB_ADMIN_PORT_VAL}
 WEB_ADMIN_AUTH_DISABLED=false
+# Set to /asterisk-admin by the Security Dashboard when it fronts this admin
+# natively via Caddy path-proxying (no iframe) — leave empty otherwise.
+WEB_ADMIN_BASE_PATH=${WEB_ADMIN_BASE_PATH_VAL}
 ENV
     chmod 600 .env
 
@@ -879,17 +983,36 @@ ENV
     # correctly: if a local Caddy ends up fronting the web admin, there's no
     # reason to also expose it on the LAN — Caddy already reaches it over
     # the host's internal network (host.docker.internal).
+    #
+    # If the Security Dashboard is already here, it owns fronting this admin
+    # instead — natively, at https://<dashboard-domain>/asterisk-admin/, via
+    # Caddy path-proxying (see services/security-dashboard.sh's
+    # _secdash_configure_caddy) rather than a separate dedicated domain. Two
+    # independent Caddy blocks both proxying the same port would just mean
+    # two working URLs instead of one, defeating the point — skip this
+    # service's own domain prompt entirely in that case. CADDY_SERVICE_MODE
+    # is still "local" either way (Caddy reaches it over host.docker.internal
+    # regardless of which Caddy block does the reaching), so the firewall
+    # scoping below stays correct without changes.
     local EXTRA_BLOCK=""
-    if [ -d "$DOCKER_DIR/authelia" ]; then
-        local _use_auth=""
-        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
-        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
-            EXTRA_BLOCK="    import authelia"
-            # Disable built-in auth since Authelia handles it
-            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+    if [[ -d "$DOCKER_DIR/security-dashboard" ]]; then
+        log_info "Security Dashboard detected — it fronts the Asterisk web admin natively"
+        log_info "at https://<dashboard-domain>/asterisk-admin/ (no iframe, one URL for both)."
+        log_info "Re-run 'sudo ./setup.sh security-dashboard' (update mode) to reconfigure that."
+        CADDY_SERVICE_CONFIGURED=true
+        CADDY_SERVICE_MODE=local
+    else
+        if [ -d "$DOCKER_DIR/authelia" ]; then
+            local _use_auth=""
+            prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
+            if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
+                EXTRA_BLOCK="    import authelia"
+                # Disable built-in auth since Authelia handles it
+                sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+            fi
         fi
+        configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
     fi
-    configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
 
     # ── UFW firewall rules ────────────────────────────────────────────────────
     if command -v ufw &>/dev/null; then

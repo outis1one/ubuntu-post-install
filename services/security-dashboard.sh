@@ -83,11 +83,17 @@ install_security-dashboard() {
     local ASTERISK_LOG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/logs}"
     local ASTERISK_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/asterisk}"
 
-    local ASTERISK_ADMIN_URL=""
+    # Port to natively path-proxy at /asterisk-admin/ (see
+    # _secdash_configure_caddy) — no separate domain, no iframe. EA_DOMAIN is
+    # only used to default the dashboard's OWN domain prompt: on a droplet,
+    # DOMAIN_NAME is already required to match Caddy's cert for SIP TLS (see
+    # services/asterisk-digital-ocean.sh), so defaulting to the SAME domain
+    # here is what makes "one URL" the path of least resistance instead of
+    # something the user has to know to ask for.
+    local ASTERISK_ADMIN_PORT="" ASTERISK_EA_DOMAIN=""
     if [ -n "$ASTERISK_EA_DIR" ] && [ -f "$ASTERISK_EA_DIR/.env" ]; then
-        local _ea_domain
-        _ea_domain="$(grep -E '^DOMAIN_NAME=' "$ASTERISK_EA_DIR/.env" | cut -d= -f2-)"
-        [ -n "$_ea_domain" ] && ASTERISK_ADMIN_URL="https://${_ea_domain}"
+        ASTERISK_ADMIN_PORT="$(grep -E '^WEB_ADMIN_PORT=' "$ASTERISK_EA_DIR/.env" | cut -d= -f2-)"
+        ASTERISK_EA_DOMAIN="$(grep -E '^DOMAIN_NAME=' "$ASTERISK_EA_DIR/.env" | cut -d= -f2-)"
     fi
 
     echo ""
@@ -131,7 +137,15 @@ install_security-dashboard() {
                 _secdash_write_app "$APP_DIR"
                 _secdash_write_asn_helper "$APP_DIR"
                 _secdash_write_sudoers "$SVC_USER"
-                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
+
+                # Preserve whatever this box's ASTERISK_ADMIN_PROXIED already
+                # is (we're not touching Caddy in this branch) instead of
+                # silently defaulting it back to false on every plain update.
+                local _CUR_ADMIN_PROXIED="false"
+                if [ -f /etc/systemd/system/security-dashboard.service ]; then
+                    _CUR_ADMIN_PROXIED="$(grep -oP '(?<=ASTERISK_ADMIN_PROXIED=)\S+' /etc/systemd/system/security-dashboard.service 2>/dev/null || echo false)"
+                fi
+                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$_CUR_ADMIN_PROXIED"
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
@@ -141,7 +155,10 @@ install_security-dashboard() {
                 prompt_yn "Reconfigure this dashboard's Caddy protection (Authelia domain, or add/rotate an independent Basic Auth layer)? (y/n):" "n" _reconf
                 if [[ "$_reconf" =~ ^[Yy]$ ]]; then
                     _secdash_remove_caddy_block "$DASHBOARD_PORT"
-                    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
+                    SECDASH_ADMIN_PROXIED=false
+                    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_PORT" "$ASTERISK_EA_DIR" "$ASTERISK_EA_DOMAIN"
+                    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$SECDASH_ADMIN_PROXIED"
+                    systemctl restart security-dashboard 2>/dev/null || true
                 fi
                 return 0
                 ;;
@@ -167,7 +184,7 @@ install_security-dashboard() {
     _secdash_write_asn_helper "$APP_DIR"
 
     _secdash_write_sudoers "$SVC_USER"
-    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
+    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "false"
 
     systemctl daemon-reload
     systemctl enable security-dashboard >/dev/null 2>&1
@@ -184,7 +201,12 @@ install_security-dashboard() {
     # _secdash_configure_caddy so "update" mode can also offer to reconfigure
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
-    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
+    SECDASH_ADMIN_PROXIED=false
+    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_PORT" "$ASTERISK_EA_DIR" "$ASTERISK_EA_DOMAIN"
+    if [[ "$SECDASH_ADMIN_PROXIED" == true ]]; then
+        _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "true"
+        systemctl restart security-dashboard 2>/dev/null || true
+    fi
 
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
@@ -206,20 +228,20 @@ CrowdSec, without ever showing a tab for something that isn't set up.
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
   (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
   sortable per column (click a header to sort, click again to reverse).
-- **Asterisk Admin** — an embedded, lazy-loaded iframe of the real Asterisk
-  web admin (only fetched the first time you open the tab), plus an
-  "open in a new tab" fallback link that's always there regardless. Its nav
-  button only appears once an Asterisk install is detected. If a local Caddy
-  install is found for both this dashboard and the Asterisk admin's own
-  domain, install automatically patches the admin's Caddy site block from
-  `X-Frame-Options` to a `Content-Security-Policy: frame-ancestors` entry
-  naming only this dashboard's domain, so the browser actually allows the
-  frame — every other site is still refused framing exactly as before. This
-  is best-effort (it depends on matching the exact header line
-  `services/asterisk-digital-ocean.sh` itself writes, and hasn't been
-  confirmed against Authelia's own portal-framing behavior on a live
-  install) — if the tab shows a blank frame, use the fallback link and check
-  this service's own log output from install time for a manual one-line fix.
+- **Asterisk Admin** — a link to the real Asterisk web admin, proxied
+  natively at \`/asterisk-admin/\` on this SAME domain — no iframe, no
+  separate domain to log into. Wired up by \`_secdash_configure_caddy\`: Caddy
+  path-routes that address straight to the admin container
+  (\`host.docker.internal:<port>\`), and \`services/asterisk.sh\` /
+  \`services/asterisk-digital-ocean.sh\` patch the vendored admin's one
+  hardcoded absolute API path (\`const API_BASE = '/api'\`, confirmed via the
+  vendored source to be the ONLY absolute-path reference anywhere in its
+  HTML/JS) so it resolves correctly under that sub-path via a
+  \`WEBADMIN_BASE_PATH\` env var. This link only appears once the proxy is
+  actually wired up (not just because an Asterisk install exists). On a
+  droplet, accepting this dashboard's domain prompt default (the droplet's
+  own \`DOMAIN_NAME\`) is what keeps Caddy's SIP-TLS cert sync working too —
+  entering a different domain there means SIP TLS falls back to self-signed.
 - **Extensions** — always available, independent of any PSTN trunk. A
   **Groups** card lets you name a set of extensions and bulk-enable/disable
   messaging for all of them at once — a management convenience only, not a
@@ -335,7 +357,7 @@ _secdash_grant_asterisk_access() {
 # both layers (this AND the group access above) need to agree, or writes
 # fail even when Unix permissions alone would have allowed them.
 _secdash_write_systemd_unit() {
-    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _admin_url="$6"
+    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _admin_proxied="$6"
     local _read_only_paths="" _read_write_paths="/etc/crowdsec/scenarios"
     [ -n "$_log_dir" ] && _read_only_paths="$_log_dir"
     [ -n "$_config_dir" ] && _read_write_paths="$_read_write_paths $_config_dir"
@@ -352,7 +374,7 @@ Group=$_svc_user
 Environment=DASHBOARD_PORT=$_port
 Environment=ASTERISK_LOG=${_log_dir:+$_log_dir/full}
 Environment=ASTERISK_CONFIG_DIR=$_config_dir
-Environment=ASTERISK_ADMIN_URL=$_admin_url
+Environment=ASTERISK_ADMIN_PROXIED=$_admin_proxied
 ExecStart=/usr/bin/python3 $_app_dir/app.py
 Restart=on-failure
 RestartSec=3
@@ -398,7 +420,8 @@ SUDOERS
 # retroactively) using the exact same code path as a fresh install, instead
 # of hand-patching a live Caddyfile block in place.
 _secdash_configure_caddy() {
-    local DASHBOARD_PORT="$1" ADMIN_URL="${2:-}"
+    local DASHBOARD_PORT="$1" ADMIN_PORT="${2:-}" ASTERISK_EA_DIR="${3:-}" ASTERISK_EA_DOMAIN="${4:-}"
+    SECDASH_ADMIN_PROXIED=false
 
     echo ""
     if ! command -v docker &>/dev/null || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
@@ -406,8 +429,13 @@ _secdash_configure_caddy() {
         return 0
     fi
 
-    local _default_domain=""
-    if [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+    # Defaults to the Asterisk droplet's own DOMAIN_NAME when detected (see
+    # services/asterisk-digital-ocean.sh — that domain is already required
+    # there for Caddy's SIP-TLS cert sync), so accepting the default is what
+    # makes "one URL for everything" the path of least resistance instead of
+    # something you have to know to ask for.
+    local _default_domain="$ASTERISK_EA_DOMAIN"
+    if [ -z "$_default_domain" ] && [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
         _default_domain="security.${SITE_DOMAIN}"
     fi
     local SD_DOMAIN=""
@@ -416,6 +444,11 @@ _secdash_configure_caddy() {
     if [ -z "$SD_DOMAIN" ]; then
         log_warning "No domain entered — dashboard stays on http://localhost:$DASHBOARD_PORT only (not reachable from outside this box)."
         return 0
+    fi
+    if [ -n "$ADMIN_PORT" ] && [ -n "$ASTERISK_EA_DOMAIN" ] && [ "$SD_DOMAIN" != "$ASTERISK_EA_DOMAIN" ]; then
+        log_warning "This differs from the Asterisk droplet's own DOMAIN_NAME (${ASTERISK_EA_DOMAIN})."
+        log_warning "SIP TLS needs Caddy actively serving THAT exact domain — using a different one here"
+        log_warning "means Caddy never gets a cert for it, and SIP TLS falls back to self-signed."
     fi
 
     local EXTRA_BLOCK=""
@@ -491,6 +524,21 @@ _secdash_configure_caddy() {
         fi
     fi
 
+    # Path-proxies the real Asterisk web admin natively at /asterisk-admin/
+    # on this SAME domain — no iframe, no separate domain for it. handle_path
+    # strips the /asterisk-admin prefix before forwarding, so the admin
+    # container sees requests exactly as if it were mounted at its own root
+    # (same as today) — its own JS is still taught the real mount point via
+    # WEBADMIN_BASE_PATH below, since its one absolute-path API reference
+    # would otherwise resolve against this domain's true root instead.
+    local ADMIN_HANDLE=""
+    if [ -n "$ADMIN_PORT" ]; then
+        ADMIN_HANDLE="    handle_path /asterisk-admin/* {
+        reverse_proxy host.docker.internal:${ADMIN_PORT}
+    }
+"
+    fi
+
     local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
     if [ -f "$CADDY_FILE" ] && ! grep -q "^${SD_DOMAIN} {" "$CADDY_FILE"; then
         cat >> "$CADDY_FILE" << CADDYBLOCK
@@ -498,7 +546,9 @@ _secdash_configure_caddy() {
 # Security Dashboard
 ${SD_DOMAIN} {
 ${BASICAUTH_BLOCK}${EXTRA_BLOCK}
-    reverse_proxy host.docker.internal:${DASHBOARD_PORT}
+${ADMIN_HANDLE}    handle {
+        reverse_proxy host.docker.internal:${DASHBOARD_PORT}
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -517,6 +567,10 @@ CADDYBLOCK
         docker compose -f "$DOCKER_DIR/caddy/docker-compose.yml" restart caddy 2>/dev/null \
             && log_success "Caddy restarted — dashboard at https://${SD_DOMAIN}" \
             || log_warning "Restart Caddy manually: cd $DOCKER_DIR/caddy && docker compose restart"
+        if [ -n "$ADMIN_PORT" ]; then
+            log_success "Asterisk web admin proxied natively at https://${SD_DOMAIN}/asterisk-admin/ — no iframe, same domain as the dashboard."
+            SECDASH_ADMIN_PROXIED=true
+        fi
     elif [ -f "$CADDY_FILE" ]; then
         log_warning "$SD_DOMAIN already in Caddyfile — leaving the existing entry alone."
     fi
@@ -530,64 +584,26 @@ CADDYBLOCK
         fi
     fi
 
-    _secdash_allow_asterisk_admin_iframe "$ADMIN_URL" "$SD_DOMAIN"
-}
-
-# Best-effort: lets the dashboard's "Asterisk Admin" tab iframe-embed the
-# real Asterisk web admin, by swapping that domain's own Caddy site block
-# from X-Frame-Options to a CSP frame-ancestors entry naming ONLY this
-# dashboard's domain — every other site is still refused framing exactly as
-# before, this just relaxes it for the one origin that's supposed to embed
-# it. Best-effort because it depends on finding the exact
-# X-Frame-Options line services/asterisk-digital-ocean.sh itself generates,
-# inside a live Caddyfile it doesn't own — if that block was hand-edited
-# since, or doesn't exist yet (Asterisk installed after this dashboard, or
-# no local Caddy at all), this silently does nothing and the tab's "open in
-# a new tab" fallback link still works either way.
-_secdash_allow_asterisk_admin_iframe() {
-    local ADMIN_URL="$1" SD_DOMAIN="$2"
-    [ -n "$ADMIN_URL" ] || return 0
-    [ -n "$SD_DOMAIN" ] || return 0
-    command -v docker &>/dev/null || return 0
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$" || return 0
-
-    local ADMIN_DOMAIN="${ADMIN_URL#https://}"
-    ADMIN_DOMAIN="${ADMIN_DOMAIN#http://}"
-    local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
-    [ -f "$CADDY_FILE" ] || return 0
-    grep -q "^${ADMIN_DOMAIN} {" "$CADDY_FILE" || return 0
-
-    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$CADDY_FILE"; then
-        return 0   # already patched for this exact dashboard domain
-    fi
-
-    local CSP_LINE="        Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
-    local TMP_FILE
-    TMP_FILE="$(mktemp)"
-    awk -v domain="${ADMIN_DOMAIN} {" -v csp="$CSP_LINE" '
-        BEGIN { in_block = 0; patched = 0 }
-        index($0, domain) == 1 { in_block = 1 }
-        in_block && !patched && /X-Frame-Options/ { print csp; patched = 1; next }
-        { print }
-        in_block && /^}/ { in_block = 0 }
-    ' "$CADDY_FILE" > "$TMP_FILE"
-
-    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$TMP_FILE"; then
-        cp "$CADDY_FILE" "$CADDY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-        mv "$TMP_FILE" "$CADDY_FILE"
-        docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-        if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || docker restart caddy &>/dev/null; then
-            log_success "Asterisk web admin (${ADMIN_DOMAIN}) now allows embedding from https://${SD_DOMAIN} — the dashboard's Asterisk Admin tab should load it."
+    # Tell the admin's own vendor-patched web admin script it's now mounted
+    # under /asterisk-admin instead of the root, and restart that container
+    # so the change actually takes effect (entrypoint.sh regenerates the
+    # script unconditionally on every start — see
+    # _asterisk_patch_webadmin_base_path in services/asterisk.sh /
+    # services/asterisk-digital-ocean.sh for the full rationale).
+    if [ "$SECDASH_ADMIN_PROXIED" = true ] && [ -n "$ASTERISK_EA_DIR" ] && [ -f "$ASTERISK_EA_DIR/.env" ]; then
+        if grep -q '^WEB_ADMIN_BASE_PATH=' "$ASTERISK_EA_DIR/.env"; then
+            sed -i 's#^WEB_ADMIN_BASE_PATH=.*#WEB_ADMIN_BASE_PATH=/asterisk-admin#' "$ASTERISK_EA_DIR/.env"
         else
-            log_warning "Caddyfile patched, but reload/restart failed — check: docker logs caddy"
+            echo 'WEB_ADMIN_BASE_PATH=/asterisk-admin' >> "$ASTERISK_EA_DIR/.env"
         fi
-    else
-        rm -f "$TMP_FILE"
-        log_warning "Couldn't find an X-Frame-Options line in ${ADMIN_DOMAIN}'s Caddy block to patch —"
-        log_warning "the dashboard's Asterisk Admin tab will show a blank frame. Add this line yourself"
-        log_warning "inside that domain's 'header { }' block in $CADDY_FILE, replacing X-Frame-Options:"
-        log_warning "  Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
-        log_warning "then: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
+        local _ea_container="easy-asterisk"
+        [[ "$ASTERISK_EA_DIR" == *asterisk-digital-ocean ]] && _ea_container="easy-asterisk-do"
+        if docker restart "$_ea_container" &>/dev/null; then
+            log_success "Restarted $_ea_container to pick up the new web admin mount point."
+        else
+            log_warning "Couldn't restart $_ea_container automatically — restart it yourself so the web admin picks up WEB_ADMIN_BASE_PATH:"
+            log_warning "  docker restart $_ea_container"
+        fi
     fi
 }
 
@@ -603,9 +619,12 @@ _secdash_remove_caddy_block() {
     local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
     [ -f "$caddy_file" ] || return 0
 
-    local marker="    reverse_proxy host.docker.internal:${port}"
+    # Any amount of leading whitespace — this line now lives inside a
+    # "handle { }" sub-block (one level deeper than before the native
+    # Asterisk-admin path-proxy was added), not at the old fixed 4-space
+    # indent directly under the domain block.
     local marker_line domain_line end_line
-    marker_line="$(grep -nF "$marker" "$caddy_file" | head -1 | cut -d: -f1)"
+    marker_line="$(grep -nE "^[[:space:]]*reverse_proxy host\.docker\.internal:${port}\$" "$caddy_file" | head -1 | cut -d: -f1)"
     if [ -z "$marker_line" ]; then
         return 0  # nothing deployed yet — fine, the fresh flow will just append
     fi
@@ -728,7 +747,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8092"))
 ASTERISK_LOG = os.environ.get("ASTERISK_LOG", "")
-ASTERISK_ADMIN_URL = os.environ.get("ASTERISK_ADMIN_URL", "")
+ASTERISK_ADMIN_PROXIED = os.environ.get("ASTERISK_ADMIN_PROXIED", "false").lower() == "true"
 ASTERISK_CONFIG_DIR = os.environ.get("ASTERISK_CONFIG_DIR", "")
 ASN_SCENARIO_FILES = [
     "/etc/crowdsec/scenarios/local-asterisk_bf.yaml",
@@ -1512,8 +1531,9 @@ INDEX_HTML = """<!doctype html>
   body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
   header { padding: 1rem 1.5rem; background: #171a21; border-bottom: 1px solid #2a2e38; display: flex; align-items: center; gap: 1rem; }
   header h1 { font-size: 1.1rem; margin: 0; flex: 1; }
-  nav button { background: none; border: none; color: #9aa4b2; padding: 0.6rem 1rem; cursor: pointer; font-size: 0.95rem; border-bottom: 2px solid transparent; }
+  nav button, nav a.nav-link-btn { background: none; border: none; color: #9aa4b2; padding: 0.6rem 1rem; cursor: pointer; font-size: 0.95rem; border-bottom: 2px solid transparent; text-decoration: none; display: inline-block; }
   nav button.active { color: #fff; border-bottom-color: #4f8cff; }
+  nav a.nav-link-btn:hover { color: #e6e6e6; }
   main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #23262f; }
@@ -1541,7 +1561,7 @@ INDEX_HTML = """<!doctype html>
   <h1>Security Dashboard</h1>
   <nav>
     <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" id="asterisk-tab-btn" data-tab="asterisk" style="display:none">Asterisk Admin</button>
+    <a class="nav-link-btn" id="asterisk-admin-link" href="/asterisk-admin/" target="_blank" style="display:none">Asterisk Admin &#8599;</a>
     <button class="tab-btn" data-tab="extensions">Extensions</button>
     <button class="tab-btn" id="pstn-tab-btn" data-tab="pstn" style="display:none">PSTN Trunk</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
@@ -1662,22 +1682,11 @@ INDEX_HTML = """<!doctype html>
       <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
   </div>
-  <div id="tab-asterisk" style="display:none">
-    <div class="card">
-      <p class="muted">
-        Embedded — not a copy, this is the real Asterisk web admin loaded live in a frame.
-        If it logs you in separately (its own Authelia domain, or Basic Auth), that's expected —
-        it's still a genuinely separate site under the hood.
-        <a id="admin-link-fallback" href="#" target="_blank">Open in a new tab instead &#8599;</a>
-      </p>
-      <iframe id="admin-iframe" style="width:100%;height:80vh;border:1px solid #2a2e38;border-radius:8px;background:#0f1115"></iframe>
-    </div>
-  </div>
 </main>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "asterisk", "extensions", "pstn", "crowdsec"];
+const TABS = ["security", "extensions", "pstn", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -1685,13 +1694,6 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
     if (btn.dataset.tab === "extensions") { loadMessaging(); loadGroups(); }
     if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
-    if (btn.dataset.tab === "asterisk") {
-      // Lazy-loaded — only fetched the first time this tab is opened, not
-      // on every dashboard page load (avoids an extra login prompt/request
-      // to a separate site for people who never open this tab).
-      const frame = document.getElementById("admin-iframe");
-      if (!frame.src && adminUrl) frame.src = adminUrl;
-    }
   });
 });
 
@@ -2201,10 +2203,8 @@ async function removePersonalDid(did) {
   loadPersonalDids();
 }
 
-const adminUrl = "__ASTERISK_ADMIN_URL__";
-if (adminUrl) {
-  document.getElementById("asterisk-tab-btn").style.display = "";
-  document.getElementById("admin-link-fallback").href = adminUrl;
+if ("__ASTERISK_ADMIN_PROXIED__") {
+  document.getElementById("asterisk-admin-link").style.display = "";
 }
 
 loadSecurity();
@@ -2238,7 +2238,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path == "":
-            html = INDEX_HTML.replace("__ASTERISK_ADMIN_URL__", ASTERISK_ADMIN_URL)
+            html = INDEX_HTML.replace("__ASTERISK_ADMIN_PROXIED__", "true" if ASTERISK_ADMIN_PROXIED else "")
             self._html(html)
         elif self.path == "/api/security-events":
             self._json(parse_security_log())
