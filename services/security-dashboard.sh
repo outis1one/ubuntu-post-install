@@ -782,6 +782,23 @@ EXT_HEADER_RE = re.compile(r"^\[(\d+)\]")
 EXTEN_RE = re.compile(r"^\d+$")
 TIER_RE = re.compile(r"^(internal|restricted|full)$")
 NUMBER_RE = re.compile(r"^\d{11}$")
+NUMBER_RE_10 = re.compile(r"^\d{10}$")
+
+
+def _normalize_nanp_number(token):
+    """Accepts either a bare 10-digit NANP number (the natural way to type
+    a US number) or an already-11-digit one (leading "1" country code) and
+    returns the canonical 11-digit form allowed_numbers is always stored
+    in - REGEX() comparisons against CALLERID(num) require an exact
+    digit-count match, and this used to silently DROP a plain 10-digit
+    entry instead of normalizing it, the admin-input-side twin of the bug
+    that was also failing inbound calls whose Caller-ID itself arrived
+    without a leading "1" (see PSTN_CALLERID_NORM in pstn-trunk.sh)."""
+    if NUMBER_RE_10.match(token):
+        return "1" + token
+    if NUMBER_RE.match(token):
+        return token
+    return None
 
 
 SECURITY_LOG_TAIL_BYTES = 2 * 1024 * 1024  # comfortably enough for 5000 lines
@@ -1149,11 +1166,13 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     the calling tier (see pstn-trunk.sh's file-level comment: an extension
     can be internal-tier for calling and still messaging-enabled, or vice
     versa), so it's set/cleared regardless of which tier branch runs below.
-    Numbers are normalized to a pipe-separated list of 11-digit US numbers —
-    pipe, not comma, because the dialplan uses this value directly as a
-    REGEX() alternation pattern (see services/pstn-trunk.sh's file-level
-    comment on why the untrusted call data is always the string being
-    tested, never interpolated into the pattern side)."""
+    Numbers are normalized to a pipe-separated list of 11-digit US numbers
+    (a bare 10-digit entry gets a leading "1" added, not dropped — see
+    _normalize_nanp_number) — pipe, not comma, because the dialplan uses
+    this value directly as a REGEX() alternation pattern (see
+    services/pstn-trunk.sh's file-level comment on why the untrusted call
+    data is always the string being tested, never interpolated into the
+    pattern side)."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     ext = str(ext).strip()
@@ -1163,7 +1182,7 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
         return False, "Invalid tier"
 
     tokens = re.split(r"[,\s|]+", (numbers_raw or "").strip())
-    clean_numbers = [t for t in tokens if NUMBER_RE.match(t)]
+    clean_numbers = [n for n in (_normalize_nanp_number(t) for t in tokens if t) if n]
     numbers = "|".join(clean_numbers)
 
     cp = _read_permissions_cp()
@@ -1405,6 +1424,19 @@ def write_limits(max_outbound, max_inbound):
 
 
 PERSONAL_DID_RE = re.compile(r"^\d{10}$")
+PERSONAL_DID_RE_11 = re.compile(r"^1\d{10}$")
+
+
+def _normalize_personal_did_input(did):
+    """write_personal_did()'s DID field is hand-typed, same footgun as
+    allowed_numbers - accept either the canonical bare 10-digit form or an
+    11-digit one with the NANP "1" prefix, returning the canonical 10-digit
+    form either way instead of rejecting a plainly-valid 11-digit entry."""
+    if PERSONAL_DID_RE.match(did):
+        return did
+    if PERSONAL_DID_RE_11.match(did):
+        return did[1:]
+    return None
 
 
 def _personal_dids_path():
@@ -1460,8 +1492,10 @@ def write_personal_did(did, owner):
         return False, "No Asterisk install detected on this box"
     did = str(did).strip()
     owner = str(owner).strip()
-    if not PERSONAL_DID_RE.match(did):
-        return False, "DID must be a 10-digit US number"
+    norm_did = _normalize_personal_did_input(did)
+    if norm_did is None:
+        return False, "DID must be a 10-digit US number (11-digit with a leading 1 also accepted)"
+    did = norm_did
 
     is_group = owner.startswith("@")
     group_name = owner[1:] if is_group else ""
@@ -3154,7 +3188,7 @@ function renderPstnTable() {
         <option value="full" ${e.tier === "full" ? "selected" : ""}>full</option>
       </select>
     </td>
-    <td><input type="text" class="pstn-numbers" value="${esc(e.allowed_numbers)}" placeholder="15551234567,15559876543" ${e.tier === "restricted" ? "" : "disabled"}></td>
+    <td><input type="text" class="pstn-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543 (leading 1 optional)" ${e.tier === "restricted" ? "" : "disabled"}></td>
     <td style="text-align:center"><input type="checkbox" class="pstn-messaging" ${e.messaging ? "checked" : ""}></td>
     <td><button class="action" onclick="savePstnPermission('${esc(e.ext)}')">Save</button></td>
   </tr>`).join("");

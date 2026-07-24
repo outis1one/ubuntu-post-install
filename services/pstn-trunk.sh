@@ -1666,6 +1666,13 @@ install_pstn-trunk() {
 
     local TRUNK_DID=""
     prompt_text "DID (the 10-digit US phone number assigned to this trunk, digits only):" "" TRUNK_DID
+    # Accept an 11-digit entry (leading "1") too and strip it — every other
+    # DID/number field in this system (personal_did, allowed_numbers) has
+    # the same 10-vs-11-digit ambiguity, and rejecting a plainly-valid
+    # 11-digit number here just to force a re-prompt is needless friction.
+    if [[ "$TRUNK_DID" =~ ^1([0-9]{10})$ ]]; then
+        TRUNK_DID="${BASH_REMATCH[1]}"
+    fi
     if [[ ! "$TRUNK_DID" =~ ^[0-9]{10}$ ]]; then
         log_error "That doesn't look like a 10-digit US number — aborting."
         return 1
