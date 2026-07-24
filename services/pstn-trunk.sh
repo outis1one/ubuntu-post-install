@@ -442,6 +442,7 @@ EOF
 
 exten => pstn_in_denied,1,NoOp(Inbound PSTN call from ${CALLERID(num)} - no ring target authorized for this caller)
 __ALERT_DENY_INBOUND_LINE__
+ same => n,Busy(15)
  same => n,Hangup()
 
 exten => pstn_in_busy,1,NoOp(PSTN trunk - inbound concurrent-call cap reached, rejecting)
@@ -467,9 +468,32 @@ __ALERT_KILLED_IN_LINE__
 ; via the dashboard with no reinstall) — so it's computed fresh on every
 ; call by pstn-personal-group-ring.sh instead, which reads the same two
 ; live config files and applies the identical tier/allowed_numbers logic
-; in a plain shell loop. UNVERIFIED: SHELL() invoking that script hasn't
-; been confirmed against a live call yet — test a group-assigned personal
-; number before relying on it.
+; in a plain shell loop.
+;
+; Every OTHER denial path in this file (outbound tier/number/intl/killswitch,
+; the shared ring-group's pstn_in_denied, this owner's own denial just
+; above) plays a proper Busy(15) tone before Hangup() — pstn_in_denied and
+; the personal-DID denial paths were missing that Busy() and fell straight
+; to a bare Hangup() on an unanswered channel instead, which chan_pjsip
+; does NOT map to "486 Busy Here" the way Busy() does. NOT yet confirmed
+; live against a real call, but this is a real, reproducible inconsistency
+; (grep this file for "Hangup()" without a preceding Busy() and these three
+; exits were the only inbound ones missing it) and is a plausible cause of
+; a caller hearing one ring and then an ambiguous fast-busy/call-failed
+; tone on what looks like a correctly-authorized group member: if the
+; group/tier/allowed_numbers config has ANY mismatch against the test
+; caller ID, the call was always going to be denied here regardless of
+; this fix — the missing Busy() just made a config problem sound like a
+; dialplan problem. Fixed below (Busy(15) added to all three inbound
+; denial exits). If a group-assigned personal number still goes straight
+; to busy after this, the NoOp() logged right after the SHELL() call in
+; pstn_personal_group_ring prints the resolved group name, caller ID, and
+; PSTN_RING_LIST — check `asterisk -rx "core show channels verbose"` / the
+; full log for that line first; an empty list there means the config (not
+; the dialplan) is the next thing to check — confirm the calling number is
+; in allowed_numbers for at least one CURRENT group member whose tier is
+; "restricted" or "full" in pstn-permissions.conf, and that the group's
+; members= line in pstn-groups.conf actually lists that extension.
 exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?pstn_personal_group_ring,1)
  same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
@@ -477,10 +501,12 @@ exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?ps
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?pstn_personal_ring,1)
  same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
+ same => n,Busy(15)
  same => n,Hangup()
 
 exten => pstn_personal_group_ring,1,Set(PSTN_GROUP_NAME=${CUT(PSTN_PERSONAL_OWNER,@,2)})
  same => n,Set(PSTN_RING_LIST=${SHELL(/etc/asterisk/pstn-personal-group-ring.sh "${PSTN_CALLERID_NORM}" "${PSTN_GROUP_NAME}")})
+ same => n,NoOp(Group ring lookup for '${PSTN_GROUP_NAME}', caller ${PSTN_CALLERID_NORM}: resolved to [${PSTN_RING_LIST}])
  same => n,GotoIf($["${PSTN_RING_LIST}" = ""]?pstn_personal_denied_group,1)
  same => n,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
  same => n,Set(PSTN_MAX_IN=${IF($["${PSTN_MAX_IN}" = ""]?10:${PSTN_MAX_IN})})
@@ -494,6 +520,7 @@ exten => pstn_personal_group_ring,1,Set(PSTN_GROUP_NAME=${CUT(PSTN_PERSONAL_OWNE
 
 exten => pstn_personal_denied_group,1,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s group ${PSTN_GROUP_NAME} has no member authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
+ same => n,Busy(15)
  same => n,Hangup()
 
 exten => pstn_personal_ring,1,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
