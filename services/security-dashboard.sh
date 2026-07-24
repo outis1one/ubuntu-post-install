@@ -458,15 +458,20 @@ _secdash_write_sudoers() {
     # `docker exec -i <container> tee <exact path>` instead of a direct
     # host-side file write (see _secdash_grant_asterisk_access's comment on
     # why), plus the two Asterisk CLI calls needed after a change and the
-    # live registration-status check. All six are exact commands, no
+    # live registration-status check. All seven are exact commands, no
     # wildcards, scoped to the one container actually installed on this box.
+    # The last line (docker restart) backs the PSTN Trunk tab's "Commit
+    # Changes" button — see restart_asterisk_container()'s comment for why
+    # that exists (AST_CONFIG() live-reads not always picking up dashboard
+    # edits without a full container restart).
     if [ -n "$_ea_container" ]; then
         _ea_lines="$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/asterisk/pjsip.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/categories.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/rooms.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ res_pjsip.so
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx pjsip\ show\ endpoints
-$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container /usr/local/bin/easy-asterisk --rebuild-dialplan"
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container /usr/local/bin/easy-asterisk --rebuild-dialplan
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker restart $_ea_container"
     fi
     cat > /etc/sudoers.d/security-dashboard << SUDOERS
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
@@ -1644,6 +1649,27 @@ def ea_rebuild_dialplan():
     run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "/usr/local/bin/easy-asterisk", "--rebuild-dialplan"])
 
 
+def restart_asterisk_container():
+    """Restarts the Easy Asterisk container - the "Commit Changes" button on
+    the PSTN Trunk tab. Confirmed live: dashboard writes to
+    pstn-permissions.conf/pstn-groups.conf/pstn-personal-dids.conf land on
+    disk immediately (readable via a plain `cat` right after saving), but
+    AST_CONFIG() in the dialplan sometimes kept returning a stale value
+    until the container was fully restarted - not just a `dialplan reload`
+    or `module reload`, an actual container restart. Root cause not fully
+    understood (contradicts AST_CONFIG's whole "reads fresh every call, no
+    restart needed" design premise, which this codebase otherwise relies on
+    throughout), but the restart reliably clears it, so this button exists
+    instead of requiring every admin to rediscover "just restart it" the
+    hard way. Uses the same ASTERISK_EA_CONTAINER/run_sudo mechanism as the
+    Easy Asterisk Admin tab's own docker exec calls - no new sudoers scope
+    needed beyond the one line added for this."""
+    if not ASTERISK_EA_CONTAINER:
+        return False, "No Asterisk container detected on this box"
+    ok, _out, err = run_sudo(["docker", "restart", ASTERISK_EA_CONTAINER], timeout=30)
+    return ok, ("" if ok else (err or "Restart failed"))
+
+
 def ea_get_status():
     """Registered/unregistered per extension — same 'pjsip show endpoints'
     parsing as the vendored get_registered_endpoints()."""
@@ -2311,9 +2337,17 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="tab-pstn" style="display:none">
+    <div class="card" id="pstn-restart-banner" style="display:none; border-left:4px solid #d9822b">
+      <b>Unsaved changes may not be live yet.</b>
+      <p class="muted" style="margin:0.25rem 0 0.5rem">
+        Edits here are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
+      </p>
+      <button class="action" id="pstn-restart-btn">Commit Changes (Restart Asterisk)</button>
+      <span id="pstn-restart-msg" class="muted" style="margin-left:0.5rem"></span>
+    </div>
     <div class="card">
       <h3 style="margin-top:0">Concurrent-call caps</h3>
-      <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes apply live, on the next call.</p>
+      <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes are usually live on the next call; if a call doesn't reflect a recent change, use "Commit Changes" below.</p>
       <div class="row">
         <label class="muted" style="white-space:nowrap">Max outbound<br><input type="text" id="limit-out" style="width:5rem"></label>
         <label class="muted" style="white-space:nowrap">Max inbound<br><input type="text" id="limit-in" style="width:5rem"></label>
@@ -2327,7 +2361,7 @@ INDEX_HTML = """<!doctype html>
         <b>internal</b> — no PSTN, can still call/receive other extensions and internal ring groups.
         <b>restricted</b> — internal, plus only pre-approved US numbers.
         <b>full</b> — internal, plus any US number.
-        Changes apply live, on the next call — no Asterisk restart needed.
+        Changes are usually live on the next call; if one doesn't seem to be taking effect, use "Commit Changes" below.
       </p>
       <p class="muted">
         <b>Messaging</b> — the same internal SIP texting flag as the Extensions tab's checkboxes, independent of the calling tier; this column is just a convenience for setting it alongside tier/numbers on one row. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
@@ -2345,7 +2379,7 @@ INDEX_HTML = """<!doctype html>
     <div class="card">
       <h3 style="margin-top:0">Personal numbers</h3>
       <p class="muted">
-        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings (checked fresh on every call, so membership changes apply immediately); a group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.
+        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call; a group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless. Reassigning a DID's owner has been confirmed to sometimes need "Commit Changes" (below) before Asterisk actually uses the new owner.
       </p>
       <div class="row">
         <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits, no leading 1)" style="width:12rem">
@@ -3118,6 +3152,7 @@ document.getElementById("grp-save").addEventListener("click", async () => {
   });
   const data = await res.json();
   document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) markPstnDirty();
   loadGroups();
 });
 
@@ -3129,6 +3164,7 @@ async function applyGroupMessaging(name, enabled) {
   });
   const data = await res.json();
   document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Applied" : "Failed");
+  if (data.ok) markPstnDirty();
   loadMessaging();
 }
 
@@ -3140,6 +3176,7 @@ async function deleteGroup(name) {
   });
   const data = await res.json();
   document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  if (data.ok) markPstnDirty();
   loadGroups();
 }
 
@@ -3152,7 +3189,39 @@ document.getElementById("limits-save").addEventListener("click", async () => {
   });
   const data = await res.json();
   document.getElementById("limits-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) markPstnDirty();
   loadPstnLimits();
+});
+
+// "Commit Changes" — see restart_asterisk_container()'s comment in app.py
+// for why this button exists: AST_CONFIG() live-reads of these PSTN config
+// files have been confirmed to sometimes stay stale (returning what was on
+// disk at last container start, not the freshly-saved value) until a full
+// container restart, contradicting the "no restart needed" premise the
+// rest of this tab's copy otherwise relies on. pstnDirty tracks whether
+// ANY save on this tab succeeded since the last restart (or page load),
+// shows a persistent banner, and warns on tab-close/navigation so a change
+// doesn't silently sit uncommitted.
+let pstnDirty = false;
+function markPstnDirty() {
+  pstnDirty = true;
+  document.getElementById("pstn-restart-banner").style.display = "";
+}
+window.addEventListener("beforeunload", (e) => {
+  if (!pstnDirty) return;
+  e.preventDefault();
+  e.returnValue = "";
+});
+document.getElementById("pstn-restart-btn").addEventListener("click", async () => {
+  const msg = document.getElementById("pstn-restart-msg");
+  msg.textContent = "Restarting Asterisk…";
+  const res = await fetch("/api/asterisk-restart", { method: "POST" });
+  const data = await res.json();
+  msg.textContent = data.message || (data.ok ? "Restarted" : "Failed");
+  if (data.ok) {
+    pstnDirty = false;
+    document.getElementById("pstn-restart-banner").style.display = "none";
+  }
 });
 
 let lastPstnExts = [];
@@ -3243,6 +3312,7 @@ async function savePstnPermission(ext) {
   });
   const data = await res.json();
   document.getElementById("pstn-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
+  if (data.ok) markPstnDirty();
   loadPstnPermissions();
 }
 
@@ -3308,7 +3378,10 @@ document.getElementById("pd-save").addEventListener("click", async () => {
   });
   const data = await res.json();
   document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
-  if (data.ok) document.getElementById("pd-did").value = "";
+  if (data.ok) {
+    document.getElementById("pd-did").value = "";
+    markPstnDirty();
+  }
   loadPersonalDids();
 });
 
@@ -3320,6 +3393,7 @@ async function removePersonalDid(did) {
   });
   const data = await res.json();
   document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  if (data.ok) markPstnDirty();
   loadPersonalDids();
 }
 
@@ -3440,6 +3514,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-groups/apply-messaging":
             ok, message = apply_group_messaging(payload.get("name", ""), bool(payload.get("enabled", False)))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/asterisk-restart":
+            ok, message = restart_asterisk_container()
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-devices":
             ok, result = ea_add_device(
