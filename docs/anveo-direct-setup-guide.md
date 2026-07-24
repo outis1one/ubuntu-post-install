@@ -159,6 +159,14 @@ In the Security Dashboard's PSTN Trunk tab:
    DID instead of the shared trunk DID. Enter the DID as **10 digits, no
    leading 1** (matches the same convention as the trunk DID above) —
    the dashboard's own input validates against exactly that format.
+   You can assign the DID to a **group** instead of a single extension —
+   pick `Group: <name>` in the owner dropdown (create the group first
+   under Groups if it doesn't exist yet). Every current member whose own
+   tier/approved-numbers authorize the caller rings, checked fresh on
+   every call, so membership changes apply immediately with no reinstall.
+   A group has no single extension to hang an outbound Caller-ID override
+   on, so the Caller-ID-override part above only applies to
+   single-extension assignments.
 
 ## 7. Test
 
