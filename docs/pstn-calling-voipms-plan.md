@@ -3,6 +3,12 @@
 Research and decisions from a design discussion, saved here so the work can
 be picked up in a fresh chat without re-deriving the background.
 
+**For the confirmed-working, step-by-step Anveo Direct account + droplet
+setup (real values, real bugs hit and fixed), see
+`docs/anveo-direct-setup-guide.md` instead of re-deriving it from this
+file** — this doc is the design/decision log; that one is the clean
+how-to.
+
 **Implemented** — see `services/pstn-trunk.sh` (run `sudo ./setup.sh
 pstn-trunk` after `asterisk-digital-ocean` **or** `asterisk` (home/LAN) is
 installed — both are supported, see the file for the static-IP caveat on the
