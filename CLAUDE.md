@@ -438,6 +438,41 @@ a reason (a stray Enter on a service you're just checking on shouldn't
 trigger anything). `fresh` runs the exact same flow a first-time install
 would, prompts included.
 
+## Chaining into another service from within your own
+
+A service can call another service's `install_<name>()` directly as a
+convenience step at the end of its own flow, instead of making the user
+remember to separately run `sudo ./setup.sh <other-name>` afterward.
+`services/asterisk.sh`/`services/asterisk-digital-ocean.sh` do this for
+`services/security-dashboard.sh` and `services/pstn-trunk.sh` — after
+Asterisk itself is installed/updated, each asks once whether to also set up
+the dashboard and/or a PSTN trunk (or, if either is already installed,
+silently re-invokes it so it gets refreshed as part of the same run — its
+own `prompt_reinstall_mode` gate decides update vs. skip, so this never
+re-asks the target service's detailed prompts unless the user is actually
+setting it up fresh).
+
+The target service **keeps its own `register_service` call** — it stays
+independently selectable/invocable exactly as before (`sudo ./setup.sh
+pstn-trunk` still works standalone). Chaining is purely additive, not a
+replacement for the target's own entry point, so nothing breaks for anyone
+already relying on running it directly.
+
+Guard every cross-file call with `declare -F`, since a service can also run
+completely standalone (`sudo bash asterisk.sh`, no `setup.sh`, no sibling
+`services/*.sh` files sourced at all):
+
+```bash
+if declare -F install_security-dashboard >/dev/null 2>&1; then
+    install_security-dashboard
+fi
+```
+
+Only chain in one direction, and only when the relationship is genuinely
+one-way (the target is meaningless without the caller already installed —
+`pstn-trunk.sh` itself says so in its own error message when Asterisk isn't
+present). Don't have both sides call each other.
+
 ## .env files and secrets
 
 Generate passwords with `generate_password` (never hardcode them).

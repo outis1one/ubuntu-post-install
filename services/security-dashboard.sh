@@ -82,12 +82,19 @@ install_security-dashboard() {
     fi
     local ASTERISK_LOG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/logs}"
     local ASTERISK_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/asterisk}"
-
-    local ASTERISK_ADMIN_URL=""
-    if [ -n "$ASTERISK_EA_DIR" ] && [ -f "$ASTERISK_EA_DIR/.env" ]; then
-        local _ea_domain
-        _ea_domain="$(grep -E '^DOMAIN_NAME=' "$ASTERISK_EA_DIR/.env" | cut -d= -f2-)"
-        [ -n "$_ea_domain" ] && ASTERISK_ADMIN_URL="https://${_ea_domain}"
+    # categories.conf/rooms.conf live in a SEPARATE directory from
+    # pjsip.conf — see vendor/easy-asterisk/easy-asterisk-v0.10.0.sh's own
+    # CATEGORIES_FILE/ROOMS_FILE constants (/etc/easy-asterisk/*, not
+    # /etc/asterisk/*). ASTERISK_EA_CONTAINER names the actual container to
+    # `docker exec` into for the native Asterisk Admin tab's writes/CLI
+    # calls (ea_* functions) — "easy-asterisk-do" for the droplet flavor,
+    # "easy-asterisk" for LAN, matching each service's own container_name.
+    local ASTERISK_EA_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/easy-asterisk}"
+    local ASTERISK_EA_CONTAINER=""
+    if [[ "$ASTERISK_EA_DIR" == *asterisk-digital-ocean ]]; then
+        ASTERISK_EA_CONTAINER="easy-asterisk-do"
+    elif [ -n "$ASTERISK_EA_DIR" ]; then
+        ASTERISK_EA_CONTAINER="easy-asterisk"
     fi
 
     echo ""
@@ -102,7 +109,8 @@ install_security-dashboard() {
 
     if [ -z "$ASTERISK_EA_DIR" ]; then
         log_warning "No asterisk-digital-ocean or asterisk install detected."
-        log_warning "The Security Log and PSTN Trunk tabs will just be empty — CrowdSec's tab still works fine."
+        log_warning "The Security Log, Extensions, Asterisk Admin, and PSTN Trunk tabs will just be"
+        log_warning "empty/hidden — CrowdSec's tab still works fine."
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -127,11 +135,11 @@ install_security-dashboard() {
         case "$MODE" in
             update)
                 log_info "Refreshing app code + sudoers rule + systemd unit (no Caddy/domain changes)..."
-                _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR"
+                _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR"
                 _secdash_write_app "$APP_DIR"
                 _secdash_write_asn_helper "$APP_DIR"
-                _secdash_write_sudoers "$SVC_USER"
-                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
+                _secdash_write_sudoers "$SVC_USER" "$ASTERISK_EA_CONTAINER"
+                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER"
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
@@ -141,7 +149,7 @@ install_security-dashboard() {
                 prompt_yn "Reconfigure this dashboard's Caddy protection (Authelia domain, or add/rotate an independent Basic Auth layer)? (y/n):" "n" _reconf
                 if [[ "$_reconf" =~ ^[Yy]$ ]]; then
                     _secdash_remove_caddy_block "$DASHBOARD_PORT"
-                    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
+                    _secdash_configure_caddy "$DASHBOARD_PORT"
                 fi
                 return 0
                 ;;
@@ -159,15 +167,15 @@ install_security-dashboard() {
         log_success "Created system user $SVC_USER"
     fi
 
-    _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR"
+    _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR"
 
     mkdir -p "$APP_DIR"
     _secdash_write_app "$APP_DIR"
     chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
     _secdash_write_asn_helper "$APP_DIR"
 
-    _secdash_write_sudoers "$SVC_USER"
-    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_ADMIN_URL"
+    _secdash_write_sudoers "$SVC_USER" "$ASTERISK_EA_CONTAINER"
+    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER"
 
     systemctl daemon-reload
     systemctl enable security-dashboard >/dev/null 2>&1
@@ -184,7 +192,7 @@ install_security-dashboard() {
     # _secdash_configure_caddy so "update" mode can also offer to reconfigure
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
-    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_ADMIN_URL"
+    _secdash_configure_caddy "$DASHBOARD_PORT"
 
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
@@ -194,13 +202,65 @@ protected page. Runs natively on the host (systemd service \`security-dashboard\
 not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
+The nav only ever shows tabs for things actually present on this box — no
+tab for a service you haven't installed. **Security Log** and **Extensions**
+are always there (they only need Asterisk itself, detected once at install
+time). **Asterisk Admin**, **PSTN Trunk**, and **CrowdSec** each check their
+own live install state on every page load and hide their own nav button
+entirely if not found, so this one page/URL scales from a bare LAN Asterisk
+box (just those first two tabs) up to a full droplet with a trunk and
+CrowdSec, without ever showing a tab for something that isn't set up.
+
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
   (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
-  filterable per column (each header has its own text filter, live as you type).
-- **CrowdSec** — current bans (\`cscli decisions list\`), a delete/unban button
-  per entry, carrier/ASN + country columns, and management of the ASN-exempt
-  Asterisk brute-force scenarios (see \`services/crowdsec.sh\`'s "Exempt
-  specific carrier ASNs" option) without SSHing in:
+  sortable per column (click a header to sort, click again to reverse).
+- **Asterisk Admin** — a native reimplementation of Easy Asterisk's own
+  vendored web admin (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s
+  device/category/room management), not a link or an iframe to that separate
+  process — one page, one login. Reads \`pjsip.conf\`/\`categories.conf\`/
+  \`rooms.conf\` directly (same formats the vendor's own
+  \`easy-asterisk --rebuild-dialplan\` CLI still generates the dialplan from);
+  writes go through \`docker exec ... tee\` (root, sudo-gated) instead of a
+  direct host-side file write, since Easy Asterisk's container writes these
+  as its own internal user and a host-side write would just be fighting that
+  ownership again on the next restart. Its nav button only appears once the
+  live \`/api/ea-status\` check confirms an Asterisk container is actually
+  reachable.
+  - **Devices** — add/rename/delete a SIP extension, reassign its category;
+    live registered/unregistered status per device.
+  - **Categories** — device profiles (an auto-answer default + description).
+  - **Rooms** — ring groups/paging groups; add/remove members per room.
+  - Every write reloads PJSIP and/or rebuilds the dialplan automatically, the
+    same way the vendored admin's own actions do.
+- **Extensions** — always available, independent of any PSTN trunk. A
+  **Groups** card lets you name a set of extensions and bulk-enable/disable
+  messaging for all of them at once — a management convenience only, not a
+  runtime concept: applying an action just writes the same per-extension
+  \`pstn-permissions.conf\` key each member's own checkbox would, and
+  membership changes never retroactively affect anything already applied.
+  An **Internal SIP messaging** card (a checkbox chip per known extension,
+  independent of PSTN calling entirely — no cost, no carrier, no DID, no
+  dependency on a PSTN trunk being installed) sits below it.
+- **PSTN Trunk** — its nav button only appears once
+  \`services/pstn-trunk.sh\`'s dialplan is actually installed
+  (\`pstn-trunk-dialplan.conf\` present), so it never shows a
+  real-looking-but-unenforced editor. When present: the outbound/inbound
+  concurrent-call caps, and every known extension's permission tier
+  (internal / restricted / full) and, for restricted, its approved numbers —
+  all editable live, no Asterisk restart, no reinstall, sortable per column.
+  Also manages personal-number assignments (DID -> owner extension or
+  group), additive to the shared trunk DID. Writes directly to
+  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
+  which the dialplan reads fresh on every call. The spend-cap kill-switch
+  and international-calling allow-list are deliberately **not** managed
+  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
+  security-sensitive than what this tab already exposes.
+- **CrowdSec** — its nav button only appears once \`cscli\` is detected on
+  this host. Current bans (\`cscli decisions list\`), a delete/unban button
+  per entry, carrier/ASN + country columns (sortable per column), and
+  management of the ASN-exempt Asterisk brute-force scenarios (see
+  \`services/crowdsec.sh\`'s "Exempt specific carrier ASNs" option) without
+  SSHing in:
   - **Currently-exempt ASNs** are listed with carrier name (resolved from
     current bans, falling back to alert history for ASNs with no active ban
     right now) regardless of when they were added.
@@ -209,45 +269,6 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
-- **PSTN Trunk** — a **Groups** card at the top (always available, whether
-  or not a PSTN trunk has ever been installed) lets you name a set of
-  extensions and bulk-enable/disable messaging for all of them at once —
-  a management convenience only, not a runtime concept: applying an action
-  just writes the same per-extension \`pstn-permissions.conf\` key each
-  member's own checkbox would, and membership changes never retroactively
-  affect anything already applied. Below that, the rest of the tab detects
-  whether \`services/pstn-trunk.sh\`'s dialplan is
-  actually installed (\`pstn-trunk-dialplan.conf\` present) and shows a
-  clear "not installed" message instead of the calling-permissions editor
-  if not, so it never shows real-looking-but-unenforced defaults. When
-  installed: the outbound/inbound concurrent-call caps, and every known
-  extension's permission tier (internal / restricted / full) and, for
-  restricted, its approved numbers — all editable live, no Asterisk
-  restart, no reinstall. Also manages personal-number assignments (DID ->
-  owner extension), additive to the shared trunk DID. Writes directly to
-  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
-  which the dialplan reads fresh on every call. The spend-cap kill-switch
-  and international-calling allow-list are deliberately **not** managed
-  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
-  security-sensitive than what this tab already exposes. An "Internal SIP
-  messaging" card at the **bottom** of the tab (a checkbox chip per known
-  extension, independent of PSTN calling entirely — no cost, no carrier, no
-  DID, no dependency on a PSTN trunk being installed) is always available
-  regardless of any of the above.
-- **Asterisk Admin** — an embedded, lazy-loaded iframe of the real Asterisk
-  web admin (only fetched the first time you open the tab), plus an
-  "open in a new tab" fallback link that's always there regardless. Only
-  shows up once an Asterisk install is detected. If a local Caddy install is
-  found for both this dashboard and the Asterisk admin's own domain, install
-  automatically patches the admin's Caddy site block from
-  `X-Frame-Options` to a `Content-Security-Policy: frame-ancestors` entry
-  naming only this dashboard's domain, so the browser actually allows the
-  frame — every other site is still refused framing exactly as before. This
-  is best-effort (it depends on matching the exact header line
-  `services/asterisk-digital-ocean.sh` itself writes, and hasn't been
-  confirmed against Authelia's own portal-framing behavior on a live
-  install) — if the tab shows a blank frame, use the fallback link and check
-  this service's own log output from install time for a manual one-line fix.
 
 ## Manage
 \`\`\`
@@ -258,8 +279,9 @@ sudo journalctl -u security-dashboard -f
 
 ## Security notes
 - Runs as a dedicated, unprivileged system user (\`secdash\`), not root.
-- Sudo access is scoped to exactly six commands via
-  \`/etc/sudoers.d/security-dashboard\`: \`cscli decisions delete --id <digits>\`,
+- Sudo access is scoped to exact commands via
+  \`/etc/sudoers.d/security-dashboard\` — nothing else. CrowdSec:
+  \`cscli decisions delete --id <digits>\`,
   \`cscli decisions list -o json\`, \`cscli alerts list -o json\` (read-only,
   used to label ASN exemptions with a carrier name from past alerts and to
   find known offending IPs for the "Ban" action), \`cscli decisions add --ip
@@ -267,7 +289,13 @@ sudo journalctl -u security-dashboard -f
   \`systemctl restart crowdsec\`, and \`set-asn-exempt.sh\` (root:root, mode
   700, installed alongside \`app.py\` — the one thing that edits CrowdSec's
   Asterisk-scenario YAMLs, since \`secdash\` has no write access to those
-  root-owned files directly and shouldn't). Nothing else.
+  root-owned files directly and shouldn't). Asterisk Admin (only added if an
+  Asterisk install is detected): \`docker exec -i <container> tee\` against
+  exactly \`pjsip.conf\`/\`categories.conf\`/\`rooms.conf\`, plus
+  \`asterisk -rx "module reload res_pjsip.so"\`,
+  \`asterisk -rx "pjsip show endpoints"\`, and
+  \`easy-asterisk --rebuild-dialplan\` — all scoped to the one Asterisk
+  container actually installed on this box, none of it a wildcard.
 - Listens on all interfaces (Caddy reaches it via \`host.docker.internal\`, a
   Docker bridge IP — a loopback-only bind refuses that). Access is scoped by
   UFW instead, allowed only from Caddy's internal network, not the internet.
@@ -296,9 +324,9 @@ README_MD
 # dashboard (or an asterisk-digital-ocean/asterisk swap) reaches an existing
 # install on its next update instead of silently only applying to new ones.
 _secdash_grant_asterisk_access() {
-    local _svc_user="$1" _log_dir="$2" _config_dir="$3"
+    local _svc_user="$1" _log_dir="$2" _config_dir="$3" _ea_config_dir="${4:-}"
     local _dir
-    for _dir in "$_log_dir" "$_config_dir"; do
+    for _dir in "$_log_dir" "$_config_dir" "$_ea_config_dir"; do
         [ -n "$_dir" ] && [ -d "$_dir" ] || continue
         local _group
         _group="$(stat -c '%G' "$_dir" 2>/dev/null || echo "$ACTUAL_USER")"
@@ -311,7 +339,11 @@ _secdash_grant_asterisk_access() {
     # directory also needs the group execute+write bit for a new file save
     # (configparser writes a fresh temp file then renames it into place) to
     # succeed. 770 only on the config dir, not the log dir (no reason for
-    # secdash to ever create files in the log dir).
+    # secdash to ever create files in the log dir). _ea_config_dir
+    # (categories.conf/rooms.conf) deliberately stays 750/read-only — the
+    # native Asterisk Admin tab writes those through `docker exec ... tee`
+    # instead (see the ea_* functions), not a direct host-side write, so
+    # there's no reason to grant this directory group-write at all.
     if [ -n "$_config_dir" ] && [ -d "$_config_dir" ]; then
         chmod 770 "$_config_dir" 2>/dev/null || true
     fi
@@ -326,14 +358,15 @@ _secdash_grant_asterisk_access() {
 # both layers (this AND the group access above) need to agree, or writes
 # fail even when Unix permissions alone would have allowed them.
 _secdash_write_systemd_unit() {
-    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _admin_url="$6"
+    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _ea_config_dir="${6:-}" _ea_container="${7:-}"
     local _read_only_paths="" _read_write_paths="/etc/crowdsec/scenarios"
     [ -n "$_log_dir" ] && _read_only_paths="$_log_dir"
+    [ -n "$_ea_config_dir" ] && _read_only_paths="$_read_only_paths $_ea_config_dir"
     [ -n "$_config_dir" ] && _read_write_paths="$_read_write_paths $_config_dir"
 
     cat > /etc/systemd/system/security-dashboard.service << SDSVC
 [Unit]
-Description=Security dashboard (Asterisk security log + CrowdSec decisions + PSTN trunk permissions)
+Description=Security dashboard (Asterisk security log + CrowdSec decisions + PSTN trunk permissions + Asterisk admin)
 After=network.target
 
 [Service]
@@ -343,7 +376,8 @@ Group=$_svc_user
 Environment=DASHBOARD_PORT=$_port
 Environment=ASTERISK_LOG=${_log_dir:+$_log_dir/full}
 Environment=ASTERISK_CONFIG_DIR=$_config_dir
-Environment=ASTERISK_ADMIN_URL=$_admin_url
+Environment=ASTERISK_EA_CONFIG_DIR=$_ea_config_dir
+Environment=ASTERISK_EA_CONTAINER=$_ea_container
 ExecStart=/usr/bin/python3 $_app_dir/app.py
 Restart=on-failure
 RestartSec=3
@@ -368,7 +402,22 @@ SDSVC
 # ban had no carrier name to show) reaches existing installs on their next
 # update instead of silently only applying to new ones.
 _secdash_write_sudoers() {
-    local _svc_user="$1"
+    local _svc_user="$1" _ea_container="${2:-}"
+    local _ea_lines=""
+    # Native Asterisk Admin tab (ea_* functions) — every write goes through
+    # `docker exec -i <container> tee <exact path>` instead of a direct
+    # host-side file write (see _secdash_grant_asterisk_access's comment on
+    # why), plus the two Asterisk CLI calls needed after a change and the
+    # live registration-status check. All six are exact commands, no
+    # wildcards, scoped to the one container actually installed on this box.
+    if [ -n "$_ea_container" ]; then
+        _ea_lines="$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/asterisk/pjsip.conf
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/categories.conf
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/rooms.conf
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ res_pjsip.so
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx pjsip\ show\ endpoints
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container /usr/local/bin/easy-asterisk --rebuild-dialplan"
+    fi
     cat > /etc/sudoers.d/security-dashboard << SUDOERS
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions delete --id [0-9]*
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions list -o json
@@ -376,6 +425,7 @@ $_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli alerts list -o json
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/cscli decisions add --ip * --duration * --type ban --reason *
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/systemctl restart crowdsec
 $_svc_user ALL=(root) NOPASSWD: /opt/security-dashboard/set-asn-exempt.sh *
+${_ea_lines}
 SUDOERS
     chmod 440 /etc/sudoers.d/security-dashboard
     visudo -c -f /etc/sudoers.d/security-dashboard >/dev/null 2>&1 \
@@ -389,7 +439,7 @@ SUDOERS
 # retroactively) using the exact same code path as a fresh install, instead
 # of hand-patching a live Caddyfile block in place.
 _secdash_configure_caddy() {
-    local DASHBOARD_PORT="$1" ADMIN_URL="${2:-}"
+    local DASHBOARD_PORT="$1"
 
     echo ""
     if ! command -v docker &>/dev/null || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
@@ -519,66 +569,6 @@ CADDYBLOCK
         if declare -f ufw_allow_from_caddy_net >/dev/null 2>&1; then
             ufw_allow_from_caddy_net "${DASHBOARD_PORT}"
         fi
-    fi
-
-    _secdash_allow_asterisk_admin_iframe "$ADMIN_URL" "$SD_DOMAIN"
-}
-
-# Best-effort: lets the dashboard's "Asterisk Admin" tab iframe-embed the
-# real Asterisk web admin, by swapping that domain's own Caddy site block
-# from X-Frame-Options to a CSP frame-ancestors entry naming ONLY this
-# dashboard's domain — every other site is still refused framing exactly as
-# before, this just relaxes it for the one origin that's supposed to embed
-# it. Best-effort because it depends on finding the exact
-# X-Frame-Options line services/asterisk-digital-ocean.sh itself generates,
-# inside a live Caddyfile it doesn't own — if that block was hand-edited
-# since, or doesn't exist yet (Asterisk installed after this dashboard, or
-# no local Caddy at all), this silently does nothing and the tab's "open in
-# a new tab" fallback link still works either way.
-_secdash_allow_asterisk_admin_iframe() {
-    local ADMIN_URL="$1" SD_DOMAIN="$2"
-    [ -n "$ADMIN_URL" ] || return 0
-    [ -n "$SD_DOMAIN" ] || return 0
-    command -v docker &>/dev/null || return 0
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$" || return 0
-
-    local ADMIN_DOMAIN="${ADMIN_URL#https://}"
-    ADMIN_DOMAIN="${ADMIN_DOMAIN#http://}"
-    local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
-    [ -f "$CADDY_FILE" ] || return 0
-    grep -q "^${ADMIN_DOMAIN} {" "$CADDY_FILE" || return 0
-
-    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$CADDY_FILE"; then
-        return 0   # already patched for this exact dashboard domain
-    fi
-
-    local CSP_LINE="        Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
-    local TMP_FILE
-    TMP_FILE="$(mktemp)"
-    awk -v domain="${ADMIN_DOMAIN} {" -v csp="$CSP_LINE" '
-        BEGIN { in_block = 0; patched = 0 }
-        index($0, domain) == 1 { in_block = 1 }
-        in_block && !patched && /X-Frame-Options/ { print csp; patched = 1; next }
-        { print }
-        in_block && /^}/ { in_block = 0 }
-    ' "$CADDY_FILE" > "$TMP_FILE"
-
-    if grep -qF "frame-ancestors 'self' https://${SD_DOMAIN};" "$TMP_FILE"; then
-        cp "$CADDY_FILE" "$CADDY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-        mv "$TMP_FILE" "$CADDY_FILE"
-        docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
-        if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || docker restart caddy &>/dev/null; then
-            log_success "Asterisk web admin (${ADMIN_DOMAIN}) now allows embedding from https://${SD_DOMAIN} — the dashboard's Asterisk Admin tab should load it."
-        else
-            log_warning "Caddyfile patched, but reload/restart failed — check: docker logs caddy"
-        fi
-    else
-        rm -f "$TMP_FILE"
-        log_warning "Couldn't find an X-Frame-Options line in ${ADMIN_DOMAIN}'s Caddy block to patch —"
-        log_warning "the dashboard's Asterisk Admin tab will show a blank frame. Add this line yourself"
-        log_warning "inside that domain's 'header { }' block in $CADDY_FILE, replacing X-Frame-Options:"
-        log_warning "  Content-Security-Policy \"frame-ancestors 'self' https://${SD_DOMAIN};\""
-        log_warning "then: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"
     fi
 }
 
@@ -719,7 +709,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8092"))
 ASTERISK_LOG = os.environ.get("ASTERISK_LOG", "")
-ASTERISK_ADMIN_URL = os.environ.get("ASTERISK_ADMIN_URL", "")
 ASTERISK_CONFIG_DIR = os.environ.get("ASTERISK_CONFIG_DIR", "")
 ASN_SCENARIO_FILES = [
     "/etc/crowdsec/scenarios/local-asterisk_bf.yaml",
@@ -801,17 +790,29 @@ def parse_security_log(limit=200):
     return events[:limit]
 
 
-def run_sudo(args, timeout=15):
+def run_sudo(args, timeout=15, input_text=None):
     """Runs a whitelisted sudo command. Always list-form args, never
     shell=True — no shell metacharacter interpretation is possible regardless
-    of what's in the arguments, on top of the sudoers-side restriction."""
+    of what's in the arguments, on top of the sudoers-side restriction.
+    input_text feeds stdin (e.g. for `docker exec -i ... tee <file>` writes —
+    see the ea_* Easy Asterisk admin functions) instead of a command-line
+    argument, so file content never has to survive sudoers pattern matching."""
     try:
         result = subprocess.run(
-            ["sudo"] + args, capture_output=True, text=True, timeout=timeout
+            ["sudo"] + args, capture_output=True, text=True, timeout=timeout,
+            input=input_text
         )
         return result.returncode == 0, result.stdout, result.stderr
     except (subprocess.TimeoutExpired, OSError) as e:
         return False, "", str(e)
+
+
+def crowdsec_installed():
+    """True if cscli is actually present on this host — mirrors
+    pstn_installed()'s approach of checking for the real thing rather than a
+    stored flag, so the CrowdSec tab tracks live state without needing this
+    dashboard reinstalled after CrowdSec is added or removed."""
+    return os.path.isfile("/usr/bin/cscli")
 
 
 def get_decisions():
@@ -1487,6 +1488,630 @@ def remove_personal_did(did):
     return True, "Removed %s" % did
 
 
+# ── Easy Asterisk Admin (native — devices, categories, rooms/ring-groups) ──
+# Full reimplementation of vendor/easy-asterisk/easy-asterisk-v0.10.0.sh's
+# vendored web admin (its own separate process, normally reached via its own
+# port/domain) as native code here instead — one tab, one process, no
+# separate app to proxy or embed. Keeps writing the EXACT same file formats
+# (pjsip.conf's "; === Device: Name (category) [AA:yes/no] ===" comment +
+# bracket-section convention, categories.conf/rooms.conf's pipe-delimited
+# rows) the vendor's own `easy-asterisk --rebuild-dialplan` CLI still reads
+# to generate the dialplan — this is a new front door onto the same
+# underlying config, not a fork of dialplan generation itself.
+#
+# Reads go straight through the host-side bind-mounted files (same as
+# list_extensions() already does for pjsip.conf) — cheap, and this dashboard
+# already has working read access there. WRITES go through `docker exec ...
+# tee` instead of writing the host-side file directly: Easy Asterisk's own
+# container writes these files as ITS OWN internal user, and a host-side
+# write here would be fighting that ownership — liable to silently break
+# again the next time the container restarts and re-asserts it. Routing
+# through docker exec (root, via a narrowly scoped sudoers entry — see
+# _secdash_write_sudoers) sidesteps the host/container UID mismatch
+# entirely, the same way this file already does for CrowdSec's cscli.
+ASTERISK_EA_CONFIG_DIR = os.environ.get("ASTERISK_EA_CONFIG_DIR", "")
+ASTERISK_EA_CONTAINER = os.environ.get("ASTERISK_EA_CONTAINER", "")
+
+EA_PJSIP_CONTAINER_PATH = "/etc/asterisk/pjsip.conf"
+EA_CATEGORIES_CONTAINER_PATH = "/etc/easy-asterisk/categories.conf"
+EA_ROOMS_CONTAINER_PATH = "/etc/easy-asterisk/rooms.conf"
+EA_EXT_RE = re.compile(r"^\d{1,10}$")
+EA_CATID_RE = re.compile(r"^[a-z0-9]+$")
+
+
+def ea_installed():
+    return bool(ASTERISK_EA_CONTAINER)
+
+
+def _ea_pjsip_host_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "pjsip.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _ea_categories_host_path():
+    return os.path.join(ASTERISK_EA_CONFIG_DIR, "categories.conf") if ASTERISK_EA_CONFIG_DIR else None
+
+
+def _ea_rooms_host_path():
+    return os.path.join(ASTERISK_EA_CONFIG_DIR, "rooms.conf") if ASTERISK_EA_CONFIG_DIR else None
+
+
+def ea_docker_write(container_path, content):
+    """Writes content to a file INSIDE the Easy Asterisk container via
+    `docker exec -i <container> tee <path>` (root, sudo-gated) — see the
+    module-level comment above for why this isn't a direct host-side write."""
+    ok, _out, err = run_sudo(
+        ["docker", "exec", "-i", ASTERISK_EA_CONTAINER, "tee", container_path],
+        input_text=content,
+    )
+    return ok, ("" if ok else (err or "Write failed"))
+
+
+def ea_reload_pjsip():
+    run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "asterisk", "-rx", "module reload res_pjsip.so"])
+
+
+def ea_rebuild_dialplan():
+    run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "/usr/local/bin/easy-asterisk", "--rebuild-dialplan"])
+
+
+def ea_get_status():
+    """Registered/unregistered per extension — same 'pjsip show endpoints'
+    parsing as the vendored get_registered_endpoints()."""
+    ok, out, _err = run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "asterisk", "-rx", "pjsip show endpoints"])
+    if not ok:
+        return {}
+    endpoints = {}
+    current = None
+    for line in out.split("\n"):
+        m = re.match(r"\s*Endpoint:\s+(\d+)/", line)
+        if m:
+            current = m.group(1)
+            endpoints[current] = "offline"
+        if current and "Contact:" in line and ("Avail" in line or "NonQual" in line):
+            endpoints[current] = "online"
+    return endpoints
+
+
+def ea_list_devices():
+    """Same comment+bracket parsing as the vendored get_devices() so this
+    reads pjsip.conf identically regardless of which admin wrote it."""
+    path = _ea_pjsip_host_path()
+    devices = []
+    if not path or not os.path.isfile(path):
+        return devices
+    with open(path) as f:
+        lines = f.readlines()
+    dev_name = dev_cat = dev_aa = None
+    for line in lines:
+        line = line.strip()
+        if "; === Device:" in line:
+            temp = line.split("; === Device:")[1].split("===")[0].strip()
+            dev_aa = None
+            if "[AA:yes]" in temp:
+                dev_aa = "yes"
+                temp = temp.replace("[AA:yes]", "").strip()
+            elif "[AA:no]" in temp:
+                dev_aa = "no"
+                temp = temp.replace("[AA:no]", "").strip()
+            if "(" in temp and ")" in temp:
+                dev_cat = temp[temp.rfind("(") + 1:temp.rfind(")")]
+                dev_name = temp[:temp.rfind("(")].strip()
+            else:
+                dev_name = temp
+                dev_cat = "unknown"
+        elif dev_name and re.match(r"^\[(\d+)\]$", line):
+            ext = re.match(r"^\[(\d+)\]$", line).group(1)
+            devices.append({"name": dev_name, "category": dev_cat, "extension": ext,
+                             "auto_answer": dev_aa, "transport": "udp", "encryption": "no"})
+            dev_name = dev_cat = dev_aa = None
+        elif devices and line.startswith("transport=transport-"):
+            devices[-1]["transport"] = line.split("transport-")[1]
+        elif devices and line.startswith("media_encryption="):
+            val = line.split("=")[1]
+            if val in ("sdes", "dtls"):
+                devices[-1]["encryption"] = val
+                if devices[-1]["transport"] == "udp":
+                    devices[-1]["transport"] = "tls"
+            elif val != "no":
+                devices[-1]["encryption"] = val
+    return devices
+
+
+def _ea_generate_password(length=16):
+    import secrets
+    import string
+    chars = string.ascii_letters + string.digits
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+def ea_add_device(name, category, extension, conn_type="lan", auto_answer=None):
+    path = _ea_pjsip_host_path()
+    if not path:
+        return False, "No Asterisk install detected on this box"
+    extension = str(extension).strip()
+    if not EA_EXT_RE.match(extension):
+        return False, "Invalid extension"
+    name = (name or "").strip()
+    if not name:
+        return False, "Name required"
+    if not os.path.isfile(path):
+        return False, "Config file not found"
+
+    with open(path) as f:
+        current = f.read()
+    if "[%s]" % extension in current:
+        return False, "Extension already exists"
+
+    password = _ea_generate_password(16)
+
+    if conn_type == "fqdn":
+        transport = "transport=transport-tls"
+        encryption = "media_encryption=sdes"
+        ice = "ice_support=yes"
+    else:
+        transport = "transport=transport-udp"
+        encryption = "media_encryption=no"
+        ice = ""
+
+    aa_tag = ""
+    if auto_answer == "yes":
+        aa_tag = "[AA:yes] "
+    elif auto_answer == "no":
+        aa_tag = "[AA:no] "
+
+    keepalive = ""
+    if category == "mobile":
+        keepalive = "rtp_keepalive=15\nrtp_timeout=120\nrtp_timeout_hold=120"
+
+    # Built as a filtered line list, not positional %s blanks — keepalive and
+    # ice are both empty for a plain non-mobile LAN device, and leaving them
+    # as literal blank template lines produces TWO consecutive blank lines
+    # inside the endpoint stanza instead of one. ea_delete_device/
+    # ea_rename_device/ea_change_device_category all use "blank line ends
+    # this device's block" as their boundary heuristic (matching the
+    # vendored admin's own logic) — an extra internal blank line there is a
+    # latent bug inherited from the vendor template, confirmed live against
+    # a synthetic fixture (delete_device left an orphaned tail of lines
+    # behind). Filtering empty lines out entirely avoids it regardless of
+    # which optional pieces are present.
+    endpoint_lines = [
+        "type=endpoint",
+        "context=intercom",
+        transport,
+        "disallow=all",
+        "allow=opus",
+        "allow=ulaw",
+        "allow=alaw",
+        "allow=g722",
+        encryption,
+        "direct_media=no",
+        "rtp_symmetric=yes",
+        "force_rport=yes",
+        "rewrite_contact=yes",
+    ]
+    if keepalive:
+        endpoint_lines.append(keepalive)
+    if ice:
+        endpoint_lines.append(ice)
+    endpoint_lines += [
+        "auth=%s" % extension,
+        "aors=%s" % extension,
+        'callerid="%s" <%s>' % (name, extension),
+    ]
+
+    device_config = "\n; === Device: %s (%s) %s===\n[%s]\n%s\n\n[%s]\ntype=auth\nauth_type=userpass\nusername=%s\npassword=%s\n\n[%s]\ntype=aor\nmax_contacts=5\nremove_existing=yes\nqualify_frequency=30\n" % (
+        name, category, aa_tag, extension, "\n".join(endpoint_lines),
+        extension, extension, password, extension,
+    )
+
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, current + device_config)
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    ea_rebuild_dialplan()
+    return True, {
+        "extension": extension, "password": password, "name": name,
+        "transport": "tls" if conn_type == "fqdn" else "udp",
+        "port": 5061 if conn_type == "fqdn" else 5060,
+    }
+
+
+def ea_delete_device(extension):
+    """Same block-removal logic as the vendored delete_device()."""
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Config file not found"
+    with open(path) as f:
+        lines = f.readlines()
+
+    new_lines = []
+    found = False
+    skip = False
+    pending_comment = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("; === Device:"):
+            pending_comment = line
+            continue
+        if re.match(r"^\[%s\]$" % re.escape(extension), stripped):
+            if pending_comment:
+                found = True
+                skip = True
+                pending_comment = None
+                continue
+            elif found:
+                skip = True
+                continue
+        if pending_comment:
+            new_lines.append(pending_comment)
+            pending_comment = None
+        if skip and stripped == "":
+            skip = False
+            continue
+        if not skip:
+            new_lines.append(line)
+
+    if not found:
+        return False, "Device not found"
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    ea_rebuild_dialplan()
+    return True, "Device deleted"
+
+
+def ea_rename_device(extension, new_name):
+    """Same comment+callerid rewrite as the vendored rename_device()."""
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Config file not found"
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False, "Name required"
+    with open(path) as f:
+        lines = f.readlines()
+
+    new_lines = []
+    found = False
+    in_device = False
+    pending_comment = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("; === Device:"):
+            temp = stripped.split("; === Device:")[1].split("===")[0].strip()
+            aa_tag = ""
+            if "[AA:yes]" in temp:
+                aa_tag = " [AA:yes]"
+                temp = temp.replace("[AA:yes]", "").strip()
+            elif "[AA:no]" in temp:
+                aa_tag = " [AA:no]"
+                temp = temp.replace("[AA:no]", "").strip()
+            cat = temp[temp.rfind("(") + 1:temp.rfind(")")] if "(" in temp else "unknown"
+            pending_comment = (line, cat, aa_tag)
+            continue
+        if pending_comment:
+            m = re.match(r"^\[(\d+)\]$", stripped)
+            if m and m.group(1) == extension:
+                _old_line, cat, aa_tag = pending_comment
+                new_lines.append("; === Device: %s (%s)%s ===\n" % (new_name, cat, aa_tag))
+                new_lines.append(line)
+                found = True
+                in_device = True
+                pending_comment = None
+                continue
+            else:
+                new_lines.append(pending_comment[0])
+                pending_comment = None
+        if in_device and stripped.startswith("callerid="):
+            new_lines.append('callerid="%s" <%s>\n' % (new_name, extension))
+            continue
+        if in_device and stripped == "":
+            in_device = False
+        new_lines.append(line)
+
+    if not found:
+        return False, "Device not found"
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    ea_rebuild_dialplan()
+    return True, "Device renamed"
+
+
+def ea_change_device_category(extension, new_category):
+    """Same comment-line category rewrite as the vendored
+    change_device_category()."""
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Config file not found"
+    new_category = (new_category or "").strip()
+    if not new_category:
+        return False, "Category required"
+    with open(path) as f:
+        lines = f.readlines()
+
+    new_lines = []
+    found = False
+    pending_comment = None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("; === Device:"):
+            pending_comment = (line, stripped)
+            continue
+        if pending_comment:
+            m = re.match(r"^\[(\d+)\]$", stripped)
+            if m and m.group(1) == extension:
+                cm = re.match(r"^; === Device: (.+?) \(([^)]+)\)(.*?)===", pending_comment[1])
+                if cm:
+                    dev_name, _old_cat, rest = cm.group(1), cm.group(2), cm.group(3)
+                    new_lines.append("; === Device: %s (%s)%s===\n" % (dev_name, new_category, rest))
+                    found = True
+                else:
+                    new_lines.append(pending_comment[0])
+                new_lines.append(line)
+                pending_comment = None
+                continue
+            else:
+                new_lines.append(pending_comment[0])
+                pending_comment = None
+        new_lines.append(line)
+
+    if not found:
+        return False, "Device not found"
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    ea_rebuild_dialplan()
+    return True, "Category changed"
+
+
+def ea_list_categories():
+    path = _ea_categories_host_path()
+    categories = []
+    if not path or not os.path.isfile(path):
+        return categories
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = line.split("|")
+                if len(parts) >= 3:
+                    categories.append({"id": parts[0], "name": parts[1], "auto_answer": parts[2],
+                                        "description": parts[3] if len(parts) > 3 else ""})
+    return categories
+
+
+def ea_create_category(cat_id, name, auto_answer="", description=""):
+    path = _ea_categories_host_path()
+    if not path:
+        return False, "No Asterisk install detected on this box"
+    cat_id = (cat_id or "").strip().lower()
+    name = (name or "").strip()
+    if not EA_CATID_RE.match(cat_id):
+        return False, "Category ID must be lowercase letters/digits only"
+    if not name:
+        return False, "Name required"
+
+    current = ""
+    if os.path.isfile(path):
+        with open(path) as f:
+            current = f.read()
+    else:
+        current = "# Format: id|name|auto_answer|description\n"
+
+    for line in current.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and line.split("|")[0] == cat_id:
+            return False, "Category ID already exists"
+
+    if not current.endswith("\n"):
+        current += "\n"
+    new_content = current + "%s|%s|%s|%s\n" % (cat_id, name, auto_answer, description)
+    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, new_content)
+    return (True, "Category created") if ok else (False, err)
+
+
+def ea_delete_category(cat_id):
+    path = _ea_categories_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Categories file not found"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped.split("|")[0] == cat_id:
+            found = True
+            continue
+        new_lines.append(line)
+    if not found:
+        return False, "Category not found"
+    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, "".join(new_lines))
+    return (True, "Category deleted") if ok else (False, err)
+
+
+def ea_rename_category(cat_id, new_name):
+    path = _ea_categories_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Categories file not found"
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False, "Name required"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            parts = stripped.split("|")
+            if len(parts) >= 2 and parts[0] == cat_id:
+                parts[1] = new_name
+                new_lines.append("|".join(parts) + "\n")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        return False, "Category not found"
+    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, "".join(new_lines))
+    return (True, "Category renamed") if ok else (False, err)
+
+
+def ea_list_rooms():
+    path = _ea_rooms_host_path()
+    rooms = []
+    if not path or not os.path.isfile(path):
+        return rooms
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                parts = line.split("|")
+                if len(parts) >= 5:
+                    rooms.append({"extension": parts[0], "name": parts[1], "members": parts[2],
+                                  "timeout": parts[3], "type": parts[4]})
+    return rooms
+
+
+def ea_create_room(extension, name, room_type="ring", timeout="60"):
+    path = _ea_rooms_host_path()
+    if not path:
+        return False, "No Asterisk install detected on this box"
+    extension = str(extension).strip()
+    name = (name or "").strip()
+    if not EA_EXT_RE.match(extension):
+        return False, "Invalid extension"
+    if not name:
+        return False, "Name required"
+
+    current = ""
+    if os.path.isfile(path):
+        with open(path) as f:
+            current = f.read()
+    else:
+        current = "# Format: ext|name|members|timeout|type(ring/page)\n"
+
+    for line in current.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and line.split("|")[0] == extension:
+            return False, "Room extension already exists"
+
+    if not current.endswith("\n"):
+        current += "\n"
+    new_content = current + "%s|%s||%s|%s\n" % (extension, name, timeout, room_type)
+    ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, new_content)
+    if not ok:
+        return False, err
+    ea_rebuild_dialplan()
+    return True, "Room created"
+
+
+def ea_delete_room(extension):
+    path = _ea_rooms_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Rooms file not found"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped.split("|")[0] == extension:
+            found = True
+            continue
+        new_lines.append(line)
+    if not found:
+        return False, "Room not found"
+    ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_rebuild_dialplan()
+    return True, "Room deleted"
+
+
+def ea_rename_room(extension, new_name):
+    path = _ea_rooms_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Rooms file not found"
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False, "Name required"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            parts = stripped.split("|")
+            if len(parts) >= 5 and parts[0] == extension:
+                parts[1] = new_name
+                new_lines.append("|".join(parts) + "\n")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        return False, "Room not found"
+    ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_rebuild_dialplan()
+    return True, "Room renamed"
+
+
+def _ea_update_room_members(extension, new_members):
+    path = _ea_rooms_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Rooms file not found"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            parts = stripped.split("|")
+            if len(parts) >= 5 and parts[0] == extension:
+                parts[2] = new_members
+                new_lines.append("|".join(parts) + "\n")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        return False, "Room not found"
+    ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_rebuild_dialplan()
+    return True, "Room members updated"
+
+
+def ea_add_room_member(room_ext, device_ext):
+    for room in ea_list_rooms():
+        if room["extension"] == room_ext:
+            members = [m for m in room["members"].split(",") if m]
+            if device_ext in members:
+                return False, "Device already in room"
+            members.append(device_ext)
+            return _ea_update_room_members(room_ext, ",".join(members))
+    return False, "Room not found"
+
+
+def ea_remove_room_member(room_ext, device_ext):
+    for room in ea_list_rooms():
+        if room["extension"] == room_ext:
+            members = [m for m in room["members"].split(",") if m]
+            if device_ext not in members:
+                return False, "Device not in room"
+            members.remove(device_ext)
+            return _ea_update_room_members(room_ext, ",".join(members))
+    return False, "Room not found"
+
+
 INDEX_HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
 <title>Security Dashboard</title>
@@ -1524,9 +2149,10 @@ INDEX_HTML = """<!doctype html>
   <h1>Security Dashboard</h1>
   <nav>
     <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" data-tab="crowdsec">CrowdSec</button>
-    <button class="tab-btn" data-tab="pstn">PSTN Trunk</button>
     <button class="tab-btn" id="asterisk-tab-btn" data-tab="asterisk" style="display:none">Asterisk Admin</button>
+    <button class="tab-btn" data-tab="extensions">Extensions</button>
+    <button class="tab-btn" id="pstn-tab-btn" data-tab="pstn" style="display:none">PSTN Trunk</button>
+    <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
 <main>
@@ -1566,7 +2192,7 @@ INDEX_HTML = """<!doctype html>
       <div id="msg"></div>
     </div>
   </div>
-  <div id="tab-pstn" style="display:none">
+  <div id="tab-extensions" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Groups</h3>
       <p class="muted">
@@ -1584,11 +2210,17 @@ INDEX_HTML = """<!doctype html>
       </tr></thead><tbody></tbody></table>
       <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    <div class="card" id="pstn-not-installed" style="display:none">
-      <h3 style="margin-top:0">PSTN trunk not installed</h3>
-      <p class="muted">No PSTN trunk dialplan was found on this box — <code>sudo ./setup.sh pstn-trunk</code> hasn't been run (or its config was removed). The calling permissions/caps/personal-numbers below aren't enforced yet; install it first to use them. Internal SIP messaging (bottom of this tab) works independently of this.</p>
+    <div class="card">
+      <h3 style="margin-top:0">Internal SIP messaging</h3>
+      <p class="muted">
+        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
+      </p>
+      <div id="msg-chips" class="chip-row"></div>
+      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
+      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    <div id="pstn-installed-cards" style="display:none">
+  </div>
+  <div id="tab-pstn" style="display:none">
     <div class="card">
       <h3 style="margin-top:0">Concurrent-call caps</h3>
       <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes apply live, on the next call.</p>
@@ -1608,7 +2240,7 @@ INDEX_HTML = """<!doctype html>
         Changes apply live, on the next call — no Asterisk restart needed.
       </p>
       <p class="muted">
-        <b>Messaging</b> — Asterisk's native internal SIP texting (no carrier SMS, no PSTN, no cost), independent of the calling tier. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
+        <b>Messaging</b> — the same internal SIP texting flag as the Extensions tab's checkboxes, independent of the calling tier; this column is just a convenience for setting it alongside tier/numbers on one row. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
       </p>
       <table id="pstn-table"><thead><tr>
         <th class="sortable" data-sort="ext">Ext</th>
@@ -1637,46 +2269,97 @@ INDEX_HTML = """<!doctype html>
       </tr></thead><tbody></tbody></table>
       <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Internal SIP messaging</h3>
-      <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Independent of the calling permissions above. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
-      </p>
-      <div id="msg-chips" class="chip-row"></div>
-      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
-      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
   </div>
   <div id="tab-asterisk" style="display:none">
     <div class="card">
+      <h3 style="margin-top:0">Devices</h3>
       <p class="muted">
-        Embedded — not a copy, this is the real Asterisk web admin loaded live in a frame.
-        If it logs you in separately (its own Authelia domain, or Basic Auth), that's expected —
-        it's still a genuinely separate site under the hood.
-        <a id="admin-link-fallback" href="#" target="_blank">Open in a new tab instead &#8599;</a>
+        SIP extensions/endpoints. Adding one generates a random password and reloads PJSIP + rebuilds the dialplan automatically — the password is shown once here, save it before it scrolls away.
       </p>
-      <iframe id="admin-iframe" style="width:100%;height:80vh;border:1px solid #2a2e38;border-radius:8px;background:#0f1115"></iframe>
+      <div class="row" style="flex-wrap:wrap">
+        <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:10rem">
+        <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:8rem">
+        <select id="ea-dev-category"></select>
+        <select id="ea-dev-conn">
+          <option value="lan">LAN (UDP)</option>
+          <option value="fqdn">Remote/FQDN (TLS)</option>
+        </select>
+        <select id="ea-dev-aa">
+          <option value="">Auto-answer: category default</option>
+          <option value="yes">Auto-answer: yes</option>
+          <option value="no">Auto-answer: no</option>
+        </select>
+        <button class="action" id="ea-dev-save">Add device</button>
+      </div>
+      <table id="ea-dev-table" style="margin-top:0.75rem"><thead><tr>
+        <th class="sortable" data-sort="extension">Ext</th>
+        <th class="sortable" data-sort="name">Name</th>
+        <th>Category</th>
+        <th class="sortable" data-sort="status">Status</th>
+        <th>Transport</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
+      <div id="ea-dev-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Categories</h3>
+      <p class="muted">Device profiles — an auto-answer default and a description, assignable to any device above.</p>
+      <div class="row" style="flex-wrap:wrap">
+        <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase, no spaces)" style="width:12rem">
+        <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
+        <select id="ea-cat-aa">
+          <option value="">Auto-answer default: no</option>
+          <option value="yes">Auto-answer default: yes</option>
+        </select>
+        <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
+        <button class="action" id="ea-cat-save">Add category</button>
+      </div>
+      <table id="ea-cat-table" style="margin-top:0.75rem"><thead><tr>
+        <th class="sortable" data-sort="id">ID</th>
+        <th class="sortable" data-sort="name">Name</th>
+        <th>Auto-answer</th>
+        <th>Description</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
+      <div id="ea-cat-msg" class="muted" style="margin-top:0.5rem"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Rooms (ring groups)</h3>
+      <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
+      <div class="row" style="flex-wrap:wrap">
+        <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:8rem">
+        <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
+        <select id="ea-room-type">
+          <option value="ring">Ring (simultaneous)</option>
+          <option value="page">Page (intercom)</option>
+        </select>
+        <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:6rem">
+        <button class="action" id="ea-room-save">Add room</button>
+      </div>
+      <table id="ea-room-table" style="margin-top:0.75rem"><thead><tr>
+        <th class="sortable" data-sort="extension">Ext</th>
+        <th class="sortable" data-sort="name">Name</th>
+        <th>Members</th>
+        <th>Timeout</th>
+        <th>Type</th>
+        <th></th>
+      </tr></thead><tbody></tbody></table>
+      <div id="ea-room-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
   </div>
 </main>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "crowdsec", "pstn", "asterisk"];
+const TABS = ["security", "asterisk", "extensions", "pstn", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "pstn") { loadPstnStatus(); loadMessaging(); loadGroups(); }
-    if (btn.dataset.tab === "asterisk") {
-      // Lazy-loaded — only fetched the first time this tab is opened, not
-      // on every dashboard page load (avoids an extra login prompt/request
-      // to a separate site for people who never open this tab).
-      const frame = document.getElementById("admin-iframe");
-      if (!frame.src && adminUrl) frame.src = adminUrl;
-    }
+    if (btn.dataset.tab === "extensions") { loadMessaging(); loadGroups(); }
+    if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
+    if (btn.dataset.tab === "asterisk") { loadEaAll(); }
   });
 });
 
@@ -1854,12 +2537,384 @@ async function banAsn(asn) {
   loadDecisions();
 }
 
+// Gates the tab button itself (not just its content) — called once at page
+// load, same as loadCrowdsecStatus() below, so the nav never shows a tab for
+// something that isn't actually set up on this box.
 async function loadPstnStatus() {
   const res = await fetch("/api/pstn-status");
   const data = await res.json();
-  document.getElementById("pstn-not-installed").style.display = data.installed ? "none" : "";
-  document.getElementById("pstn-installed-cards").style.display = data.installed ? "" : "none";
+  document.getElementById("pstn-tab-btn").style.display = data.installed ? "" : "none";
   if (data.installed) { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
+}
+
+async function loadCrowdsecStatus() {
+  const res = await fetch("/api/crowdsec-status");
+  const data = await res.json();
+  document.getElementById("crowdsec-tab-btn").style.display = data.installed ? "" : "none";
+}
+
+// ── Easy Asterisk Admin (native — devices/categories/rooms) ────────────────
+let eaDevices = [], eaCategories = [], eaRooms = [], eaStatusMap = {};
+let eaDevSort = { key: null, dir: 1 };
+let eaCatSort = { key: null, dir: 1 };
+let eaRoomSort = { key: null, dir: 1 };
+
+async function loadEaStatus() {
+  const res = await fetch("/api/ea-status");
+  const data = await res.json();
+  document.getElementById("asterisk-tab-btn").style.display = data.installed ? "" : "none";
+  if (data.installed) loadEaAll();
+}
+
+// Sequenced (not parallel) — device rows render a category <select> that
+// needs eaCategories already populated, and room rows render a member-add
+// picker that needs eaDevices already populated.
+async function loadEaAll() {
+  await loadEaCategories();
+  await loadEaDevices();
+  await loadEaRooms();
+}
+
+function renderEaDeviceCategoryOptions() {
+  const sel = document.getElementById("ea-dev-category");
+  sel.innerHTML = eaCategories.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")
+    || '<option value="">No categories yet — add one below first</option>';
+}
+
+async function loadEaCategories() {
+  const res = await fetch("/api/ea-categories");
+  const data = await res.json();
+  eaCategories = data.categories || [];
+  renderEaCategories();
+  renderEaDeviceCategoryOptions();
+}
+
+function eaCatSortValue(c, key) { return (c[key] || "").toString().toLowerCase(); }
+
+function renderEaCategories() {
+  let rows = eaCategories.slice();
+  if (eaCatSort.key) {
+    rows.sort((a, b) => {
+      const av = eaCatSortValue(a, eaCatSort.key), bv = eaCatSortValue(b, eaCatSort.key);
+      if (av < bv) return -1 * eaCatSort.dir;
+      if (av > bv) return 1 * eaCatSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#ea-cat-table th.sortable .arrow").forEach(a => a.remove());
+  if (eaCatSort.key) {
+    const th = document.querySelector(`#ea-cat-table th[data-sort="${eaCatSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaCatSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#ea-cat-table tbody");
+  tbody.innerHTML = rows.map(c => `<tr data-id="${esc(c.id)}">
+    <td>${esc(c.id)}</td>
+    <td>${esc(c.name)}</td>
+    <td>${c.auto_answer === "yes" ? "yes" : (c.auto_answer === "no" ? "no" : "—")}</td>
+    <td>${esc(c.description)}</td>
+    <td>
+      <button class="action" onclick="renameEaCategory('${esc(c.id)}')">Rename</button>
+      <button class="action" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
+    </td>
+  </tr>`).join("") || '<tr><td colspan=5 class=muted>No categories yet.</td></tr>';
+}
+
+document.querySelectorAll("#ea-cat-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    eaCatSort.dir = (eaCatSort.key === key) ? -eaCatSort.dir : 1;
+    eaCatSort.key = key;
+    renderEaCategories();
+  });
+});
+
+document.getElementById("ea-cat-save").addEventListener("click", async () => {
+  const id = document.getElementById("ea-cat-id").value.trim();
+  const name = document.getElementById("ea-cat-name").value.trim();
+  const auto_answer = document.getElementById("ea-cat-aa").value;
+  const description = document.getElementById("ea-cat-desc").value.trim();
+  const res = await fetch("/api/ea-categories", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id, name, auto_answer, description}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) {
+    document.getElementById("ea-cat-id").value = "";
+    document.getElementById("ea-cat-name").value = "";
+    document.getElementById("ea-cat-desc").value = "";
+  }
+  loadEaCategories();
+});
+
+async function renameEaCategory(id) {
+  const cur = eaCategories.find(c => c.id === id);
+  const name = prompt("New name for category " + id + ":", cur ? cur.name : "");
+  if (name === null || !name.trim()) return;
+  const res = await fetch("/api/ea-categories/rename", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id, name: name.trim()}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  loadEaCategories();
+}
+
+async function deleteEaCategory(id) {
+  if (!confirm("Delete category " + id + "? Devices already using it keep their current setting, but it won't be selectable for new ones.")) return;
+  const res = await fetch("/api/ea-categories/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({id}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  loadEaCategories();
+}
+
+async function loadEaDevices() {
+  const res = await fetch("/api/ea-devices");
+  const data = await res.json();
+  eaDevices = data.devices || [];
+  eaStatusMap = data.status || {};
+  renderEaDevices();
+}
+
+function eaDevSortValue(d, key) {
+  if (key === "extension") return parseInt(d.extension, 10);
+  if (key === "status") return eaStatusMap[d.extension] || "";
+  return (d[key] || "").toString().toLowerCase();
+}
+
+function renderEaDevices() {
+  let rows = eaDevices.slice();
+  if (eaDevSort.key) {
+    rows.sort((a, b) => {
+      const av = eaDevSortValue(a, eaDevSort.key), bv = eaDevSortValue(b, eaDevSort.key);
+      if (av < bv) return -1 * eaDevSort.dir;
+      if (av > bv) return 1 * eaDevSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#ea-dev-table th.sortable .arrow").forEach(a => a.remove());
+  if (eaDevSort.key) {
+    const th = document.querySelector(`#ea-dev-table th[data-sort="${eaDevSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaDevSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#ea-dev-table tbody");
+  tbody.innerHTML = rows.map(d => {
+    const status = eaStatusMap[d.extension] || "unknown";
+    const catOptions = eaCategories.map(c =>
+      `<option value="${esc(c.id)}" ${c.id === d.category ? "selected" : ""}>${esc(c.name)}</option>`
+    ).join("") || `<option value="${esc(d.category)}" selected>${esc(d.category)}</option>`;
+    return `<tr data-ext="${esc(d.extension)}">
+      <td>${esc(d.extension)}</td>
+      <td>${esc(d.name)}</td>
+      <td><select onchange="changeEaDeviceCategory('${esc(d.extension)}', this.value)">${catOptions}</select></td>
+      <td class="${status === "online" ? "sev-Informational" : "muted"}">${esc(status)}</td>
+      <td>${esc(d.transport)}${d.encryption && d.encryption !== "no" ? " / " + esc(d.encryption) : ""}</td>
+      <td>
+        <button class="action" onclick="renameEaDevice('${esc(d.extension)}')">Rename</button>
+        <button class="action" onclick="deleteEaDevice('${esc(d.extension)}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join("") || '<tr><td colspan=6 class=muted>No devices yet.</td></tr>';
+}
+
+document.querySelectorAll("#ea-dev-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    eaDevSort.dir = (eaDevSort.key === key) ? -eaDevSort.dir : 1;
+    eaDevSort.key = key;
+    renderEaDevices();
+  });
+});
+
+document.getElementById("ea-dev-save").addEventListener("click", async () => {
+  const name = document.getElementById("ea-dev-name").value.trim();
+  const extension = document.getElementById("ea-dev-ext").value.trim();
+  const category = document.getElementById("ea-dev-category").value;
+  const conn_type = document.getElementById("ea-dev-conn").value;
+  const aa = document.getElementById("ea-dev-aa").value;
+  const res = await fetch("/api/ea-devices", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name, extension, category, conn_type, auto_answer: aa || null}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    document.getElementById("ea-dev-msg").textContent =
+      `Added ${data.data.extension} — password: ${data.data.password} (shown once, save it now) — SIP ${data.data.transport} on port ${data.data.port}`;
+    document.getElementById("ea-dev-name").value = "";
+    document.getElementById("ea-dev-ext").value = "";
+  } else {
+    document.getElementById("ea-dev-msg").textContent = data.message || "Failed";
+  }
+  loadEaDevices();
+});
+
+async function renameEaDevice(ext) {
+  const cur = eaDevices.find(d => d.extension === ext);
+  const name = prompt("New name for extension " + ext + ":", cur ? cur.name : "");
+  if (name === null || !name.trim()) return;
+  const res = await fetch("/api/ea-devices/rename", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext, name: name.trim()}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  loadEaDevices();
+}
+
+async function deleteEaDevice(ext) {
+  if (!confirm("Delete device " + ext + "? This cannot be undone.")) return;
+  const res = await fetch("/api/ea-devices/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  loadEaDevices();
+  loadEaRooms();
+}
+
+async function changeEaDeviceCategory(ext, category) {
+  const res = await fetch("/api/ea-devices/category", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext, category}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Category changed" : "Failed");
+  loadEaDevices();
+}
+
+async function loadEaRooms() {
+  const res = await fetch("/api/ea-rooms");
+  const data = await res.json();
+  eaRooms = data.rooms || [];
+  renderEaRooms();
+}
+
+function eaRoomSortValue(r, key) {
+  if (key === "extension") return parseInt(r.extension, 10);
+  return (r[key] || "").toString().toLowerCase();
+}
+
+function renderEaRooms() {
+  let rows = eaRooms.slice();
+  if (eaRoomSort.key) {
+    rows.sort((a, b) => {
+      const av = eaRoomSortValue(a, eaRoomSort.key), bv = eaRoomSortValue(b, eaRoomSort.key);
+      if (av < bv) return -1 * eaRoomSort.dir;
+      if (av > bv) return 1 * eaRoomSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#ea-room-table th.sortable .arrow").forEach(a => a.remove());
+  if (eaRoomSort.key) {
+    const th = document.querySelector(`#ea-room-table th[data-sort="${eaRoomSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaRoomSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#ea-room-table tbody");
+  tbody.innerHTML = rows.map(r => {
+    const memberExts = (r.members || "").split(",").filter(Boolean);
+    const memberChips = memberExts.map(ext => {
+      const dev = eaDevices.find(d => d.extension === ext);
+      const label = dev ? `${esc(ext)} — ${esc(dev.name)}` : esc(ext);
+      return `<span style="display:inline-flex;gap:0.25rem;align-items:center;margin:0.1rem;padding:0.1rem 0.4rem;background:#0f1115;border:1px solid #2a2e38;border-radius:4px;font-size:0.8rem">
+        ${label}
+        <button class="action" style="padding:0 0.3rem" onclick="removeEaRoomMember('${esc(r.extension)}','${esc(ext)}')">&times;</button>
+      </span>`;
+    }).join("");
+    const available = eaDevices.filter(d => !memberExts.includes(d.extension));
+    const addPicker = available.length
+      ? `<select style="width:auto">${available.map(d => `<option value="${esc(d.extension)}">${esc(d.extension)} — ${esc(d.name)}</option>`).join("")}</select>
+         <button class="action" onclick="addEaRoomMemberFromRow('${esc(r.extension)}', this)">+</button>`
+      : '<span class="muted">no more devices</span>';
+    return `<tr data-ext="${esc(r.extension)}">
+      <td>${esc(r.extension)}</td>
+      <td>${esc(r.name)}</td>
+      <td>${memberChips || '<span class="muted">none</span>'}<br>${addPicker}</td>
+      <td>${esc(r.timeout)}</td>
+      <td>${esc(r.type)}</td>
+      <td>
+        <button class="action" onclick="renameEaRoom('${esc(r.extension)}')">Rename</button>
+        <button class="action" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join("") || '<tr><td colspan=6 class=muted>No rooms yet.</td></tr>';
+}
+
+document.querySelectorAll("#ea-room-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    eaRoomSort.dir = (eaRoomSort.key === key) ? -eaRoomSort.dir : 1;
+    eaRoomSort.key = key;
+    renderEaRooms();
+  });
+});
+
+document.getElementById("ea-room-save").addEventListener("click", async () => {
+  const extension = document.getElementById("ea-room-ext").value.trim();
+  const name = document.getElementById("ea-room-name").value.trim();
+  const type = document.getElementById("ea-room-type").value;
+  const timeout = document.getElementById("ea-room-timeout").value.trim() || "60";
+  const res = await fetch("/api/ea-rooms", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension, name, type, timeout}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  if (data.ok) {
+    document.getElementById("ea-room-ext").value = "";
+    document.getElementById("ea-room-name").value = "";
+  }
+  loadEaRooms();
+});
+
+async function renameEaRoom(ext) {
+  const cur = eaRooms.find(r => r.extension === ext);
+  const name = prompt("New name for room " + ext + ":", cur ? cur.name : "");
+  if (name === null || !name.trim()) return;
+  const res = await fetch("/api/ea-rooms/rename", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext, name: name.trim()}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  loadEaRooms();
+}
+
+async function deleteEaRoom(ext) {
+  if (!confirm("Delete room " + ext + "? This cannot be undone.")) return;
+  const res = await fetch("/api/ea-rooms/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  loadEaRooms();
+}
+
+async function addEaRoomMemberFromRow(roomExt, btn) {
+  const select = btn.previousElementSibling;
+  const device = select.value;
+  if (!device) return;
+  const res = await fetch("/api/ea-rooms/members/add", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({room: roomExt, device}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Added" : "Failed");
+  loadEaRooms();
+}
+
+async function removeEaRoomMember(roomExt, device) {
+  const res = await fetch("/api/ea-rooms/members/remove", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({room: roomExt, device}),
+  });
+  const data = await res.json();
+  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  loadEaRooms();
 }
 
 async function loadPstnLimits() {
@@ -2178,15 +3233,12 @@ async function removePersonalDid(did) {
   loadPersonalDids();
 }
 
-const adminUrl = "__ASTERISK_ADMIN_URL__";
-if (adminUrl) {
-  document.getElementById("asterisk-tab-btn").style.display = "";
-  document.getElementById("admin-link-fallback").href = adminUrl;
-}
-
 loadSecurity();
 loadDecisions();
 loadAsnExempt();
+loadPstnStatus();
+loadCrowdsecStatus();
+loadEaStatus();
 setInterval(loadSecurity, 30000);
 setInterval(loadDecisions, 30000);
 </script>
@@ -2213,7 +3265,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/" or self.path == "":
-            html = INDEX_HTML.replace("__ASTERISK_ADMIN_URL__", ASTERISK_ADMIN_URL)
+            html = INDEX_HTML
             self._html(html)
         elif self.path == "/api/security-events":
             self._json(parse_security_log())
@@ -2243,6 +3295,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"installed": pstn_installed()})
         elif self.path == "/api/pstn-groups":
             self._json({"groups": list_groups()})
+        elif self.path == "/api/crowdsec-status":
+            self._json({"installed": crowdsec_installed()})
+        elif self.path == "/api/ea-status":
+            self._json({"installed": ea_installed()})
+        elif self.path == "/api/ea-devices":
+            self._json({"devices": ea_list_devices(), "status": ea_get_status()})
+        elif self.path == "/api/ea-categories":
+            self._json({"categories": ea_list_categories()})
+        elif self.path == "/api/ea-rooms":
+            self._json({"rooms": ea_list_rooms()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -2288,6 +3350,54 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-groups/apply-messaging":
             ok, message = apply_group_messaging(payload.get("name", ""), bool(payload.get("enabled", False)))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-devices":
+            ok, result = ea_add_device(
+                payload.get("name", ""), payload.get("category", ""), payload.get("extension", ""),
+                payload.get("conn_type", "lan"), payload.get("auto_answer")
+            )
+            if ok:
+                self._json({"ok": True, "data": result})
+            else:
+                self._json({"ok": False, "message": result})
+        elif self.path == "/api/ea-devices/delete":
+            ok, message = ea_delete_device(payload.get("extension", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-devices/rename":
+            ok, message = ea_rename_device(payload.get("extension", ""), payload.get("name", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-devices/category":
+            ok, message = ea_change_device_category(payload.get("extension", ""), payload.get("category", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-categories":
+            ok, message = ea_create_category(
+                payload.get("id", ""), payload.get("name", ""),
+                payload.get("auto_answer", ""), payload.get("description", "")
+            )
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-categories/delete":
+            ok, message = ea_delete_category(payload.get("id", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-categories/rename":
+            ok, message = ea_rename_category(payload.get("id", ""), payload.get("name", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms":
+            ok, message = ea_create_room(
+                payload.get("extension", ""), payload.get("name", ""),
+                payload.get("type", "ring"), payload.get("timeout", "60")
+            )
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms/delete":
+            ok, message = ea_delete_room(payload.get("extension", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms/rename":
+            ok, message = ea_rename_room(payload.get("extension", ""), payload.get("name", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms/members/add":
+            ok, message = ea_add_room_member(payload.get("room", ""), payload.get("device", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms/members/remove":
+            ok, message = ea_remove_room_member(payload.get("room", ""), payload.get("device", ""))
             self._json({"ok": ok, "message": message})
         else:
             self._json({"error": "not found"}, 404)
