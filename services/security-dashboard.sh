@@ -786,14 +786,18 @@ NUMBER_RE_10 = re.compile(r"^\d{10}$")
 
 
 def _normalize_nanp_number(token):
-    """Accepts either a bare 10-digit NANP number (the natural way to type
-    a US number) or an already-11-digit one (leading "1" country code) and
-    returns the canonical 11-digit form allowed_numbers is always stored
-    in - REGEX() comparisons against CALLERID(num) require an exact
-    digit-count match, and this used to silently DROP a plain 10-digit
-    entry instead of normalizing it, the admin-input-side twin of the bug
-    that was also failing inbound calls whose Caller-ID itself arrived
-    without a leading "1" (see PSTN_CALLERID_NORM in pstn-trunk.sh)."""
+    """Accepts a bare 10-digit NANP number (the natural way to type a US
+    number), an already-11-digit one (leading "1" country code), or either
+    of those with a leading "+" (the natural way to paste a number straight
+    out of a phone's call log) and returns the canonical 11-digit,
+    digits-only form allowed_numbers is always stored in - REGEX()
+    comparisons against CALLERID(num) require an exact digit-count match,
+    and this used to silently DROP a plain 10-digit entry instead of
+    normalizing it, the admin-input-side twin of the bug that was also
+    failing inbound calls whose Caller-ID itself arrived without a leading
+    "1", or arrived "+E.164" style with a leading "+" Asterisk never
+    stripped (see PSTN_CALLERID_NORM / PSTN_CID_RAW in pstn-trunk.sh)."""
+    token = token.lstrip("+")
     if NUMBER_RE_10.match(token):
         return "1" + token
     if NUMBER_RE.match(token):
@@ -1429,9 +1433,11 @@ PERSONAL_DID_RE_11 = re.compile(r"^1\d{10}$")
 
 def _normalize_personal_did_input(did):
     """write_personal_did()'s DID field is hand-typed, same footgun as
-    allowed_numbers - accept either the canonical bare 10-digit form or an
-    11-digit one with the NANP "1" prefix, returning the canonical 10-digit
-    form either way instead of rejecting a plainly-valid 11-digit entry."""
+    allowed_numbers - accept the canonical bare 10-digit form, an 11-digit
+    one with the NANP "1" prefix, or either with a leading "+" (pasted
+    straight from a call log), returning the canonical 10-digit form either
+    way instead of rejecting a plainly-valid entry."""
+    did = did.lstrip("+")
     if PERSONAL_DID_RE.match(did):
         return did
     if PERSONAL_DID_RE_11.match(did):
