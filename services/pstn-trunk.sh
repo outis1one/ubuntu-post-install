@@ -533,10 +533,26 @@ CONF_DIR="/etc/asterisk"
 
 _ini_get() {
     # _ini_get <file> <section> <key>
+    # configparser.write() (used by every .conf writer in this project) pads
+    # '=' with spaces by default, so keys/values must be trimmed before
+    # comparing — a bare $1 == key here never matches and silently returns
+    # empty for every lookup, including the group's own members= line.
     awk -F'=' -v want="[$2]" -v key="$3" '
         $0 == want { found=1; next }
         /^\[/ { found=0 }
-        found && $1 == key { sub(/^[^=]*=/, ""); print; exit }
+        found {
+            eq = index($0, "=")
+            if (eq > 0) {
+                k = substr($0, 1, eq-1)
+                gsub(/^[ \t]+|[ \t]+$/, "", k)
+                if (k == key) {
+                    v = substr($0, eq+1)
+                    gsub(/^[ \t]+|[ \t]+$/, "", v)
+                    print v
+                    exit
+                }
+            }
+        }
     ' "$1" 2>/dev/null
 }
 
@@ -558,7 +574,7 @@ for _ext in "${MEMBERS[@]}"; do
         fi
     fi
 done
-echo "$RING_LIST"
+printf '%s' "$RING_LIST"
 SCRIPT
 }
 
