@@ -2245,6 +2245,14 @@ extension in \`pstn-permissions.conf\` (the outbound Caller-ID override) —
 both kept in sync automatically by the CLI installer and the Security
 Dashboard's Extensions tab, live, no restart needed.
 
+## Receiving SMS on the trunk DID
+
+Not handled by this service — SMS and voice are configured separately at the
+provider, and inbound SMS doesn't touch Asterisk at all. \`sudo ./setup.sh
+sms-inbound\` sets up verification codes arriving as ntfy push notifications;
+see that service's README for the short-code and mobile-DID caveats that
+decide whether codes actually get through.
+
 ## Managing this from a web UI
 
 If \`services/security-dashboard.sh\` is installed, its Extensions tab

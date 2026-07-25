@@ -97,6 +97,7 @@ is_installed() {
         # merged back into `asterisk` still run out of ~/docker/asterisk-digital-ocean.
         asterisk) [ -e "$DOCKER_DIR/asterisk" ] || [ -e "$DOCKER_DIR/asterisk-digital-ocean" ] ;;
         pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] || [ -f "$DOCKER_DIR/asterisk/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
+        sms-inbound) [ -f /opt/sms-inbound/settings.env ] ;;
         ssh-config) false ;;   # repeatable management tool, never shows [installed]
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac

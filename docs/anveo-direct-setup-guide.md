@@ -199,6 +199,93 @@ In the Security Dashboard's PSTN Trunk tab:
   # container is named easy-asterisk-do instead
   ```
 
+## 8. SMS — receiving verification codes
+
+Voice and SMS are separate features on an Anveo DID and are configured in
+different places. This section covers **receiving** only; see "What about
+sending?" below for why.
+
+### Pick the right kind of number first
+
+Anveo sells two classes of US DID, and for verification codes the difference
+matters more than anything else in this section:
+
+- **Geographic (default)** — the cheap ones this guide orders in step 2
+  ($0.25 setup, $0.15/month). Industry lookups classify these as VoIP.
+- **Mobile** — a separate pool sourced from wireless carriers, available
+  across roughly 20 major US city area codes (released on Anveo Retail first,
+  then Direct). These are classified as *mobile* in the same databases that
+  services query when they decide whether to accept your number. Priced above
+  the geographic ones — check the DID ordering tool for the current rate.
+
+Plenty of services (Google, WhatsApp, Microsoft, many banks) reject a number
+that looks like VoIP at signup, before any message is ever sent. **If codes
+are the reason you're buying the number, order a mobile one** — no amount of
+correct SMS routing fixes a signup form that refuses the number outright.
+
+### Short codes
+
+Most verification codes come from short codes (262966, 32665, ...), and most
+VoIP providers don't deliver them at all — VoIP.ms, for instance, doesn't
+except for Google, and users there report a large fraction of 2FA codes never
+arriving. Anveo is unusual in supporting short-code SMS to its DIDs, which is
+the main reason it's worth using for this.
+
+Not every number in the pool has it enabled, so confirm on your specific DID
+(or ask support to turn it on) rather than assuming.
+
+### Wire it up
+
+Run the installer and follow what it prints:
+
+```bash
+sudo ./setup.sh sms-inbound
+```
+
+It generates a long random ntfy topic, then offers two ways for Anveo to
+reach it:
+
+- **Relay (recommended)** — a small systemd service on the droplet receives
+  Anveo's request and republishes to ntfy properly. Two concrete wins: a
+  message body containing `&` survives intact (Anveo interpolates the text
+  into the query string unescaped, so an unencoded `&` otherwise truncates
+  the message), and your ntfy credentials never get stored in Anveo's portal.
+- **Direct** — Anveo calls ntfy itself; nothing runs on the droplet. Simpler,
+  but the URL you paste into Anveo carries your ntfy token, and the `&` case
+  loses the tail of the message.
+
+Then in the Anveo portal: **Phone Numbers → the DID → SMS tab**, set the
+destination to **URL**, and paste the string the installer printed. Keep the
+`$[message]$` placeholder **last** — that's what makes the unescaped-`&` case
+recoverable.
+
+Send a text to the number from another phone; the notification should arrive
+within seconds. `journalctl -u sms-inbound -f` shows sender, recipient and
+message length (never the body — these are one-time passcodes and the journal
+has a wider audience than the notification does).
+
+### What about sending?
+
+Not covered, on purpose. Outbound SMS isn't available on Anveo Direct — Anveo
+support directs users to an Anveo **Retail** account for it, which is a
+second account to fund and manage. Any of the free texting apps covers
+sending without involving this box.
+
+### MMS and group texts
+
+Don't plan on either. No VoIP provider delivers MMS over SIP, and MMS to a
+VoIP DID generally drops or arrives as a media link through a separate API.
+US group texts are MMS, so a SIM-less phone on this number will silently miss
+them.
+
+### The native Messages app never sees these
+
+Android's Messages app reads the telephony SMS provider, which only the
+cellular radio (or whichever app holds the default-SMS-app role) writes to;
+iOS lets nothing write to Messages at all. Codes arrive as ntfy push
+notifications instead — which, for a passcode you're about to read and type,
+is the more useful place anyway.
+
 ## Bugs hit and fixed along the way (informational — already fixed)
 
 These were all real, confirmed-live bugs in earlier versions of this
