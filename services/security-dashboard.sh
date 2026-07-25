@@ -3789,6 +3789,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # The page is inlined into this file, so a dashboard update changes
+        # the HTML at a URL that never changes. Without this a browser can
+        # keep serving the previous UI after an upgrade, which looks exactly
+        # like the upgrade having silently failed.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
