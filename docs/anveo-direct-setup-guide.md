@@ -254,10 +254,17 @@ reach it:
   but the URL you paste into Anveo carries your ntfy token, and the `&` case
   loses the tail of the message.
 
-Then in the Anveo portal: **Phone Numbers → the DID → SMS tab**, set the
-destination to **URL**, and paste the string the installer printed. Keep the
-`$[message]$` placeholder **last** — that's what makes the unescaped-`&` case
-recoverable.
+Then in the Anveo portal: **Phone Numbers → the DID → SMS tab**. The tab has
+exactly one control — a **Forward to URL** checkbox and a text field. Tick the
+box, paste the string the installer printed into the field, and press **SAVE**
+(not RETURN, which discards). Keep the `$[message]$` placeholder **last** in
+that URL — that's what makes the unescaped-`&` case recoverable.
+
+The field has no visible length limit, but the generated URLs are long
+(~90 characters in relay mode, ~150+ in direct mode, since that one carries
+the ntfy auth parameter). After saving, reopen the tab and confirm the whole
+string came back intact rather than truncated — if it didn't, relay mode is
+the shorter of the two.
 
 Send a text to the number from another phone; the notification should arrive
 within seconds. `journalctl -u sms-inbound -f` shows sender, recipient and
@@ -285,6 +292,33 @@ cellular radio (or whichever app holds the default-SMS-app role) writes to;
 iOS lets nothing write to Messages at all. Codes arrive as ntfy push
 notifications instead — which, for a passcode you're about to read and type,
 is the more useful place anyway.
+
+## Provider risk and keeping the number
+
+Anveo is small — founder-run since ~2006, bootstrapped (no outside funding),
+around 8 people. The clunky portal reads as a niche business that hasn't
+needed to rewrite its UI rather than one in trouble: they shipped a Hosted
+STIR/SHAKEN signing service for the June 20 2025 reseller deadline, added
+carrier-sourced mobile DIDs, and support answers technical tickets within a
+day or two.
+
+The realistic way to lose a number here isn't insolvency, it's **account
+action or a lapsed balance**. There are long-standing reports of accounts
+closed without warning, sometimes with prepaid credit still on them, and the
+AUP penalises high volumes of very short or non-conversational calls. Three
+cheap precautions:
+
+- **Keep the balance small** — enough for a few months, no more. Auto-recharge
+  stays off anyway for the toll-fraud reasons above, which conveniently caps
+  what's at risk.
+- **Save a copy of a recent invoice now**, offline. Porting a number out
+  requires a signed LOA *plus* the latest bill from the losing carrier — and
+  if the account is already closed you can't download one.
+- **Know the exit exists.** Anveo Direct states it does not block or restrict
+  port-outs (a provider refusing to release numbers is the real warning sign).
+  The process is at `anveo.com/lnp.asp`: signed authorisation form plus that
+  invoice, 3–6 weeks, non-refundable porting fee. Service must stay active on
+  the number until the port completes.
 
 ## Bugs hit and fixed along the way (informational — already fixed)
 

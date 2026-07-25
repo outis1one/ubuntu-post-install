@@ -309,8 +309,9 @@ Mode: **${_mode}**
 
 ## The URL to paste into your DID provider
 
-In the provider portal, open the DID's SMS settings, choose "forward to URL"
-and paste this:
+In the provider portal, open the DID's SMS settings and paste this into the
+"forward to URL" field (on Anveo: Phone Numbers → the DID → SMS tab, tick the
+checkbox, paste, press SAVE — RETURN discards):
 
 \`\`\`
 ${_url}
@@ -601,12 +602,14 @@ ENV
     echo "  1. Subscribe to this topic in the ntfy app:"
     echo "       ${NTFY_TOPIC_URL}"
     echo ""
-    echo "  2. In your DID provider's portal, open the number's SMS settings,"
-    echo "     choose \"forward to URL\", and paste exactly:"
+    echo "  2. In your DID provider's portal, open the number's SMS settings and"
+    echo "     paste this into the \"forward to URL\" field, exactly:"
     echo ""
     echo "       ${FORWARD_URL}"
     echo ""
-    echo "     Keep the message placeholder last — see the README for why."
+    echo "     On Anveo: Phone Numbers → the DID → SMS tab; tick the checkbox,"
+    echo "     paste, then press SAVE (RETURN discards). Reopen the tab after"
+    echo "     saving to confirm the whole URL came back — it is a long string."
     echo ""
     echo "  3. Text the number from another phone. The notification should"
     echo "     arrive within a few seconds."
