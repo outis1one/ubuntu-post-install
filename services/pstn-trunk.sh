@@ -3,8 +3,10 @@
 # US-only outbound (NANP dialplan
 # restriction), independent outbound/inbound concurrent-call caps, a
 # per-extension permission model built on ONE whitelist plus a mode saying
-# which direction(s) it applies to (none / unrestricted / restrict outbound /
-# restrict inbound / restrict both), a configurable inbound ring-group,
+# which direction(s) it applies to — the original full / restricted /
+# internal tiers, plus restricted-in (whitelist gates incoming, dials
+# anywhere) and restricted-out (whitelist gates outgoing, anyone can call
+# in) — a configurable inbound ring-group,
 # IP-authenticated trunk (no SIP password stored), ntfy alerts on
 # denied/rejected calls, and a periodic spend/volume check.
 #
@@ -784,32 +786,32 @@ _pstn_migrate_permissions_split() {
         function flush_section() {
             if (!have) return
             if (header != "") print header
-            mode = "none"
-            if (tier == "full") mode = "open"
-            else if (tier == "restricted") mode = "both"
+            mode = "internal"
+            if (tier == "full") mode = "full"
+            else if (tier == "restricted") mode = "restricted"
             # An install that predates the split has no tier_out; one made
             # between the split and this change may, so honour it if present.
             if (tier_out != "" || tier_in != "") {
                 o = (tier_out != "" ? tier_out : tier)
                 i = (tier_in  != "" ? tier_in  : tier)
-                if (o == "full" && i == "full") mode = "open"
-                else if (o == "restricted" && i == "restricted") mode = "both"
-                else if (o == "restricted") mode = "out"
-                else if (i == "restricted") mode = "in"
-                else mode = "none"
+                if (o == "full" && i == "full") mode = "full"
+                else if (o == "restricted" && i == "restricted") mode = "restricted"
+                else if (o == "restricted") mode = "restricted-out"
+                else if (i == "restricted") mode = "restricted-in"
+                else mode = "internal"
             }
             print "restrict=" mode
             if (nums != "") print "allowed_numbers=" nums
-            if (mode == "open") { print "tier_out=full"; print "tier_in=full"; print "tier=full" }
-            else if (mode == "out") {
+            if (mode == "full") { print "tier_out=full"; print "tier_in=full"; print "tier=full" }
+            else if (mode == "restricted-out") {
                 print "tier_out=restricted"; print "allowed_out=" nums
                 print "tier_in=full"; print "tier=restricted"
             }
-            else if (mode == "in") {
+            else if (mode == "restricted-in") {
                 print "tier_out=full"; print "tier_in=restricted"
                 print "allowed_in=" nums; print "tier=full"
             }
-            else if (mode == "both") {
+            else if (mode == "restricted") {
                 print "tier_out=restricted"; print "allowed_out=" nums
                 print "tier_in=restricted"; print "allowed_in=" nums
                 print "tier=restricted"
@@ -887,12 +889,13 @@ _pstn_write_permissions_file() {
     local _written_exts=""
     {
         echo "; PSTN permissions. Each extension has ONE whitelist and a 'restrict' mode"
-        echo "; saying which direction(s) that whitelist applies to:"
-        echo ";   none  - no PSTN at all (internal extension calling still works)"
-        echo ";   open  - unrestricted both ways"
-        echo ";   out   - may only DIAL numbers on the whitelist; anyone may call in"
-        echo ";   in    - may only be CALLED BY numbers on the whitelist; may dial anywhere"
-        echo ";   both  - the whitelist applies in both directions"
+        echo "; saying which direction(s) that whitelist applies to. The first three are"
+        echo "; the original tiers, unchanged; the last two are the new half-restrictions:"
+        echo ";   full            - no whitelist, calls both ways"
+        echo ";   restricted      - the whitelist applies BOTH ways"
+        echo ";   internal        - no PSTN at all (internal extension calling still works)"
+        echo ";   restricted-in   - whitelist gates INCOMING only; may dial anywhere"
+        echo ";   restricted-out  - whitelist gates OUTGOING only; anyone may call in"
         echo "; 'allowed_numbers' is that whitelist: pipe-separated 11-digit numbers, used"
         echo "; directly as a REGEX() alternation (see this file's own comments on why"
         echo "; untrusted call data is always the string being tested, never the pattern)."
@@ -927,7 +930,7 @@ _pstn_write_permissions_file() {
         local _ext
         for _ext in $FULL_EXTS; do
             echo "[$_ext]"
-            echo "restrict=open"
+            echo "restrict=full"
             echo "tier_out=full"
             echo "tier_in=full"
             echo "tier=full"
@@ -940,7 +943,7 @@ _pstn_write_permissions_file() {
             _ext="$1"; local _nums="$2"
             shift 2
             echo "[$_ext]"
-            echo "restrict=both"
+            echo "restrict=restricted"
             echo "allowed_numbers=${_nums}"
             echo "tier_out=restricted"
             echo "allowed_out=${_nums}"

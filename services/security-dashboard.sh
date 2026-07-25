@@ -1144,8 +1144,9 @@ def _write_ini_cp(path, header, cp):
 PERMISSIONS_HEADER = (
     "; PSTN permissions. Each extension has ONE whitelist (allowed_numbers)\n"
     "; and a 'restrict' mode saying which direction(s) it applies to:\n"
-    ";   none / open / out (may only dial the list) / in (may only be called\n"
-    ";   by the list) / both.\n"
+    ";   full / restricted (both ways) / internal - the original tiers - plus\n"
+    ";   restricted-in (whitelist gates incoming only) and restricted-out\n"
+    ";   (whitelist gates outgoing only).\n"
     "; restrict + allowed_numbers are the authored pair; tier_out/allowed_out\n"
     "; and tier_in/allowed_in are DERIVED from them and are what the dialplan\n"
     "; reads; 'tier' is a rollback mirror for a pre-split pstn-trunk.sh.\n"
@@ -1187,7 +1188,7 @@ def _read_permissions_cp():
     return cp
 
 
-RESTRICT_RE = re.compile(r"^(none|open|out|in|both)$")
+RESTRICT_RE = re.compile(r"^(internal|restricted|full|restricted-in|restricted-out)$")
 
 
 def _derive_restrict(tier_out, tier_in):
@@ -1197,14 +1198,14 @@ def _derive_restrict(tier_out, tier_in):
     the more restrictive reading: anything that isn't clearly open in a
     direction is treated as restricted or none, never widened."""
     if tier_out == "full" and tier_in == "full":
-        return "open"
+        return "full"
     if tier_out == "restricted" and tier_in == "restricted":
-        return "both"
+        return "restricted"
     if tier_out == "restricted":
-        return "out"
+        return "restricted-out"
     if tier_in == "restricted":
-        return "in"
-    return "none"
+        return "restricted-in"
+    return "internal"
 
 
 def get_all_permissions():
@@ -1212,8 +1213,9 @@ def get_all_permissions():
     with a non-default record.
 
     Each extension has ONE whitelist and a mode saying which direction(s) it
-    applies to: none (no PSTN), open (unrestricted), out (may only dial the
-    list), in (may only be called by the list), both. That authored pair is
+    applies to: the original internal / restricted / full, plus restricted-in
+    (whitelist gates incoming, dials anywhere) and restricted-out (whitelist
+    gates outgoing, anyone may call in). That authored pair is
     what this returns and what the UI edits; the dialplan reads the derived
     tier_out/allowed_out/tier_in/allowed_in that write_permission keeps in
     step with it.
@@ -1254,12 +1256,15 @@ def get_all_permissions():
 # Which per-direction tiers each authored mode compiles down to. The dialplan
 # only ever reads the compiled keys; this table is the single place the
 # mapping is defined.
+# The first three are the original tiers, unchanged. restricted-in and
+# restricted-out are the halves: the whitelist gates one direction while the
+# other stays wide open.
 _RESTRICT_TIERS = {
-    "none": ("internal", "internal"),
-    "open": ("full", "full"),
-    "out":  ("restricted", "full"),
-    "in":   ("full", "restricted"),
-    "both": ("restricted", "restricted"),
+    "internal":       ("internal", "internal"),
+    "full":           ("full", "full"),
+    "restricted":     ("restricted", "restricted"),
+    "restricted-in":  ("full", "restricted"),
+    "restricted-out": ("restricted", "full"),
 }
 
 
@@ -1276,7 +1281,8 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
 
     One list, not two: the whitelist is "the numbers this extension deals
     with", and the mode says whether that constrains dialling out, being
-    called, or both. Modes are none / open / out / in / both.
+    called, or both. Modes are internal / restricted / full (the original
+    tiers) plus restricted-in and restricted-out.
 
     Writes three layers, all derived from those two authored values:
       restrict, allowed_numbers      what a human edits (and what this reads back)
@@ -1308,7 +1314,7 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
     tier_out, tier_in = _RESTRICT_TIERS[restrict]
 
     cp = _read_permissions_cp()
-    if restrict == "none":
+    if restrict == "internal":
         # Clear the PSTN keys only, never the whole section — messaging and
         # personal_did are independent and must survive. (Removing the
         # section here was a real, confirmed bug in an earlier version.)
@@ -1321,7 +1327,7 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
         if not cp.has_section(ext):
             cp.add_section(ext)
         cp.set(ext, "restrict", restrict)
-        _set_or_clear(cp, ext, "allowed_numbers", numbers if restrict != "open" else "")
+        _set_or_clear(cp, ext, "allowed_numbers", numbers if restrict != "full" else "")
         cp.set(ext, "tier_out", tier_out)
         cp.set(ext, "tier_in", tier_in)
         _set_or_clear(cp, ext, "allowed_out", numbers if tier_out == "restricted" else "")
@@ -1336,8 +1342,8 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
         cp.remove_option(ext, "messaging")
 
     # Drop the section entirely once nothing is left in it — only reachable
-    # when the mode is none, messaging is off, and no personal_did was ever
-    # assigned.
+    # when the mode is internal, messaging is off, and no personal_did was
+    # ever assigned.
     if cp.has_section(ext) and not cp.options(ext):
         cp.remove_section(ext)
 
@@ -1345,7 +1351,7 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
     if not ok:
         return False, err
 
-    if restrict != "none" and restrict != "open" and not clean:
+    if restrict not in ("internal", "full") and not clean:
         return True, ("Saved, but the whitelist is EMPTY — with this mode that means no PSTN "
                       "number is permitted in the restricted direction yet.")
     return True, "Saved"
@@ -2693,11 +2699,11 @@ INDEX_HTML = """<!doctype html>
           <p class="muted"><b>Name</b> and <b>Category</b> are editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card.</p>
             <p class="muted pstn-only"><b>PSTN</b> sets how the outside phone network reaches this extension, and the <b>Whitelist</b> beside it is the one list of numbers that mode applies to:</p>
           <ul class="muted pstn-only" style="margin:0 0 var(--sp-2); padding-left:1.2rem">
-            <li><b>No PSTN</b> — outside calls neither in nor out.</li>
-            <li><b>Unrestricted</b> — dial anyone, anyone can call.</li>
-            <li><b>Restrict outbound</b> — may only dial the whitelist; anyone can call in.</li>
-            <li><b>Restrict inbound</b> — may dial anywhere; only the whitelist can call in.</li>
-            <li><b>Restrict both</b> — the whitelist applies in both directions.</li>
+            <li><b>full</b> — dial anyone, anyone can call. No whitelist.</li>
+            <li><b>restricted (both ways)</b> — the whitelist applies to outgoing <i>and</i> incoming.</li>
+            <li><b>restricted incoming</b> — dials anywhere; only whitelisted numbers can call in.</li>
+            <li><b>restricted outgoing</b> — anyone can call in; may only dial the whitelist.</li>
+            <li><b>internal</b> — no PSTN at all, either direction.</li>
           </ul>
           <p class="muted pstn-only">Internal extension-to-extension calling and ring groups are never gated by any of this. Changes are usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
           <p class="muted"><b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README, including its caveat that the sender-extraction logic still needs real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code>.</p>
@@ -3224,15 +3230,19 @@ async function loadExtensions() {
 let extRows = [];
 let extSort = { key: null, dir: 1 };
 
-// Sort the PSTN column by how much reach the mode grants, not alphabetically
-// — "open" would otherwise land between "both" and "in".
-const RESTRICT_ORDER = { none: 0, both: 1, in: 2, out: 3, open: 4 };
+// Sort by how much reach the mode grants, not alphabetically — "full" would
+// otherwise land between "internal" and "restricted".
+const RESTRICT_ORDER = {
+  "internal": 0, "restricted": 1, "restricted-in": 2, "restricted-out": 3, "full": 4,
+};
+// Order as offered in the dropdown: the original three tiers still read the
+// same, with the two half-restrictions slotted in between.
 const RESTRICT_LABELS = [
-  ["none", "No PSTN"],
-  ["open", "Unrestricted"],
-  ["out", "Restrict outbound"],
-  ["in", "Restrict inbound"],
-  ["both", "Restrict both"],
+  ["full", "full"],
+  ["restricted", "restricted (both ways)"],
+  ["restricted-in", "restricted incoming"],
+  ["restricted-out", "restricted outgoing"],
+  ["internal", "internal"],
 ];
 
 function extSortValue(e, key) {
@@ -3255,7 +3265,7 @@ function restrictSelect(value) {
 }
 
 // The whitelist is meaningless for "no PSTN" and "unrestricted".
-function restrictUsesList(mode) { return mode === "out" || mode === "in" || mode === "both"; }
+function restrictUsesList(mode) { return mode.indexOf("restricted") === 0; }
 
 function renderExtensions() {
   const tbody = document.querySelector("#ext-table tbody");
@@ -3935,7 +3945,7 @@ class Handler(BaseHTTPRequestHandler):
             perms = get_all_permissions()
             extensions = []
             for e in list_extensions():
-                p = perms.get(e["ext"], {"restrict": "none", "allowed_numbers": "", "messaging": False})
+                p = perms.get(e["ext"], {"restrict": "internal", "allowed_numbers": "", "messaging": False})
                 extensions.append({"ext": e["ext"], "name": e["name"],
                                     "restrict": p["restrict"],
                                     "allowed_numbers": p["allowed_numbers"],
