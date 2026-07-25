@@ -498,7 +498,6 @@ _secdash_write_sudoers() {
     # edits without a full container restart).
     if [ -n "$_ea_container" ]; then
         _ea_lines="$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/asterisk/pjsip.conf
-$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/categories.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/rooms.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ res_pjsip.so
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx pjsip\ show\ endpoints
@@ -1727,10 +1726,8 @@ ASTERISK_EA_CONFIG_DIR = os.environ.get("ASTERISK_EA_CONFIG_DIR", "")
 ASTERISK_EA_CONTAINER = os.environ.get("ASTERISK_EA_CONTAINER", "")
 
 EA_PJSIP_CONTAINER_PATH = "/etc/asterisk/pjsip.conf"
-EA_CATEGORIES_CONTAINER_PATH = "/etc/easy-asterisk/categories.conf"
 EA_ROOMS_CONTAINER_PATH = "/etc/easy-asterisk/rooms.conf"
 EA_EXT_RE = re.compile(r"^\d{1,10}$")
-EA_CATID_RE = re.compile(r"^[a-z0-9]+$")
 
 
 def ea_installed():
@@ -1739,10 +1736,6 @@ def ea_installed():
 
 def _ea_pjsip_host_path():
     return os.path.join(ASTERISK_CONFIG_DIR, "pjsip.conf") if ASTERISK_CONFIG_DIR else None
-
-
-def _ea_categories_host_path():
-    return os.path.join(ASTERISK_EA_CONFIG_DIR, "categories.conf") if ASTERISK_EA_CONFIG_DIR else None
 
 
 def _ea_rooms_host_path():
@@ -2101,99 +2094,6 @@ def ea_change_device_category(extension, new_category):
     ea_reload_pjsip()
     ea_rebuild_dialplan()
     return True, "Category changed"
-
-
-def ea_list_categories():
-    path = _ea_categories_host_path()
-    categories = []
-    if not path or not os.path.isfile(path):
-        return categories
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                parts = line.split("|")
-                if len(parts) >= 3:
-                    categories.append({"id": parts[0], "name": parts[1], "auto_answer": parts[2],
-                                        "description": parts[3] if len(parts) > 3 else ""})
-    return categories
-
-
-def ea_create_category(cat_id, name, auto_answer="", description=""):
-    path = _ea_categories_host_path()
-    if not path:
-        return False, "No Asterisk install detected on this box"
-    cat_id = (cat_id or "").strip().lower()
-    name = (name or "").strip()
-    if not EA_CATID_RE.match(cat_id):
-        return False, "Category ID must be lowercase letters/digits only"
-    if not name:
-        return False, "Name required"
-
-    current = ""
-    if os.path.isfile(path):
-        with open(path) as f:
-            current = f.read()
-    else:
-        current = "# Format: id|name|auto_answer|description\n"
-
-    for line in current.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and line.split("|")[0] == cat_id:
-            return False, "Category ID already exists"
-
-    if not current.endswith("\n"):
-        current += "\n"
-    new_content = current + "%s|%s|%s|%s\n" % (cat_id, name, auto_answer, description)
-    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, new_content)
-    return (True, "Category created") if ok else (False, err)
-
-
-def ea_delete_category(cat_id):
-    path = _ea_categories_host_path()
-    if not path or not os.path.isfile(path):
-        return False, "Categories file not found"
-    with open(path) as f:
-        lines = f.readlines()
-    new_lines = []
-    found = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and stripped.split("|")[0] == cat_id:
-            found = True
-            continue
-        new_lines.append(line)
-    if not found:
-        return False, "Category not found"
-    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, "".join(new_lines))
-    return (True, "Category deleted") if ok else (False, err)
-
-
-def ea_rename_category(cat_id, new_name):
-    path = _ea_categories_host_path()
-    if not path or not os.path.isfile(path):
-        return False, "Categories file not found"
-    new_name = (new_name or "").strip()
-    if not new_name:
-        return False, "Name required"
-    with open(path) as f:
-        lines = f.readlines()
-    new_lines = []
-    found = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            parts = stripped.split("|")
-            if len(parts) >= 2 and parts[0] == cat_id:
-                parts[1] = new_name
-                new_lines.append("|".join(parts) + "\n")
-                found = True
-                continue
-        new_lines.append(line)
-    if not found:
-        return False, "Category not found"
-    ok, err = ea_docker_write(EA_CATEGORIES_CONTAINER_PATH, "".join(new_lines))
-    return (True, "Category renamed") if ok else (False, err)
 
 
 def ea_list_rooms():
@@ -2691,23 +2591,22 @@ INDEX_HTML = """<!doctype html>
         <div class="add-form ea-only" id="ext-add-form">
           <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:11rem">
           <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:9rem">
-          <select id="ea-dev-category"></select>
           <select id="ea-dev-conn">
             <option value="lan">LAN (UDP)</option>
             <option value="fqdn">Remote/FQDN (TLS)</option>
           </select>
           <select id="ea-dev-aa">
-            <option value="">Auto-answer: category default</option>
-            <option value="yes">Auto-answer: yes</option>
             <option value="no">Auto-answer: no</option>
+            <option value="yes">Auto-answer: yes</option>
           </select>
+          <label class="muted" style="white-space:nowrap"><input type="checkbox" id="ea-dev-mobile"> Mobile/cellular device</label>
           <button class="primary" id="ea-dev-save">Add</button>
           <button class="action" id="ext-add-cancel">Cancel</button>
         </div>
 
         <details class="help">
           <summary>What these columns mean</summary>
-          <p class="muted"><b>Name</b> and <b>Category</b> are editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card.</p>
+          <p class="muted"><b>Name</b> is editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card. <b>Mobile</b> tags a device as a cellular/off-LAN softphone (like a phone app over wifi/data) so Asterisk sends RTP NAT-keepalive traffic to keep it reachable — leave it off for anything on the LAN.</p>
             <p class="muted pstn-only"><b>PSTN</b> sets how the outside phone network reaches this extension, and the <b>Whitelist</b> beside it is the one list of numbers that mode applies to:</p>
           <ul class="muted pstn-only" style="margin:0 0 var(--sp-2); padding-left:1.2rem">
             <li><b>full</b> — dial anyone, anyone can call. No whitelist.</li>
@@ -2724,7 +2623,7 @@ INDEX_HTML = """<!doctype html>
           <table id="ext-table"><thead><tr>
             <th class="sortable" data-sort="ext">Ext</th>
             <th class="sortable" data-sort="name">Name</th>
-            <th class="ea-only">Category</th>
+            <th class="ea-only">Mobile</th>
             <th class="sortable ea-only" data-sort="status">Status</th>
             <th class="ea-only">Transport</th>
             <th class="sortable pstn-only" data-sort="restrict">PSTN</th>
@@ -2743,32 +2642,6 @@ INDEX_HTML = """<!doctype html>
     </details>
 
     <div class="section-head ea-only">Easy Asterisk device setup</div>
-
-    <details class="card ea-only" id="card-categories">
-      <summary>Categories <span class="count" id="cat-count"></span></summary>
-      <div class="card-body">
-        <p class="muted">Device profiles — an auto-answer default and a description, assignable to any extension above.</p>
-        <div class="row" style="margin-bottom:var(--sp-3)">
-          <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase)" style="width:12rem">
-          <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
-          <select id="ea-cat-aa">
-            <option value="">Auto-answer default: no</option>
-            <option value="yes">Auto-answer default: yes</option>
-          </select>
-          <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
-          <button class="action" id="ea-cat-save">Add category</button>
-        </div>
-        <div class="table-wrap">
-          <table id="ea-cat-table"><thead><tr>
-            <th class="sortable" data-sort="id">ID</th>
-            <th class="sortable" data-sort="name">Name</th>
-            <th>Auto-answer</th>
-            <th>Description</th>
-            <th></th>
-          </tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-    </details>
 
     <details class="card ea-only" id="card-rooms">
       <summary>Rooms (ring groups) <span class="count" id="room-count"></span></summary>
@@ -3052,9 +2925,8 @@ async function loadCrowdsecStatus() {
   document.getElementById("crowdsec-tab-btn").style.display = data.installed ? "" : "none";
 }
 
-// ── Extensions tab (extensions + categories + rooms + groups + trunk) ──────
-let eaDevices = [], eaCategories = [], eaRooms = [], eaStatusMap = {};
-let eaCatSort = { key: null, dir: 1 };
+// ── Extensions tab (extensions + rooms + groups + trunk) ───────────────────
+let eaDevices = [], eaRooms = [], eaStatusMap = {};
 let eaRoomSort = { key: null, dir: 1 };
 
 async function initExtensionsTab() {
@@ -3069,114 +2941,14 @@ async function initExtensionsTab() {
   await refreshExtensionsTab();
 }
 
-// Sequenced (not parallel) — extension rows render a category <select> that
-// needs eaCategories already populated, room rows render a member-add picker
-// that needs eaDevices (populated by loadExtensions), and the personal-DID
-// owner picker needs both extensions and groups.
+// Sequenced (not parallel) — room rows render a member-add picker that needs
+// eaDevices (populated by loadExtensions), and the personal-DID owner picker
+// needs both extensions and groups.
 async function refreshExtensionsTab() {
-  if (eaInstalled) await loadEaCategories();
   await loadExtensions();
   if (eaInstalled) await loadEaRooms();
   await loadGroups();
   if (pstnInstalled) await loadPersonalDids();
-}
-
-function renderEaDeviceCategoryOptions() {
-  const sel = document.getElementById("ea-dev-category");
-  sel.innerHTML = eaCategories.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")
-    || '<option value="">No categories yet — add one below first</option>';
-}
-
-async function loadEaCategories() {
-  const res = await fetch("/api/ea-categories");
-  const data = await res.json();
-  eaCategories = data.categories || [];
-  renderEaCategories();
-  renderEaDeviceCategoryOptions();
-  if (extRows.length) renderExtensions();
-}
-
-function eaCatSortValue(c, key) { return (c[key] || "").toString().toLowerCase(); }
-
-function renderEaCategories() {
-  let rows = eaCategories.slice();
-  if (eaCatSort.key) {
-    rows.sort((a, b) => {
-      const av = eaCatSortValue(a, eaCatSort.key), bv = eaCatSortValue(b, eaCatSort.key);
-      if (av < bv) return -1 * eaCatSort.dir;
-      if (av > bv) return 1 * eaCatSort.dir;
-      return 0;
-    });
-  }
-  document.querySelectorAll("#ea-cat-table th.sortable .arrow").forEach(a => a.remove());
-  if (eaCatSort.key) {
-    const th = document.querySelector(`#ea-cat-table th[data-sort="${eaCatSort.key}"]`);
-    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaCatSort.dir === 1 ? "▲" : "▼"}</span>`);
-  }
-  setCount("cat-count", eaCategories.length);
-  const tbody = document.querySelector("#ea-cat-table tbody");
-  tbody.innerHTML = rows.map(c => `<tr data-id="${esc(c.id)}">
-    <td>${esc(c.id)}</td>
-    <td>${esc(c.name)}</td>
-    <td>${c.auto_answer === "yes" ? "yes" : (c.auto_answer === "no" ? "no" : "—")}</td>
-    <td>${esc(c.description)}</td>
-    <td class="actions">
-      <button class="action" onclick="renameEaCategory('${esc(c.id)}')">Rename</button>
-      <button class="action danger" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
-    </td>
-  </tr>`).join("") || '<tr><td colspan=5 class=empty>No categories yet.</td></tr>';
-}
-
-document.querySelectorAll("#ea-cat-table th.sortable").forEach(th => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    eaCatSort.dir = (eaCatSort.key === key) ? -eaCatSort.dir : 1;
-    eaCatSort.key = key;
-    renderEaCategories();
-  });
-});
-
-document.getElementById("ea-cat-save").addEventListener("click", async () => {
-  const id = document.getElementById("ea-cat-id").value.trim();
-  const name = document.getElementById("ea-cat-name").value.trim();
-  const auto_answer = document.getElementById("ea-cat-aa").value;
-  const description = document.getElementById("ea-cat-desc").value.trim();
-  const res = await fetch("/api/ea-categories", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id, name, auto_answer, description}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Category added" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok) {
-    document.getElementById("ea-cat-id").value = "";
-    document.getElementById("ea-cat-name").value = "";
-    document.getElementById("ea-cat-desc").value = "";
-  }
-  loadEaCategories();
-});
-
-async function renameEaCategory(id) {
-  const cur = eaCategories.find(c => c.id === id);
-  const name = prompt("New name for category " + id + ":", cur ? cur.name : "");
-  if (name === null || !name.trim()) return;
-  const res = await fetch("/api/ea-categories/rename", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id, name: name.trim()}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Category renamed" : "Failed"), data.ok ? "ok" : "err");
-  loadEaCategories();
-}
-
-async function deleteEaCategory(id) {
-  if (!confirm("Delete category " + id + "? Devices already using it keep their current setting, but it won't be selectable for new ones.")) return;
-  const res = await fetch("/api/ea-categories/delete", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({id}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Category deleted" : "Failed"), data.ok ? "ok" : "err");
-  loadEaCategories();
 }
 
 // ── Toasts ────────────────────────────────────────────────────────────────
@@ -3296,15 +3068,12 @@ function renderExtensions() {
 
   tbody.innerHTML = rows.map(e => {
     const status = e.status || "unknown";
-    const catOptions = eaCategories.map(c =>
-      `<option value="${esc(c.id)}" ${c.id === e.category ? "selected" : ""}>${esc(c.name)}</option>`
-    ).join("") || `<option value="${esc(e.category)}" selected>${esc(e.category)}</option>`;
     // Rows for an extension the Easy Asterisk container doesn't know about
     // (in pjsip.conf but not its device list) still get tier/messaging —
     // only the container-backed controls are inert, since every one of them
     // writes through `docker exec` into that container.
-    const catCell = e.ea
-      ? `<select class="ext-category">${catOptions}</select>`
+    const mobileCell = e.ea
+      ? `<input type="checkbox" class="ext-mobile" ${e.category === "mobile" ? "checked" : ""} aria-label="Mobile/cellular device for extension ${esc(e.ext)}">`
       : '<span class="empty">—</span>';
     const statusCell = e.ea
       ? `<span class="pill ${status === "online" ? "online" : "offline"}">${esc(status)}</span>`
@@ -3312,7 +3081,7 @@ function renderExtensions() {
     return `<tr data-ext="${esc(e.ext)}">
       <td>${esc(e.ext)}</td>
       <td><input type="text" class="inline-edit ext-name" value="${esc(e.name)}" ${e.ea ? "" : "disabled"} aria-label="Name for extension ${esc(e.ext)}"></td>
-      <td class="ea-only">${catCell}</td>
+      <td class="ea-only" style="text-align:center">${mobileCell}</td>
       <td class="ea-only">${statusCell}</td>
       <td class="ea-only muted">${esc(e.transport)}${e.encryption && e.encryption !== "no" ? " / " + esc(e.encryption) : ""}</td>
       <td class="pstn-only">${restrictSelect(e.restrict)}</td>
@@ -3348,13 +3117,13 @@ function rowEdits(tr) {
   const model = extRows.find(e => e.ext === ext);
   if (!model) return null;
   const nameEl = tr.querySelector(".ext-name");
-  const catEl = tr.querySelector(".ext-category");
+  const mobileEl = tr.querySelector(".ext-mobile");
   const modeEl = tr.querySelector(".ext-restrict");
   const numsEl = tr.querySelector(".ext-numbers");
   const msgEl = tr.querySelector(".ext-messaging");
   const edits = {};
   if (nameEl && !nameEl.disabled && nameEl.value.trim() !== model.name) edits.name = nameEl.value.trim();
-  if (catEl && catEl.value !== model.category) edits.category = catEl.value;
+  if (mobileEl && mobileEl.checked !== (model.category === "mobile")) edits.category = mobileEl.checked ? "mobile" : "standard";
   if (modeEl && modeEl.value !== model.restrict) edits.restrict = modeEl.value;
   if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
   if (msgEl && msgEl.checked !== !!model.messaging) edits.messaging = msgEl.checked;
@@ -3481,7 +3250,7 @@ document.getElementById("ea-dev-save").addEventListener("click", async () => {
   const data = await postJSON("/api/ea-devices", {
     name,
     extension,
-    category: document.getElementById("ea-dev-category").value,
+    category: document.getElementById("ea-dev-mobile").checked ? "mobile" : "standard",
     conn_type: document.getElementById("ea-dev-conn").value,
     auto_answer: document.getElementById("ea-dev-aa").value || null,
   });
@@ -3493,6 +3262,7 @@ document.getElementById("ea-dev-save").addEventListener("click", async () => {
     document.getElementById("ext-password-callout").classList.add("show");
     document.getElementById("ea-dev-name").value = "";
     document.getElementById("ea-dev-ext").value = "";
+    document.getElementById("ea-dev-mobile").checked = false;
     extAddForm.classList.remove("open");
   } else {
     toast(data.message || "Failed to add extension", "err");
@@ -3971,8 +3741,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"installed": ea_installed()})
         elif self.path == "/api/ea-devices":
             self._json({"devices": ea_list_devices(), "status": ea_get_status()})
-        elif self.path == "/api/ea-categories":
-            self._json({"categories": ea_list_categories()})
         elif self.path == "/api/ea-rooms":
             self._json({"rooms": ea_list_rooms()})
         else:
@@ -4042,18 +3810,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-devices/category":
             ok, message = ea_change_device_category(payload.get("extension", ""), payload.get("category", ""))
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/ea-categories":
-            ok, message = ea_create_category(
-                payload.get("id", ""), payload.get("name", ""),
-                payload.get("auto_answer", ""), payload.get("description", "")
-            )
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/ea-categories/delete":
-            ok, message = ea_delete_category(payload.get("id", ""))
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/ea-categories/rename":
-            ok, message = ea_rename_category(payload.get("id", ""), payload.get("name", ""))
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-rooms":
             ok, message = ea_create_room(
