@@ -1,8 +1,8 @@
 # Anveo Direct + Easy Asterisk — confirmed working setup guide
 
 This is the exact sequence that got a real Anveo Direct DID working end to
-end (both outbound and inbound) with `asterisk-digital-ocean.sh` +
-`pstn-trunk.sh`, confirmed live on a real droplet.
+end (both outbound and inbound) with `asterisk.sh` + `pstn-trunk.sh`,
+confirmed live on a real droplet.
 
 **Steps 1, 3 and 4 are one-time account setup** — the outbound Service
 Trunk (step 3) and the inbound SIP Trunk (step 4) each cover every DID on
@@ -13,8 +13,8 @@ in the dashboard, and test.
 
 ## 0. Prerequisites
 
-- `asterisk-digital-ocean.sh` (or `asterisk.sh` for a LAN box) already
-  installed and running, with at least one extension configured.
+- `asterisk.sh` already installed and running (droplet or home/LAN — the
+  installer detects which), with at least one extension configured.
 - This box's public IP address (`curl -4 ifconfig.me`).
 
 ## 1. Anveo Direct account (one-time)
@@ -194,7 +194,9 @@ In the Security Dashboard's PSTN Trunk tab:
   answers or 20 seconds pass.
 - Watch the live console while testing either direction:
   ```
-  docker exec -it easy-asterisk-do asterisk -rvvv
+  docker exec -it easy-asterisk asterisk -rvvv
+  # on a droplet set up before the two Asterisk services were merged, the
+  # container is named easy-asterisk-do instead
   ```
 
 ## Bugs hit and fixed along the way (informational — already fixed)

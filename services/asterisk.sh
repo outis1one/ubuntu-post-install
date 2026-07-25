@@ -2,6 +2,20 @@
 # services/asterisk.sh — Easy Asterisk PBX + coturn TURN server (home intercom/VoIP).
 # Part of the modular post-install system (sourced by setup.sh).
 #
+# One installer for both deployment shapes. It detects a DigitalOcean droplet
+# (via the link-local metadata service, with a y/n fallback if that's blocked)
+# and, in droplet mode, swaps in the public-cloud specifics: a swapfile for
+# low-RAM plans, a public-FQDN-only flow with no LAN/VLAN prompts, a Caddy
+# site block pinned to that one FQDN, an optional remote Authelia, and a
+# DigitalOcean Cloud Firewall via doctl. Everything else — vendor files,
+# compose, messaging dialplan, presence alerts, UFW, log rotation — is
+# identical either way.
+#
+# This used to be two services (services/asterisk-digital-ocean.sh held a
+# near-duplicate copy of the whole file). An existing droplet install at
+# ~/docker/asterisk-digital-ocean is detected and kept in place, container
+# names included, so the merge doesn't strand it.
+#
 # Can also be run standalone on any machine:
 #   sudo bash asterisk.sh
 # (Docker must already be installed when run standalone)
@@ -218,12 +232,83 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service asterisk homelab "Easy Asterisk PBX + coturn TURN server (home intercom/VoIP)" 5061
+register_service asterisk homelab "Easy Asterisk PBX + coturn TURN server (intercom/VoIP; auto-tunes for a DigitalOcean droplet)" 5061
+
+# ── Install layout: directory + container names ────────────────────────────
+# Sets ASTERISK_DIR / ASTERISK_CONTAINER / ASTERISK_COTURN / ASTERISK_PROJECT.
+#
+# New installs always land in ~/docker/asterisk with the plain container
+# names, droplet or not — the DigitalOcean specifics are behaviour, not a
+# separate install. But boxes provisioned by the old, separate
+# services/asterisk-digital-ocean.sh have a live install at
+# ~/docker/asterisk-digital-ocean running containers named easy-asterisk-do /
+# easy-asterisk-do-coturn, with a Caddyfile block, UFW rules, a Cloud
+# Firewall, CrowdSec acquisition and a PSTN trunk all pointing at those exact
+# paths and names. Renaming any of that from under a running deployment would
+# break every one of those references at once, so an existing legacy install
+# is detected and kept exactly as it is; only new installs get the unified
+# naming. Every sibling service in this repo (pstn-trunk, security-dashboard,
+# crowdsec) already probes for both directories, so both layouts stay fully
+# supported without further special-casing.
+_asterisk_resolve_layout() {
+    if [[ -f "$DOCKER_DIR/asterisk-digital-ocean/docker-compose.yml" ]]; then
+        ASTERISK_DIR="$DOCKER_DIR/asterisk-digital-ocean"
+        ASTERISK_CONTAINER="easy-asterisk-do"
+        ASTERISK_COTURN="easy-asterisk-do-coturn"
+        ASTERISK_PROJECT="asterisk-do"
+    else
+        ASTERISK_DIR="$DOCKER_DIR/asterisk"
+        ASTERISK_CONTAINER="easy-asterisk"
+        ASTERISK_COTURN="easy-asterisk-coturn"
+        ASTERISK_PROJECT="asterisk"
+    fi
+}
+
+# ── DigitalOcean droplet detection ─────────────────────────────────────────
+# Sets IS_DO (true/false), DROPLET_ID and PUBLIC_IP.
+#
+# A droplet's own id/public IP are readable, unauthenticated, from the
+# link-local metadata service — no API token needed for this part. The
+# metadata service isn't always reachable (a container, a firewalled
+# 169.254.0.0/16, a non-DO cloud that still wants the same public-IP
+# treatment), so a miss falls back to asking rather than silently deciding
+# for the user. Droplet mode is what gates the swapfile, the public-FQDN-only
+# flow, and the Cloud Firewall step further down.
+_asterisk_detect_digitalocean() {
+    local _meta="http://169.254.169.254/metadata/v1"
+    DROPLET_ID="$(curl -fsS --max-time 2 "$_meta/id" 2>/dev/null || true)"
+    PUBLIC_IP="$(curl -fsS --max-time 2 "$_meta/interfaces/public/0/ipv4/address" 2>/dev/null || true)"
+
+    echo ""
+    local _answer=""
+    if [[ -n "$DROPLET_ID" ]]; then
+        [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+        log_success "DigitalOcean droplet detected (id $DROPLET_ID, public IP ${PUBLIC_IP:-unknown})."
+        log_info "Droplet mode adds: swapfile for low-RAM plans, public-FQDN-only setup (no"
+        log_info "LAN/VLAN prompts), a Cloud Firewall via doctl, and a remote-Authelia option."
+        prompt_yn "Set this up as a public droplet? (n = treat it as a home/LAN box) (y/n):" "y" _answer
+    else
+        log_info "No DigitalOcean metadata service reachable — assuming a home/LAN box."
+        log_info "Answer y here anyway if this is a public cloud VM (droplet with metadata"
+        log_info "blocked, or another provider) that should get the public-IP treatment."
+        prompt_yn "Set this up as a public cloud box? (y/n):" "n" _answer
+    fi
+
+    if [[ "$_answer" =~ ^[Yy]$ ]]; then
+        IS_DO=true
+        [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+        [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        [[ -z "$DROPLET_ID" ]] && log_warning "No droplet id — the Cloud Firewall step will print manual rules instead of using doctl."
+    else
+        IS_DO=false
+        DROPLET_ID=""
+    fi
+}
 
 # ── Shared: vendor file refresh ────────────────────────────────────────────
 # Called from both a fresh install and an "update in place" run, so a single
 # copy of this logic stays current for both instead of drifting apart. Must
-# be called with $PWD already at $EA_DIR.
+# be called with $PWD already at $ASTERISK_DIR.
 _asterisk_refresh_vendor_files() {
     mkdir -p docker scripts
 
@@ -255,6 +340,50 @@ _asterisk_refresh_vendor_files() {
     chmod 755 ./easy-asterisk.sh ./easy-asterisk-v0.10.0.sh \
               ./docker/entrypoint.sh ./docker/coturn-entrypoint.sh \
               ./scripts/vpn-diagnostics.sh ./scripts/dns-whitelist.sh
+
+    # Persist security-level logging to a file — vendor's logger.conf only
+    # sends the "security" level (auth failures, SIP brute-force attempts) to
+    # the console (Docker stdout), not a file CrowdSec/fail2ban can tail.
+    # Applies on every box, not just droplets: the Security Dashboard's
+    # Security Log tab and services/crowdsec.sh's Asterisk acquisition both
+    # read logs/full, and neither has anything to read without this patch.
+    if grep -q '^console => notice,warning,error,security$' ./docker/entrypoint.sh; then
+        sed -i '/^console => notice,warning,error,security$/a full => notice,warning,error,security' \
+            ./docker/entrypoint.sh
+    else
+        log_warning "entrypoint.sh logger.conf template changed upstream — security events won't be logged to a file. Update the sed patch in this installer."
+    fi
+}
+
+# ── Shared: log rotation for logs/full (unbounded otherwise) ──────────────
+# Confirmed live: with no rotation, this file grew to 1.4GB in about 3 days
+# on a busy box (SIP scanning noise is constant on the public internet) —
+# a real disk-exhaustion risk on a small droplet, and separately made the
+# Security Dashboard balloon to 600+MB RAM/GBs of swap reading it every 30s
+# before that was fixed to only read a bounded tail (see
+# services/security-dashboard.sh). copytruncate avoids needing to signal
+# Asterisk to reopen its log file — it has a long-held file descriptor on
+# this path and no reload mechanism this installer can reach from the host.
+#
+# Not droplet-only: a LAN box reachable from the internet (port-forwarded
+# SIP) collects the same scanning noise, and the file is unbounded either
+# way now that the security-level logging patch above applies everywhere.
+_asterisk_write_logrotate() {
+    local _ea_dir="$1"
+    cat > /etc/logrotate.d/asterisk << LOGROTATE
+$_ea_dir/logs/full {
+    size 100M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE
+    # Supersedes the config the old separate droplet installer wrote. Left in
+    # place it would rotate the very same path a second time (both files can
+    # name the same log), so it goes when this one lands.
+    rm -f /etc/logrotate.d/asterisk-digital-ocean
 }
 
 # ── Shared: extension presence (online/offline) ntfy alerts ────────────────
@@ -266,7 +395,7 @@ _asterisk_refresh_vendor_files() {
 # parsed defensively (grep for the Avail/Unavail keyword rather than a fixed
 # column position) specifically because it hasn't been confirmed against a
 # live install's actual output yet — run
-# `docker exec easy-asterisk asterisk -rx "pjsip show contacts"` yourself
+# `docker exec <container> asterisk -rx "pjsip show contacts"` yourself
 # after enabling this to confirm extensions/status actually show up as
 # expected, same as any other not-yet-live-tested piece in this project.
 _asterisk_write_presence_alert_script() {
@@ -442,7 +571,7 @@ _asterisk_patch_messaging_vendor_files() {
 # Patches the LIVE file directly instead, so it takes effect immediately
 # regardless of whether Easy Asterisk ever regenerates it on its own.
 _asterisk_ensure_live_messaging_include() {
-    local EA_DIR="$1"
+    local EA_DIR="$1" CONTAINER_NAME="$2"
     local EXT_LIVE="$EA_DIR/config/asterisk/extensions.conf"
     [[ -f "$EXT_LIVE" ]] || return 0
     if ! grep -q 'messaging-dialplan.conf' "$EXT_LIVE"; then
@@ -451,10 +580,10 @@ _asterisk_ensure_live_messaging_include() {
             log_success "Patched the messaging #include directly into the live extensions.conf."
         else
             log_warning "Couldn't find '[intercom]' in the live extensions.conf — add"
-            log_warning "'#include messaging-dialplan.conf' manually, then: docker exec easy-asterisk asterisk -rx \"dialplan reload\""
+            log_warning "'#include messaging-dialplan.conf' manually, then: docker exec ${CONTAINER_NAME} asterisk -rx \"dialplan reload\""
         fi
     fi
-    docker exec easy-asterisk asterisk -rx "dialplan reload" &>/dev/null || true
+    docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
 }
 
 # One-time migration for devices that already existed before the patch above
@@ -493,8 +622,8 @@ _asterisk_migrate_existing_devices_message_context() {
 
 # The actual enforcement — gated on the SENDER's own "messaging" flag in
 # pstn-permissions.conf (the exact file/flag the Security Dashboard's
-# "Internal SIP messaging" checkbox writes, independent of whether the PSTN
-# trunk is installed), read live via AST_CONFIG() on every message, same
+# Messaging column writes, independent of whether the PSTN trunk is
+# installed), read live via AST_CONFIG() on every message, same
 # mechanism pstn-trunk.sh's own dialplan already relies on for permission
 # tiers — no restart needed to take effect. Off by default: an extension
 # with no entry, or messaging=no, is denied. UNVERIFIED: MESSAGE(from)'s
@@ -544,7 +673,7 @@ _asterisk_remove_presence_timer() {
 # international-calling step: this is a live-editable extra, not a
 # structural setting, so it doesn't belong exclusively to one path).
 _asterisk_run_presence_step() {
-    local EA_DIR="$1"
+    local EA_DIR="$1" CONTAINER_NAME="$2"
     local SETTINGS_FILE="$EA_DIR/.presence-alert.env"
     local STATE_FILE="$EA_DIR/.presence-alert.state"
 
@@ -596,7 +725,7 @@ ENV
         return 0
     fi
 
-    _asterisk_write_presence_alert_script "$EA_DIR/asterisk-presence-alert.sh" "easy-asterisk" "$PRESENCE_NTFY_URL" "$STATE_FILE"
+    _asterisk_write_presence_alert_script "$EA_DIR/asterisk-presence-alert.sh" "$CONTAINER_NAME" "$PRESENCE_NTFY_URL" "$STATE_FILE"
     _asterisk_install_presence_timer "$EA_DIR"
 
     cat > "$SETTINGS_FILE" << ENV
@@ -638,7 +767,7 @@ _asterisk_offer_dashboard_and_trunk() {
             install_security-dashboard
         else
             local _WANT_DASH=""
-            prompt_yn "Set up the Security Dashboard (Security Log, Extensions, Asterisk Admin, PSTN Trunk, CrowdSec — one page)? (y/n):" "y" _WANT_DASH
+            prompt_yn "Set up the Security Dashboard (Security Log, Extensions, CrowdSec — one page)? (y/n):" "y" _WANT_DASH
             [[ "$_WANT_DASH" =~ ^[Yy]$ ]] && install_security-dashboard
         fi
     fi
@@ -658,17 +787,23 @@ _asterisk_offer_dashboard_and_trunk() {
 
 # ── Shared: docker-compose.yml ─────────────────────────────────────────────
 # Same reasoning as above — one copy of the template used by both fresh
-# installs and updates. Must be called with $PWD already at $EA_DIR.
+# installs and updates. Must be called with $PWD already at the install dir.
 # HAS_VLANS_VAL/VLAN_SUBNETS_VAL aren't referenced here — they live only in
 # .env, which the entrypoint reads at container start.
+#
+# The heredoc stays quoted so ${TURN_PORT} and friends reach docker compose
+# literally (it interpolates them from .env, this script must not). Project
+# and container names are therefore substituted afterwards, same placeholder
+# trick the Caddy volume line already uses below.
 _asterisk_write_compose() {
+    local PROJECT="$1" CONTAINER="$2" COTURN_CONTAINER="$3"
     cat > docker-compose.yml << 'EOF'
-name: asterisk
+name: PROJECT_NAME_PLACEHOLDER
 
 services:
   asterisk:
     build: .
-    container_name: easy-asterisk
+    container_name: ASTERISK_CONTAINER_PLACEHOLDER
     network_mode: host
     depends_on:
       coturn:
@@ -692,7 +827,7 @@ CADDY_VOLUME_PLACEHOLDER
 
   coturn:
     image: coturn/coturn:latest
-    container_name: easy-asterisk-coturn
+    container_name: COTURN_CONTAINER_PLACEHOLDER
     network_mode: host
     user: root
     entrypoint: ["/coturn-entrypoint.sh"]
@@ -718,6 +853,10 @@ CADDY_VOLUME_PLACEHOLDER
 
 EOF
 
+    sed -i "s#PROJECT_NAME_PLACEHOLDER#${PROJECT}#; \
+            s#ASTERISK_CONTAINER_PLACEHOLDER#${CONTAINER}#; \
+            s#COTURN_CONTAINER_PLACEHOLDER#${COTURN_CONTAINER}#" docker-compose.yml
+
     # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
     # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
     # self-signed. No-op if Caddy isn't installed on this box.
@@ -728,15 +867,541 @@ EOF
     fi
 }
 
+# ── Shared: swapfile for low-RAM public cloud boxes ────────────────────────
+# DigitalOcean doesn't provision swap by default. Docker + Asterisk + coturn
+# fit in 512MB-1GB at idle with little headroom; a swapfile absorbs spikes
+# (apt/image pulls, log bursts, a few concurrent calls) instead of the
+# kernel OOM-killing a container or the box going unresponsive over SSH.
+_asterisk_offer_swapfile() {
+    local TOTAL_RAM_MB
+    TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    [[ "$TOTAL_RAM_MB" -gt 0 && "$TOTAL_RAM_MB" -le 2048 ]] || return 0
+    swapon --show | grep -q . && return 0
+
+    local FREE_DISK_MB SWAP_MB=2048
+    FREE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+    if [[ "$FREE_DISK_MB" -le $((SWAP_MB + 2048)) ]]; then
+        log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
+        log_warning "Consider a bigger box, or free up disk before installing."
+        return 0
+    fi
+
+    local ADD_SWAP=""
+    prompt_yn "No swap detected on this ${TOTAL_RAM_MB}MB-RAM box — add a ${SWAP_MB}MB swapfile? (y/n):" "y" ADD_SWAP
+    [[ "$ADD_SWAP" =~ ^[Yy]$ ]] || return 0
+
+    fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+    sysctl -w vm.swappiness=10 >/dev/null 2>&1
+    log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
+}
+
+# ── Droplet-mode Caddy: web admin on the SAME FQDN used for SIP ────────────
+# Deliberately NOT using configure_caddy_for_service in this mode. Caddy only
+# holds a cert for domains it's actively serving, and Asterisk never does ACME
+# itself — it mounts Caddy's cert store and copies the cert matching
+# DOMAIN_NAME. Proxy the admin on a separate "admin" subdomain and Caddy
+# obtains a cert for THAT name instead, the sync finds nothing matching
+# DOMAIN_NAME, and SIP TLS silently stays self-signed. The helper would also
+# prompt for its own domain, defaulting to "<subdomain>.${SITE_DOMAIN}" —
+# which is blank or wrong whenever SITE_DOMAIN isn't set, i.e. every time
+# this service is run by name (`sudo ./setup.sh asterisk` skips setup.sh's
+# site-defaults wizard). There is exactly one correct domain here, so the
+# site block is written directly with no domain prompt to get wrong.
+#
+# Sets WEB_ADMIN_PUBLIC_ACCESS_NEEDED (out-param) so the firewall steps below
+# know whether the bare IP:port still has to be reachable.
+_asterisk_configure_caddy_public() {
+    local DOMAIN_NAME="$1" WEB_ADMIN_PORT_VAL="$2" PUBLIC_IP="$3"
+
+    WEB_ADMIN_PUBLIC_ACCESS_NEEDED=true
+
+    if [[ -z "$DOMAIN_NAME" ]]; then
+        log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL} (nothing for Caddy to do)."
+        return 0
+    fi
+    if [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
+        log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL}, SIP TLS stays self-signed."
+        return 0
+    fi
+
+    local EXTRA_BLOCK=""
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        local _use_auth=""
+        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
+        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
+            EXTRA_BLOCK="    import authelia"
+            # Disable built-in auth since Authelia handles it
+            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+        fi
+    else
+        # No local Authelia — offer one running elsewhere (e.g. a homelab).
+        # There's no shared "(authelia)" Caddy snippet to import in that
+        # case (authelia.sh only writes one when installing locally), so
+        # this builds the same forward_auth block inline, targeting the
+        # remote instance directly instead of the local "authelia:9091"
+        # container reference.
+        local _use_remote_auth=""
+        prompt_yn "Protect the web admin with a remote Authelia instance (e.g. on a homelab)? (y/n):" "n" _use_remote_auth
+        if [[ "$_use_remote_auth" =~ ^[Yy]$ ]]; then
+            local _remote_authelia=""
+            prompt_text "  Remote Authelia address — a bare host:port over a private network (e.g. a NetBird mesh IP:9091), or a full https:// URL if it's on its own public domain+TLS:" "" _remote_authelia
+            if [[ -n "$_remote_authelia" ]]; then
+                # header_up lines are required here (unlike the local
+                # "authelia:9091" snippet in services/authelia.sh) because
+                # this upstream is reached over a second Caddy hop when
+                # given as a scheme-qualified URL (https://auth.example.com).
+                # Caddy rewrites the outgoing request's Host header to that
+                # upstream host so the remote Caddy can route/SNI-match it —
+                # and without an explicit override, X-Forwarded-Host picks up
+                # that rewritten value instead of the original site's host.
+                # Confirmed live: Authelia was evaluating every request as
+                # if it were for auth.example.com itself (which has
+                # policy: bypass in access_control.rules), so every domain
+                # silently passed through with no 2FA prompt regardless of
+                # its own policy. Pinning these to the original request's
+                # values fixes it regardless of hop count.
+                #
+                # X-Forwarded-Host uses a literal domain, NOT the {host}
+                # placeholder. Confirmed live: {host} still evaluated to
+                # the upstream's own hostname (auth.example.com) rather
+                # than the original site's — Caddy appears to rewrite the
+                # outgoing request's Host to the upstream target before
+                # header_up placeholders are resolved for a scheme-
+                # qualified upstream, so {host} echoes back the already-
+                # rewritten value instead of the original client-facing
+                # host. Since this site block only ever serves one domain
+                # (DOMAIN_NAME), hardcoding it sidesteps the ambiguity
+                # entirely instead of depending on Caddy's internal
+                # header-mutation ordering.
+                EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
+        uri /api/authz/forward-auth
+        copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+        header_up X-Forwarded-Method {method}
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host ${DOMAIN_NAME}
+        header_up X-Forwarded-Uri {uri}
+    }"
+                sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+                log_info "Using remote Authelia at ${_remote_authelia}."
+                log_info "Verify it's reachable from this box before relying on it — e.g.:"
+                log_info "  curl -I ${_remote_authelia}"
+            else
+                log_info "No address entered — skipping Authelia protection."
+            fi
+        fi
+    fi
+
+    echo ""
+    local WANT_CADDY_PROXY=""
+    prompt_yn "Reverse-proxy the web admin at https://${DOMAIN_NAME}/ via Caddy? (also gets Asterisk a trusted TLS cert for SIP instead of self-signed) (y/n):" "y" WANT_CADDY_PROXY
+    [[ "$WANT_CADDY_PROXY" =~ ^[Yy]$ ]] || return 0
+
+    local _CADDY_MODE="local"
+    [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -n "${CADDY_REMOTE_HOST:-}" ]] && _CADDY_MODE="remote"
+
+    # Asterisk runs with network_mode: host, so whatever proxies to it
+    # needs a way to reach the host, not "localhost" (which resolves
+    # to the proxying container's own netns). A local Caddy container
+    # reaches the host via host.docker.internal (wired up in
+    # services/caddy.sh's compose file); a remote Caddy machine needs
+    # this box's actual public IP instead.
+    local _PROXY_TARGET="host.docker.internal:${WEB_ADMIN_PORT_VAL}"
+    [[ "$_CADDY_MODE" == "remote" ]] && _PROXY_TARGET="${PUBLIC_IP}:${WEB_ADMIN_PORT_VAL}"
+
+    local _SITE_BLOCK
+    _SITE_BLOCK="$(cat << CADDY_BLOCK
+
+# Asterisk Web Admin
+${DOMAIN_NAME} {
+    # Auth (if any) must come before reverse_proxy — forward_auth is the
+    # same directive family as reverse_proxy internally, and Caddy doesn't
+    # reorder repeats of the same directive within a block; it runs them in
+    # the order they're written. With reverse_proxy first, it would handle
+    # and terminate every request immediately, so an auth check written
+    # after it would be dead code that never runs — full bypass regardless
+    # of what the auth server's own rules say.
+${EXTRA_BLOCK}
+    reverse_proxy ${_PROXY_TARGET}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/${DOMAIN_NAME}.log
+        format json
+    }
+}
+CADDY_BLOCK
+)"
+
+    if [[ "$_CADDY_MODE" == "local" ]]; then
+        # Caddy reaches this over the host's internal network — no
+        # need to keep the port open to the public internet.
+        WEB_ADMIN_PUBLIC_ACCESS_NEEDED=false
+        local _CADDYFILE="$DOCKER_DIR/caddy/Caddyfile"
+        local _CADDY_BACKUP="$_CADDYFILE.backup.$(date +%Y%m%d-%H%M%S)"
+        if [[ -f "$_CADDYFILE" ]]; then
+            cp "$_CADDYFILE" "$_CADDY_BACKUP"
+        else
+            touch "$_CADDYFILE"
+        fi
+        if grep -q "^${DOMAIN_NAME}" "$_CADDYFILE" 2>/dev/null; then
+            log_warning "${DOMAIN_NAME} already in Caddyfile — leaving the existing entry alone."
+        else
+            printf '%s\n' "$_SITE_BLOCK" >> "$_CADDYFILE"
+            log_success "Added ${DOMAIN_NAME} to Caddyfile (backup: $(basename "$_CADDY_BACKUP"))"
+            docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+            # The template Caddyfile ships with "admin off", so
+            # `caddy reload` (which needs that same admin API) never
+            # actually works here. Try it anyway, fall back to a
+            # restart — confirmed necessary on a real deployment.
+            if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+                log_success "Web admin accessible at: https://${DOMAIN_NAME}"
+            elif docker restart caddy &>/dev/null; then
+                log_success "Caddy restarted to apply changes (reload API is disabled by default)"
+                log_success "Web admin should be accessible at: https://${DOMAIN_NAME}"
+            else
+                log_warning "Reload/restart failed — check: docker logs caddy"
+                log_info "Manual fix: docker restart caddy"
+            fi
+        fi
+    else
+        local _SNIPPET_DIR="$DOCKER_DIR/caddy-snippets"
+        mkdir -p "$_SNIPPET_DIR"
+        printf '%s\n' "$_SITE_BLOCK" > "$_SNIPPET_DIR/asterisk.caddy"
+        chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk.caddy" 2>/dev/null || true
+        log_success "Snippet saved: $_SNIPPET_DIR/asterisk.caddy"
+        log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk.caddy caddy-host:~/caddy-snippets/"
+        log_info "Remote Caddy reaches this box over its public IP, so the web admin port stays open below."
+    fi
+}
+
+# ── DigitalOcean Cloud Firewall (network edge, in front of the droplet) ────
+_asterisk_configure_do_cloud_firewall() {
+    local DROPLET_ID="$1" WEB_ADMIN_PORT_VAL="$2" WEB_ADMIN_PUBLIC="$3"
+
+    local DO_FW_RULES=(
+        "protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:5060,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:5060,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:5061,address:0.0.0.0/0,address:::/0"
+    )
+    if [[ "$WEB_ADMIN_PUBLIC" == true ]]; then
+        DO_FW_RULES+=("protocol:tcp,ports:${WEB_ADMIN_PORT_VAL},address:0.0.0.0/0,address:::/0")
+    fi
+    DO_FW_RULES+=(
+        "protocol:tcp,ports:8088-8089,address:0.0.0.0/0,address:::/0"
+        "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
+    )
+
+    echo ""
+    if [[ -n "$DROPLET_ID" ]] && command -v doctl &>/dev/null && doctl account get &>/dev/null; then
+        local EXISTING_FW
+        EXISTING_FW="$(doctl compute firewall list --format ID,DropletIDs --no-header 2>/dev/null \
+            | grep -E "(^|[, ])${DROPLET_ID}([, ]|\$)" | awk '{print $1}' | head -1)"
+
+        if [[ -n "$EXISTING_FW" ]]; then
+            log_warning "A Cloud Firewall (id $EXISTING_FW) is already attached to this droplet — not touching it."
+            log_warning "Add these inbound rules to it yourself (Networking → Firewalls in the DO console):"
+            printf '    %s\n' "${DO_FW_RULES[@]}"
+        else
+            local DO_FW=""
+            prompt_yn "Create a DigitalOcean Cloud Firewall for this droplet via doctl now? (y/n):" "y" DO_FW
+            if [[ "$DO_FW" =~ ^[Yy]$ ]]; then
+                if doctl compute firewall create \
+                    --name "asterisk" \
+                    --droplet-ids "$DROPLET_ID" \
+                    --inbound-rules "$(IFS=' '; echo "${DO_FW_RULES[*]}")" \
+                    --outbound-rules "protocol:tcp,ports:all,address:0.0.0.0/0,address:::/0 protocol:udp,ports:all,address:0.0.0.0/0,address:::/0 protocol:icmp,ports:0,address:0.0.0.0/0,address:::/0" \
+                    &>/dev/null; then
+                    log_success "Cloud Firewall 'asterisk' created and attached (SSH/22 included so you don't get locked out)."
+                    log_info "Verify it in the DO console — adjust the SSH rule if you use a non-default SSH port."
+                else
+                    log_warning "doctl firewall create failed — add the rules manually (see README)."
+                fi
+            fi
+        fi
+    else
+        log_info "doctl not installed/authenticated — configure a DigitalOcean Cloud Firewall manually:"
+        log_info "Control Panel → Networking → Firewalls → create, attach to this droplet, allow:"
+        printf '    %s\n' "${DO_FW_RULES[@]}"
+    fi
+}
+
+# ── Shared: README ─────────────────────────────────────────────────────────
+# One document with a droplet-only section appended in public-cloud mode, so
+# the two deployment shapes can't document themselves differently by accident.
+_asterisk_write_readme() {
+    local EA_DIR="$1" CONTAINER="$2" IS_DO="$3" DOMAIN_NAME="$4" PUBLIC_IP="$5" WEB_ADMIN_PORT_VAL="$6"
+    local _host="${DOMAIN_NAME:-${PUBLIC_IP:-<host-ip>}}"
+
+    {
+        cat << MD
+# Easy Asterisk PBX + coturn
+
+Self-hosted SIP PBX using Easy Asterisk with a coturn TURN/STUN server for
+NAT traversal. Suitable for home intercom, VoIP handsets, and softphones.
+
+One installer covers both a home/LAN box and a public cloud VM — it detects a
+DigitalOcean droplet at install time and adjusts. This install is in
+**$( [[ "$IS_DO" == true ]] && echo "public cloud / droplet" || echo "home / LAN" )** mode; re-run
+\`sudo ./setup.sh asterisk\` and pick a full reinstall to change that.
+
+## Manage
+
+\`\`\`bash
+docker compose up -d --build   # build image and start
+docker compose up -d           # start (after initial build)
+docker compose down            # stop
+docker compose logs -f         # follow logs
+docker compose pull            # update coturn image
+docker compose up -d --build   # rebuild asterisk image
+\`\`\`
+
+## Management script
+
+\`\`\`bash
+docker exec -it ${CONTAINER} easy-asterisk --help
+\`\`\`
+
+Use it to create SIP extensions (Server Settings → Extensions) before
+connecting a phone. The Security Dashboard's Extensions tab
+(\`services/security-dashboard.sh\`) does the same thing from a browser.
+
+## SIP client setup
+
+| Setting         | Value                                |
+|-----------------|--------------------------------------|
+| SIP server      | \`${_host}\`                          |
+| SIP port        | 5061 (TLS) / 5060 (UDP)              |
+| TURN server     | \`${_host}:3478\`                     |
+| TURN username   | easyasterisk                         |
+| TURN password   | see \`.env\` → \`TURN_PASSWORD\`         |
+
+Recommended softphones: Linphone, Zoiper, Bria, Grandstream Wave, and
+[Sipnetic](https://www.sipnetic.com/) on Android (free, TLS/SRTP +
+STUN/TURN/ICE). For a phone to work the same way regardless of network (LAN,
+VLAN, remote, no VPN), register it against \`${_host}:5061\` over TLS. Plain
+UDP/TCP on 5060 still works for LAN-only devices, but only the FQDN+TLS path
+is location-independent.
+
+If it registers but calls connect with no audio, the RTP/TURN port ranges
+below are almost always the cause — check them on every firewall layer.
+
+## TLS certificate
+
+Caddy is what actually talks to Let's Encrypt — Asterisk never does ACME
+itself. If Caddy is installed and holds a cert for \`DOMAIN_NAME\` (i.e.
+there's a Caddyfile site block for that exact hostname), the container mounts
+Caddy's cert store read-only and the entrypoint syncs it in automatically on
+every start — and re-checks every 12h so renewals get picked up without a
+restart. No Caddyfile block for the domain, or no Caddy at all, falls back to
+a self-signed cert (phones must be configured to accept it).
+
+## Web admin
+
+Access the Easy Asterisk web interface at
+\`http://${PUBLIC_IP:-<host-ip>}:${WEB_ADMIN_PORT_VAL}\` or via your configured
+reverse-proxy domain. (8081 is the default; if that port was already taken by
+something else on this box, the installer picked the next free one instead —
+\`WEB_ADMIN_PORT\` in \`.env\` is the actual value.)
+
+## Internal SIP messaging (no PSTN trunk needed)
+
+Every extension can send/receive Asterisk's native SIP MESSAGE (no carrier
+SMS, no PSTN, no cost) once its "messaging" flag is set to yes in
+\`pstn-permissions.conf\` — via the Security Dashboard's Extensions tab, or by
+hand. This works independent of \`pstn-trunk.sh\` entirely. Under the hood:
+every device endpoint gets \`message_context=sip-messaging\`, routing messages
+to a dedicated \`config/asterisk/messaging-dialplan.conf\` context instead of
+\`[intercom]\` (which already owns per-device call routing) — this
+install/update patches both the device-creation code (so new extensions pick
+it up automatically) and any devices that already existed. Confirmed against
+a live install's \`pjsip.conf\`/\`extensions.conf\` on 2026-07-23 — the MESSAGE
+sender-extraction logic itself is still unconfirmed against real traffic; if
+messages silently don't arrive, check
+\`docker exec ${CONTAINER} asterisk -rx "core set verbose 3"\` while sending one.
+
+## Extension presence (online/offline) alerts
+
+Optional ntfy alert when an extension's SIP registration changes state —
+offered on both fresh install and "update in place". Checked every 2
+minutes (systemd timer, cron.d fallback); fires only on a change, never on
+every check.
+
+## Logs
+
+Asterisk's security-level events (auth failures, SIP brute-force attempts)
+are written to \`logs/full\` as well as the container's stdout — that file is
+what the Security Dashboard's Security Log tab and CrowdSec's Asterisk
+acquisition both read. It's rotated at 100MB (5 generations, compressed) via
+\`/etc/logrotate.d/asterisk\`; unrotated it reached 1.4GB in three days on a
+publicly reachable box.
+
+## VLANs / other subnets
+
+\`.env\` → \`HAS_VLANS\`/\`VLAN_SUBNETS\` lists extra networks (space-separated
+CIDRs) this server isn't itself attached to but that phones live on. These
+become \`local_net=\` entries in \`pjsip.conf\` so NAT/SDP handling is correct
+for those devices (missing entries here is the most common cause of calls
+connecting with no audio). To change this after install:
+
+\`\`\`bash
+docker exec -it ${CONTAINER} easy-asterisk
+# Server Settings → Configure VLAN/VPN Subnets
+\`\`\`
+
+## Ports
+
+| Port          | Protocol | Purpose                          |
+|---------------|----------|----------------------------------|
+| 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
+| 5061          | TCP      | SIP over TLS                     |
+| ${WEB_ADMIN_PORT_VAL}          | TCP      | Easy Asterisk web admin (auto-picked — see \`.env\`) |
+| 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
+| 3478          | UDP/TCP  | TURN/STUN (coturn)               |
+| 10000–20000   | UDP      | RTP media streams                |
+| 49152–49252   | UDP      | TURN relay media ports           |
+
+## Data directories (all inside ${EA_DIR}/, included in backup)
+
+| Directory            | Contents                        |
+|----------------------|---------------------------------|
+| config/asterisk/     | /etc/asterisk — dialplan, SIP   |
+| config/easy-asterisk/| /etc/easy-asterisk — web config |
+| logs/                | /var/log/asterisk               |
+| spool/               | /var/spool/asterisk             |
+| lib/                 | /var/lib/asterisk               |
+MD
+
+        # Droplet-only appendix. Guarded with an `if`, not an early return —
+        # this block runs in the pipeline's subshell, where a bare `return`
+        # would only leave the subshell and quietly skip nothing useful.
+        [[ "$IS_DO" == true ]] && cat << MD
+
+## DigitalOcean droplet notes
+
+This install is in public-cloud mode: the installer read the droplet's public
+IP from the metadata service, set up a swapfile, offered a Cloud Firewall, and
+reverse-proxied the web admin on the same FQDN used for SIP.
+
+### Droplet sizing
+
+Asterisk + coturn is light for a handful of SIP extensions and personal use.
+
+| Plan                          | vCPU | RAM   | Good for                              |
+|--------------------------------|------|-------|----------------------------------------|
+| Basic (regular), \$4/mo          | 1    | 512 MB | Works — this installer adds a 2GB swapfile automatically to cover it. Fine for a couple of extensions and light personal use. |
+| **Basic (regular), \$6/mo — recommended** | 1    | 1 GB  | More headroom, still gets an automatic swapfile |
+| Basic (regular), \$12/mo         | 1    | 2 GB  | Comfortable — no swap needed, a handful of concurrent calls |
+| Basic (regular), \$24/mo         | 2    | 4 GB  | Several simultaneous calls, conference bridges, transcoding |
+
+10 GB SSD (the \$4/mo plan's disk) is enough — this stack isn't storage-heavy,
+and the swapfile only takes 2GB of it. Any DO region close to where the
+phones actually are is fine; SIP/RTP care about latency more than raw
+bandwidth.
+
+**Swap:** DigitalOcean doesn't provision swap by default, and Docker +
+Asterisk + coturn leave little headroom at 512MB–1GB RAM. The installer
+detects RAM ≤2GB with no existing swap and offers to add a 2GB swapfile
+(persisted in \`/etc/fstab\`) — it's what makes the \$4/mo plan viable instead
+of risking an OOM kill under load.
+
+**OS image:** Ubuntu 24.04 LTS (supported through April 2029) is the safe,
+battle-tested choice for Docker + coturn. Ubuntu 26.04 LTS is also available
+and supported longer (through 2031) if you'd rather track the newer LTS.
+
+### DNS
+
+Point an A record at the droplet's public IP before running the installer:
+
+\`\`\`
+sip.yourdomain.com   A   ${PUBLIC_IP:-<droplet public IP>}
+\`\`\`
+
+That one FQDN is used for SIP, the web admin, and the TLS cert — there's no
+separate domain to plan for the admin panel.
+
+### Security
+
+- **SSH:** key-based auth only, password login disabled — \`services/base.sh\`
+  in this repo offers to do this for you on first run. Don't skip it; this
+  box is public.
+- **Two firewall layers, same rule set:**
+  - **DigitalOcean Cloud Firewall** — filters at the network edge, before
+    traffic reaches the droplet. The installer offers to create one
+    automatically via \`doctl\` (only if none is already attached to this
+    droplet — it never overwrites an existing one, to avoid clobbering a
+    custom SSH allow-list). If \`doctl\` isn't set up, add the same rules as
+    the Ports table above manually in the DO console (Networking →
+    Firewalls), plus TCP 22 for SSH.
+  - **UFW** — host-level, configured automatically by the installer as a
+    second layer. Keep both in sync; don't let them contradict each other.
+- The web admin port is only opened publicly when Caddy isn't fronting it
+  locally — otherwise it's reachable at \`https://${DOMAIN_NAME:-your-domain}/\`
+  only, not the bare IP:port.
+- **CrowdSec** — SIP brute-force/enumeration protection
+  (\`crowdsecurity/asterisk\` collection). Not installed by this script —
+  install it separately (whiptail menu, or \`sudo ./setup.sh crowdsec\`); its
+  own installer auto-detects this install and wires up SIP protection
+  regardless of install order.
+- DO's paid Droplet Backups, or \`services/borg-backup.sh\` installed
+  separately, are both options for a rollback path.
+
+### Other services (installed separately, not by this script)
+
+This installer only sets up Asterisk + coturn. Everything else — Caddy,
+CrowdSec, Authelia, ntfy, watchtower, wg-easy, NetBird, Borg backup — is a
+normal service in this repo: pick it from the whiptail menu, or run
+\`sudo ./setup.sh <name>\` directly. A few integrate automatically with this
+install if already present, no extra config needed:
+
+- **Caddy** — if installed (locally, or you're on a remote-Caddy setup), the
+  installer reverse-proxies the web admin on \`DOMAIN_NAME\` and Asterisk syncs
+  the resulting Let's Encrypt cert for SIP-TLS too. Not installed →
+  self-signed cert, plain HTTP admin.
+- **Authelia** — if installed locally (needs Caddy), or you point the
+  installer at a remote instance (e.g. a homelab, via NetBird mesh IP or a
+  public \`https://\` URL), the web admin gets SSO/2FA in front of it.
+- **CrowdSec** — see Security above; wires up SIP protection automatically
+  once installed, regardless of whether it went in before or after this.
+MD
+    } | write_readme "$EA_DIR"
+}
+
 install_asterisk() {
     require_docker || return 1
     log_info "Installing Easy Asterisk PBX + coturn..."
 
-    local EA_DIR="$DOCKER_DIR/asterisk"
+    local ASTERISK_DIR ASTERISK_CONTAINER ASTERISK_COTURN ASTERISK_PROJECT
+    _asterisk_resolve_layout
+    local EA_DIR="$ASTERISK_DIR"
+    local CONTAINER="$ASTERISK_CONTAINER"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $EA_DIR with Dockerfile, docker-compose.yml, .env"
-        echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk"
+        echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk, patching Asterisk to"
+        echo "[DRY-RUN]   log security events to logs/full (what CrowdSec + the Security Dashboard read)"
+        echo "[DRY-RUN] Would rotate logs/full at 100MB via /etc/logrotate.d/asterisk"
+        echo "[DRY-RUN] Would detect a DigitalOcean droplet via its metadata service (asking either way)"
+        echo "[DRY-RUN]   and, in droplet mode, additionally:"
+        echo "[DRY-RUN]     - add a swapfile if RAM <= 2048MB and none exists"
+        echo "[DRY-RUN]     - skip the LAN/VLAN prompts and set up one public FQDN for SIP + web admin"
+        echo "[DRY-RUN]     - reverse-proxy the web admin on that SAME FQDN (needed for SIP cert sync)"
+        echo "[DRY-RUN]     - offer local OR remote Authelia to protect the web admin"
+        echo "[DRY-RUN]     - offer to create a DigitalOcean Cloud Firewall via doctl"
         echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
         echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
         echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if $EA_DIR already exists"
@@ -753,11 +1418,15 @@ install_asterisk() {
         return 0
     fi
 
+    [[ "$EA_DIR" == *asterisk-digital-ocean ]] && \
+        log_info "Using the existing droplet install at $EA_DIR (containers ${CONTAINER}/${ASTERISK_COTURN}) — left where it is so Caddy, UFW, CrowdSec and the PSTN trunk keep pointing at it."
+
     # ── Existing install? Offer update-in-place instead of a full reinstall ───
-    # A fresh install re-runs every prompt (networking mode, domain, VLANs,
-    # Authelia). An update only refreshes vendor files + docker-compose.yml —
-    # picking up fixes like this one — and rebuilds, without touching .env,
-    # UFW, or the Caddy/Authelia config already in place.
+    # A fresh install re-runs every prompt (droplet detection, networking mode,
+    # domain, VLANs, firewalls, Authelia). An update only refreshes vendor
+    # files + docker-compose.yml — picking up fixes like this one — and
+    # rebuilds, without touching .env, UFW, any Cloud Firewall, or the
+    # Caddy/Authelia config already in place.
     if [[ -f "$EA_DIR/docker-compose.yml" && -f "$EA_DIR/.env" ]]; then
         echo ""
         log_info "Existing install found at $EA_DIR."
@@ -771,10 +1440,11 @@ install_asterisk() {
                 cd "$EA_DIR" || return 1
 
                 _asterisk_refresh_vendor_files
-                _asterisk_write_compose
+                _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN"
+                _asterisk_write_logrotate "$EA_DIR"
                 _asterisk_patch_messaging_vendor_files "$EA_DIR"
                 _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
-                _asterisk_ensure_live_messaging_include "$EA_DIR"
+                _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
                 _asterisk_migrate_existing_devices_message_context "$EA_DIR/config/asterisk/pjsip.conf"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
@@ -786,14 +1456,14 @@ install_asterisk() {
                     log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
                 fi
 
-                _asterisk_run_presence_step "$EA_DIR"
+                _asterisk_run_presence_step "$EA_DIR" "$CONTAINER"
                 _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
                 local _EXISTING_DOMAIN _EXISTING_PORT
                 _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
                 _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
                 echo ""
-                log_success "Existing .env, UFW rules, and Caddy/Authelia config were left untouched."
+                log_success "Existing .env, firewall rules, and Caddy/Authelia config were left untouched."
                 if [[ -n "$_EXISTING_DOMAIN" ]]; then
                     echo "  Web admin: https://${_EXISTING_DOMAIN}/"
                 else
@@ -813,6 +1483,13 @@ install_asterisk() {
         esac
     fi
 
+    # ── Public cloud (DigitalOcean droplet) or home/LAN box? ──────────────────
+    # Everything droplet-specific below hangs off this one answer.
+    local IS_DO=false DROPLET_ID="" PUBLIC_IP=""
+    _asterisk_detect_digitalocean
+
+    [[ "$IS_DO" == true ]] && _asterisk_offer_swapfile
+
     mkdir -p "$EA_DIR"
     mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
              "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
@@ -820,58 +1497,83 @@ install_asterisk() {
     cd "$EA_DIR" || return 1
 
     _asterisk_refresh_vendor_files
+    _asterisk_write_logrotate "$EA_DIR"
     _asterisk_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+    _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
     chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
 
-    # ── Networking mode ───────────────────────────────────────────────────────
-    echo ""
-    echo "  Networking mode:"
-    echo "    1) FQDN (recommended) — TLS + TURN relay, every phone connects the"
-    echo "                            same way regardless of LAN/VLAN/remote"
-    echo "    2) LAN-only           — no domain, self-signed cert, local network/VPN only"
-    local HA_NETMODE=""
-    prompt_text "Choose [1]:" "1" HA_NETMODE
+    # ── Domain / networking mode ──────────────────────────────────────────────
+    # A public cloud box is always reachable from anywhere, so there's no
+    # LAN-only option worth offering and no VLAN to bridge — one FQDN covers
+    # SIP registration, the web admin, and the TLS cert. A home box gets the
+    # full choice, plus the VLAN/subnet questions that only matter there.
+    local DOMAIN_NAME="" HAS_VLANS_VAL="n" VLAN_SUBNETS_VAL=""
 
-    local DOMAIN_NAME=""
-    if [[ "$HA_NETMODE" != "2" ]]; then
-        prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=fall back to LAN-only]:" "" DOMAIN_NAME
-        [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — proceeding in LAN-only mode."
-    fi
+    if [[ "$IS_DO" == true ]]; then
+        echo ""
+        echo "  Point a DNS A record at this box before continuing:"
+        echo "    <subdomain>.${SITE_DOMAIN:-example.com}  A  ${PUBLIC_IP:-<public IP>}"
+        echo ""
+        echo "  This one FQDN covers everything below — SIP registration, the web"
+        echo "  admin, and (via Caddy) the TLS cert Asterisk needs for SIP. There's"
+        echo "  no separate \"admin domain\" to pick later — whatever you enter here"
+        echo "  is what your SIP client (e.g. Sipnetic) will register against."
+        prompt_text "FQDN for this PBX, e.g. sip.yourdomain.com [blank=self-signed cert, IP-only access]:" "" DOMAIN_NAME
+        [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — using a self-signed cert; phones must trust it manually."
+    else
+        echo ""
+        echo "  Networking mode:"
+        echo "    1) FQDN (recommended) — TLS + TURN relay, every phone connects the"
+        echo "                            same way regardless of LAN/VLAN/remote"
+        echo "    2) LAN-only           — no domain, self-signed cert, local network/VPN only"
+        local HA_NETMODE=""
+        prompt_text "Choose [1]:" "1" HA_NETMODE
 
-    # ── Local networks / VLANs ────────────────────────────────────────────────
-    # Feeds HAS_VLANS/VLAN_SUBNETS into .env, which the entrypoint reads to add
-    # extra local_net= entries in pjsip.conf so phones on those subnets get
-    # correct NAT/SDP handling (this is what fixes the "no sound" symptom for
-    # devices on a VLAN the server isn't itself attached to).
-    echo ""
-    echo "  Detecting networks this host can see..."
-    local DETECTED_NETS=""
-    DETECTED_NETS="$(ip -o -f inet addr show scope global 2>/dev/null \
-        | awk '{print $2, $4}' \
-        | grep -Ev '^(docker|br-|veth|tun|tap|wg)' \
-        | awk '{ split($2,a,"/"); split(a[1],o,"."); print o[1]"."o[2]"."o[3]".0/"a[2] }' \
-        | sort -u)"
-    if [[ -n "$DETECTED_NETS" ]]; then
-        echo "  This host is directly attached to:"
-        echo "$DETECTED_NETS" | sed 's/^/    /'
+        if [[ "$HA_NETMODE" != "2" ]]; then
+            prompt_text "FQDN (e.g. asterisk.${SITE_DOMAIN:-example.com}) [blank=fall back to LAN-only]:" "" DOMAIN_NAME
+            [[ -z "$DOMAIN_NAME" ]] && log_warning "No FQDN entered — proceeding in LAN-only mode."
+        fi
+
+        # ── Local networks / VLANs ────────────────────────────────────────────
+        # Feeds HAS_VLANS/VLAN_SUBNETS into .env, which the entrypoint reads to
+        # add extra local_net= entries in pjsip.conf so phones on those subnets
+        # get correct NAT/SDP handling (this is what fixes the "no sound"
+        # symptom for devices on a VLAN the server isn't itself attached to).
+        echo ""
+        echo "  Detecting networks this host can see..."
+        local DETECTED_NETS=""
+        DETECTED_NETS="$(ip -o -f inet addr show scope global 2>/dev/null \
+            | awk '{print $2, $4}' \
+            | grep -Ev '^(docker|br-|veth|tun|tap|wg)' \
+            | awk '{ split($2,a,"/"); split(a[1],o,"."); print o[1]"."o[2]"."o[3]".0/"a[2] }' \
+            | sort -u)"
+        if [[ -n "$DETECTED_NETS" ]]; then
+            echo "  This host is directly attached to:"
+            echo "$DETECTED_NETS" | sed 's/^/    /'
+        fi
+        echo "  Phones on OTHER VLANs (this server usually can't see those directly)"
+        echo "  still need to be listed here so their media is treated as local/trusted."
+        prompt_text "VLAN/VPN subnets, space-separated CIDRs [blank=none]:" "" VLAN_SUBNETS_VAL
+        [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
     fi
-    echo "  Phones on OTHER VLANs (this server usually can't see those directly)"
-    echo "  still need to be listed here so their media is treated as local/trusted."
-    local VLAN_SUBNETS_VAL=""
-    prompt_text "VLAN/VPN subnets, space-separated CIDRs [blank=none]:" "" VLAN_SUBNETS_VAL
-    local HAS_VLANS_VAL="n"
-    [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
 
     # ── Secrets ───────────────────────────────────────────────────────────────
     local TURN_PASSWORD
     TURN_PASSWORD="$(generate_password 24)"
 
+    # A public box always has a usable TURN address (the FQDN if set, else its
+    # public IP). A LAN box with no FQDN has none — coturn is only reachable
+    # over the local network, so clients use the server's LAN address directly.
     local TURN_SERVER_VAL=""
-    [[ -n "$DOMAIN_NAME" ]] && TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
+    if [[ "$IS_DO" == true ]]; then
+        TURN_SERVER_VAL="${DOMAIN_NAME:-$PUBLIC_IP}:3478"
+    elif [[ -n "$DOMAIN_NAME" ]]; then
+        TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
+    fi
 
-    _asterisk_write_compose
+    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN"
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share
@@ -893,16 +1595,27 @@ install_asterisk() {
     fi
 
     # ── .env ──────────────────────────────────────────────────────────────────
+    local _domain_comment="Set to your FQDN for remote access. Leave empty for LAN-only."
+    local _vlan_comment="Extra local_net= entries for phones on networks this server isn't
+# itself attached to. Space-separated CIDRs."
+    if [[ "$IS_DO" == true ]]; then
+        _domain_comment="Public FQDN for this box. Leave empty to fall back to a self-signed
+# cert reachable at the public IP (${PUBLIC_IP:-unknown})."
+        _vlan_comment="A public cloud box has one public NIC, so this is usually irrelevant.
+# Only set it if you're bridging phones back in over a VPN (e.g.
+# WireGuard/Tailscale) on a subnet this box isn't directly attached to."
+    fi
+
     cat > .env << ENV
 # ── Domain ────────────────────────────────────────────────────
-# Set to your FQDN for remote access. Leave empty for LAN-only.
+# ${_domain_comment}
 DOMAIN_NAME=${DOMAIN_NAME}
 
 # ── TURN/STUN ─────────────────────────────────────────────────
 TURN_USERNAME=easyasterisk
 TURN_PASSWORD=${TURN_PASSWORD}
 TURN_PORT=3478
-# For LAN-only: TURN_SERVER is empty. For FQDN: set to domain:3478
+# Empty when there's no publicly resolvable address (LAN-only, no FQDN).
 TURN_SERVER=${TURN_SERVER_VAL}
 
 # ── RTP port range ────────────────────────────────────────────
@@ -910,8 +1623,7 @@ RTP_START=10000
 RTP_END=20000
 
 # ── VLAN/VPN subnets ──────────────────────────────────────────
-# Extra local_net= entries for phones on networks this server isn't
-# itself attached to. Space-separated CIDRs.
+# ${_vlan_comment}
 HAS_VLANS=${HAS_VLANS_VAL}
 VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 
@@ -919,40 +1631,51 @@ VLAN_SUBNETS=${VLAN_SUBNETS_VAL}
 # Picked automatically at install time (first free port starting at 8081) —
 # see WEB_ADMIN_PORT_VAL in services/asterisk.sh if this ever needs to
 # change again; don't hand-edit without also updating Caddy's Caddyfile and
-# any firewall rules to match.
+# every firewall layer to match.
 WEB_ADMIN_PORT=${WEB_ADMIN_PORT_VAL}
 WEB_ADMIN_AUTH_DISABLED=false
 ENV
     chmod 600 .env
 
-    # ── Caddy reverse proxy for web admin ─────────────────────────────────────
-    # Decided before the firewall rules below so they can be scoped
-    # correctly: if a local Caddy ends up fronting the web admin, there's no
-    # reason to also expose it on the LAN — Caddy already reaches it over
-    # the host's internal network (host.docker.internal).
-    local EXTRA_BLOCK=""
-    if [ -d "$DOCKER_DIR/authelia" ]; then
-        local _use_auth=""
-        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
-        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
-            EXTRA_BLOCK="    import authelia"
-            # Disable built-in auth since Authelia handles it
-            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+    # ── Caddy reverse proxy for the web admin ─────────────────────────────────
+    # Decided before the firewall rules below so they can be scoped correctly:
+    # if a local Caddy ends up fronting the web admin, there's no reason to
+    # also expose it directly — Caddy already reaches it over the host's
+    # internal network (host.docker.internal), and leaving the bare IP:port
+    # open would let anyone bypass Caddy/Authelia entirely.
+    local WEB_ADMIN_PUBLIC_ACCESS_NEEDED=true
+    if [[ "$IS_DO" == true ]]; then
+        _asterisk_configure_caddy_public "$DOMAIN_NAME" "$WEB_ADMIN_PORT_VAL" "$PUBLIC_IP"
+    else
+        local EXTRA_BLOCK=""
+        if [ -d "$DOCKER_DIR/authelia" ]; then
+            local _use_auth=""
+            prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
+            if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
+                EXTRA_BLOCK="    import authelia"
+                # Disable built-in auth since Authelia handles it
+                sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
+            fi
+        fi
+        configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
+        if [[ "$CADDY_SERVICE_CONFIGURED" == true && "$CADDY_SERVICE_MODE" == "local" ]]; then
+            WEB_ADMIN_PUBLIC_ACCESS_NEEDED=false
         fi
     fi
-    configure_caddy_for_service "Asterisk Web Admin" "${WEB_ADMIN_PORT_VAL}" "asterisk" "$EXTRA_BLOCK"
 
-    # ── UFW firewall rules ────────────────────────────────────────────────────
+    # ── UFW firewall rules (host-level) ───────────────────────────────────────
     if command -v ufw &>/dev/null; then
         log_info "Opening UFW ports for Asterisk + coturn..."
         ufw allow 5060/udp
         ufw allow 5060/tcp
         ufw allow 5061/tcp
-        if [[ "$CADDY_SERVICE_CONFIGURED" == true && "$CADDY_SERVICE_MODE" == "local" ]]; then
+        if [[ "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" == true ]]; then
+            ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
+        else
+            # Scoped, not deleted outright: a bare `ufw delete allow` also
+            # blocks Caddy's own request arriving over the caddy_net bridge.
             ufw delete allow "${WEB_ADMIN_PORT_VAL}/tcp" 2>/dev/null || true
             ufw_allow_from_caddy_net "${WEB_ADMIN_PORT_VAL}"
-        else
-            ufw allow "${WEB_ADMIN_PORT_VAL}/tcp"
         fi
         ufw allow 8088/tcp
         ufw allow 8089/tcp
@@ -964,123 +1687,33 @@ ENV
         log_success "UFW rules added."
     fi
 
+    # ── DigitalOcean Cloud Firewall (network edge) ────────────────────────────
+    [[ "$IS_DO" == true ]] && \
+        _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED"
+
+    # ── CrowdSec note ──────────────────────────────────────────────────────────
+    # Not installed here — select it separately from the whiptail menu, or
+    # `sudo ./setup.sh crowdsec`. Its own installer (services/crowdsec.sh)
+    # auto-detects an Asterisk install and wires up SIP brute-force
+    # protection on its own, in either install order.
+    if command -v cscli &>/dev/null; then
+        log_info "CrowdSec is already installed — rerun it to pick up SIP protection for this install:"
+        log_info "  sudo ./setup.sh crowdsec"
+    elif [[ "$IS_DO" == true ]]; then
+        log_info "CrowdSec not installed. Recommended for SSH + SIP intrusion prevention on a"
+        log_info "public box — install it separately (whiptail menu, or 'sudo ./setup.sh crowdsec')."
+        log_info "It auto-detects this install and wires up SIP protection on its own."
+    else
+        log_info "CrowdSec not installed. Worth adding if SIP is reachable from the internet"
+        log_info "(port-forwarded 5060/5061) — whiptail menu, or 'sudo ./setup.sh crowdsec'."
+        log_info "It auto-detects this install and wires up SIP protection on its own."
+    fi
+
     # ── Extension presence (online/offline) ntfy alerts ────────────────────────
-    _asterisk_run_presence_step "$EA_DIR"
+    _asterisk_run_presence_step "$EA_DIR" "$CONTAINER"
 
     # ── README ────────────────────────────────────────────────────────────────
-    write_readme "$EA_DIR" << 'MD'
-# Easy Asterisk PBX + coturn
-
-Self-hosted SIP PBX using Easy Asterisk with a coturn TURN/STUN server for
-NAT traversal. Suitable for home intercom, VoIP handsets, and softphones.
-
-## Manage
-
-```bash
-docker compose up -d --build   # build image and start
-docker compose up -d           # start (after initial build)
-docker compose down            # stop
-docker compose logs -f         # follow logs
-docker compose pull            # update coturn image
-docker compose up -d --build   # rebuild asterisk image
-```
-
-## Management script
-
-```bash
-docker exec -it easy-asterisk easy-asterisk --help
-```
-
-## SIP client setup
-
-| Setting         | Value                                |
-|-----------------|--------------------------------------|
-| SIP server      | <host-ip> (LAN) or your FQDN (FQDN) |
-| SIP port        | 5061 (TLS) / 5060 (UDP)             |
-| TURN server     | <DOMAIN_NAME>:3478 (FQDN mode only) |
-| TURN username   | easyasterisk                         |
-| TURN password   | see .env → TURN_PASSWORD             |
-
-Recommended softphones: Linphone, Zoiper, Bria, Grandstream Wave.
-
-For a phone to work the same way regardless of network (LAN, VLAN, remote,
-no VPN), register it against `<DOMAIN_NAME>:5061` over TLS — that's what
-FQDN mode is for. Plain UDP/TCP on 5060 still works for LAN-only devices,
-but only the FQDN+TLS path is location-independent.
-
-## VLANs / other subnets
-
-`.env` → `HAS_VLANS`/`VLAN_SUBNETS` lists extra networks (space-separated
-CIDRs) this server isn't itself attached to but that phones live on. These
-become `local_net=` entries in `pjsip.conf` so NAT/SDP handling is correct
-for those devices (missing entries here is the most common cause of calls
-connecting with no audio). To change this after install:
-
-```bash
-docker exec -it easy-asterisk easy-asterisk
-# Server Settings → Configure VLAN/VPN Subnets
-```
-
-## TLS certificate
-
-If Caddy is installed and already holds a Let's Encrypt cert for
-`DOMAIN_NAME` (i.e. there's a Caddyfile site block for that exact hostname),
-the container mounts Caddy's cert store read-only and the entrypoint syncs
-it in automatically on every start — and re-checks every 12h so renewals
-get picked up without a restart. No Caddyfile block for the domain, or no
-Caddy at all, falls back to a self-signed cert (phones must be configured
-to accept it).
-
-## Web admin
-
-Access the Easy Asterisk web interface at http://<host-ip>:8081
-or via your configured reverse-proxy domain. (8081 is the default; if that
-port was already taken by something else on this box, the installer picked
-the next free one instead — check WEB_ADMIN_PORT in .env for the actual
-value.)
-
-## Data directories (all inside ~/docker/asterisk/, included in backup)
-
-| Directory            | Contents                        |
-|----------------------|---------------------------------|
-| config/asterisk/     | /etc/asterisk — dialplan, SIP   |
-| config/easy-asterisk/| /etc/easy-asterisk — web config |
-| logs/                | /var/log/asterisk               |
-| spool/               | /var/spool/asterisk             |
-| lib/                 | /var/lib/asterisk               |
-
-## Internal SIP messaging (no PSTN trunk needed)
-
-Every extension can send/receive Asterisk's native SIP MESSAGE (no carrier
-SMS, no PSTN, no cost) once its "messaging" flag is set to yes in
-\`pstn-permissions.conf\` — via the Security Dashboard's "Internal SIP
-messaging" card, or by hand. This works independent of \`pstn-trunk.sh\`
-entirely. Under the hood: every device endpoint gets
-\`message_context=sip-messaging\`, routing messages to a dedicated
-\`config/asterisk/messaging-dialplan.conf\` context instead of \`[intercom]\`
-(which already owns per-device call routing) — this install/update patches
-both the device-creation code (so new extensions pick it up automatically)
-and any devices that already existed.
-
-## Extension presence (online/offline) alerts
-
-Optional ntfy alert when an extension's SIP registration changes state —
-offered on both fresh install and "update in place". Checked every 2
-minutes (systemd timer, cron.d fallback); fires only on a change, never on
-every check.
-
-## Ports
-
-| Port          | Protocol | Purpose                          |
-|---------------|----------|----------------------------------|
-| 5060          | UDP/TCP  | SIP signalling (unencrypted)     |
-| 5061          | TCP      | SIP over TLS                     |
-| 8081          | TCP      | Easy Asterisk web admin (default — see .env) |
-| 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
-| 3478          | UDP/TCP  | TURN/STUN (coturn)               |
-| 10000–20000   | UDP      | RTP media streams                |
-| 49152–49252   | UDP      | TURN relay media ports           |
-MD
+    _asterisk_write_readme "$EA_DIR" "$CONTAINER" "$IS_DO" "$DOMAIN_NAME" "$PUBLIC_IP" "$WEB_ADMIN_PORT_VAL"
 
     # ── Start ─────────────────────────────────────────────────────────────────
     echo ""
@@ -1095,19 +1728,33 @@ MD
     _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
     # ── Summary ───────────────────────────────────────────────────────────────
+    local _LOCAL_IP
+    _LOCAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost)"
     echo ""
     log_success "Easy Asterisk installed at $EA_DIR"
     if [[ -n "$DOMAIN_NAME" ]]; then
-        echo "  Mode:        FQDN ($DOMAIN_NAME)"
+        echo "  Mode:        FQDN ($DOMAIN_NAME)$( [[ "$IS_DO" == true ]] && echo ", public cloud" )"
         echo "  TURN server: ${DOMAIN_NAME}:3478"
+    elif [[ "$IS_DO" == true ]]; then
+        echo "  Mode:        IP-only, public cloud (self-signed cert)"
+        echo "  TURN server: ${PUBLIC_IP:-unknown}:3478"
     else
         echo "  Mode:        LAN-only"
         echo "  TURN server: (none — LAN/VPN only)"
     fi
+    [[ "$IS_DO" == true ]] && echo "  Public IP:   ${PUBLIC_IP:-unknown}"
     echo "  SIP port:    5061 (TLS) / 5060 (UDP)"
-    echo "  Web admin:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${WEB_ADMIN_PORT_VAL}"
+    echo "  Web admin:   http://${PUBLIC_IP:-$_LOCAL_IP}:${WEB_ADMIN_PORT_VAL}"
     echo "  Manage:      docker compose -f $EA_DIR/docker-compose.yml <up|down|logs>"
-    echo "  Script:      docker exec -it easy-asterisk easy-asterisk --help"
+    echo "  Script:      docker exec -it ${CONTAINER} easy-asterisk --help"
+    if [[ -n "$DOMAIN_NAME" ]] && [[ -d "$DOCKER_DIR/caddy" ]]; then
+        echo ""
+        log_info "If Caddy was just installed in this same run, it may still be obtaining the"
+        log_info "Let's Encrypt cert for ${DOMAIN_NAME} — Asterisk only checks for it at startup"
+        log_info "and then every 12h. If SIP TLS still shows self-signed after a couple of"
+        log_info "minutes, pick it up immediately with:"
+        log_info "  docker compose -f $EA_DIR/docker-compose.yml restart asterisk"
+    fi
     echo ""
 }
 

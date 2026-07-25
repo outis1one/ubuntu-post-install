@@ -27,6 +27,10 @@ export TERM="${TERM:-xterm-256color}"
 CATEGORY_ORDER=(base homelab utilities media cameras gaming extras backup)
 # Service ordering hint within a category (lower = earlier). Default 50.
 declare -A SERVICE_PRIORITY=( [caddy]=1 [crowdsec]=2 [authelia]=3 )
+# Retired service names that now resolve to another service. Keeps a name
+# that used to work on the command line (and in docs/muscle memory) working
+# after a merge, without giving it a second menu entry of its own.
+declare -A SERVICE_ALIAS=( [asterisk-digital-ocean]=asterisk )
 
 # ── Parse flags / collect service names ──────────────────────────────────────
 DRY_RUN=false; UNATTENDED=false; DO_LIST=false
@@ -89,6 +93,9 @@ is_installed() {
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
         sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
         sky-cam-frigate) [ -d "$ACTUAL_HOME/sky-cam/.git" ] && [ -f "$ACTUAL_HOME/sky-cam/frigate-retime.sh" ] ;;
+        # Either directory counts: boxes set up before the droplet edition was
+        # merged back into `asterisk` still run out of ~/docker/asterisk-digital-ocean.
+        asterisk) [ -e "$DOCKER_DIR/asterisk" ] || [ -e "$DOCKER_DIR/asterisk-digital-ocean" ] ;;
         pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] || [ -f "$DOCKER_DIR/asterisk/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
         ssh-config) false ;;   # repeatable management tool, never shows [installed]
         *) [ -e "$DOCKER_DIR/$1" ] ;;
@@ -97,6 +104,10 @@ is_installed() {
 
 run_service() {
     local name="$1"
+    if [ -n "${SERVICE_ALIAS[$name]:-}" ]; then
+        log_info "'$name' is now part of '${SERVICE_ALIAS[$name]}' — running that instead."
+        name="${SERVICE_ALIAS[$name]}"
+    fi
     if [ -z "${SERVICE_GROUP[$name]:-}" ]; then log_error "Unknown service: $name (try --list)"; return 1; fi
     declare -F "install_${name}" >/dev/null || { log_error "Service '$name' has no install_${name}"; return 1; }
     log_info "=== ${name} (${SERVICE_DESC[$name]}) ==="

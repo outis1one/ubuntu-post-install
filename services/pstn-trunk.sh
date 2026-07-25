@@ -1,6 +1,6 @@
 #!/bin/bash
-# services/pstn-trunk.sh — SIP PSTN trunk add-on for asterisk-digital-ocean
-# (or the home/LAN asterisk install): US-only outbound (NANP dialplan
+# services/pstn-trunk.sh — SIP PSTN trunk add-on for services/asterisk.sh:
+# US-only outbound (NANP dialplan
 # restriction), independent outbound/inbound concurrent-call caps, a 3-tier
 # permission model per extension (internal-only / restricted to pre-approved
 # numbers / full US calling), a configurable inbound ring-group,
@@ -15,19 +15,19 @@
 # works the same way. VoIP.ms and Anveo Direct are both confirmed working;
 # see docs/pstn-calling-voipms-plan.md for the design/cost background.
 #
-# Requires an existing services/asterisk-digital-ocean.sh OR services/asterisk.sh
-# install — this adds a PSTN trunk on top of one of them and does not stand
-# alone. Permission tiers AND concurrency caps are managed live (no restart
+# Requires an existing services/asterisk.sh install (either directory layout —
+# ~/docker/asterisk, or ~/docker/asterisk-digital-ocean on a box set up before
+# the droplet edition was merged back in) — this adds a PSTN trunk on top and
+# does not stand alone. Permission tiers AND concurrency caps are managed live (no restart
 # needed) via pstn-permissions.conf / pstn-limits.conf — editable by hand, or
-# from services/security-dashboard.sh's "PSTN Trunk" tab if that's installed.
+# from services/security-dashboard.sh's Extensions tab if that's installed.
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/asterisk — US-only, per-extension permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
-# Easy Asterisk (the vendor project asterisk-digital-ocean.sh/asterisk.sh
-# build on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
+# Easy Asterisk (the vendor project services/asterisk.sh builds on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
 # internal state:
 #   - extensions.conf: rebuilt by rebuild_dialplan() on every container start,
 #     and whenever a device/room is added or removed via the web admin.
@@ -41,9 +41,9 @@ register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/a
 # the #include itself survive regeneration too, _pstn_patch_vendor_files
 # (below) patches it into the vendor's *generator functions* — the same
 # technique this repo already uses for the logger.conf security-logging fix
-# in _asterisk_do_refresh_vendor_files (see services/asterisk-digital-ocean.sh).
+# in _asterisk_refresh_vendor_files (see services/asterisk.sh).
 #
-# Caveat: if the base asterisk-digital-ocean/asterisk install is later
+# Caveat: if the base asterisk install is later
 # refreshed ("update in place", which re-copies fresh vendor files)
 # independently of this service, the patch is wiped along with it and needs
 # reapplying — run this service again (fresh or update mode both reapply it)
@@ -459,7 +459,7 @@ EOF
 # zero of the outbound NANP patterns either, and `dialplan show
 # from-pstn-trunk` reported the context didn't exist at all, with no
 # warning or error anywhere (config log, full log, or the reload command's
-# own output) pointing at why. Meanwhile services/asterisk-digital-ocean.sh's
+# own output) pointing at why. Meanwhile services/asterisk.sh's
 # messaging-dialplan.conf — #include'd via the exact same mechanism, right
 # after [intercom] in the same extensions.conf — loaded fine every time.
 # The one structural difference: messaging-dialplan.conf's first real line
@@ -1608,7 +1608,7 @@ install_pstn-trunk() {
     [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
+        echo "[DRY-RUN] Would require an existing asterisk install (droplet or home/LAN)"
         echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct runs a full 5-step"
         echo "[DRY-RUN]   interactive portal walkthrough — account/funding, DID ordering, both trunk"
         echo "[DRY-RUN]   objects, confirmed rate — pausing for Enter between each; VoIP.ms pre-fills known"
@@ -1640,10 +1640,12 @@ install_pstn-trunk() {
     fi
 
     if [[ -z "$EA_DIR" ]]; then
-        log_error "Neither asterisk-digital-ocean nor asterisk (LAN) is installed — install one first:"
-        log_error "  sudo ./setup.sh asterisk-digital-ocean     (recommended — public droplet, static IP)"
-        log_error "  sudo ./setup.sh asterisk                   (home/LAN — see the static-IP caveat below)"
-        log_error "This service adds a PSTN trunk on top of one of them; it doesn't stand alone."
+        log_error "Asterisk is not installed — install it first:"
+        log_error "  sudo ./setup.sh asterisk"
+        log_error "A public droplet (which that installer detects and tunes for) is the"
+        log_error "recommended host, since IP authentication wants a static IP — see the"
+        log_error "caveat below for what that means on a home/LAN box."
+        log_error "This service adds a PSTN trunk on top of it; it doesn't stand alone."
         return 1
     fi
 
@@ -1652,7 +1654,7 @@ install_pstn-trunk() {
         log_warning "Using the home/LAN asterisk install. IP authentication needs a STABLE public IP —"
         log_warning "if this box is behind a dynamic home IP, your provider's IP allow-list goes stale"
         log_warning "whenever your ISP rotates it, breaking calls until you update it there yourself."
-        log_warning "A static IP from your ISP avoids that; asterisk-digital-ocean sidesteps it entirely."
+        log_warning "A static IP from your ISP avoids that; a cloud droplet sidesteps it entirely."
     fi
 
     log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (any IP-authenticated provider —"
@@ -2213,12 +2215,11 @@ Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
 no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
 tiers above — off by default, same "opt in" posture. Live-editable any
-time via the Security Dashboard's "PSTN Trunk" tab, in its own
-always-available "Internal SIP messaging" card — no dependency on this
-trunk (or any PSTN trunk at all) being installed.
+time via the Security Dashboard's Extensions tab, in the Messaging column of
+its always-available extensions table — no dependency on this trunk (or any
+PSTN trunk at all) being installed.
 
-Actually enforced, not just a flag — \`services/asterisk-digital-ocean.sh\`
-(and \`services/asterisk.sh\` for the LAN edition) routes messages through a
+Actually enforced, not just a flag — \`services/asterisk.sh\` routes messages through a
 dedicated \`[sip-messaging]\` dialplan context (separate from \`[intercom]\`'s
 own per-device call routing, so there's no collision risk) and checks this
 same flag via \`AST_CONFIG()\` before delivering. One caveat still flagged
