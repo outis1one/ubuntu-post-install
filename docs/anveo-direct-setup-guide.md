@@ -1,8 +1,8 @@
 # Anveo Direct + Easy Asterisk — confirmed working setup guide
 
 This is the exact sequence that got a real Anveo Direct DID working end to
-end (both outbound and inbound) with `asterisk-digital-ocean.sh` +
-`pstn-trunk.sh`, confirmed live on a real droplet.
+end (both outbound and inbound) with `asterisk.sh` + `pstn-trunk.sh`,
+confirmed live on a real droplet.
 
 **Steps 1, 3 and 4 are one-time account setup** — the outbound Service
 Trunk (step 3) and the inbound SIP Trunk (step 4) each cover every DID on
@@ -13,8 +13,8 @@ in the dashboard, and test.
 
 ## 0. Prerequisites
 
-- `asterisk-digital-ocean.sh` (or `asterisk.sh` for a LAN box) already
-  installed and running, with at least one extension configured.
+- `asterisk.sh` already installed and running (droplet or home/LAN — the
+  installer detects which), with at least one extension configured.
 - This box's public IP address (`curl -4 ifconfig.me`).
 
 ## 1. Anveo Direct account (one-time)
@@ -194,8 +194,131 @@ In the Security Dashboard's PSTN Trunk tab:
   answers or 20 seconds pass.
 - Watch the live console while testing either direction:
   ```
-  docker exec -it easy-asterisk-do asterisk -rvvv
+  docker exec -it easy-asterisk asterisk -rvvv
+  # on a droplet set up before the two Asterisk services were merged, the
+  # container is named easy-asterisk-do instead
   ```
+
+## 8. SMS — receiving verification codes
+
+Voice and SMS are separate features on an Anveo DID and are configured in
+different places. This section covers **receiving** only; see "What about
+sending?" below for why.
+
+### Pick the right kind of number first
+
+Anveo sells two classes of US DID, and for verification codes the difference
+matters more than anything else in this section:
+
+- **Geographic (default)** — the cheap ones this guide orders in step 2
+  ($0.25 setup, $0.15/month). Industry lookups classify these as VoIP.
+- **Mobile** — a separate pool sourced from wireless carriers, available
+  across roughly 20 major US city area codes (released on Anveo Retail first,
+  then Direct). These are classified as *mobile* in the same databases that
+  services query when they decide whether to accept your number. Priced above
+  the geographic ones — check the DID ordering tool for the current rate.
+
+Plenty of services (Google, WhatsApp, Microsoft, many banks) reject a number
+that looks like VoIP at signup, before any message is ever sent. **If codes
+are the reason you're buying the number, order a mobile one** — no amount of
+correct SMS routing fixes a signup form that refuses the number outright.
+
+### Short codes
+
+Most verification codes come from short codes (262966, 32665, ...), and most
+VoIP providers don't deliver them at all — VoIP.ms, for instance, doesn't
+except for Google, and users there report a large fraction of 2FA codes never
+arriving. Anveo is unusual in supporting short-code SMS to its DIDs, which is
+the main reason it's worth using for this.
+
+Not every number in the pool has it enabled, so confirm on your specific DID
+(or ask support to turn it on) rather than assuming.
+
+### Wire it up
+
+Run the installer and follow what it prints:
+
+```bash
+sudo ./setup.sh sms-inbound
+```
+
+It generates a long random ntfy topic, then offers two ways for Anveo to
+reach it:
+
+- **Relay (recommended)** — a small systemd service on the droplet receives
+  Anveo's request and republishes to ntfy properly. Two concrete wins: a
+  message body containing `&` survives intact (Anveo interpolates the text
+  into the query string unescaped, so an unencoded `&` otherwise truncates
+  the message), and your ntfy credentials never get stored in Anveo's portal.
+- **Direct** — Anveo calls ntfy itself; nothing runs on the droplet. Simpler,
+  but the URL you paste into Anveo carries your ntfy token, and the `&` case
+  loses the tail of the message.
+
+Then in the Anveo portal: **Phone Numbers → the DID → SMS tab**. The tab has
+exactly one control — a **Forward to URL** checkbox and a text field. Tick the
+box, paste the string the installer printed into the field, and press **SAVE**
+(not RETURN, which discards). Keep the `$[message]$` placeholder **last** in
+that URL — that's what makes the unescaped-`&` case recoverable.
+
+The field has no visible length limit, but the generated URLs are long
+(~90 characters in relay mode, ~150+ in direct mode, since that one carries
+the ntfy auth parameter). After saving, reopen the tab and confirm the whole
+string came back intact rather than truncated — if it didn't, relay mode is
+the shorter of the two.
+
+Send a text to the number from another phone; the notification should arrive
+within seconds. `journalctl -u sms-inbound -f` shows sender, recipient and
+message length (never the body — these are one-time passcodes and the journal
+has a wider audience than the notification does).
+
+### What about sending?
+
+Not covered, on purpose. Outbound SMS isn't available on Anveo Direct — Anveo
+support directs users to an Anveo **Retail** account for it, which is a
+second account to fund and manage. Any of the free texting apps covers
+sending without involving this box.
+
+### MMS and group texts
+
+Don't plan on either. No VoIP provider delivers MMS over SIP, and MMS to a
+VoIP DID generally drops or arrives as a media link through a separate API.
+US group texts are MMS, so a SIM-less phone on this number will silently miss
+them.
+
+### The native Messages app never sees these
+
+Android's Messages app reads the telephony SMS provider, which only the
+cellular radio (or whichever app holds the default-SMS-app role) writes to;
+iOS lets nothing write to Messages at all. Codes arrive as ntfy push
+notifications instead — which, for a passcode you're about to read and type,
+is the more useful place anyway.
+
+## Provider risk and keeping the number
+
+Anveo is small — founder-run since ~2006, bootstrapped (no outside funding),
+around 8 people. The clunky portal reads as a niche business that hasn't
+needed to rewrite its UI rather than one in trouble: they shipped a Hosted
+STIR/SHAKEN signing service for the June 20 2025 reseller deadline, added
+carrier-sourced mobile DIDs, and support answers technical tickets within a
+day or two.
+
+The realistic way to lose a number here isn't insolvency, it's **account
+action or a lapsed balance**. There are long-standing reports of accounts
+closed without warning, sometimes with prepaid credit still on them, and the
+AUP penalises high volumes of very short or non-conversational calls. Three
+cheap precautions:
+
+- **Keep the balance small** — enough for a few months, no more. Auto-recharge
+  stays off anyway for the toll-fraud reasons above, which conveniently caps
+  what's at risk.
+- **Save a copy of a recent invoice now**, offline. Porting a number out
+  requires a signed LOA *plus* the latest bill from the losing carrier — and
+  if the account is already closed you can't download one.
+- **Know the exit exists.** Anveo Direct states it does not block or restrict
+  port-outs (a provider refusing to release numbers is the real warning sign).
+  The process is at `anveo.com/lnp.asp`: signed authorisation form plus that
+  invoice, 3–6 weeks, non-refundable porting fee. Service must stay active on
+  the number until the port completes.
 
 ## Bugs hit and fixed along the way (informational — already fixed)
 

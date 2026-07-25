@@ -18,7 +18,7 @@ checklist per group, and calls `install_<name>()` for each selected item.
 1. Create `services/<name>.sh` (kebab-case filename)
 2. Call `register_service` at the top of the file
 3. Define `install_<name>()` — keep hyphens **literal** in the function name
-   (`install_asterisk-digital-ocean`, not `install_asterisk_digital_ocean`).
+   (`install_pstn-trunk`, not `install_pstn_trunk`).
    `setup.sh`'s dispatcher calls `install_${name}` with no hyphen→underscore
    conversion, so the function name must match the service name exactly.
    Confirmed live: a mismatched underscore here produces
@@ -28,6 +28,41 @@ That's it. The menu picks it up on the next run.
 
 Also update the **Services table in `README.md`** — add the service name to the
 appropriate group row so the README stays current.
+
+## Retiring a service name (merging two services)
+
+Deleting `services/<name>.sh` removes it from the menu, but `sudo ./setup.sh
+<name>` then fails outright for anyone with that name in their notes, docs, or
+shell history. Add the old name to `SERVICE_ALIAS` in `setup.sh` instead —
+`run_service` resolves it to the surviving service, says so once, and runs
+that. The alias never gets its own menu entry, which is the whole point.
+
+`services/asterisk-digital-ocean.sh` was merged into `services/asterisk.sh`
+this way: one installer that detects a DigitalOcean droplet (metadata service,
+with a y/n either way) and applies the droplet-only extras — swapfile,
+public-FQDN-only flow, hand-built Caddy site block, remote Authelia, Cloud
+Firewall — behind that one answer. Two lessons worth reusing:
+
+- **Don't rename a live install's directory or containers.** New installs
+  land in `~/docker/asterisk` with `easy-asterisk`; a pre-merge droplet keeps
+  `~/docker/asterisk-digital-ocean` and `easy-asterisk-do`, because its
+  Caddyfile block, UFW rules, Cloud Firewall, CrowdSec acquisition and PSTN
+  trunk all name those exact paths. `_asterisk_resolve_layout()` picks
+  whichever exists, and every sibling service probes both.
+- **Check whether a "flavor-specific" behavior was actually flavor-specific.**
+  The Asterisk security-logging patch and the `logs/full` logrotate config
+  were droplet-only purely because that's where they got written first — the
+  Security Dashboard's Security Log and CrowdSec's Asterisk acquisition were
+  silently empty on every home/LAN install as a result. Both now apply
+  everywhere.
+
+The pre-merge installer is parked at `attic/asterisk-digital-ocean.sh` as a
+rollback path until the unified one is confirmed on real hardware. `attic/`
+is outside `setup.sh`'s `services/*.sh` glob, so nothing there registers or
+runs on its own — see `attic/README.md`, including why it's a way to get the
+old script back rather than an undo button. Delete it once the merge is
+proven; a second copy of the same logic is what the merge existed to remove,
+and fixes are deliberately not backported into it.
 
 ## Minimal Docker service template
 
@@ -175,15 +210,16 @@ the auth server's own access-control rules say. Confirmed live: this was
 the actual cause of a "Caddy proxies fine but Authelia never prompts for
 login" bug, on a site block that otherwise looked completely correct. If a
 service builds its own site block instead of using this helper (e.g.
-`services/asterisk-digital-ocean.sh` does, deliberately, see its own
-comment for why), put its auth block first there too.
+`services/asterisk.sh` does in droplet mode, deliberately — see
+`_asterisk_configure_caddy_public`'s comment for why), put its auth block
+first there too.
 
 **`forward_auth` to a remote Authelia over a scheme-qualified URL needs
 explicit `header_up` pins.** A bare `forward_auth authelia:9091` (Authelia on
 the same Docker network, one hop) is fine relying on Caddy's default
 `X-Forwarded-*` headers. But `forward_auth https://auth.example.com { ... }`
 (Authelia on a *different* machine, reached over its own public domain+TLS —
-see `services/asterisk-digital-ocean.sh`'s remote-Authelia prompt) is a
+see `services/asterisk.sh`'s droplet-mode remote-Authelia prompt) is a
 second Caddy hop: Caddy rewrites the outgoing request's `Host` header to
 `auth.example.com` so the remote Caddy can route/SNI-match it, and without an
 override `X-Forwarded-Host` picks up that rewritten value instead of the
@@ -221,9 +257,10 @@ Use this to skip opening a host firewall port for a service Caddy already
 fronts *locally* (it reaches the service over `host.docker.internal`, not
 the network) — but still open it when `CADDY_SERVICE_MODE` is `"remote"`,
 since a remote Caddy machine needs to reach this host over the network
-instead. See `services/asterisk.sh` and `services/asterisk-digital-ocean.sh`
-for the reference pattern: call `configure_caddy_for_service` *before*
-building firewall rules, not after, so the decision is known in time.
+instead. See `services/asterisk.sh` for the reference pattern: it decides
+the Caddy question *before* building firewall rules, not after, so the
+answer is known in time (in droplet mode it hand-builds its own site block
+and sets the same flag itself, for the reasons noted above).
 
 ### UFW enable
 
@@ -252,8 +289,7 @@ blocks that too and silently breaks the service (confirmed live: closing
 the web admin port outright took Caddy down with it). Call
 `ufw_allow_from_caddy_net` right after the `delete` to re-open the port
 scoped to just `caddy_net`'s subnet — reachable from Caddy, not from the
-internet. See `services/asterisk-digital-ocean.sh` and
-`services/asterisk.sh` for the pattern.
+internet. See `services/asterisk.sh` for the pattern.
 
 ### README generation
 
@@ -298,7 +334,7 @@ on the same machine anyway. See `add_authelia_domain()` in `services/authelia.sh
 
 **Running a genuinely separate instance (e.g. one per machine).** `services/authelia.sh`
 runs standalone on any box (`sudo bash authelia.sh`, same pattern as `crowdsec.sh`) and
-`asterisk-digital-ocean.sh` already auto-detects a local install (`if [ -d
+`asterisk.sh` already auto-detects a local install (`if [ -d
 "$DOCKER_DIR/authelia" ]`), switching from the remote-Authelia `forward_auth` flow to the
 local `import authelia` snippet automatically — so a second, fully independent instance on
 another machine (e.g. a droplet, for resilience if the first machine goes down) works with
@@ -429,9 +465,8 @@ rules, or reverse-proxy/SSO config that's already in place. If the
 vendor-copy or `docker-compose.yml`-generation logic is more than a few
 lines, factor it into a helper function so the fresh-install path and the
 update path share one copy instead of drifting apart — see
-`_asterisk_do_refresh_vendor_files`/`_asterisk_do_write_compose` in
-`services/asterisk-digital-ocean.sh` (and their `_asterisk_*` counterparts in
-`services/asterisk.sh`) for the reference pattern.
+`_asterisk_refresh_vendor_files`/`_asterisk_write_compose` in
+`services/asterisk.sh` for the reference pattern.
 
 `cancel` must leave the install completely untouched — it's the default for
 a reason (a stray Enter on a service you're just checking on shouldn't
@@ -443,9 +478,9 @@ would, prompts included.
 A service can call another service's `install_<name>()` directly as a
 convenience step at the end of its own flow, instead of making the user
 remember to separately run `sudo ./setup.sh <other-name>` afterward.
-`services/asterisk.sh`/`services/asterisk-digital-ocean.sh` do this for
+`services/asterisk.sh` does this for
 `services/security-dashboard.sh` and `services/pstn-trunk.sh` — after
-Asterisk itself is installed/updated, each asks once whether to also set up
+Asterisk itself is installed/updated, it asks once whether to also set up
 the dashboard and/or a PSTN trunk (or, if either is already installed,
 silently re-invokes it so it gets refreshed as part of the same run — its
 own `prompt_reinstall_mode` gate decides update vs. skip, so this never
@@ -501,7 +536,7 @@ it, so as long as your `install_<name>()` calls `require_docker` before
 `docker compose up` (it always should), the network is guaranteed to exist
 regardless of whether Caddy itself has been installed yet.
 
-**`network_mode: host` services (e.g. `asterisk`/`asterisk-digital-ocean`) don't join
+**`network_mode: host` services (e.g. `asterisk`) don't join
 `caddy_net` at all** — Caddy reaching them (or anything else on the host
 network) needs `host.docker.internal:PORT` in the Caddyfile, not
 `localhost:PORT` or a container name. Caddy's own compose file

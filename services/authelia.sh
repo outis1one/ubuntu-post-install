@@ -435,7 +435,7 @@ auth.${AUTHELIA_DOMAIN} {
     # own incoming request (always auth.${AUTHELIA_DOMAIN} itself) and
     # overwrites the value a forward_auth caller (e.g. a remote site's
     # "forward_auth https://auth.${AUTHELIA_DOMAIN}" block, see
-    # services/asterisk-digital-ocean.sh) set for its own domain. Confirmed
+    # services/asterisk.sh's droplet-mode Caddy block) set for its own domain. Confirmed
     # live: every forward-auth check evaluated as if it were for
     # auth.${AUTHELIA_DOMAIN} itself (which has policy: bypass in
     # access_control.rules so its own login portal isn't gated behind

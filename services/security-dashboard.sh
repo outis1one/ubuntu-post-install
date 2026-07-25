@@ -64,16 +64,17 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service security-dashboard homelab "Security dashboard: Asterisk failed-connections + CrowdSec bans (Authelia-protected)" 8092
+register_service security-dashboard homelab "Security dashboard: Asterisk failed-connections + extension/trunk management + CrowdSec bans (Authelia-protected)" 8092
 
 install_security-dashboard() {
     local APP_DIR="/opt/security-dashboard"
     local DASHBOARD_PORT=8092
     local SVC_USER="secdash"
 
-    # Either Asterisk flavor works — prefer asterisk-digital-ocean if both
-    # happen to be installed, matching services/pstn-trunk.sh's own
-    # preference order for consistency.
+    # Either install layout works — prefer ~/docker/asterisk-digital-ocean
+    # (a droplet from before that service was merged into `asterisk`) if both
+    # happen to exist, matching services/pstn-trunk.sh's own preference order
+    # for consistency.
     local ASTERISK_EA_DIR=""
     if [ -d "$DOCKER_DIR/asterisk-digital-ocean" ]; then
         ASTERISK_EA_DIR="$DOCKER_DIR/asterisk-digital-ocean"
@@ -86,9 +87,10 @@ install_security-dashboard() {
     # pjsip.conf — see vendor/easy-asterisk/easy-asterisk-v0.10.0.sh's own
     # CATEGORIES_FILE/ROOMS_FILE constants (/etc/easy-asterisk/*, not
     # /etc/asterisk/*). ASTERISK_EA_CONTAINER names the actual container to
-    # `docker exec` into for the native Asterisk Admin tab's writes/CLI
-    # calls (ea_* functions) — "easy-asterisk-do" for the droplet flavor,
-    # "easy-asterisk" for LAN, matching each service's own container_name.
+    # `docker exec` into for the Extensions tab's device writes/CLI calls
+    # (ea_* functions) — "easy-asterisk", or "easy-asterisk-do" for a droplet
+    # set up before the two Asterisk services merged, matching whichever
+    # container_name services/asterisk.sh actually used there.
     local ASTERISK_EA_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/easy-asterisk}"
     local ASTERISK_EA_CONTAINER=""
     if [[ "$ASTERISK_EA_DIR" == *asterisk-digital-ocean ]]; then
@@ -100,17 +102,17 @@ install_security-dashboard() {
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ SECURITY DASHBOARD                                               │"
-    echo "│ Asterisk failed-connection log + CrowdSec decisions + PSTN      │"
-    echo "│ trunk permissions, one page. Runs natively on the host (not     │"
-    echo "│ Docker) so it can call cscli and read Asterisk's files          │"
-    echo "│ directly. Authelia-protected.                                   │"
+    echo "│ Asterisk failed-connection log + one Extensions tab (devices,   │"
+    echo "│ categories, rooms, groups, PSTN tiers, DIDs) + CrowdSec bans,   │"
+    echo "│ one page. Runs natively on the host (not Docker) so it can call │"
+    echo "│ cscli and read Asterisk's files directly. Authelia-protected.   │"
     echo "└─────────────────────────────────────────────────────────────────┘"
     echo ""
 
     if [ -z "$ASTERISK_EA_DIR" ]; then
-        log_warning "No asterisk-digital-ocean or asterisk install detected."
-        log_warning "The Security Log, Extensions, Asterisk Admin, and PSTN Trunk tabs will just be"
-        log_warning "empty/hidden — CrowdSec's tab still works fine."
+        log_warning "No Asterisk install detected."
+        log_warning "The Security Log and Extensions tabs will just be empty — CrowdSec's tab"
+        log_warning "still works fine."
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -118,7 +120,7 @@ install_security-dashboard() {
         echo "[DRY-RUN] Would write $APP_DIR/app.py"
         echo "[DRY-RUN] Would write /etc/sudoers.d/security-dashboard (scoped cscli/systemctl/set-asn-exempt.sh only)"
         echo "[DRY-RUN] Would write a systemd unit and start it on 0.0.0.0:$DASHBOARD_PORT (firewalled via UFW, not interface binding)"
-        echo "[DRY-RUN] Would grant read/write access to the detected Asterisk config dir (for the PSTN Trunk tab)"
+        echo "[DRY-RUN] Would grant read/write access to the detected Asterisk config dir (for the Extensions tab)"
         echo "[DRY-RUN] Would configure Caddy + Authelia for a domain you'll be prompted for"
         return 0
     fi
@@ -202,59 +204,89 @@ protected page. Runs natively on the host (systemd service \`security-dashboard\
 not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
-The nav only ever shows tabs for things actually present on this box — no
-tab for a service you haven't installed. **Security Log** and **Extensions**
-are always there (they only need Asterisk itself, detected once at install
-time). **Asterisk Admin**, **PSTN Trunk**, and **CrowdSec** each check their
-own live install state on every page load and hide their own nav button
-entirely if not found, so this one page/URL scales from a bare LAN Asterisk
-box (just those first two tabs) up to a full droplet with a trunk and
-CrowdSec, without ever showing a tab for something that isn't set up.
+
+Three tabs: **Security Log**, **Extensions**, **CrowdSec**. The first two are
+always there (they only need Asterisk itself, detected once at install time);
+CrowdSec checks its own live install state on every page load and hides its
+nav button if \`cscli\` isn't found.
+
+Extensions used to be three separate tabs — *Asterisk Admin*, *Extensions*
+and *PSTN Trunk* — which between them listed the same extensions three times:
+once as devices with a category/status, once as a row of messaging
+checkboxes, and once as permission tiers. They're now one tab with one
+extensions table, and each capability adds columns and cards to it instead of
+a nav button of its own. That means the page still scales from a bare LAN
+Asterisk box up to a full droplet with a trunk, without ever showing a
+control for something that isn't set up — you just don't have to remember
+which tab a given extension's settings live on.
 
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
   (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
   sortable per column (click a header to sort, click again to reverse).
-- **Asterisk Admin** — a native reimplementation of Easy Asterisk's own
-  vendored web admin (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s
-  device/category/room management), not a link or an iframe to that separate
-  process — one page, one login. Reads \`pjsip.conf\`/\`categories.conf\`/
-  \`rooms.conf\` directly (same formats the vendor's own
-  \`easy-asterisk --rebuild-dialplan\` CLI still generates the dialplan from);
-  writes go through \`docker exec ... tee\` (root, sudo-gated) instead of a
-  direct host-side file write, since Easy Asterisk's container writes these
-  as its own internal user and a host-side write would just be fighting that
-  ownership again on the next restart. Its nav button only appears once the
-  live \`/api/ea-status\` check confirms an Asterisk container is actually
-  reachable.
-  - **Devices** — add/rename/delete a SIP extension, reassign its category;
-    live registered/unregistered status per device.
+- **Extensions** — one row per extension, merged from \`pjsip.conf\` (which
+  always works) and, when the Easy Asterisk container is reachable, its own
+  device list. Columns: Ext, Name, then Category/Status/Transport if that
+  container is present, then **PSTN** + **Whitelist** if a trunk dialplan is
+  installed, then Messaging (always: internal SIP texting has no PSTN
+  dependency at all — no cost, no carrier, no DID).
+
+  Each extension has one whitelist and a mode saying which direction(s) it
+  applies to: **No PSTN**, **Unrestricted**, **Restrict outbound** (may only
+  dial the list, anyone can call in), **Restrict inbound** (may dial
+  anywhere, only the list can call in), or **Restrict both**. The whitelist
+  field greys out for the two modes that don't use one. Internal
+  extension-to-extension calling and ring groups are never gated by any of
+  this.
+
+  Name and Category are edited **in place**; every cell feeds one batched
+  save. Rows you've touched get a highlight and a left rail, a sticky bar
+  reports how many are edited, and **Save changes** commits just those rows —
+  routing each change to the endpoint it needs (rename/category through the
+  container; tier + approved numbers + messaging through the permissions
+  file, or the messaging-only endpoint when there's no trunk). **Discard**
+  reverts to what's on disk, and closing the page with edits pending warns
+  first. Delete keeps its own control per row, since it's destructive and
+  must not ride along with a batch.
+
+  Everything below the table — Categories, Rooms, Groups, Concurrent-call
+  caps, Personal numbers — is a collapsed section with an item count in its
+  header, so the tab opens on the extensions table rather than on six
+  expanded cards. Long explanations sit behind "what this means"
+  disclosures for the same reason. The table scrolls horizontally inside
+  its own card, so the page never scrolls sideways on a phone.
+  - **Extensions** — add/rename/delete a SIP extension, reassign its category;
+    live registered/unregistered status per device. This is a native
+    reimplementation of Easy Asterisk's own vendored web admin
+    (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s device/category/room
+    management), not a link or an iframe to that separate process — one page,
+    one login. Reads \`pjsip.conf\`/\`categories.conf\`/\`rooms.conf\` directly
+    (same formats the vendor's own \`easy-asterisk --rebuild-dialplan\` CLI
+    still generates the dialplan from); writes go through
+    \`docker exec ... tee\` (root, sudo-gated) instead of a direct host-side
+    file write, since Easy Asterisk's container writes these as its own
+    internal user and a host-side write would just be fighting that ownership
+    again on the next restart. Every write reloads PJSIP and/or rebuilds the
+    dialplan automatically, the same way the vendored admin's own actions do.
   - **Categories** — device profiles (an auto-answer default + description).
   - **Rooms** — ring groups/paging groups; add/remove members per room.
-  - Every write reloads PJSIP and/or rebuilds the dialplan automatically, the
-    same way the vendored admin's own actions do.
-- **Extensions** — always available, independent of any PSTN trunk. A
-  **Groups** card lets you name a set of extensions and bulk-enable/disable
-  messaging for all of them at once — a management convenience only, not a
-  runtime concept: applying an action just writes the same per-extension
-  \`pstn-permissions.conf\` key each member's own checkbox would, and
-  membership changes never retroactively affect anything already applied.
-  An **Internal SIP messaging** card (a checkbox chip per known extension,
-  independent of PSTN calling entirely — no cost, no carrier, no DID, no
-  dependency on a PSTN trunk being installed) sits below it.
-- **PSTN Trunk** — its nav button only appears once
-  \`services/pstn-trunk.sh\`'s dialplan is actually installed
-  (\`pstn-trunk-dialplan.conf\` present), so it never shows a
-  real-looking-but-unenforced editor. When present: the outbound/inbound
-  concurrent-call caps, and every known extension's permission tier
-  (internal / restricted / full) and, for restricted, its approved numbers —
-  all editable live, no Asterisk restart, no reinstall, sortable per column.
-  Also manages personal-number assignments (DID -> owner extension or
-  group), additive to the shared trunk DID. Writes directly to
-  \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
-  which the dialplan reads fresh on every call. The spend-cap kill-switch
-  and international-calling allow-list are deliberately **not** managed
-  here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
-  security-sensitive than what this tab already exposes.
+  - **Groups** — name a set of extensions and bulk-enable/disable messaging
+    for all of them at once. A management convenience only, not a runtime
+    concept: applying an action just writes the same per-extension
+    \`pstn-permissions.conf\` key each member's own checkbox would, and
+    membership changes never retroactively affect anything already applied.
+    (A group owning a personal DID *is* evaluated live against current
+    membership, though — see below.)
+  - **Concurrent-call caps** and **Personal numbers** appear only once
+    \`services/pstn-trunk.sh\`'s dialplan is actually installed
+    (\`pstn-trunk-dialplan.conf\` present), so the page never shows a
+    real-looking-but-unenforced editor. Caps are the outbound/inbound
+    concurrent-call limits; personal numbers map a DID to an owner extension
+    or group, additive to the shared trunk DID. Writes go directly to
+    \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
+    which the dialplan reads fresh on every call. The spend-cap kill-switch
+    and international-calling allow-list are deliberately **not** managed
+    here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
+    security-sensitive than what this tab already exposes.
 - **CrowdSec** — its nav button only appears once \`cscli\` is detected on
   this host. Current bans (\`cscli decisions list\`), a delete/unban button
   per entry, carrier/ASN + country columns (sortable per column), and
@@ -289,8 +321,8 @@ sudo journalctl -u security-dashboard -f
   \`systemctl restart crowdsec\`, and \`set-asn-exempt.sh\` (root:root, mode
   700, installed alongside \`app.py\` — the one thing that edits CrowdSec's
   Asterisk-scenario YAMLs, since \`secdash\` has no write access to those
-  root-owned files directly and shouldn't). Asterisk Admin (only added if an
-  Asterisk install is detected): \`docker exec -i <container> tee\` against
+  root-owned files directly and shouldn't). Extension/device management (only
+  added if an Asterisk install is detected): \`docker exec -i <container> tee\` against
   exactly \`pjsip.conf\`/\`categories.conf\`/\`rooms.conf\`, plus
   \`asterisk -rx "module reload res_pjsip.so"\`,
   \`asterisk -rx "pjsip show endpoints"\`, and
@@ -386,7 +418,7 @@ _secdash_grant_asterisk_access() {
     # fresh temp file then renames it into place) — only on the config dir,
     # not the log dir (no reason for secdash to ever create files there).
     # _ea_config_dir (categories.conf/rooms.conf) deliberately stays
-    # read-only — the native Asterisk Admin tab writes those through
+    # read-only — the Extensions tab writes those through
     # `docker exec ... tee` instead (see the ea_* functions), not a direct
     # host-side write, so there's no reason to grant it write access at all.
     if [ -n "$_config_dir" ] && [ -d "$_config_dir" ]; then
@@ -454,13 +486,13 @@ SDSVC
 _secdash_write_sudoers() {
     local _svc_user="$1" _ea_container="${2:-}"
     local _ea_lines=""
-    # Native Asterisk Admin tab (ea_* functions) — every write goes through
+    # Extensions tab device management (ea_* functions) — every write goes through
     # `docker exec -i <container> tee <exact path>` instead of a direct
     # host-side file write (see _secdash_grant_asterisk_access's comment on
     # why), plus the two Asterisk CLI calls needed after a change and the
     # live registration-status check. All seven are exact commands, no
     # wildcards, scoped to the one container actually installed on this box.
-    # The last line (docker restart) backs the PSTN Trunk tab's "Commit
+    # The last line (docker restart) backs the Extensions tab's "Commit
     # Changes" button — see restart_asterisk_container()'s comment for why
     # that exists (AST_CONFIG() live-reads not always picking up dashboard
     # edits without a full container restart).
@@ -1110,7 +1142,15 @@ def _write_ini_cp(path, header, cp):
 
 
 PERMISSIONS_HEADER = (
-    "; PSTN permission tiers - internal / restricted / full - PLUS two\n"
+    "; PSTN permissions. Each extension has ONE whitelist (allowed_numbers)\n"
+    "; and a 'restrict' mode saying which direction(s) it applies to:\n"
+    ";   full / restricted (both ways) / internal - the original tiers - plus\n"
+    ";   restricted-in (whitelist gates incoming only) and restricted-out\n"
+    ";   (whitelist gates outgoing only).\n"
+    "; restrict + allowed_numbers are the authored pair; tier_out/allowed_out\n"
+    "; and tier_in/allowed_in are DERIVED from them and are what the dialplan\n"
+    "; reads; 'tier' is a rollback mirror for a pre-split pstn-trunk.sh.\n"
+    "; PLUS two\n"
     "; independent per-extension axes: messaging (internal SIP MESSAGE\n"
     "; texting) and personal_did (outbound Caller-ID override; inbound\n"
     "; routing for personal DIDs lives in pstn-personal-dids.conf).\n"
@@ -1148,73 +1188,151 @@ def _read_permissions_cp():
     return cp
 
 
+RESTRICT_RE = re.compile(r"^(internal|restricted|full|restricted-in|restricted-out)$")
+
+
+def _derive_restrict(tier_out, tier_in):
+    """Infer the authored mode from the derived per-direction tiers.
+
+    Only needed for a config written before 'restrict' existed. Fails toward
+    the more restrictive reading: anything that isn't clearly open in a
+    direction is treated as restricted or none, never widened."""
+    if tier_out == "full" and tier_in == "full":
+        return "full"
+    if tier_out == "restricted" and tier_in == "restricted":
+        return "restricted"
+    if tier_out == "restricted":
+        return "restricted-out"
+    if tier_in == "restricted":
+        return "restricted-in"
+    return "internal"
+
+
 def get_all_permissions():
-    """{ext: {"tier": ..., "allowed_numbers": "num|num|...", "messaging":
-    bool}} for every extension with a non-default record. Extensions with
-    no section are implicitly "internal"/messaging-disabled — the
-    dialplan's AST_CONFIG() lookup treats a missing section/key as empty/
-    denied the same way, so there's nothing to return for them here; the
-    UI fills in the defaults for any known extension (from
-    list_extensions()) not present in this dict."""
+    """{ext: {"restrict", "allowed_numbers", "messaging"}} for every extension
+    with a non-default record.
+
+    Each extension has ONE whitelist and a mode saying which direction(s) it
+    applies to: the original internal / restricted / full, plus restricted-in
+    (whitelist gates incoming, dials anywhere) and restricted-out (whitelist
+    gates outgoing, anyone may call in). That authored pair is
+    what this returns and what the UI edits; the dialplan reads the derived
+    tier_out/allowed_out/tier_in/allowed_in that write_permission keeps in
+    step with it.
+
+    Older configs are read by deriving the mode from whatever they do have —
+    the per-direction tiers, or the pre-split single 'tier' — so the UI is
+    correct even on a box where services/pstn-trunk.sh hasn't been re-run.
+
+    Extensions with no section are implicitly no-PSTN/messaging-disabled: the
+    dialplan's AST_CONFIG() lookup treats a missing section as denied the same
+    way, so there's nothing to return for them; the UI fills in defaults for
+    any known extension not present here."""
     cp = _read_permissions_cp()
     result = {}
     for section in cp.sections():
         if not EXTEN_RE.match(section):
             continue
+        legacy_tier = cp.get(section, "tier", fallback="internal")
+        legacy_nums = cp.get(section, "allowed_numbers", fallback="")
+        restrict = cp.get(section, "restrict", fallback="")
+        if not RESTRICT_RE.match(restrict):
+            restrict = _derive_restrict(
+                cp.get(section, "tier_out", fallback=legacy_tier),
+                cp.get(section, "tier_in", fallback=legacy_tier),
+            )
+        numbers = legacy_nums
+        if not numbers:
+            numbers = (cp.get(section, "allowed_out", fallback="")
+                       or cp.get(section, "allowed_in", fallback=""))
         result[section] = {
-            "tier": cp.get(section, "tier", fallback="internal"),
-            "allowed_numbers": cp.get(section, "allowed_numbers", fallback=""),
+            "restrict": restrict,
+            "allowed_numbers": numbers,
             "messaging": cp.getboolean(section, "messaging", fallback=False),
         }
     return result
 
 
-def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
-    """Saves one extension's tier + (for restricted) approved-number list +
-    messaging flag in one action — messaging is an independent axis from
-    the calling tier (see pstn-trunk.sh's file-level comment: an extension
-    can be internal-tier for calling and still messaging-enabled, or vice
-    versa), so it's set/cleared regardless of which tier branch runs below.
-    Numbers are normalized to a pipe-separated list of 11-digit US numbers
-    (a bare 10-digit entry gets a leading "1" added, not dropped — see
-    _normalize_nanp_number) — pipe, not comma, because the dialplan uses
-    this value directly as a REGEX() alternation pattern (see
-    services/pstn-trunk.sh's file-level comment on why the untrusted call
-    data is always the string being tested, never interpolated into the
-    pattern side)."""
+# Which per-direction tiers each authored mode compiles down to. The dialplan
+# only ever reads the compiled keys; this table is the single place the
+# mapping is defined.
+# The first three are the original tiers, unchanged. restricted-in and
+# restricted-out are the halves: the whitelist gates one direction while the
+# other stays wide open.
+_RESTRICT_TIERS = {
+    "internal":       ("internal", "internal"),
+    "full":           ("full", "full"),
+    "restricted":     ("restricted", "restricted"),
+    "restricted-in":  ("full", "restricted"),
+    "restricted-out": ("restricted", "full"),
+}
+
+
+def _set_or_clear(cp, ext, key, value):
+    if value:
+        cp.set(ext, key, value)
+    elif cp.has_option(ext, key):
+        cp.remove_option(ext, key)
+
+
+def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
+    """Saves one extension's PSTN restriction mode, its single whitelist, and
+    its messaging flag in one action.
+
+    One list, not two: the whitelist is "the numbers this extension deals
+    with", and the mode says whether that constrains dialling out, being
+    called, or both. Modes are internal / restricted / full (the original
+    tiers) plus restricted-in and restricted-out.
+
+    Writes three layers, all derived from those two authored values:
+      restrict, allowed_numbers      what a human edits (and what this reads back)
+      tier_out/allowed_out,
+      tier_in/allowed_in             what the dialplan reads
+      tier, allowed_numbers          rollback mirror for a pre-split installer
+
+    Messaging is an independent axis (see pstn-trunk.sh's file-level comment:
+    an extension can have no PSTN at all and still be messaging-enabled, or
+    vice versa), so it's set/cleared regardless of the mode.
+
+    Numbers normalize to a pipe-separated list of 11-digit US numbers (a bare
+    10-digit entry gains a leading "1" rather than being dropped — see
+    _normalize_nanp_number). Pipe, not comma, because the dialplan uses the
+    value directly as a REGEX() alternation — see services/pstn-trunk.sh on
+    why untrusted call data is always the string being tested, never
+    interpolated into the pattern side."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     ext = str(ext).strip()
     if not EXTEN_RE.match(ext):
         return False, "Invalid extension"
-    if not TIER_RE.match(tier):
-        return False, "Invalid tier"
+    if not RESTRICT_RE.match(restrict or ""):
+        return False, "Invalid restriction mode"
 
     tokens = re.split(r"[,\s|]+", (numbers_raw or "").strip())
-    clean_numbers = [n for n in (_normalize_nanp_number(t) for t in tokens if t) if n]
-    numbers = "|".join(clean_numbers)
+    clean = [n for n in (_normalize_nanp_number(t) for t in tokens if t) if n]
+    numbers = "|".join(clean)
+    tier_out, tier_in = _RESTRICT_TIERS[restrict]
 
     cp = _read_permissions_cp()
-    if tier == "internal":
-        # Only drop the tier/allowed_numbers keys, NOT the whole section —
-        # an extension can independently have messaging=yes and/or a
-        # personal_did assigned, and those must survive a tier change back
-        # to internal. Confirmed live as a real bug: cp.remove_section(ext)
-        # here used to silently discard both whenever tier was set to
-        # internal.
+    if restrict == "internal":
+        # Clear the PSTN keys only, never the whole section — messaging and
+        # personal_did are independent and must survive. (Removing the
+        # section here was a real, confirmed bug in an earlier version.)
         if cp.has_section(ext):
-            if cp.has_option(ext, "tier"):
-                cp.remove_option(ext, "tier")
-            if cp.has_option(ext, "allowed_numbers"):
-                cp.remove_option(ext, "allowed_numbers")
+            for key in ("restrict", "allowed_numbers", "tier_out", "allowed_out",
+                        "tier_in", "allowed_in", "tier"):
+                if cp.has_option(ext, key):
+                    cp.remove_option(ext, key)
     else:
         if not cp.has_section(ext):
             cp.add_section(ext)
-        cp.set(ext, "tier", tier)
-        if tier == "restricted":
-            cp.set(ext, "allowed_numbers", numbers)
-        elif cp.has_option(ext, "allowed_numbers"):
-            cp.remove_option(ext, "allowed_numbers")
+        cp.set(ext, "restrict", restrict)
+        _set_or_clear(cp, ext, "allowed_numbers", numbers if restrict != "full" else "")
+        cp.set(ext, "tier_out", tier_out)
+        cp.set(ext, "tier_in", tier_in)
+        _set_or_clear(cp, ext, "allowed_out", numbers if tier_out == "restricted" else "")
+        _set_or_clear(cp, ext, "allowed_in", numbers if tier_in == "restricted" else "")
+        cp.set(ext, "tier", tier_out)
 
     if messaging_enabled:
         if not cp.has_section(ext):
@@ -1223,9 +1341,9 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
         cp.remove_option(ext, "messaging")
 
-    # Drop the section entirely once nothing (tier, numbers, messaging,
-    # personal_did) is left in it — only reached this way when tier is
-    # internal, messaging is off, and no personal_did was ever assigned.
+    # Drop the section entirely once nothing is left in it — only reachable
+    # when the mode is internal, messaging is off, and no personal_did was
+    # ever assigned.
     if cp.has_section(ext) and not cp.options(ext):
         cp.remove_section(ext)
 
@@ -1233,16 +1351,17 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     if not ok:
         return False, err
 
-    if tier == "restricted" and not clean_numbers:
-        return True, "Saved as restricted with an EMPTY approved list — no PSTN number can reach/be reached by it yet."
+    if restrict not in ("internal", "full") and not clean:
+        return True, ("Saved, but the whitelist is EMPTY — with this mode that means no PSTN "
+                      "number is permitted in the restricted direction yet.")
     return True, "Saved"
 
 
 def write_messaging(ext, enabled):
     """Sets/clears just the messaging flag for one extension, leaving any
     tier/allowed_numbers/personal_did untouched. This is the write path for
-    the standalone "Internal SIP messaging" card, which works whether or
-    not a PSTN trunk has ever been installed — messaging has no dependency
+    the Extensions tab's Messaging column when there's no PSTN trunk to
+    save alongside — messaging works whether or not one has been installed — messaging has no dependency
     on one (no cost, no carrier, no DID), unlike the calling-permissions
     table this dashboard otherwise gates behind pstn_installed(). Creates
     pstn-permissions.conf from scratch if it doesn't exist yet."""
@@ -1373,9 +1492,9 @@ def pstn_installed():
     """True only once services/pstn-trunk.sh has actually wired the dialplan
     in (pstn-trunk-dialplan.conf existing), not just because base Asterisk is
     present — pjsip.conf/extensions.conf exist either way, so extension names
-    alone can't tell us this. Without this check the tab would show a real
-    extension list and a default-but-unenforced 10/10 cap even when there is
-    no PSTN trunk at all."""
+    alone can't tell us this. Without this check the Extensions tab would
+    show tier columns and a default-but-unenforced 10/10 cap even when there
+    is no PSTN trunk at all."""
     if not ASTERISK_CONFIG_DIR:
         return False
     return os.path.isfile(os.path.join(ASTERISK_CONFIG_DIR, "pstn-trunk-dialplan.conf"))
@@ -1583,7 +1702,7 @@ def remove_personal_did(did):
     return True, "Removed %s" % did
 
 
-# ── Easy Asterisk Admin (native — devices, categories, rooms/ring-groups) ──
+# ── Easy Asterisk device management (devices, categories, rooms/ring-groups) ──
 # Full reimplementation of vendor/easy-asterisk/easy-asterisk-v0.10.0.sh's
 # vendored web admin (its own separate process, normally reached via its own
 # port/domain) as native code here instead — one tab, one process, no
@@ -1651,7 +1770,7 @@ def ea_rebuild_dialplan():
 
 def restart_asterisk_container():
     """Restarts the Easy Asterisk container - the "Commit Changes" button on
-    the PSTN Trunk tab. Confirmed live: dashboard writes to
+    the Extensions tab. Confirmed live: dashboard writes to
     pstn-permissions.conf/pstn-groups.conf/pstn-personal-dids.conf land on
     disk immediately (readable via a plain `cat` right after saving), but
     AST_CONFIG() in the dialplan sometimes kept returning a stale value
@@ -1662,7 +1781,7 @@ def restart_asterisk_container():
     throughout), but the restart reliably clears it, so this button exists
     instead of requiring every admin to rediscover "just restart it" the
     hard way. Uses the same ASTERISK_EA_CONTAINER/run_sudo mechanism as the
-    Easy Asterisk Admin tab's own docker exec calls - no new sudoers scope
+    Extensions tab's own docker exec calls - no new sudoers scope
     needed beyond the one line added for this."""
     if not ASTERISK_EA_CONTAINER:
         return False, "No Asterisk container detected on this box"
@@ -2233,259 +2352,519 @@ INDEX_HTML = """<!doctype html>
 <title>Security Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
-  header { padding: 1rem 1.5rem; background: #171a21; border-bottom: 1px solid #2a2e38; display: flex; align-items: center; gap: 1rem; }
-  header h1 { font-size: 1.1rem; margin: 0; flex: 1; }
-  nav button { background: none; border: none; color: #9aa4b2; padding: 0.6rem 1rem; cursor: pointer; font-size: 0.95rem; border-bottom: 2px solid transparent; }
-  nav button.active { color: #fff; border-bottom-color: #4f8cff; }
-  main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #23262f; }
-  th { color: #9aa4b2; font-weight: 600; }
+  /* ── Design tokens ────────────────────────────────────────────────────────
+     One scale for spacing/radius/colour so cards, tables and controls line up
+     without per-element nudging. Dark-only on purpose: this is an admin panel
+     that lives next to terminal windows. */
+  :root {
+    --bg: #0c0e13;
+    --surface: #14171f;
+    --surface-2: #1b1f29;
+    --line: #262b37;
+    --line-soft: #1e222c;
+    --text: #e8eaed;
+    --text-dim: #9aa4b2;
+    --text-faint: #6b7484;
+    --accent: #4f8cff;
+    --accent-dim: #1e3a6b;
+    --ok: #46c07a;
+    --warn: #f5b342;
+    --danger: #ff6b6b;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --sp-1: 0.25rem; --sp-2: 0.5rem; --sp-3: 0.75rem; --sp-4: 1rem; --sp-6: 1.5rem;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; background: var(--bg); color: var(--text);
+    font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Header / nav ─────────────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 30;
+    padding: 0 var(--sp-6); background: rgba(20,23,31,0.85);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: var(--sp-6); flex-wrap: wrap;
+  }
+  header h1 { font-size: 0.95rem; margin: 0; padding: var(--sp-4) 0; font-weight: 650; letter-spacing: -0.01em; }
+  nav { display: flex; gap: var(--sp-1); }
+  nav button {
+    background: none; border: none; color: var(--text-dim); font: inherit;
+    padding: var(--sp-4) var(--sp-3); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: var(--sp-6); max-width: 1180px; margin: 0 auto; }
+
+  /* ── Cards ────────────────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); margin-bottom: var(--sp-4);
+  }
+  .card > .card-head {
+    display: flex; align-items: center; gap: var(--sp-3);
+    padding: var(--sp-4) var(--sp-4) 0;
+  }
+  .card > .card-head h3 { font-size: 0.95rem; margin: 0; flex: 1; font-weight: 650; }
+  .card > .card-body { padding: var(--sp-4); }
+
+  /* Secondary sections collapse by default so the tab opens on the one table
+     that matters. <details> keeps this keyboard-accessible with no JS. */
+  details.card > summary {
+    padding: var(--sp-4); cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: var(--sp-2);
+    font-size: 0.95rem; font-weight: 650; user-select: none;
+  }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::before {
+    content: "›"; color: var(--text-faint); font-size: 1.2em; line-height: 1;
+    transition: transform 0.15s ease; display: inline-block;
+  }
+  details.card[open] > summary::before { transform: rotate(90deg); }
+  details.card > summary:hover { color: #fff; }
+  details.card > summary .count {
+    color: var(--text-faint); font-weight: 400; font-size: 0.85rem;
+  }
+  details.card > .card-body { padding: 0 var(--sp-4) var(--sp-4); }
+
+  /* Inline "what does this mean" disclosure — keeps the explanation one click
+     away instead of pushing every control below three paragraphs of prose. */
+  details.help { margin: 0 0 var(--sp-3); }
+  details.help > summary {
+    cursor: pointer; color: var(--text-dim); font-size: 0.85rem;
+    list-style: none; display: inline-flex; align-items: center; gap: var(--sp-1);
+  }
+  details.help > summary::-webkit-details-marker { display: none; }
+  details.help > summary::before { content: "ⓘ"; opacity: 0.7; }
+  details.help > summary:hover { color: var(--text); }
+  details.help[open] > summary { margin-bottom: var(--sp-2); }
+  details.help p { margin: 0 0 var(--sp-2); }
+
+  /* ── Tables ───────────────────────────────────────────────────────────── */
+  /* Wrapper, not the table, owns horizontal overflow — a nine-column table on
+     a phone scrolls inside the card instead of blowing out the page. */
+  .table-wrap { overflow-x: auto; margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  th, td { text-align: left; padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-soft); }
+  th {
+    color: var(--text-faint); font-weight: 600; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.015); }
   th.sortable { cursor: pointer; user-select: none; }
-  th.sortable:hover { color: #e6e6e6; }
-  th.sortable .arrow { opacity: 0.5; font-size: 0.75em; margin-left: 0.25em; }
-  .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
-  .chip-row label { white-space: nowrap; font-size: 0.85rem; color: #9aa4b2; }
-  .sev-Error { color: #ff6b6b; }
-  .sev-Warning { color: #f5b342; }
-  .sev-Informational { color: #7fbf7f; }
-  button.action { background: #2a2e38; color: #e6e6e6; border: 1px solid #3a3f4b; border-radius: 4px; padding: 0.3rem 0.7rem; cursor: pointer; }
-  button.action:hover { background: #3a3f4b; }
-  .card { background: #171a21; border: 1px solid #2a2e38; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-  input[type=text] { background: #0f1115; border: 1px solid #3a3f4b; color: #e6e6e6; padding: 0.4rem 0.6rem; border-radius: 4px; width: 100%; box-sizing: border-box; }
-  .row { display: flex; gap: 0.5rem; align-items: center; }
-  .muted { color: #9aa4b2; font-size: 0.85rem; }
-  a { color: #4f8cff; }
-  #msg { margin-top: 0.5rem; font-size: 0.85rem; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .arrow { opacity: 0.6; font-size: 0.85em; margin-left: var(--sp-1); }
+  td.actions { text-align: right; white-space: nowrap; }
+
+  /* A row with unsaved edits is marked, not just remembered — the old design
+     had eight Save buttons and no way to see which rows you'd touched. */
+  tr.dirty > td { background: rgba(79,140,255,0.07); }
+  tr.dirty > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+  /* ── Status pill ──────────────────────────────────────────────────────── */
+  .pill {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    font-size: 0.8rem; color: var(--text-dim); white-space: nowrap;
+  }
+  .pill::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-faint); flex: none;
+  }
+  .pill.online { color: var(--ok); }
+  .pill.online::before { background: var(--ok); box-shadow: 0 0 0 3px rgba(70,192,122,0.15); }
+  .pill.offline::before { background: var(--text-faint); }
+
+  /* ── Controls ─────────────────────────────────────────────────────────── */
+  input[type=text], select {
+    background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    padding: 0.35rem 0.55rem; border-radius: var(--radius-sm);
+    font: inherit; font-size: 0.875rem; max-width: 100%;
+  }
+  input[type=text]:focus, select:focus, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  input[type=text]:disabled { opacity: 0.4; cursor: not-allowed; }
+  input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+
+  /* Name cell reads as text until you focus it — editing in place beats a
+     Rename button that opens a browser prompt() dialog. */
+  input.inline-edit {
+    background: transparent; border: 1px solid transparent; color: var(--text);
+    padding: 0.2rem 0.35rem; width: 100%; min-width: 7rem;
+  }
+  input.inline-edit:hover:not(:disabled) { border-color: var(--line); }
+  input.inline-edit:focus { background: var(--bg); border-color: var(--accent); }
+  input.inline-edit:disabled { opacity: 1; }
+
+  button.action, button.primary, button.danger {
+    font: inherit; font-size: 0.85rem; border-radius: var(--radius-sm);
+    padding: 0.35rem 0.7rem; cursor: pointer; white-space: nowrap;
+    border: 1px solid var(--line); background: var(--surface-2); color: var(--text);
+  }
+  button.action:hover { background: #232834; border-color: #333a49; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #3f7bee; }
+  button.danger { color: var(--danger); }
+  button.danger:hover { background: rgba(255,107,107,0.1); border-color: rgba(255,107,107,0.4); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.icon {
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    padding: 0.2rem 0.4rem; border-radius: var(--radius-sm); font-size: 1rem; line-height: 1;
+  }
+  button.icon:hover { color: var(--danger); background: rgba(255,107,107,0.1); }
+
+  .row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); }
+  .chip-row label { white-space: nowrap; font-size: 0.85rem; color: var(--text-dim); display: inline-flex; align-items: center; gap: var(--sp-1); }
+
+  /* Add-extension form starts hidden — the table is what you came for. */
+  .add-form {
+    display: none; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
+    padding: var(--sp-3); margin-bottom: var(--sp-3);
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  }
+  .add-form.open { display: flex; }
+
+  /* ── Save bar ─────────────────────────────────────────────────────────── */
+  /* One commit point for the whole table, pinned to the bottom of the viewport
+     so it stays reachable however far you've scrolled. */
+  #ext-savebar {
+    position: sticky; bottom: var(--sp-4); z-index: 20;
+    display: none; align-items: center; gap: var(--sp-3);
+    margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+    background: var(--surface-2); border: 1px solid var(--accent-dim);
+    border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  #ext-savebar.show { display: flex; }
+  #ext-savebar .grow { flex: 1; font-size: 0.875rem; }
+
+  /* ── Toasts ───────────────────────────────────────────────────────────── */
+  #toasts {
+    position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 60;
+    display: flex; flex-direction: column; gap: var(--sp-2); max-width: min(28rem, calc(100vw - 2rem));
+  }
+  .toast {
+    background: var(--surface-2); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm); padding: var(--sp-2) var(--sp-3);
+    font-size: 0.85rem; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    animation: toast-in 0.15s ease;
+  }
+  .toast.err { border-left-color: var(--danger); }
+  .toast.ok { border-left-color: var(--ok); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* The one-time device password must not auto-dismiss like a toast does. */
+  .callout {
+    display: none; align-items: flex-start; gap: var(--sp-3);
+    margin-bottom: var(--sp-3); padding: var(--sp-3);
+    background: rgba(70,192,122,0.08); border: 1px solid rgba(70,192,122,0.35);
+    border-radius: var(--radius-sm); font-size: 0.875rem;
+  }
+  .callout.show { display: flex; }
+  .callout code { background: rgba(0,0,0,0.35); padding: 0.1rem 0.35rem; border-radius: 4px; user-select: all; }
+
+  /* ── Misc ─────────────────────────────────────────────────────────────── */
+  .banner { border-left: 3px solid var(--warn); }
+  .sev-Error { color: var(--danger); }
+  .sev-Warning { color: var(--warn); }
+  .sev-Informational { color: var(--ok); }
+  .muted { color: var(--text-dim); font-size: 0.85rem; }
+  .empty { color: var(--text-faint); font-style: italic; }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+  #msg { margin-top: var(--sp-2); font-size: 0.85rem; }
+
+  /* Capability gating for the Extensions tab. Everything that needs the Easy
+     Asterisk container (device/category/room writes) is .ea-only; everything
+     that needs a PSTN trunk dialplan is .pstn-only. Both classes start ON the
+     body so nothing flashes before /api/ea-status and /api/pstn-status answer,
+     and they're removed once those confirm. Marking cells rather than juggling
+     column indices keeps the one extensions table honest as columns come and
+     go. */
+  body.no-ea .ea-only { display: none !important; }
+  body.no-pstn .pstn-only { display: none !important; }
+
+  @media (max-width: 640px) {
+    main { padding: var(--sp-3); }
+    header { padding: 0 var(--sp-3); gap: var(--sp-3); }
+    .table-wrap { margin: 0 calc(-1 * var(--sp-3)); padding: 0 var(--sp-3); }
+  }
 </style>
 </head>
-<body>
+<body class="no-ea no-pstn">
 <header>
   <h1>Security Dashboard</h1>
   <nav>
     <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" id="asterisk-tab-btn" data-tab="asterisk" style="display:none">Asterisk Admin</button>
     <button class="tab-btn" data-tab="extensions">Extensions</button>
-    <button class="tab-btn" id="pstn-tab-btn" data-tab="pstn" style="display:none">PSTN Trunk</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
 <main>
   <div id="tab-security">
     <div class="card">
-      <p class="muted">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
-      <table id="sec-table"><thead><tr>
-        <th class="sortable" data-sort="timestamp">Time</th>
-        <th class="sortable" data-sort="event">Event</th>
-        <th class="sortable" data-sort="account">Account</th>
-        <th class="sortable" data-sort="remote">Remote</th>
-        <th class="sortable" data-sort="severity">Severity</th>
-      </tr></thead><tbody></tbody></table>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
+        <div class="table-wrap">
+          <table id="sec-table"><thead><tr>
+            <th class="sortable" data-sort="timestamp">Time</th>
+            <th class="sortable" data-sort="event">Event</th>
+            <th class="sortable" data-sort="account">Account</th>
+            <th class="sortable" data-sort="remote">Remote</th>
+            <th class="sortable" data-sort="severity">Severity</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
     </div>
   </div>
   <div id="tab-crowdsec" style="display:none">
     <div class="card">
-      <h3 style="margin-top:0">Active bans</h3>
-      <table id="dec-table"><thead><tr>
-        <th class="sortable" data-sort="value">IP/Range</th>
-        <th class="sortable" data-sort="scenario">Scenario</th>
-        <th class="sortable" data-sort="carrier">Network / Carrier</th>
-        <th class="sortable" data-sort="country">Country</th>
-        <th class="sortable" data-sort="duration">Duration</th>
-        <th class="sortable" data-sort="origin">Origin</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
+      <div class="card-head"><h3>Active bans</h3></div>
+      <div class="card-body">
+        <div class="table-wrap">
+          <table id="dec-table"><thead><tr>
+            <th class="sortable" data-sort="value">IP/Range</th>
+            <th class="sortable" data-sort="scenario">Scenario</th>
+            <th class="sortable" data-sort="carrier">Network / Carrier</th>
+            <th class="sortable" data-sort="country">Country</th>
+            <th class="sortable" data-sort="duration">Duration</th>
+            <th class="sortable" data-sort="origin">Origin</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Asterisk brute-force ASN exemptions</h3>
-      <p class="muted">Carrier ASNs exempted from the Asterisk brute-force scenarios only — SSH/web/geo protection is unaffected. See CLAUDE.md / services/crowdsec.sh for background.</p>
-      <div class="row">
-        <input type="text" id="asn-input" placeholder="e.g. 21928, 14593">
-        <button class="action" id="asn-save">Save</button>
+      <div class="card-head"><h3>Asterisk brute-force ASN exemptions</h3></div>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Carrier ASNs exempted from the Asterisk brute-force scenarios only — SSH/web/geo protection is unaffected. See CLAUDE.md / services/crowdsec.sh for background.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="asn-input" placeholder="e.g. 21928, 14593" style="width:16rem">
+          <button class="action" id="asn-save">Save</button>
+        </div>
+        <div class="table-wrap">
+          <table id="asn-table"><thead><tr><th>ASN</th><th>Carrier</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div id="msg"></div>
       </div>
-      <table id="asn-table" style="margin-top:0.75rem"><thead><tr><th>ASN</th><th>Carrier</th><th></th></tr></thead><tbody></tbody></table>
-      <div id="msg"></div>
     </div>
   </div>
   <div id="tab-extensions" style="display:none">
-    <div class="card">
-      <h3 style="margin-top:0">Groups</h3>
-      <p class="muted">
-        Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own checkbox above would, one time — it isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied.
-      </p>
-      <div class="row">
-        <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
-        <button class="action" id="grp-save">Save group</button>
+    <div class="card pstn-only banner" id="pstn-restart-banner" style="display:none">
+      <div class="card-body">
+        <b>Changes may not be live yet.</b>
+        <p class="muted" style="margin:var(--sp-1) 0 var(--sp-2)">
+          Edits are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
+        </p>
+        <button class="action" id="pstn-restart-btn">Commit changes (restart Asterisk)</button>
+        <span id="pstn-restart-msg" class="muted" style="margin-left:var(--sp-2)"></span>
       </div>
-      <div id="grp-members" class="row" style="flex-wrap:wrap;margin-top:0.5rem"></div>
-      <table id="grp-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="name">Group</th>
-        <th class="sortable" data-sort="members">Members</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
+
     <div class="card">
-      <h3 style="margin-top:0">Internal SIP messaging</h3>
-      <p class="muted">
-        Asterisk's native SIP texting between extensions — no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk being installed at all. Enforced live by a dedicated dialplan context (see services/asterisk-digital-ocean.sh's README) — install/rerun that service to pick up the dialplan wiring if this box predates it.
-      </p>
-      <div id="msg-chips" class="chip-row"></div>
-      <button class="action" id="msg-save-all" style="margin-top:0.75rem">Save changes</button>
-      <div id="msg-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-  </div>
-  <div id="tab-pstn" style="display:none">
-    <div class="card" id="pstn-restart-banner" style="display:none; border-left:4px solid #d9822b">
-      <b>Unsaved changes may not be live yet.</b>
-      <p class="muted" style="margin:0.25rem 0 0.5rem">
-        Edits here are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
-      </p>
-      <button class="action" id="pstn-restart-btn">Commit Changes (Restart Asterisk)</button>
-      <span id="pstn-restart-msg" class="muted" style="margin-left:0.5rem"></span>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Concurrent-call caps</h3>
-      <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes are usually live on the next call; if a call doesn't reflect a recent change, use "Commit Changes" below.</p>
-      <div class="row">
-        <label class="muted" style="white-space:nowrap">Max outbound<br><input type="text" id="limit-out" style="width:5rem"></label>
-        <label class="muted" style="white-space:nowrap">Max inbound<br><input type="text" id="limit-in" style="width:5rem"></label>
-        <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
+      <div class="card-head">
+        <h3>Extensions <span class="count muted" id="ext-count"></span></h3>
+        <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
       </div>
-      <div id="limits-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">PSTN permission tiers</h3>
-      <p class="muted">
-        <b>internal</b> — no PSTN, can still call/receive other extensions and internal ring groups.
-        <b>restricted</b> — internal, plus only pre-approved US numbers.
-        <b>full</b> — internal, plus any US number.
-        Changes are usually live on the next call; if one doesn't seem to be taking effect, use "Commit Changes" below.
-      </p>
-      <p class="muted">
-        <b>Messaging</b> — the same internal SIP texting flag as the Extensions tab's checkboxes, independent of the calling tier; this column is just a convenience for setting it alongside tier/numbers on one row. Enforced live by a dedicated dialplan context — see services/asterisk-digital-ocean.sh's README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation.
-      </p>
-      <table id="pstn-table"><thead><tr>
-        <th class="sortable" data-sort="ext">Ext</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th class="sortable" data-sort="tier">Tier</th>
-        <th>Approved numbers (restricted only)</th>
-        <th class="sortable" data-sort="messaging">Messaging</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="pstn-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Personal numbers</h3>
-      <p class="muted">
-        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call; a group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless. Reassigning a DID's owner has been confirmed to sometimes need "Commit Changes" (below) before Asterisk actually uses the new owner.
-      </p>
-      <div class="row">
-        <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits, no leading 1)" style="width:12rem">
-        <select id="pd-owner"></select>
-        <button class="action" id="pd-save">Assign</button>
+      <div class="card-body">
+        <div class="callout" id="ext-password-callout">
+          <div class="grow" id="ext-password-text" style="flex:1"></div>
+          <button class="icon" id="ext-password-dismiss" title="Dismiss">&times;</button>
+        </div>
+
+        <div class="add-form ea-only" id="ext-add-form">
+          <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:11rem">
+          <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:9rem">
+          <select id="ea-dev-category"></select>
+          <select id="ea-dev-conn">
+            <option value="lan">LAN (UDP)</option>
+            <option value="fqdn">Remote/FQDN (TLS)</option>
+          </select>
+          <select id="ea-dev-aa">
+            <option value="">Auto-answer: category default</option>
+            <option value="yes">Auto-answer: yes</option>
+            <option value="no">Auto-answer: no</option>
+          </select>
+          <button class="primary" id="ea-dev-save">Add</button>
+          <button class="action" id="ext-add-cancel">Cancel</button>
+        </div>
+
+        <details class="help">
+          <summary>What these columns mean</summary>
+          <p class="muted"><b>Name</b> and <b>Category</b> are editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card.</p>
+            <p class="muted pstn-only"><b>PSTN</b> sets how the outside phone network reaches this extension, and the <b>Whitelist</b> beside it is the one list of numbers that mode applies to:</p>
+          <ul class="muted pstn-only" style="margin:0 0 var(--sp-2); padding-left:1.2rem">
+            <li><b>full</b> — dial anyone, anyone can call. No whitelist.</li>
+            <li><b>restricted (both ways)</b> — the whitelist applies to outgoing <i>and</i> incoming.</li>
+            <li><b>restricted incoming</b> — dials anywhere; only whitelisted numbers can call in.</li>
+            <li><b>restricted outgoing</b> — anyone can call in; may only dial the whitelist.</li>
+            <li><b>internal</b> — no PSTN at all, either direction.</li>
+          </ul>
+          <p class="muted pstn-only">Internal extension-to-extension calling and ring groups are never gated by any of this. Changes are usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
+          <p class="muted"><b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README, including its caveat that the sender-extraction logic still needs real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code>.</p>
+        </details>
+
+        <div class="table-wrap">
+          <table id="ext-table"><thead><tr>
+            <th class="sortable" data-sort="ext">Ext</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th class="ea-only">Category</th>
+            <th class="sortable ea-only" data-sort="status">Status</th>
+            <th class="ea-only">Transport</th>
+            <th class="sortable pstn-only" data-sort="restrict">PSTN</th>
+            <th class="pstn-only">Whitelist</th>
+            <th class="sortable" data-sort="messaging">Messaging</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+
+        <div id="ext-savebar">
+          <span class="grow" id="ext-dirty-label"></span>
+          <button class="action" id="ext-discard">Discard</button>
+          <button class="primary" id="ext-save-all">Save changes</button>
+        </div>
       </div>
-      <table id="pd-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="did">DID</th>
-        <th class="sortable" data-sort="owner">Owner</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-  </div>
-  <div id="tab-asterisk" style="display:none">
-    <div class="card">
-      <h3 style="margin-top:0">Devices</h3>
-      <p class="muted">
-        SIP extensions/endpoints. Adding one generates a random password and reloads PJSIP + rebuilds the dialplan automatically — the password is shown once here, save it before it scrolls away.
-      </p>
-      <div class="row" style="flex-wrap:wrap">
-        <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:10rem">
-        <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:8rem">
-        <select id="ea-dev-category"></select>
-        <select id="ea-dev-conn">
-          <option value="lan">LAN (UDP)</option>
-          <option value="fqdn">Remote/FQDN (TLS)</option>
-        </select>
-        <select id="ea-dev-aa">
-          <option value="">Auto-answer: category default</option>
-          <option value="yes">Auto-answer: yes</option>
-          <option value="no">Auto-answer: no</option>
-        </select>
-        <button class="action" id="ea-dev-save">Add device</button>
+
+    <details class="card ea-only" id="card-categories">
+      <summary>Categories <span class="count" id="cat-count"></span></summary>
+      <div class="card-body">
+        <p class="muted">Device profiles — an auto-answer default and a description, assignable to any extension above.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase)" style="width:12rem">
+          <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
+          <select id="ea-cat-aa">
+            <option value="">Auto-answer default: no</option>
+            <option value="yes">Auto-answer default: yes</option>
+          </select>
+          <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
+          <button class="action" id="ea-cat-save">Add category</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ea-cat-table"><thead><tr>
+            <th class="sortable" data-sort="id">ID</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th>Auto-answer</th>
+            <th>Description</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <table id="ea-dev-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="extension">Ext</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th>Category</th>
-        <th class="sortable" data-sort="status">Status</th>
-        <th>Transport</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ea-dev-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Categories</h3>
-      <p class="muted">Device profiles — an auto-answer default and a description, assignable to any device above.</p>
-      <div class="row" style="flex-wrap:wrap">
-        <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase, no spaces)" style="width:12rem">
-        <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
-        <select id="ea-cat-aa">
-          <option value="">Auto-answer default: no</option>
-          <option value="yes">Auto-answer default: yes</option>
-        </select>
-        <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
-        <button class="action" id="ea-cat-save">Add category</button>
+    </details>
+
+    <details class="card ea-only" id="card-rooms">
+      <summary>Rooms (ring groups) <span class="count" id="room-count"></span></summary>
+      <div class="card-body">
+        <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
+          <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
+          <select id="ea-room-type">
+            <option value="ring">Ring (simultaneous)</option>
+            <option value="page">Page (intercom)</option>
+          </select>
+          <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:7rem">
+          <button class="action" id="ea-room-save">Add room</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ea-room-table"><thead><tr>
+            <th class="sortable" data-sort="extension">Ext</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th>Members</th>
+            <th>Timeout</th>
+            <th>Type</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <table id="ea-cat-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="id">ID</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th>Auto-answer</th>
-        <th>Description</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ea-cat-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Rooms (ring groups)</h3>
-      <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
-      <div class="row" style="flex-wrap:wrap">
-        <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:8rem">
-        <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
-        <select id="ea-room-type">
-          <option value="ring">Ring (simultaneous)</option>
-          <option value="page">Page (intercom)</option>
-        </select>
-        <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:6rem">
-        <button class="action" id="ea-room-save">Add room</button>
+    </details>
+
+    <details class="card" id="card-groups">
+      <summary>Groups <span class="count" id="grp-count"></span></summary>
+      <div class="card-body">
+        <details class="help">
+          <summary>What groups do</summary>
+          <p class="muted">Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own Messaging checkbox above would, one time. It isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied. A group can also own a personal number below, which <i>is</i> evaluated live against current membership on every call.</p>
+        </details>
+        <div class="row" style="margin-bottom:var(--sp-2)">
+          <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
+          <button class="action" id="grp-save">Save group</button>
+        </div>
+        <div id="grp-members" class="chip-row" style="margin-bottom:var(--sp-3)"></div>
+        <div class="table-wrap">
+          <table id="grp-table"><thead><tr>
+            <th class="sortable" data-sort="name">Group</th>
+            <th class="sortable" data-sort="members">Members</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <table id="ea-room-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="extension">Ext</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th>Members</th>
-        <th>Timeout</th>
-        <th>Type</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ea-room-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
+    </details>
+
+    <details class="card pstn-only" id="card-limits">
+      <summary>Concurrent-call caps</summary>
+      <div class="card-body">
+        <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Usually live on the next call; if a call doesn't reflect a recent change, use "Commit changes" at the top.</p>
+        <div class="row">
+          <label class="muted">Max outbound<br><input type="text" id="limit-out" style="width:5.5rem"></label>
+          <label class="muted">Max inbound<br><input type="text" id="limit-in" style="width:5.5rem"></label>
+          <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="card pstn-only" id="card-dids">
+      <summary>Personal numbers <span class="count" id="pd-count"></span></summary>
+      <div class="card-body">
+        <details class="help">
+          <summary>How personal numbers route</summary>
+          <p class="muted">Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID.</p>
+          <p class="muted">You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call. A group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.</p>
+          <p class="muted">Reassigning a DID's owner has been confirmed to sometimes need "Commit changes" (at the top) before Asterisk actually uses the new owner.</p>
+        </details>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits)" style="width:14rem">
+          <select id="pd-owner"></select>
+          <button class="action" id="pd-save">Assign</button>
+        </div>
+        <div class="table-wrap">
+          <table id="pd-table"><thead><tr>
+            <th class="sortable" data-sort="did">DID</th>
+            <th class="sortable" data-sort="owner">Owner</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </details>
   </div>
 </main>
+<div id="toasts"></div>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "asterisk", "extensions", "pstn", "crowdsec"];
+const TABS = ["security", "extensions", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
-    if (btn.dataset.tab === "extensions") { loadMessaging(); loadGroups(); }
-    if (btn.dataset.tab === "pstn") { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
-    if (btn.dataset.tab === "asterisk") { loadEaAll(); }
+    if (btn.dataset.tab === "extensions") refreshExtensionsTab();
   });
 });
+
+// What this box can actually do, resolved once per page load. Everything the
+// Extensions tab shows is gated on these two rather than on separate nav
+// buttons: the extension list itself only needs pjsip.conf, so it's always
+// worth showing, while device/category/room editing needs a reachable Easy
+// Asterisk container and tier/DID editing needs a PSTN trunk dialplan. One
+// tab that grows columns and cards as those appear beats three tabs that
+// each list the same extensions from a different angle.
+let eaInstalled = false, pstnInstalled = false;
 
 let lastSecurityEvents = [];
 let secSort = { key: null, dir: 1 };
@@ -2661,42 +3040,41 @@ async function banAsn(asn) {
   loadDecisions();
 }
 
-// Gates the tab button itself (not just its content) — called once at page
-// load, same as loadCrowdsecStatus() below, so the nav never shows a tab for
-// something that isn't actually set up on this box.
-async function loadPstnStatus() {
-  const res = await fetch("/api/pstn-status");
-  const data = await res.json();
-  document.getElementById("pstn-tab-btn").style.display = data.installed ? "" : "none";
-  if (data.installed) { loadPstnLimits(); loadPstnPermissions(); loadPersonalDids(); }
-}
-
+// CrowdSec is the one thing still worth its own tab — it's about banned IPs,
+// not the phone system — so its nav button is still gated the old way.
 async function loadCrowdsecStatus() {
   const res = await fetch("/api/crowdsec-status");
   const data = await res.json();
   document.getElementById("crowdsec-tab-btn").style.display = data.installed ? "" : "none";
 }
 
-// ── Easy Asterisk Admin (native — devices/categories/rooms) ────────────────
+// ── Extensions tab (extensions + categories + rooms + groups + trunk) ──────
 let eaDevices = [], eaCategories = [], eaRooms = [], eaStatusMap = {};
-let eaDevSort = { key: null, dir: 1 };
 let eaCatSort = { key: null, dir: 1 };
 let eaRoomSort = { key: null, dir: 1 };
 
-async function loadEaStatus() {
-  const res = await fetch("/api/ea-status");
-  const data = await res.json();
-  document.getElementById("asterisk-tab-btn").style.display = data.installed ? "" : "none";
-  if (data.installed) loadEaAll();
+async function initExtensionsTab() {
+  const [ea, pstn] = await Promise.all([
+    fetch("/api/ea-status").then(r => r.json()),
+    fetch("/api/pstn-status").then(r => r.json()),
+  ]);
+  eaInstalled = !!ea.installed;
+  pstnInstalled = !!pstn.installed;
+  document.body.classList.toggle("no-ea", !eaInstalled);
+  document.body.classList.toggle("no-pstn", !pstnInstalled);
+  await refreshExtensionsTab();
 }
 
-// Sequenced (not parallel) — device rows render a category <select> that
-// needs eaCategories already populated, and room rows render a member-add
-// picker that needs eaDevices already populated.
-async function loadEaAll() {
-  await loadEaCategories();
-  await loadEaDevices();
-  await loadEaRooms();
+// Sequenced (not parallel) — extension rows render a category <select> that
+// needs eaCategories already populated, room rows render a member-add picker
+// that needs eaDevices (populated by loadExtensions), and the personal-DID
+// owner picker needs both extensions and groups.
+async function refreshExtensionsTab() {
+  if (eaInstalled) await loadEaCategories();
+  await loadExtensions();
+  if (eaInstalled) await loadEaRooms();
+  await loadGroups();
+  if (pstnInstalled) { await loadPstnLimits(); await loadPersonalDids(); }
 }
 
 function renderEaDeviceCategoryOptions() {
@@ -2711,6 +3089,7 @@ async function loadEaCategories() {
   eaCategories = data.categories || [];
   renderEaCategories();
   renderEaDeviceCategoryOptions();
+  if (extRows.length) renderExtensions();
 }
 
 function eaCatSortValue(c, key) { return (c[key] || "").toString().toLowerCase(); }
@@ -2730,17 +3109,18 @@ function renderEaCategories() {
     const th = document.querySelector(`#ea-cat-table th[data-sort="${eaCatSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaCatSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("cat-count", eaCategories.length);
   const tbody = document.querySelector("#ea-cat-table tbody");
   tbody.innerHTML = rows.map(c => `<tr data-id="${esc(c.id)}">
     <td>${esc(c.id)}</td>
     <td>${esc(c.name)}</td>
     <td>${c.auto_answer === "yes" ? "yes" : (c.auto_answer === "no" ? "no" : "—")}</td>
     <td>${esc(c.description)}</td>
-    <td>
+    <td class="actions">
       <button class="action" onclick="renameEaCategory('${esc(c.id)}')">Rename</button>
-      <button class="action" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
+      <button class="action danger" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
     </td>
-  </tr>`).join("") || '<tr><td colspan=5 class=muted>No categories yet.</td></tr>';
+  </tr>`).join("") || '<tr><td colspan=5 class=empty>No categories yet.</td></tr>';
 }
 
 document.querySelectorAll("#ea-cat-table th.sortable").forEach(th => {
@@ -2762,7 +3142,7 @@ document.getElementById("ea-cat-save").addEventListener("click", async () => {
     body: JSON.stringify({id, name, auto_answer, description}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Category added" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("ea-cat-id").value = "";
     document.getElementById("ea-cat-name").value = "";
@@ -2780,7 +3160,7 @@ async function renameEaCategory(id) {
     body: JSON.stringify({id, name: name.trim()}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  toast(data.message || (data.ok ? "Category renamed" : "Failed"), data.ok ? "ok" : "err");
   loadEaCategories();
 }
 
@@ -2791,123 +3171,338 @@ async function deleteEaCategory(id) {
     body: JSON.stringify({id}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  toast(data.message || (data.ok ? "Category deleted" : "Failed"), data.ok ? "ok" : "err");
   loadEaCategories();
 }
 
-async function loadEaDevices() {
-  const res = await fetch("/api/ea-devices");
-  const data = await res.json();
-  eaDevices = data.devices || [];
-  eaStatusMap = data.status || {};
-  renderEaDevices();
+// ── Toasts ────────────────────────────────────────────────────────────────
+// Transient feedback that doesn't push layout around. Anything the user must
+// keep (a one-time device password) uses the persistent callout instead.
+function toast(text, kind) {
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.textContent = text;
+  document.getElementById("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 5000);
 }
 
-function eaDevSortValue(d, key) {
-  if (key === "extension") return parseInt(d.extension, 10);
-  if (key === "status") return eaStatusMap[d.extension] || "";
-  return (d[key] || "").toString().toLowerCase();
+// One row per extension, merged from two sources that used to drive two
+// separate tables (plus a third card of checkboxes): pjsip.conf via
+// /api/pstn-permissions — which always works, with or without the Easy
+// Asterisk container — and /api/ea-devices for category/status/transport.
+// Keyed by extension number, so an extension known to only one of them still
+// gets a row rather than silently vanishing.
+async function loadExtensions() {
+  const permData = await fetch("/api/pstn-permissions").then(r => r.json());
+  const byExt = new Map();
+  (permData.extensions || []).forEach(e => byExt.set(e.ext, {
+    ext: e.ext, name: e.name,
+    restrict: e.restrict, allowed_numbers: e.allowed_numbers,
+    messaging: e.messaging, ea: false, category: "", status: "", transport: "", encryption: "",
+  }));
+
+  if (eaInstalled) {
+    const devData = await fetch("/api/ea-devices").then(r => r.json());
+    eaDevices = devData.devices || [];
+    eaStatusMap = devData.status || {};
+    eaDevices.forEach(d => {
+      const row = byExt.get(d.extension) || {
+        ext: d.extension, name: d.name,
+        restrict: "none", allowed_numbers: "",
+        messaging: false,
+      };
+      row.ea = true;
+      row.name = row.name || d.name;
+      row.category = d.category;
+      row.transport = d.transport;
+      row.encryption = d.encryption;
+      row.status = eaStatusMap[d.extension] || "unknown";
+      byExt.set(d.extension, row);
+    });
+  }
+
+  extRows = Array.from(byExt.values());
+  renderExtensions();
+  renderGroupMemberPickers();
+  renderPersonalDidOwnerOptions();
 }
 
-function renderEaDevices() {
-  let rows = eaDevices.slice();
-  if (eaDevSort.key) {
+let extRows = [];
+let extSort = { key: null, dir: 1 };
+
+// Sort by how much reach the mode grants, not alphabetically — "full" would
+// otherwise land between "internal" and "restricted".
+const RESTRICT_ORDER = {
+  "internal": 0, "restricted": 1, "restricted-in": 2, "restricted-out": 3, "full": 4,
+};
+// Order as offered in the dropdown: the original three tiers still read the
+// same, with the two half-restrictions slotted in between.
+const RESTRICT_LABELS = [
+  ["full", "full"],
+  ["restricted", "restricted (both ways)"],
+  ["restricted-in", "restricted incoming"],
+  ["restricted-out", "restricted outgoing"],
+  ["internal", "internal"],
+];
+
+function extSortValue(e, key) {
+  if (key === "ext") return parseInt(e.ext, 10);
+  if (key === "messaging") return e.messaging ? 1 : 0;
+  if (key === "restrict") return RESTRICT_ORDER[e[key]] ?? -1;
+  return (e[key] || "").toString().toLowerCase();
+}
+
+function setCount(id, n) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = n ? "(" + n + ")" : "";
+}
+
+function restrictSelect(value) {
+  return '<select class="ext-restrict">' +
+    RESTRICT_LABELS.map(([v, label]) =>
+      `<option value="${v}" ${value === v ? "selected" : ""}>${esc(label)}</option>`).join("") +
+    "</select>";
+}
+
+// The whitelist is meaningless for "no PSTN" and "unrestricted".
+function restrictUsesList(mode) { return mode.indexOf("restricted") === 0; }
+
+function renderExtensions() {
+  const tbody = document.querySelector("#ext-table tbody");
+  setCount("ext-count", extRows.length);
+  if (!extRows.length) {
+    tbody.innerHTML = '<tr><td colspan=9 class=empty>No extensions found — no Asterisk install detected, or pjsip.conf has no devices yet.</td></tr>';
+    updateDirtyState();
+    return;
+  }
+  let rows = extRows.slice();
+  if (extSort.key) {
     rows.sort((a, b) => {
-      const av = eaDevSortValue(a, eaDevSort.key), bv = eaDevSortValue(b, eaDevSort.key);
-      if (av < bv) return -1 * eaDevSort.dir;
-      if (av > bv) return 1 * eaDevSort.dir;
+      const av = extSortValue(a, extSort.key), bv = extSortValue(b, extSort.key);
+      if (av < bv) return -1 * extSort.dir;
+      if (av > bv) return 1 * extSort.dir;
       return 0;
     });
   }
-  document.querySelectorAll("#ea-dev-table th.sortable .arrow").forEach(a => a.remove());
-  if (eaDevSort.key) {
-    const th = document.querySelector(`#ea-dev-table th[data-sort="${eaDevSort.key}"]`);
-    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaDevSort.dir === 1 ? "▲" : "▼"}</span>`);
+  document.querySelectorAll("#ext-table th.sortable .arrow").forEach(a => a.remove());
+  if (extSort.key) {
+    const th = document.querySelector(`#ext-table th[data-sort="${extSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${extSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
-  const tbody = document.querySelector("#ea-dev-table tbody");
-  tbody.innerHTML = rows.map(d => {
-    const status = eaStatusMap[d.extension] || "unknown";
+
+  tbody.innerHTML = rows.map(e => {
+    const status = e.status || "unknown";
     const catOptions = eaCategories.map(c =>
-      `<option value="${esc(c.id)}" ${c.id === d.category ? "selected" : ""}>${esc(c.name)}</option>`
-    ).join("") || `<option value="${esc(d.category)}" selected>${esc(d.category)}</option>`;
-    return `<tr data-ext="${esc(d.extension)}">
-      <td>${esc(d.extension)}</td>
-      <td>${esc(d.name)}</td>
-      <td><select onchange="changeEaDeviceCategory('${esc(d.extension)}', this.value)">${catOptions}</select></td>
-      <td class="${status === "online" ? "sev-Informational" : "muted"}">${esc(status)}</td>
-      <td>${esc(d.transport)}${d.encryption && d.encryption !== "no" ? " / " + esc(d.encryption) : ""}</td>
-      <td>
-        <button class="action" onclick="renameEaDevice('${esc(d.extension)}')">Rename</button>
-        <button class="action" onclick="deleteEaDevice('${esc(d.extension)}')">Delete</button>
+      `<option value="${esc(c.id)}" ${c.id === e.category ? "selected" : ""}>${esc(c.name)}</option>`
+    ).join("") || `<option value="${esc(e.category)}" selected>${esc(e.category)}</option>`;
+    // Rows for an extension the Easy Asterisk container doesn't know about
+    // (in pjsip.conf but not its device list) still get tier/messaging —
+    // only the container-backed controls are inert, since every one of them
+    // writes through `docker exec` into that container.
+    const catCell = e.ea
+      ? `<select class="ext-category">${catOptions}</select>`
+      : '<span class="empty">—</span>';
+    const statusCell = e.ea
+      ? `<span class="pill ${status === "online" ? "online" : "offline"}">${esc(status)}</span>`
+      : '<span class="empty">—</span>';
+    return `<tr data-ext="${esc(e.ext)}">
+      <td>${esc(e.ext)}</td>
+      <td><input type="text" class="inline-edit ext-name" value="${esc(e.name)}" ${e.ea ? "" : "disabled"} aria-label="Name for extension ${esc(e.ext)}"></td>
+      <td class="ea-only">${catCell}</td>
+      <td class="ea-only">${statusCell}</td>
+      <td class="ea-only muted">${esc(e.transport)}${e.encryption && e.encryption !== "no" ? " / " + esc(e.encryption) : ""}</td>
+      <td class="pstn-only">${restrictSelect(e.restrict)}</td>
+      <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${restrictUsesList(e.restrict) ? "" : "disabled"} style="width:16rem" aria-label="Whitelist for extension ${esc(e.ext)}"></td>
+      <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
+      <td class="actions">
+        <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
       </td>
     </tr>`;
-  }).join("") || '<tr><td colspan=6 class=muted>No devices yet.</td></tr>';
+  }).join("");
+
+  tbody.querySelectorAll("tr").forEach(row => {
+    const modeSel = row.querySelector(".ext-restrict");
+    const numsInput = row.querySelector(".ext-numbers");
+    if (modeSel && numsInput) {
+      modeSel.addEventListener("change", () => { numsInput.disabled = !restrictUsesList(modeSel.value); });
+    }
+    row.querySelectorAll("input, select").forEach(ctl => {
+      ctl.addEventListener("input", updateDirtyState);
+      ctl.addEventListener("change", updateDirtyState);
+    });
+  });
+  updateDirtyState();
 }
 
-document.querySelectorAll("#ea-dev-table th.sortable").forEach(th => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    eaDevSort.dir = (eaDevSort.key === key) ? -eaDevSort.dir : 1;
-    eaDevSort.key = key;
-    renderEaDevices();
+// ── Dirty tracking ────────────────────────────────────────────────────────
+// Every editable cell is compared against the loaded model, so the table can
+// mark exactly which rows changed and commit them in one go. The previous
+// design put a Save button on every row with no indication of which ones you
+// had actually touched.
+function rowEdits(tr) {
+  const ext = tr.dataset.ext;
+  const model = extRows.find(e => e.ext === ext);
+  if (!model) return null;
+  const nameEl = tr.querySelector(".ext-name");
+  const catEl = tr.querySelector(".ext-category");
+  const modeEl = tr.querySelector(".ext-restrict");
+  const numsEl = tr.querySelector(".ext-numbers");
+  const msgEl = tr.querySelector(".ext-messaging");
+  const edits = {};
+  if (nameEl && !nameEl.disabled && nameEl.value.trim() !== model.name) edits.name = nameEl.value.trim();
+  if (catEl && catEl.value !== model.category) edits.category = catEl.value;
+  if (modeEl && modeEl.value !== model.restrict) edits.restrict = modeEl.value;
+  if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
+  if (msgEl && msgEl.checked !== !!model.messaging) edits.messaging = msgEl.checked;
+  return {ext, model, edits, tr, count: Object.keys(edits).length};
+}
+
+function collectDirtyRows() {
+  return Array.from(document.querySelectorAll("#ext-table tbody tr[data-ext]"))
+    .map(rowEdits).filter(r => r && r.count > 0);
+}
+
+function updateDirtyState() {
+  const dirty = collectDirtyRows();
+  const dirtyExts = new Set(dirty.map(d => d.ext));
+  document.querySelectorAll("#ext-table tbody tr[data-ext]").forEach(tr => {
+    tr.classList.toggle("dirty", dirtyExts.has(tr.dataset.ext));
   });
+  const bar = document.getElementById("ext-savebar");
+  bar.classList.toggle("show", dirty.length > 0);
+  document.getElementById("ext-dirty-label").textContent =
+    dirty.length === 1 ? "1 extension edited" : dirty.length + " extensions edited";
+}
+
+document.getElementById("ext-discard").addEventListener("click", () => { renderExtensions(); });
+
+// Saves only the rows that changed, and only the endpoints each change needs.
+// Name and category go through the Easy Asterisk container; tier/numbers/
+// messaging go through the permissions file — or, with no trunk installed,
+// the messaging-only endpoint, which exists precisely because messaging has
+// no PSTN dependency.
+document.getElementById("ext-save-all").addEventListener("click", async () => {
+  const dirty = collectDirtyRows();
+  if (!dirty.length) return;
+  const btn = document.getElementById("ext-save-all");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+
+  let saved = 0;
+  const failures = [];
+  for (const row of dirty) {
+    const {ext, model, edits} = row;
+    try {
+      if ("name" in edits) {
+        const r = await postJSON("/api/ea-devices/rename", {extension: ext, name: edits.name});
+        if (!r.ok) throw new Error(r.message || "rename failed");
+      }
+      if ("category" in edits) {
+        const r = await postJSON("/api/ea-devices/category", {extension: ext, category: edits.category});
+        if (!r.ok) throw new Error(r.message || "category change failed");
+      }
+      const permKeys = ["restrict", "allowed_numbers", "messaging"];
+      if (permKeys.some(k => k in edits)) {
+        const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
+        let r;
+        if (pstnInstalled) {
+          // Send the whole permission record, not just the changed fields —
+          // the endpoint rewrites all of it, so omitting an unchanged value
+          // would silently reset it.
+          r = await postJSON("/api/pstn-permissions", {
+            ext: ext,
+            restrict: "restrict" in edits ? edits.restrict : model.restrict,
+            allowed_numbers: "allowed_numbers" in edits ? edits.allowed_numbers : model.allowed_numbers,
+            messaging: messaging,
+          });
+        } else {
+          r = await postJSON("/api/pstn-messaging", {ext: ext, enabled: messaging});
+        }
+        if (!r.ok) throw new Error(r.message || "permission save failed");
+        if (pstnInstalled) markPstnDirty();
+      }
+      saved++;
+    } catch (err) {
+      failures.push(ext + ": " + err.message);
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = "Save changes";
+  if (failures.length) {
+    toast(`Saved ${saved}, failed ${failures.length} — ` + failures.join("; "), "err");
+  } else {
+    toast(`Saved ${saved} extension${saved === 1 ? "" : "s"}`, "ok");
+  }
+  await loadExtensions();
+});
+
+function postJSON(url, body) {
+  return fetch(url, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  }).then(r => r.json());
+}
+
+document.querySelectorAll("#ext-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    // Re-rendering drops uncommitted edits, so don't silently throw them away.
+    if (collectDirtyRows().length &&
+        !confirm("Sorting reloads the table and discards your unsaved edits. Continue?")) return;
+    const key = th.dataset.sort;
+    extSort.dir = (extSort.key === key) ? -extSort.dir : 1;
+    extSort.key = key;
+    renderExtensions();
+  });
+});
+
+// ── Add extension ─────────────────────────────────────────────────────────
+const extAddForm = document.getElementById("ext-add-form");
+document.getElementById("ext-add-toggle").addEventListener("click", () => {
+  extAddForm.classList.toggle("open");
+  if (extAddForm.classList.contains("open")) document.getElementById("ea-dev-name").focus();
+});
+document.getElementById("ext-add-cancel").addEventListener("click", () => {
+  extAddForm.classList.remove("open");
+});
+document.getElementById("ext-password-dismiss").addEventListener("click", () => {
+  document.getElementById("ext-password-callout").classList.remove("show");
 });
 
 document.getElementById("ea-dev-save").addEventListener("click", async () => {
   const name = document.getElementById("ea-dev-name").value.trim();
   const extension = document.getElementById("ea-dev-ext").value.trim();
-  const category = document.getElementById("ea-dev-category").value;
-  const conn_type = document.getElementById("ea-dev-conn").value;
-  const aa = document.getElementById("ea-dev-aa").value;
-  const res = await fetch("/api/ea-devices", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name, extension, category, conn_type, auto_answer: aa || null}),
+  const data = await postJSON("/api/ea-devices", {
+    name,
+    extension,
+    category: document.getElementById("ea-dev-category").value,
+    conn_type: document.getElementById("ea-dev-conn").value,
+    auto_answer: document.getElementById("ea-dev-aa").value || null,
   });
-  const data = await res.json();
   if (data.ok) {
-    document.getElementById("ea-dev-msg").textContent =
-      `Added ${data.data.extension} — password: ${data.data.password} (shown once, save it now) — SIP ${data.data.transport} on port ${data.data.port}`;
+    // Persistent, not a toast: this password is shown exactly once.
+    document.getElementById("ext-password-text").innerHTML =
+      `Added extension <b>${esc(data.data.extension)}</b> — password <code>${esc(data.data.password)}</code> ` +
+      `(shown once, save it now). SIP ${esc(data.data.transport)} on port ${esc(String(data.data.port))}.`;
+    document.getElementById("ext-password-callout").classList.add("show");
     document.getElementById("ea-dev-name").value = "";
     document.getElementById("ea-dev-ext").value = "";
+    extAddForm.classList.remove("open");
   } else {
-    document.getElementById("ea-dev-msg").textContent = data.message || "Failed";
+    toast(data.message || "Failed to add extension", "err");
   }
-  loadEaDevices();
+  loadExtensions();
 });
 
-async function renameEaDevice(ext) {
-  const cur = eaDevices.find(d => d.extension === ext);
-  const name = prompt("New name for extension " + ext + ":", cur ? cur.name : "");
-  if (name === null || !name.trim()) return;
-  const res = await fetch("/api/ea-devices/rename", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext, name: name.trim()}),
-  });
-  const data = await res.json();
-  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
-  loadEaDevices();
-}
-
+// Delete keeps its own control — it's destructive, so it must not ride along
+// with the batched Save. Rename and category changes are part of that batch
+// now, which is why their standalone handlers are gone.
 async function deleteEaDevice(ext) {
-  if (!confirm("Delete device " + ext + "? This cannot be undone.")) return;
-  const res = await fetch("/api/ea-devices/delete", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext}),
-  });
-  const data = await res.json();
-  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
-  loadEaDevices();
+  if (!confirm("Delete extension " + ext + "? This cannot be undone.")) return;
+  const data = await postJSON("/api/ea-devices/delete", {extension: ext});
+  toast(data.message || (data.ok ? "Deleted extension " + ext : "Delete failed"), data.ok ? "ok" : "err");
+  loadExtensions();
   loadEaRooms();
-}
-
-async function changeEaDeviceCategory(ext, category) {
-  const res = await fetch("/api/ea-devices/category", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext, category}),
-  });
-  const data = await res.json();
-  document.getElementById("ea-dev-msg").textContent = data.message || (data.ok ? "Category changed" : "Failed");
-  loadEaDevices();
 }
 
 async function loadEaRooms() {
@@ -2937,6 +3532,7 @@ function renderEaRooms() {
     const th = document.querySelector(`#ea-room-table th[data-sort="${eaRoomSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaRoomSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("room-count", eaRooms.length);
   const tbody = document.querySelector("#ea-room-table tbody");
   tbody.innerHTML = rows.map(r => {
     const memberExts = (r.members || "").split(",").filter(Boolean);
@@ -2959,12 +3555,12 @@ function renderEaRooms() {
       <td>${memberChips || '<span class="muted">none</span>'}<br>${addPicker}</td>
       <td>${esc(r.timeout)}</td>
       <td>${esc(r.type)}</td>
-      <td>
+      <td class="actions">
         <button class="action" onclick="renameEaRoom('${esc(r.extension)}')">Rename</button>
-        <button class="action" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
+        <button class="action danger" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
       </td>
     </tr>`;
-  }).join("") || '<tr><td colspan=6 class=muted>No rooms yet.</td></tr>';
+  }).join("") || '<tr><td colspan=6 class=empty>No rooms yet.</td></tr>';
 }
 
 document.querySelectorAll("#ea-room-table th.sortable").forEach(th => {
@@ -2986,7 +3582,7 @@ document.getElementById("ea-room-save").addEventListener("click", async () => {
     body: JSON.stringify({extension, name, type, timeout}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Room added" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("ea-room-ext").value = "";
     document.getElementById("ea-room-name").value = "";
@@ -3003,7 +3599,7 @@ async function renameEaRoom(ext) {
     body: JSON.stringify({extension: ext, name: name.trim()}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  toast(data.message || (data.ok ? "Room renamed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3014,7 +3610,7 @@ async function deleteEaRoom(ext) {
     body: JSON.stringify({extension: ext}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  toast(data.message || (data.ok ? "Room deleted" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3027,7 +3623,7 @@ async function addEaRoomMemberFromRow(roomExt, btn) {
     body: JSON.stringify({room: roomExt, device}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Added" : "Failed");
+  toast(data.message || (data.ok ? "Member added" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3037,7 +3633,7 @@ async function removeEaRoomMember(roomExt, device) {
     body: JSON.stringify({room: roomExt, device}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  toast(data.message || (data.ok ? "Member removed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3048,41 +3644,17 @@ async function loadPstnLimits() {
   document.getElementById("limit-in").value = data.max_inbound;
 }
 
-// Independent of pstn_installed() — messaging has no dependency on a PSTN
-// trunk existing, unlike everything else in this tab, so this loads/saves
-// regardless of whether services/pstn-trunk.sh has ever been run.
-async function loadMessaging() {
-  const res = await fetch("/api/pstn-permissions");
-  const data = await res.json();
-  const exts = data.extensions || [];
-
+// The Groups card's membership picker. Driven by the same merged extension
+// list the table above renders, so a group can never offer an extension the
+// table doesn't show (or miss one it does).
+function renderGroupMemberPickers() {
   const grpMembers = document.getElementById("grp-members");
-  grpMembers.innerHTML = exts.map(e => `
+  grpMembers.innerHTML = extRows.map(e => `
     <label class="muted" style="white-space:nowrap">
       <input type="checkbox" class="grp-member-cb" value="${esc(e.ext)}"> ${esc(e.ext)} — ${esc(e.name)}
     </label>
   `).join("") || '<span class="muted">No extensions found</span>';
-
-  const chips = document.getElementById("msg-chips");
-  chips.innerHTML = exts.map(e => `
-    <label><input type="checkbox" class="msg-chip" data-ext="${esc(e.ext)}" ${e.messaging ? "checked" : ""}> ${esc(e.ext)} — ${esc(e.name)}</label>
-  `).join("") || '<span class="muted">No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</span>';
 }
-
-document.getElementById("msg-save-all").addEventListener("click", async () => {
-  const checkboxes = Array.from(document.querySelectorAll(".msg-chip"));
-  const results = await Promise.all(checkboxes.map(cb =>
-    fetch("/api/pstn-messaging", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ext: cb.dataset.ext, enabled: cb.checked}),
-    }).then(r => r.json())
-  ));
-  const failed = results.filter(r => !r.ok);
-  document.getElementById("msg-msg").textContent = failed.length
-    ? `Saved with ${failed.length} error(s): ` + failed.map(r => r.message).join("; ")
-    : `Saved (${checkboxes.length} extension${checkboxes.length === 1 ? "" : "s"})`;
-  loadMessaging();
-});
 
 let lastGroups = [];
 let grpSort = { key: null, dir: 1 };
@@ -3107,17 +3679,18 @@ function renderGroups() {
     const th = document.querySelector(`#grp-table th[data-sort="${grpSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${grpSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("grp-count", lastGroups.length);
   const tbody = document.querySelector("#grp-table tbody");
   tbody.innerHTML = rows.map(g => `<tr data-group="${esc(g.name)}">
     <td>${esc(g.name)}</td>
     <td>${g.members.map(esc).join(", ") || '<span class="muted">none</span>'}</td>
-    <td>
+    <td class="actions">
       <button class="action" onclick="editGroup('${esc(g.name)}')">Edit</button>
       <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', true)">Enable messaging</button>
       <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', false)">Disable messaging</button>
-      <button class="action" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
+      <button class="action danger" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
     </td>
-  </tr>`).join("") || '<tr><td colspan=3 class=muted>No groups yet.</td></tr>';
+  </tr>`).join("") || '<tr><td colspan=3 class=empty>No groups yet.</td></tr>';
 }
 
 document.querySelectorAll("#grp-table th.sortable").forEach(th => {
@@ -3134,6 +3707,7 @@ async function loadGroups() {
   const data = await res.json();
   lastGroups = data.groups || [];
   renderGroups();
+  renderPersonalDidOwnerOptions();
 }
 
 function editGroup(name) {
@@ -3151,8 +3725,8 @@ document.getElementById("grp-save").addEventListener("click", async () => {
     body: JSON.stringify({name: name, members: members}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
-  if (data.ok) markPstnDirty();
+  toast(data.message || (data.ok ? "Group saved" : "Failed"), data.ok ? "ok" : "err");
+  if (data.ok && pstnInstalled) markPstnDirty();
   loadGroups();
 });
 
@@ -3163,9 +3737,9 @@ async function applyGroupMessaging(name, enabled) {
     body: JSON.stringify({name: name, enabled: enabled}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Applied" : "Failed");
-  if (data.ok) markPstnDirty();
-  loadMessaging();
+  toast(data.message || (data.ok ? "Applied to group" : "Failed"), data.ok ? "ok" : "err");
+  if (data.ok && pstnInstalled) markPstnDirty();
+  loadExtensions();
 }
 
 async function deleteGroup(name) {
@@ -3175,8 +3749,8 @@ async function deleteGroup(name) {
     body: JSON.stringify({name: name}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
-  if (data.ok) markPstnDirty();
+  toast(data.message || (data.ok ? "Group deleted" : "Failed"), data.ok ? "ok" : "err");
+  if (data.ok && pstnInstalled) markPstnDirty();
   loadGroups();
 }
 
@@ -3188,7 +3762,7 @@ document.getElementById("limits-save").addEventListener("click", async () => {
     body: JSON.stringify({max_outbound: maxOut, max_inbound: maxIn}),
   });
   const data = await res.json();
-  document.getElementById("limits-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Caps saved" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) markPstnDirty();
   loadPstnLimits();
 });
@@ -3208,7 +3782,10 @@ function markPstnDirty() {
   document.getElementById("pstn-restart-banner").style.display = "";
 }
 window.addEventListener("beforeunload", (e) => {
-  if (!pstnDirty) return;
+  // Two independent kinds of "unsaved": edits still sitting in the table, and
+  // saved-but-not-yet-committed PSTN config the dialplan may still be stale on.
+  const tableDirty = typeof collectDirtyRows === "function" && collectDirtyRows().length > 0;
+  if (!pstnDirty && !tableDirty) return;
   e.preventDefault();
   e.returnValue = "";
 });
@@ -3224,96 +3801,14 @@ document.getElementById("pstn-restart-btn").addEventListener("click", async () =
   }
 });
 
-let lastPstnExts = [];
-let pstnSort = { key: null, dir: 1 };
-
-function pstnSortValue(e, key) {
-  if (key === "ext") return parseInt(e.ext, 10);
-  if (key === "messaging") return e.messaging ? 1 : 0;
-  return (e[key] || "").toString().toLowerCase();
-}
-
-function renderPstnTable() {
-  const tbody = document.querySelector("#pstn-table tbody");
-  if (!lastPstnExts.length) {
-    tbody.innerHTML = '<tr><td colspan=6 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
-    return;
-  }
-  let rows = lastPstnExts.slice();
-  if (pstnSort.key) {
-    rows.sort((a, b) => {
-      const av = pstnSortValue(a, pstnSort.key), bv = pstnSortValue(b, pstnSort.key);
-      if (av < bv) return -1 * pstnSort.dir;
-      if (av > bv) return 1 * pstnSort.dir;
-      return 0;
-    });
-  }
-  document.querySelectorAll("#pstn-table th.sortable .arrow").forEach(a => a.remove());
-  if (pstnSort.key) {
-    const th = document.querySelector(`#pstn-table th[data-sort="${pstnSort.key}"]`);
-    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${pstnSort.dir === 1 ? "▲" : "▼"}</span>`);
-  }
-  tbody.innerHTML = rows.map(e => `<tr data-ext="${esc(e.ext)}">
-    <td>${esc(e.ext)}</td>
-    <td>${esc(e.name)}</td>
-    <td>
-      <select class="pstn-tier">
-        <option value="internal" ${e.tier === "internal" ? "selected" : ""}>internal</option>
-        <option value="restricted" ${e.tier === "restricted" ? "selected" : ""}>restricted</option>
-        <option value="full" ${e.tier === "full" ? "selected" : ""}>full</option>
-      </select>
-    </td>
-    <td><input type="text" class="pstn-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543 (leading 1 optional)" ${e.tier === "restricted" ? "" : "disabled"}></td>
-    <td style="text-align:center"><input type="checkbox" class="pstn-messaging" ${e.messaging ? "checked" : ""}></td>
-    <td><button class="action" onclick="savePstnPermission('${esc(e.ext)}')">Save</button></td>
-  </tr>`).join("");
-
-  tbody.querySelectorAll("tr").forEach(row => {
-    const tierSel = row.querySelector(".pstn-tier");
-    const numsInput = row.querySelector(".pstn-numbers");
-    tierSel.addEventListener("change", () => { numsInput.disabled = tierSel.value !== "restricted"; });
-  });
-}
-
-document.querySelectorAll("#pstn-table th.sortable").forEach(th => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    pstnSort.dir = (pstnSort.key === key) ? -pstnSort.dir : 1;
-    pstnSort.key = key;
-    renderPstnTable();
-  });
-});
-
-async function loadPstnPermissions() {
-  const res = await fetch("/api/pstn-permissions");
-  const data = await res.json();
-  lastPstnExts = data.extensions || [];
-
-  const grpRes = await fetch("/api/pstn-groups");
-  const grpData = await grpRes.json();
-  const groups = grpData.groups || [];
-
+// The personal-DID owner picker spans both lists, so it re-renders from
+// whichever of the two finished last rather than being owned by either.
+function renderPersonalDidOwnerOptions() {
   const ownerSel = document.getElementById("pd-owner");
-  const extOptions = lastPstnExts.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
-  const groupOptions = groups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
+  if (!ownerSel) return;
+  const extOptions = extRows.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
+  const groupOptions = lastGroups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
   ownerSel.innerHTML = (extOptions + groupOptions) || '<option value="">No extensions found</option>';
-
-  renderPstnTable();
-}
-
-async function savePstnPermission(ext) {
-  const row = document.querySelector(`#pstn-table tr[data-ext="${ext}"]`);
-  const tier = row.querySelector(".pstn-tier").value;
-  const numbers = row.querySelector(".pstn-numbers").value;
-  const messaging = row.querySelector(".pstn-messaging").checked;
-  const res = await fetch("/api/pstn-permissions", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ext: ext, tier: tier, allowed_numbers: numbers, messaging: messaging}),
-  });
-  const data = await res.json();
-  document.getElementById("pstn-msg").textContent = (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
-  if (data.ok) markPstnDirty();
-  loadPstnPermissions();
 }
 
 let lastPersonalDids = [];
@@ -3340,6 +3835,7 @@ function renderPersonalDids() {
     const th = document.querySelector(`#pd-table th[data-sort="${pdSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${pdSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("pd-count", lastPersonalDids.length);
   const tbody = document.querySelector("#pd-table tbody");
   tbody.innerHTML = rows.map(d => {
     const ownerDisplay = d.owner.startsWith("@")
@@ -3348,9 +3844,9 @@ function renderPersonalDids() {
     return `<tr>
     <td>${esc(d.did)}</td>
     <td>${ownerDisplay}</td>
-    <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
+    <td class="actions"><button class="action danger" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
   </tr>`;
-  }).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+  }).join("") || "<tr><td colspan=3 class=empty>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
 }
 
 document.querySelectorAll("#pd-table th.sortable").forEach(th => {
@@ -3377,7 +3873,7 @@ document.getElementById("pd-save").addEventListener("click", async () => {
     body: JSON.stringify({did: did, owner: owner}),
   });
   const data = await res.json();
-  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Number assigned" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("pd-did").value = "";
     markPstnDirty();
@@ -3392,7 +3888,7 @@ async function removePersonalDid(did) {
     body: JSON.stringify({did: did}),
   });
   const data = await res.json();
-  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  toast(data.message || (data.ok ? "Number removed" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) markPstnDirty();
   loadPersonalDids();
 }
@@ -3400,9 +3896,8 @@ async function removePersonalDid(did) {
 loadSecurity();
 loadDecisions();
 loadAsnExempt();
-loadPstnStatus();
 loadCrowdsecStatus();
-loadEaStatus();
+initExtensionsTab();
 setInterval(loadSecurity, 30000);
 setInterval(loadDecisions, 30000);
 </script>
@@ -3424,6 +3919,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # The page is inlined into this file, so a dashboard update changes
+        # the HTML at a URL that never changes. Without this a browser can
+        # keep serving the previous UI after an upgrade, which looks exactly
+        # like the upgrade having silently failed.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
@@ -3445,9 +3945,11 @@ class Handler(BaseHTTPRequestHandler):
             perms = get_all_permissions()
             extensions = []
             for e in list_extensions():
-                p = perms.get(e["ext"], {"tier": "internal", "allowed_numbers": "", "messaging": False})
-                extensions.append({"ext": e["ext"], "name": e["name"], "tier": p["tier"],
-                                    "allowed_numbers": p["allowed_numbers"], "messaging": p["messaging"]})
+                p = perms.get(e["ext"], {"restrict": "internal", "allowed_numbers": "", "messaging": False})
+                extensions.append({"ext": e["ext"], "name": e["name"],
+                                    "restrict": p["restrict"],
+                                    "allowed_numbers": p["allowed_numbers"],
+                                    "messaging": p["messaging"]})
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
@@ -3490,8 +3992,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(ban_asn(payload.get("asn", "")))
         elif self.path == "/api/pstn-permissions":
             ok, message = write_permission(
-                payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", ""),
-                bool(payload.get("messaging", False))
+                payload.get("ext", ""),
+                payload.get("restrict", ""), payload.get("allowed_numbers", ""),
+                bool(payload.get("messaging", False)),
             )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-limits":

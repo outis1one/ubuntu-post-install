@@ -1,9 +1,12 @@
 #!/bin/bash
-# services/pstn-trunk.sh — SIP PSTN trunk add-on for asterisk-digital-ocean
-# (or the home/LAN asterisk install): US-only outbound (NANP dialplan
-# restriction), independent outbound/inbound concurrent-call caps, a 3-tier
-# permission model per extension (internal-only / restricted to pre-approved
-# numbers / full US calling), a configurable inbound ring-group,
+# services/pstn-trunk.sh — SIP PSTN trunk add-on for services/asterisk.sh:
+# US-only outbound (NANP dialplan
+# restriction), independent outbound/inbound concurrent-call caps, a
+# per-extension permission model built on ONE whitelist plus a mode saying
+# which direction(s) it applies to — the original full / restricted /
+# internal tiers, plus restricted-in (whitelist gates incoming, dials
+# anywhere) and restricted-out (whitelist gates outgoing, anyone can call
+# in) — a configurable inbound ring-group,
 # IP-authenticated trunk (no SIP password stored), ntfy alerts on
 # denied/rejected calls, and a periodic spend/volume check.
 #
@@ -15,19 +18,19 @@
 # works the same way. VoIP.ms and Anveo Direct are both confirmed working;
 # see docs/pstn-calling-voipms-plan.md for the design/cost background.
 #
-# Requires an existing services/asterisk-digital-ocean.sh OR services/asterisk.sh
-# install — this adds a PSTN trunk on top of one of them and does not stand
-# alone. Permission tiers AND concurrency caps are managed live (no restart
+# Requires an existing services/asterisk.sh install (either directory layout —
+# ~/docker/asterisk, or ~/docker/asterisk-digital-ocean on a box set up before
+# the droplet edition was merged back in) — this adds a PSTN trunk on top and
+# does not stand alone. Permission tiers AND concurrency caps are managed live (no restart
 # needed) via pstn-permissions.conf / pstn-limits.conf — editable by hand, or
-# from services/security-dashboard.sh's "PSTN Trunk" tab if that's installed.
+# from services/security-dashboard.sh's Extensions tab if that's installed.
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/asterisk — US-only, per-extension permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension whitelist restricting inbound and/or outbound, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
-# Easy Asterisk (the vendor project asterisk-digital-ocean.sh/asterisk.sh
-# build on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
+# Easy Asterisk (the vendor project services/asterisk.sh builds on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
 # internal state:
 #   - extensions.conf: rebuilt by rebuild_dialplan() on every container start,
 #     and whenever a device/room is added or removed via the web admin.
@@ -41,16 +44,19 @@ register_service pstn-trunk homelab "SIP PSTN trunk for asterisk-digital-ocean/a
 # the #include itself survive regeneration too, _pstn_patch_vendor_files
 # (below) patches it into the vendor's *generator functions* — the same
 # technique this repo already uses for the logger.conf security-logging fix
-# in _asterisk_do_refresh_vendor_files (see services/asterisk-digital-ocean.sh).
+# in _asterisk_refresh_vendor_files (see services/asterisk.sh).
 #
-# Caveat: if the base asterisk-digital-ocean/asterisk install is later
+# Caveat: if the base asterisk install is later
 # refreshed ("update in place", which re-copies fresh vendor files)
 # independently of this service, the patch is wiped along with it and needs
 # reapplying — run this service again (fresh or update mode both reapply it)
 # after any base install update.
 #
 # ── Why permissions are a separate live file, not baked into the dialplan ──
-# pstn-permissions.conf holds each extension's tier (internal/restricted/full)
+# pstn-permissions.conf holds each extension's 'restrict' mode and its single
+# 'allowed_numbers' whitelist (the authored pair), plus the
+# tier_out/allowed_out/tier_in/allowed_in derived from them that the dialplan
+# actually reads, plus a legacy 'tier' mirror for rollback
 # and, for restricted, its pipe-separated approved-number list. The dialplan
 # reads it via Asterisk's AST_CONFIG() function, which re-reads the file from
 # disk on every call — so editing this file (by hand, or via the Security
@@ -267,8 +273,10 @@ EOF
 
 # ── Shared: one inbound ring-group member's live permission check ─────────
 # Emits a block that only adds this extension to PSTN_RING_LIST if it's
-# "full" tier, or "restricted" tier AND the inbound Caller-ID is on its
-# approved list. Uses a single-quoted heredoc (fully literal — no bash
+# "full" INBOUND tier, or "restricted" inbound tier AND the caller ID is on
+# allowed_in. The outbound side is not consulted here at all, which is what
+# lets "Restrict inbound" mean "dial anywhere, but only these numbers get
+# through to me" — and "Restrict outbound" the reverse. Uses a single-quoted heredoc (fully literal — no bash
 # expansion) captured into a variable, then a pure bash string replace for
 # the extension number placeholder — safer than sed here since it needs no
 # escaping at all (the extension is plain digits, but this avoids relying on
@@ -282,9 +290,9 @@ _pstn_ring_member_block() {
     # (bare "?label" / "Goto(label)"), not "label,1" (which addresses a
     # different, nonexistent extension named "label" instead).
     block=$(cat << 'MEMBER'
- same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier)})
+ same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier_in)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "full"]?ring__EXT__)
- same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_numbers)})
+ same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_in)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?ring__EXT__)
  same => n,Goto(skip__EXT__)
  same => n(ring__EXT__),Set(PSTN_RING_LIST=${PSTN_RING_LIST}${PSTN_RING_SEP}PJSIP/__EXT__)
@@ -350,10 +358,10 @@ exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL} to ${EXT
  same => n,GotoIf($[${REGEX("^(242|246|264|268|284|340|345|441|473|649|658|664|670|671|684|721|758|767|784|787|809|829|849|868|869|876|939)$" ${PSTN_AREA_CODE})} = 1]?pstn_intl_blocked,1)
  same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
  same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
- same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier_out)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_check_busy,1)
  same => n,GotoIf($["${PSTN_TIER}" = "restricted"]?pstn_check_allow_out,1)
- same => n,NoOp(Denied - ${PSTN_CALLER} has no PSTN permission, tier: ${PSTN_TIER})
+ same => n,NoOp(Denied - ${PSTN_CALLER} has no outbound PSTN permission, tier_out: ${PSTN_TIER})
 __ALERT_DENY_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -392,9 +400,9 @@ exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL} 
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
  same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
- same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier_out)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_intl_check_country,1)
- same => n,NoOp(Denied intl - ${PSTN_CALLER} tier ${PSTN_TIER} not eligible for international calling)
+ same => n,NoOp(Denied intl - ${PSTN_CALLER} tier_out ${PSTN_TIER} not eligible for international calling)
 __ALERT_DENY_INTL_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -410,7 +418,7 @@ __ALERT_DENY_INTL_COUNTRY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
-exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_numbers)})
+exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_out)})
  same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${PSTN_DIALED})} = 1]?pstn_check_busy,1)
  same => n,NoOp(Denied - ${PSTN_DIALED} not on ${PSTN_CALLER}'s approved number list)
 __ALERT_DENY_NUMBER_LINE__
@@ -459,7 +467,7 @@ EOF
 # zero of the outbound NANP patterns either, and `dialplan show
 # from-pstn-trunk` reported the context didn't exist at all, with no
 # warning or error anywhere (config log, full log, or the reload command's
-# own output) pointing at why. Meanwhile services/asterisk-digital-ocean.sh's
+# own output) pointing at why. Meanwhile services/asterisk.sh's
 # messaging-dialplan.conf — #include'd via the exact same mechanism, right
 # after [intercom] in the same extensions.conf — loaded fine every time.
 # The one structural difference: messaging-dialplan.conf's first real line
@@ -608,9 +616,9 @@ __ALERT_KILLED_IN_LINE__
 ; restart — see restart_asterisk_container() in services/security-dashboard.sh)
 ; before AST_CONFIG() actually returns the new value.
 exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?pstn_personal_group_ring,1)
- same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
+ same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier_in)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
- same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
+ same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_in)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?pstn_personal_ring,1)
  same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
@@ -734,11 +742,11 @@ IFS=',' read -ra MEMBERS <<< "$MEMBERS_RAW"
 for _ext in "${MEMBERS[@]}"; do
     _ext="$(echo "$_ext" | xargs)"
     [[ -z "$_ext" ]] && continue
-    _tier="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "tier")"
+    _tier="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "tier_in")"
     if [[ "$_tier" == "full" ]]; then
         RING_LIST="${RING_LIST}${RING_LIST:+&}PJSIP/${_ext}"
     elif [[ "$_tier" == "restricted" ]]; then
-        _allowed="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "allowed_numbers")"
+        _allowed="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "allowed_in")"
         if [[ -n "$_allowed" ]] && [[ "$CALLER" =~ ^(${_allowed})$ ]]; then
             RING_LIST="${RING_LIST}${RING_LIST:+&}PJSIP/${_ext}"
         fi
@@ -746,6 +754,102 @@ for _ext in "${MEMBERS[@]}"; do
 done
 printf '%s' "$RING_LIST"
 SCRIPT
+}
+
+# ── Migration: legacy single tier → 'restrict' mode + derived keys ─────────
+# Installs made before the per-direction split have only 'tier' and
+# 'allowed_numbers'. The dialplan now reads tier_out/tier_in, so leaving them
+# alone would fail closed and silently deny every PSTN call both ways.
+#
+# Writes the authored 'restrict' key plus the derived tier_out/allowed_out/
+# tier_in/allowed_in, reproducing exactly the behaviour the box already had:
+# a legacy tier of "full" becomes restrict=open, "restricted" becomes
+# restrict=both (the old single list applied in both directions, which is
+# what the old dialplan did), anything else becomes restrict=none.
+#
+# Idempotent: an extension that already has 'restrict' is left alone, so this
+# runs safely on every update. Backs the file up first — unlike most of this
+# installer, it edits a file the user may have hand-tuned.
+_pstn_migrate_permissions_split() {
+    local FILE="$1"
+    [[ -f "$FILE" ]] || return 0
+    grep -qE '^[[:space:]]*(tier|tier_out)[[:space:]]*=' "$FILE" || return 0
+    grep -qE '^[[:space:]]*restrict[[:space:]]*=' "$FILE" && return 0
+
+    cp "$FILE" "$FILE.backup.$(date +%Y%m%d-%H%M%S)"
+    local TMP
+    TMP="$(mktemp)"
+    # Buffer per section: 'restrict' depends on the tier, and the whitelist
+    # may appear on either side of it, so the whole section has to be read
+    # before any of it can be rewritten.
+    awk '
+        function flush_section() {
+            if (!have) return
+            if (header != "") print header
+            mode = "internal"
+            if (tier == "full") mode = "full"
+            else if (tier == "restricted") mode = "restricted"
+            # An install that predates the split has no tier_out; one made
+            # between the split and this change may, so honour it if present.
+            if (tier_out != "" || tier_in != "") {
+                o = (tier_out != "" ? tier_out : tier)
+                i = (tier_in  != "" ? tier_in  : tier)
+                if (o == "full" && i == "full") mode = "full"
+                else if (o == "restricted" && i == "restricted") mode = "restricted"
+                else if (o == "restricted") mode = "restricted-out"
+                else if (i == "restricted") mode = "restricted-in"
+                else mode = "internal"
+            }
+            print "restrict=" mode
+            if (nums != "") print "allowed_numbers=" nums
+            if (mode == "full") { print "tier_out=full"; print "tier_in=full"; print "tier=full" }
+            else if (mode == "restricted-out") {
+                print "tier_out=restricted"; print "allowed_out=" nums
+                print "tier_in=full"; print "tier=restricted"
+            }
+            else if (mode == "restricted-in") {
+                print "tier_out=full"; print "tier_in=restricted"
+                print "allowed_in=" nums; print "tier=full"
+            }
+            else if (mode == "restricted") {
+                print "tier_out=restricted"; print "allowed_out=" nums
+                print "tier_in=restricted"; print "allowed_in=" nums
+                print "tier=restricted"
+            }
+            for (k = 1; k <= nkeep; k++) print keep[k]
+            header = ""; tier = ""; tier_out = ""; tier_in = ""; nums = ""
+            nkeep = 0; have = 0
+        }
+        /^[ \t]*\[/ { flush_section(); header = $0; have = 1; next }
+        {
+            if (!have) { print; next }
+            line = $0
+            key = line; sub(/=.*$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", key)
+            val = line
+            if (index(line, "=") > 0) { sub(/^[^=]*=[ \t]*/, "", val) } else { val = "" }
+            gsub(/[ \t]+$/, "", val)
+            if (key == "tier") { tier = val; next }
+            if (key == "tier_out") { tier_out = val; next }
+            if (key == "tier_in") { tier_in = val; next }
+            if (key == "allowed_numbers" || key == "allowed_out" || key == "allowed_in") {
+                if (nums == "" && val != "") nums = val
+                next
+            }
+            keep[++nkeep] = line
+        }
+        END { flush_section() }
+    ' "$FILE" > "$TMP"
+
+    if [[ -s "$TMP" ]]; then
+        mv "$TMP" "$FILE"
+        chmod 664 "$FILE"
+        log_success "Migrated pstn-permissions.conf to the 'restrict' model (backup saved alongside it)."
+        log_info "Every extension kept its existing behaviour. Pick which direction(s) each"
+        log_info "whitelist applies to in the Security Dashboard's Extensions tab."
+    else
+        rm -f "$TMP"
+        log_warning "Permission migration produced an empty file — left the original alone."
+    fi
 }
 
 # ── Shared: initial concurrency limits (fresh install / explicit reset only
@@ -784,8 +888,26 @@ _pstn_write_permissions_file() {
     done
     local _written_exts=""
     {
-        echo "; PSTN permission tiers — internal / restricted / full — PLUS two independent"
-        echo "; axes per extension:"
+        echo "; PSTN permissions. Each extension has ONE whitelist and a 'restrict' mode"
+        echo "; saying which direction(s) that whitelist applies to. The first three are"
+        echo "; the original tiers, unchanged; the last two are the new half-restrictions:"
+        echo ";   full            - no whitelist, calls both ways"
+        echo ";   restricted      - the whitelist applies BOTH ways"
+        echo ";   internal        - no PSTN at all (internal extension calling still works)"
+        echo ";   restricted-in   - whitelist gates INCOMING only; may dial anywhere"
+        echo ";   restricted-out  - whitelist gates OUTGOING only; anyone may call in"
+        echo "; 'allowed_numbers' is that whitelist: pipe-separated 11-digit numbers, used"
+        echo "; directly as a REGEX() alternation (see this file's own comments on why"
+        echo "; untrusted call data is always the string being tested, never the pattern)."
+        echo ";"
+        echo "; 'restrict' + 'allowed_numbers' are the AUTHORED form — the two keys to edit"
+        echo "; by hand. tier_out/allowed_out/tier_in/allowed_in below them are DERIVED from"
+        echo "; those and are what the dialplan actually reads; 'tier' is a rollback mirror"
+        echo "; of tier_out for pre-split versions of this installer. Change the authored"
+        echo "; keys and re-run this installer (or use the Security Dashboard, which keeps"
+        echo "; all of them in step) rather than editing the derived ones directly."
+        echo ";"
+        echo "; PLUS two further independent axes per extension:"
         echo "; - 'messaging' for Asterisk's native internal SIP MESSAGE texting (no carrier"
         echo "; SMS, no PSTN, no cost — a separate axis from PSTN calling, since the risk"
         echo "; profile is different: an extension can be internal-tier for calling and"
@@ -808,6 +930,9 @@ _pstn_write_permissions_file() {
         local _ext
         for _ext in $FULL_EXTS; do
             echo "[$_ext]"
+            echo "restrict=full"
+            echo "tier_out=full"
+            echo "tier_in=full"
             echo "tier=full"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
@@ -818,8 +943,13 @@ _pstn_write_permissions_file() {
             _ext="$1"; local _nums="$2"
             shift 2
             echo "[$_ext]"
-            echo "tier=restricted"
+            echo "restrict=restricted"
             echo "allowed_numbers=${_nums}"
+            echo "tier_out=restricted"
+            echo "allowed_out=${_nums}"
+            echo "tier_in=restricted"
+            echo "allowed_in=${_nums}"
+            echo "tier=restricted"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
             echo ""
@@ -1458,6 +1588,10 @@ _pstn_apply_settings() {
     _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$NTFY_URL"
     _pstn_write_inbound_dialplan_include "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf" "$RING_EXTS" "$NTFY_URL"
     _pstn_write_personal_group_ring_script "$ASTERISK_DIR/pstn-personal-group-ring.sh"
+    # Must run alongside the dialplan write, not after a reload: the dialplan
+    # above reads tier_out/tier_in, so an un-migrated permissions file would
+    # deny every call in the window between the two.
+    _pstn_migrate_permissions_split "$ASTERISK_DIR/pstn-permissions.conf"
     _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$ASTERISK_DIR" \
         "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL" "$CONTAINER_NAME"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
@@ -1608,7 +1742,7 @@ install_pstn-trunk() {
     [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would require an existing asterisk-digital-ocean OR asterisk (LAN) install"
+        echo "[DRY-RUN] Would require an existing asterisk install (droplet or home/LAN)"
         echo "[DRY-RUN] Would prompt for: known-provider quick-pick (Anveo Direct runs a full 5-step"
         echo "[DRY-RUN]   interactive portal walkthrough — account/funding, DID ordering, both trunk"
         echo "[DRY-RUN]   objects, confirmed rate — pausing for Enter between each; VoIP.ms pre-fills known"
@@ -1640,10 +1774,12 @@ install_pstn-trunk() {
     fi
 
     if [[ -z "$EA_DIR" ]]; then
-        log_error "Neither asterisk-digital-ocean nor asterisk (LAN) is installed — install one first:"
-        log_error "  sudo ./setup.sh asterisk-digital-ocean     (recommended — public droplet, static IP)"
-        log_error "  sudo ./setup.sh asterisk                   (home/LAN — see the static-IP caveat below)"
-        log_error "This service adds a PSTN trunk on top of one of them; it doesn't stand alone."
+        log_error "Asterisk is not installed — install it first:"
+        log_error "  sudo ./setup.sh asterisk"
+        log_error "A public droplet (which that installer detects and tunes for) is the"
+        log_error "recommended host, since IP authentication wants a static IP — see the"
+        log_error "caveat below for what that means on a home/LAN box."
+        log_error "This service adds a PSTN trunk on top of it; it doesn't stand alone."
         return 1
     fi
 
@@ -1652,7 +1788,7 @@ install_pstn-trunk() {
         log_warning "Using the home/LAN asterisk install. IP authentication needs a STABLE public IP —"
         log_warning "if this box is behind a dynamic home IP, your provider's IP allow-list goes stale"
         log_warning "whenever your ISP rotates it, breaking calls until you update it there yourself."
-        log_warning "A static IP from your ISP avoids that; asterisk-digital-ocean sidesteps it entirely."
+        log_warning "A static IP from your ISP avoids that; a cloud droplet sidesteps it entirely."
     fi
 
     log_info "Configuring a SIP PSTN trunk for $ASTERISK_KIND (any IP-authenticated provider —"
@@ -2089,7 +2225,7 @@ access specifically:
 
 Stored in \`config/asterisk/pstn-permissions.conf\`, read **live** by the
 dialplan via Asterisk's \`AST_CONFIG()\` on every call — editing this file
-(by hand, or via the Security Dashboard's "PSTN Trunk" tab, if that service
+(by hand, or via the Security Dashboard's Extensions tab, if that service
 is installed) takes effect on the next call, no restart needed. Re-running
 this installer in "update" mode never touches this file — only a "fresh"
 reinstall (with confirmation) or the web UI change it, the same protection
@@ -2213,12 +2349,11 @@ Asterisk's native SIP \`MESSAGE\` support (extension-to-extension texting —
 no carrier SMS, no PSTN, no cost) is gated by a \`messaging=yes\` flag per
 extension in \`pstn-permissions.conf\`, independent of the PSTN calling
 tiers above — off by default, same "opt in" posture. Live-editable any
-time via the Security Dashboard's "PSTN Trunk" tab, in its own
-always-available "Internal SIP messaging" card — no dependency on this
-trunk (or any PSTN trunk at all) being installed.
+time via the Security Dashboard's Extensions tab, in the Messaging column of
+its always-available extensions table — no dependency on this trunk (or any
+PSTN trunk at all) being installed.
 
-Actually enforced, not just a flag — \`services/asterisk-digital-ocean.sh\`
-(and \`services/asterisk.sh\` for the LAN edition) routes messages through a
+Actually enforced, not just a flag — \`services/asterisk.sh\` routes messages through a
 dedicated \`[sip-messaging]\` dialplan context (separate from \`[intercom]\`'s
 own per-device call routing, so there's no collision risk) and checks this
 same flag via \`AST_CONFIG()\` before delivering. One caveat still flagged
@@ -2242,11 +2377,19 @@ Stored in \`config/asterisk/pstn-personal-dids.conf\` (DID -> owner, read live
 by the dialplan for inbound routing) and a \`personal_did=\` field per
 extension in \`pstn-permissions.conf\` (the outbound Caller-ID override) —
 both kept in sync automatically by the CLI installer and the Security
-Dashboard's "PSTN Trunk" tab, live, no restart needed.
+Dashboard's Extensions tab, live, no restart needed.
+
+## Receiving SMS on the trunk DID
+
+Not handled by this service — SMS and voice are configured separately at the
+provider, and inbound SMS doesn't touch Asterisk at all. \`sudo ./setup.sh
+sms-inbound\` sets up verification codes arriving as ntfy push notifications;
+see that service's README for the short-code and mobile-DID caveats that
+decide whether codes actually get through.
 
 ## Managing this from a web UI
 
-If \`services/security-dashboard.sh\` is installed, its "PSTN Trunk" tab
+If \`services/security-dashboard.sh\` is installed, its Extensions tab
 shows the per-extension permission tiers, the outbound/inbound concurrency
 caps, and personal-number assignments, all editable live — no restart, no
 reinstall. Install/update it any time with \`sudo ./setup.sh

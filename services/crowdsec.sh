@@ -102,7 +102,7 @@ install_crowdsec() {
         echo "[DRY-RUN] Would ensure /var/log/caddy exists for log acquisition"
         echo "[DRY-RUN] Would install collections: sshd, linux, caddy, base-http-scenarios"
         echo "[DRY-RUN] Would write Caddy acquisition /etc/crowdsec/acquis.d/caddy.yaml"
-        echo "[DRY-RUN] Would install crowdsecurity/asterisk + write an acquisition if asterisk-digital-ocean is installed"
+        echo "[DRY-RUN] Would install crowdsecurity/asterisk + write an acquisition if asterisk is installed"
         echo "[DRY-RUN] Would optionally wire ntfy ban alerts into the default profile"
         echo "[DRY-RUN] Would optionally register with a remote/central LAPI and disable the local one"
         echo "[DRY-RUN] Would enable + restart crowdsec and crowdsec-firewall-bouncer"
@@ -194,17 +194,26 @@ labels:
         echo "  ✓ Caddy acquisition already exists"
     fi
 
-    # ── 5b. SIP brute-force/enumeration protection, if asterisk-digital-ocean
-    # is installed (services/asterisk-digital-ocean.sh patches Asterisk to log
-    # security events — auth failures, registration scanning — to
-    # $EA_DIR/logs/full. The plain LAN asterisk.sh doesn't emit that file yet,
-    # so it's intentionally not detected here.)
-    local ASTERISK_LOG_DIR="$DOCKER_DIR/asterisk-digital-ocean/logs"
-    if [ -d "$ASTERISK_LOG_DIR" ]; then
-        echo "  Detected asterisk-digital-ocean — installing SIP brute-force/enumeration protection..."
+    # ── 5b. SIP brute-force/enumeration protection, if Asterisk is installed.
+    # services/asterisk.sh patches Asterisk to log security events — auth
+    # failures, registration scanning — to $EA_DIR/logs/full, which is what
+    # the acquisition below tails. Both directories are probed: a box set up
+    # before the droplet edition was merged back into `asterisk` still runs
+    # out of ~/docker/asterisk-digital-ocean. The logging patch used to be
+    # droplet-only; it now applies to every install, so a home/LAN box gets
+    # SIP protection here too.
+    local ASTERISK_LOG_DIR=""
+    local _ea_candidate
+    for _ea_candidate in "$DOCKER_DIR/asterisk-digital-ocean" "$DOCKER_DIR/asterisk"; do
+        [ -d "$_ea_candidate/logs" ] && { ASTERISK_LOG_DIR="$_ea_candidate/logs"; break; }
+    done
+    if [ -n "$ASTERISK_LOG_DIR" ]; then
+        echo "  Detected Asterisk at ${ASTERISK_LOG_DIR%/logs} — installing SIP brute-force/enumeration protection..."
         sudo cscli collections install crowdsecurity/asterisk 2>/dev/null || \
             echo "  ⚠ crowdsecurity/asterisk collection may already be installed"
 
+        # Filename kept as-is so a droplet that already has this acquisition
+        # isn't given a second one pointing at the same log.
         local ASTERISK_ACQUIS="/etc/crowdsec/acquis.d/asterisk-digital-ocean.yaml"
         if [ ! -f "$ASTERISK_ACQUIS" ]; then
             local ASTERISK_ACQUIS_CONTENT="filenames:
@@ -543,7 +552,7 @@ install. The real configuration lives under `/etc/crowdsec`.
 ## What it does
 
 - Detects malicious behaviour (SSH brute force, web scans, SIP brute
-  force/enumeration if `asterisk-digital-ocean` is installed) by parsing logs.
+  force/enumeration if `asterisk` is installed) by parsing logs.
 - Bans offending IPs via the **firewall bouncer** (iptables/nftables).
 - Pulls **community IP reputation** blocklists so known-bad IPs are blocked
   before they ever touch your services.
@@ -573,9 +582,12 @@ sudo cscli collections list             # installed detection collections
 - Log acquisition (what to watch): `/etc/crowdsec/acquis.d/`
   - Caddy access logs: `/etc/crowdsec/acquis.d/caddy.yaml`
     (`/var/log/caddy/*.log` — Caddy writes JSON access logs there)
-  - Asterisk SIP auth events (if `asterisk-digital-ocean` is installed):
-    `/etc/crowdsec/acquis.d/asterisk-digital-ocean.yaml`
-    (`~/docker/asterisk-digital-ocean/logs/full` — auth failures, registration scans)
+  - Asterisk SIP auth events (if `asterisk` is installed):
+    `/etc/crowdsec/acquis.d/asterisk-digital-ocean.yaml` (filename kept from
+    when the droplet edition was its own service, so existing droplets aren't
+    given a duplicate acquisition)
+    (`~/docker/asterisk/logs/full`, or `~/docker/asterisk-digital-ocean/logs/full`
+    on a pre-merge droplet — auth failures, registration scans)
 - Notifications: `/etc/crowdsec/notifications/`
   - ntfy ban alerts (if enabled): `/etc/crowdsec/notifications/ntfy.yaml`,
     wired into `/etc/crowdsec/profiles.yaml`
@@ -609,7 +621,7 @@ sudo cscli collections list             # installed detection collections
   list directly in that file, then `sudo systemctl restart crowdsec`. This
   can block Let's Encrypt's out-of-region ACME validation checks; if a cert
   renewal fails mysteriously, check here first.
-- ASN-exempt Asterisk brute-force scenarios (if enabled, asterisk-digital-ocean
+- ASN-exempt Asterisk brute-force scenarios (if enabled, Asterisk installs
   only): `/etc/crowdsec/scenarios/local-asterisk_bf.yaml` and
   `local-asterisk_user_enum.yaml` — local forks of the stock hub scenarios with
   specific carrier ASNs excluded from their filter (the hub originals get
