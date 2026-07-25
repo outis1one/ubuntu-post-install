@@ -2091,7 +2091,7 @@ access specifically:
 
 Stored in \`config/asterisk/pstn-permissions.conf\`, read **live** by the
 dialplan via Asterisk's \`AST_CONFIG()\` on every call — editing this file
-(by hand, or via the Security Dashboard's "PSTN Trunk" tab, if that service
+(by hand, or via the Security Dashboard's Extensions tab, if that service
 is installed) takes effect on the next call, no restart needed. Re-running
 this installer in "update" mode never touches this file — only a "fresh"
 reinstall (with confirmation) or the web UI change it, the same protection
@@ -2243,11 +2243,11 @@ Stored in \`config/asterisk/pstn-personal-dids.conf\` (DID -> owner, read live
 by the dialplan for inbound routing) and a \`personal_did=\` field per
 extension in \`pstn-permissions.conf\` (the outbound Caller-ID override) —
 both kept in sync automatically by the CLI installer and the Security
-Dashboard's "PSTN Trunk" tab, live, no restart needed.
+Dashboard's Extensions tab, live, no restart needed.
 
 ## Managing this from a web UI
 
-If \`services/security-dashboard.sh\` is installed, its "PSTN Trunk" tab
+If \`services/security-dashboard.sh\` is installed, its Extensions tab
 shows the per-extension permission tiers, the outbound/inbound concurrency
 caps, and personal-number assignments, all editable live — no restart, no
 reinstall. Install/update it any time with \`sudo ./setup.sh

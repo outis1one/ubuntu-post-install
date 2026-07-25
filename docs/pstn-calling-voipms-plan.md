@@ -39,7 +39,7 @@ hardcoded to it — any provider supporting IP authentication works. Covers:
 - A configurable **inbound ring-group** (one extension or several), each
   member's live tier/approved-numbers checked per inbound call via an
   unrolled per-member dialplan block (no AGI needed).
-- **`services/security-dashboard.sh` integration** — a "PSTN Trunk" tab
+- **`services/security-dashboard.sh` integration** — its Extensions tab
   shows both concurrency caps and every extension (parsed from
   `pjsip.conf`) with its live tier and approved numbers, all editable with
   no restart. This is what makes the tier model and caps actually
@@ -212,7 +212,7 @@ separately from that hourly check.
   admin-controlled approved-list in the pattern position and the live call
   data in the tested-string position — worth keeping that direction if this
   is ever refactored.
-- **Web UI — implemented.** `services/security-dashboard.sh`'s "PSTN Trunk"
+- **Web UI — implemented.** `services/security-dashboard.sh`'s Extensions
   tab lists every extension (parsed from `pjsip.conf`, the same marker
   format Easy Asterisk's own `rebuild_dialplan()` uses) with a tier dropdown
   and approved-numbers field, saving straight to `pstn-permissions.conf`.
