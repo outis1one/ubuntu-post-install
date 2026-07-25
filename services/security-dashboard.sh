@@ -228,9 +228,24 @@ which tab a given extension's settings live on.
   device list. Columns: Ext, Name, then Category/Status/Transport if that
   container is present, then Tier/Approved-numbers if a PSTN trunk dialplan
   is installed, then Messaging (always — internal SIP texting has no PSTN
-  dependency at all: no cost, no carrier, no DID) and a per-row Save. Save
-  writes tier + approved numbers + messaging together when there's a trunk,
-  and messaging alone when there isn't.
+  dependency at all: no cost, no carrier, no DID).
+
+  Name and Category are edited **in place**; every cell feeds one batched
+  save. Rows you've touched get a highlight and a left rail, a sticky bar
+  reports how many are edited, and **Save changes** commits just those rows —
+  routing each change to the endpoint it needs (rename/category through the
+  container; tier + approved numbers + messaging through the permissions
+  file, or the messaging-only endpoint when there's no trunk). **Discard**
+  reverts to what's on disk, and closing the page with edits pending warns
+  first. Delete keeps its own control per row, since it's destructive and
+  must not ride along with a batch.
+
+  Everything below the table — Categories, Rooms, Groups, Concurrent-call
+  caps, Personal numbers — is a collapsed section with an item count in its
+  header, so the tab opens on the extensions table rather than on six
+  expanded cards. Long explanations sit behind "what this means"
+  disclosures for the same reason. The table scrolls horizontally inside
+  its own card, so the page never scrolls sideways on a phone.
   - **Extensions** — add/rename/delete a SIP extension, reassign its category;
     live registered/unregistered status per device. This is a native
     reimplementation of Easy Asterisk's own vendored web admin
@@ -2242,31 +2257,233 @@ INDEX_HTML = """<!doctype html>
 <title>Security Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
-  header { padding: 1rem 1.5rem; background: #171a21; border-bottom: 1px solid #2a2e38; display: flex; align-items: center; gap: 1rem; }
-  header h1 { font-size: 1.1rem; margin: 0; flex: 1; }
-  nav button { background: none; border: none; color: #9aa4b2; padding: 0.6rem 1rem; cursor: pointer; font-size: 0.95rem; border-bottom: 2px solid transparent; }
-  nav button.active { color: #fff; border-bottom-color: #4f8cff; }
-  main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #23262f; }
-  th { color: #9aa4b2; font-weight: 600; }
+  /* ── Design tokens ────────────────────────────────────────────────────────
+     One scale for spacing/radius/colour so cards, tables and controls line up
+     without per-element nudging. Dark-only on purpose: this is an admin panel
+     that lives next to terminal windows. */
+  :root {
+    --bg: #0c0e13;
+    --surface: #14171f;
+    --surface-2: #1b1f29;
+    --line: #262b37;
+    --line-soft: #1e222c;
+    --text: #e8eaed;
+    --text-dim: #9aa4b2;
+    --text-faint: #6b7484;
+    --accent: #4f8cff;
+    --accent-dim: #1e3a6b;
+    --ok: #46c07a;
+    --warn: #f5b342;
+    --danger: #ff6b6b;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --sp-1: 0.25rem; --sp-2: 0.5rem; --sp-3: 0.75rem; --sp-4: 1rem; --sp-6: 1.5rem;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; background: var(--bg); color: var(--text);
+    font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Header / nav ─────────────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 30;
+    padding: 0 var(--sp-6); background: rgba(20,23,31,0.85);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: var(--sp-6); flex-wrap: wrap;
+  }
+  header h1 { font-size: 0.95rem; margin: 0; padding: var(--sp-4) 0; font-weight: 650; letter-spacing: -0.01em; }
+  nav { display: flex; gap: var(--sp-1); }
+  nav button {
+    background: none; border: none; color: var(--text-dim); font: inherit;
+    padding: var(--sp-4) var(--sp-3); cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: var(--sp-6); max-width: 1180px; margin: 0 auto; }
+
+  /* ── Cards ────────────────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); margin-bottom: var(--sp-4);
+  }
+  .card > .card-head {
+    display: flex; align-items: center; gap: var(--sp-3);
+    padding: var(--sp-4) var(--sp-4) 0;
+  }
+  .card > .card-head h3 { font-size: 0.95rem; margin: 0; flex: 1; font-weight: 650; }
+  .card > .card-body { padding: var(--sp-4); }
+
+  /* Secondary sections collapse by default so the tab opens on the one table
+     that matters. <details> keeps this keyboard-accessible with no JS. */
+  details.card > summary {
+    padding: var(--sp-4); cursor: pointer; list-style: none;
+    display: flex; align-items: center; gap: var(--sp-2);
+    font-size: 0.95rem; font-weight: 650; user-select: none;
+  }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::before {
+    content: "›"; color: var(--text-faint); font-size: 1.2em; line-height: 1;
+    transition: transform 0.15s ease; display: inline-block;
+  }
+  details.card[open] > summary::before { transform: rotate(90deg); }
+  details.card > summary:hover { color: #fff; }
+  details.card > summary .count {
+    color: var(--text-faint); font-weight: 400; font-size: 0.85rem;
+  }
+  details.card > .card-body { padding: 0 var(--sp-4) var(--sp-4); }
+
+  /* Inline "what does this mean" disclosure — keeps the explanation one click
+     away instead of pushing every control below three paragraphs of prose. */
+  details.help { margin: 0 0 var(--sp-3); }
+  details.help > summary {
+    cursor: pointer; color: var(--text-dim); font-size: 0.85rem;
+    list-style: none; display: inline-flex; align-items: center; gap: var(--sp-1);
+  }
+  details.help > summary::-webkit-details-marker { display: none; }
+  details.help > summary::before { content: "ⓘ"; opacity: 0.7; }
+  details.help > summary:hover { color: var(--text); }
+  details.help[open] > summary { margin-bottom: var(--sp-2); }
+  details.help p { margin: 0 0 var(--sp-2); }
+
+  /* ── Tables ───────────────────────────────────────────────────────────── */
+  /* Wrapper, not the table, owns horizontal overflow — a nine-column table on
+     a phone scrolls inside the card instead of blowing out the page. */
+  .table-wrap { overflow-x: auto; margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  th, td { text-align: left; padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--line-soft); }
+  th {
+    color: var(--text-faint); font-weight: 600; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(255,255,255,0.015); }
   th.sortable { cursor: pointer; user-select: none; }
-  th.sortable:hover { color: #e6e6e6; }
-  th.sortable .arrow { opacity: 0.5; font-size: 0.75em; margin-left: 0.25em; }
-  .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
-  .chip-row label { white-space: nowrap; font-size: 0.85rem; color: #9aa4b2; }
-  .sev-Error { color: #ff6b6b; }
-  .sev-Warning { color: #f5b342; }
-  .sev-Informational { color: #7fbf7f; }
-  button.action { background: #2a2e38; color: #e6e6e6; border: 1px solid #3a3f4b; border-radius: 4px; padding: 0.3rem 0.7rem; cursor: pointer; }
-  button.action:hover { background: #3a3f4b; }
-  .card { background: #171a21; border: 1px solid #2a2e38; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-  input[type=text] { background: #0f1115; border: 1px solid #3a3f4b; color: #e6e6e6; padding: 0.4rem 0.6rem; border-radius: 4px; width: 100%; box-sizing: border-box; }
-  .row { display: flex; gap: 0.5rem; align-items: center; }
-  .muted { color: #9aa4b2; font-size: 0.85rem; }
-  a { color: #4f8cff; }
-  #msg { margin-top: 0.5rem; font-size: 0.85rem; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable .arrow { opacity: 0.6; font-size: 0.85em; margin-left: var(--sp-1); }
+  td.actions { text-align: right; white-space: nowrap; }
+
+  /* A row with unsaved edits is marked, not just remembered — the old design
+     had eight Save buttons and no way to see which rows you'd touched. */
+  tr.dirty > td { background: rgba(79,140,255,0.07); }
+  tr.dirty > td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+  /* ── Status pill ──────────────────────────────────────────────────────── */
+  .pill {
+    display: inline-flex; align-items: center; gap: var(--sp-1);
+    font-size: 0.8rem; color: var(--text-dim); white-space: nowrap;
+  }
+  .pill::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-faint); flex: none;
+  }
+  .pill.online { color: var(--ok); }
+  .pill.online::before { background: var(--ok); box-shadow: 0 0 0 3px rgba(70,192,122,0.15); }
+  .pill.offline::before { background: var(--text-faint); }
+
+  /* ── Controls ─────────────────────────────────────────────────────────── */
+  input[type=text], select {
+    background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    padding: 0.35rem 0.55rem; border-radius: var(--radius-sm);
+    font: inherit; font-size: 0.875rem; max-width: 100%;
+  }
+  input[type=text]:focus, select:focus, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  input[type=text]:disabled { opacity: 0.4; cursor: not-allowed; }
+  input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+
+  /* Name cell reads as text until you focus it — editing in place beats a
+     Rename button that opens a browser prompt() dialog. */
+  input.inline-edit {
+    background: transparent; border: 1px solid transparent; color: var(--text);
+    padding: 0.2rem 0.35rem; width: 100%; min-width: 7rem;
+  }
+  input.inline-edit:hover:not(:disabled) { border-color: var(--line); }
+  input.inline-edit:focus { background: var(--bg); border-color: var(--accent); }
+  input.inline-edit:disabled { opacity: 1; }
+
+  button.action, button.primary, button.danger {
+    font: inherit; font-size: 0.85rem; border-radius: var(--radius-sm);
+    padding: 0.35rem 0.7rem; cursor: pointer; white-space: nowrap;
+    border: 1px solid var(--line); background: var(--surface-2); color: var(--text);
+  }
+  button.action:hover { background: #232834; border-color: #333a49; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #3f7bee; }
+  button.danger { color: var(--danger); }
+  button.danger:hover { background: rgba(255,107,107,0.1); border-color: rgba(255,107,107,0.4); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.icon {
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    padding: 0.2rem 0.4rem; border-radius: var(--radius-sm); font-size: 1rem; line-height: 1;
+  }
+  button.icon:hover { color: var(--danger); background: rgba(255,107,107,0.1); }
+
+  .row { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); }
+  .chip-row label { white-space: nowrap; font-size: 0.85rem; color: var(--text-dim); display: inline-flex; align-items: center; gap: var(--sp-1); }
+
+  /* Add-extension form starts hidden — the table is what you came for. */
+  .add-form {
+    display: none; gap: var(--sp-2); flex-wrap: wrap; align-items: center;
+    padding: var(--sp-3); margin-bottom: var(--sp-3);
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  }
+  .add-form.open { display: flex; }
+
+  /* ── Save bar ─────────────────────────────────────────────────────────── */
+  /* One commit point for the whole table, pinned to the bottom of the viewport
+     so it stays reachable however far you've scrolled. */
+  #ext-savebar {
+    position: sticky; bottom: var(--sp-4); z-index: 20;
+    display: none; align-items: center; gap: var(--sp-3);
+    margin-top: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+    background: var(--surface-2); border: 1px solid var(--accent-dim);
+    border-radius: var(--radius); box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  #ext-savebar.show { display: flex; }
+  #ext-savebar .grow { flex: 1; font-size: 0.875rem; }
+
+  /* ── Toasts ───────────────────────────────────────────────────────────── */
+  #toasts {
+    position: fixed; right: var(--sp-4); bottom: var(--sp-4); z-index: 60;
+    display: flex; flex-direction: column; gap: var(--sp-2); max-width: min(28rem, calc(100vw - 2rem));
+  }
+  .toast {
+    background: var(--surface-2); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm); padding: var(--sp-2) var(--sp-3);
+    font-size: 0.85rem; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    animation: toast-in 0.15s ease;
+  }
+  .toast.err { border-left-color: var(--danger); }
+  .toast.ok { border-left-color: var(--ok); }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* The one-time device password must not auto-dismiss like a toast does. */
+  .callout {
+    display: none; align-items: flex-start; gap: var(--sp-3);
+    margin-bottom: var(--sp-3); padding: var(--sp-3);
+    background: rgba(70,192,122,0.08); border: 1px solid rgba(70,192,122,0.35);
+    border-radius: var(--radius-sm); font-size: 0.875rem;
+  }
+  .callout.show { display: flex; }
+  .callout code { background: rgba(0,0,0,0.35); padding: 0.1rem 0.35rem; border-radius: 4px; user-select: all; }
+
+  /* ── Misc ─────────────────────────────────────────────────────────────── */
+  .banner { border-left: 3px solid var(--warn); }
+  .sev-Error { color: var(--danger); }
+  .sev-Warning { color: var(--warn); }
+  .sev-Informational { color: var(--ok); }
+  .muted { color: var(--text-dim); font-size: 0.85rem; }
+  .empty { color: var(--text-faint); font-style: italic; }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }
+  #msg { margin-top: var(--sp-2); font-size: 0.85rem; }
+
   /* Capability gating for the Extensions tab. Everything that needs the Easy
      Asterisk container (device/category/room writes) is .ea-only; everything
      that needs a PSTN trunk dialplan is .pstn-only. Both classes start ON the
@@ -2276,6 +2493,12 @@ INDEX_HTML = """<!doctype html>
      go. */
   body.no-ea .ea-only { display: none !important; }
   body.no-pstn .pstn-only { display: none !important; }
+
+  @media (max-width: 640px) {
+    main { padding: var(--sp-3); }
+    header { padding: 0 var(--sp-3); gap: var(--sp-3); }
+    .table-wrap { margin: 0 calc(-1 * var(--sp-3)); padding: 0 var(--sp-3); }
+  }
 </style>
 </head>
 <body class="no-ea no-pstn">
@@ -2290,179 +2513,234 @@ INDEX_HTML = """<!doctype html>
 <main>
   <div id="tab-security">
     <div class="card">
-      <p class="muted">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
-      <table id="sec-table"><thead><tr>
-        <th class="sortable" data-sort="timestamp">Time</th>
-        <th class="sortable" data-sort="event">Event</th>
-        <th class="sortable" data-sort="account">Account</th>
-        <th class="sortable" data-sort="remote">Remote</th>
-        <th class="sortable" data-sort="severity">Severity</th>
-      </tr></thead><tbody></tbody></table>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
+        <div class="table-wrap">
+          <table id="sec-table"><thead><tr>
+            <th class="sortable" data-sort="timestamp">Time</th>
+            <th class="sortable" data-sort="event">Event</th>
+            <th class="sortable" data-sort="account">Account</th>
+            <th class="sortable" data-sort="remote">Remote</th>
+            <th class="sortable" data-sort="severity">Severity</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
     </div>
   </div>
   <div id="tab-crowdsec" style="display:none">
     <div class="card">
-      <h3 style="margin-top:0">Active bans</h3>
-      <table id="dec-table"><thead><tr>
-        <th class="sortable" data-sort="value">IP/Range</th>
-        <th class="sortable" data-sort="scenario">Scenario</th>
-        <th class="sortable" data-sort="carrier">Network / Carrier</th>
-        <th class="sortable" data-sort="country">Country</th>
-        <th class="sortable" data-sort="duration">Duration</th>
-        <th class="sortable" data-sort="origin">Origin</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
+      <div class="card-head"><h3>Active bans</h3></div>
+      <div class="card-body">
+        <div class="table-wrap">
+          <table id="dec-table"><thead><tr>
+            <th class="sortable" data-sort="value">IP/Range</th>
+            <th class="sortable" data-sort="scenario">Scenario</th>
+            <th class="sortable" data-sort="carrier">Network / Carrier</th>
+            <th class="sortable" data-sort="country">Country</th>
+            <th class="sortable" data-sort="duration">Duration</th>
+            <th class="sortable" data-sort="origin">Origin</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">Asterisk brute-force ASN exemptions</h3>
-      <p class="muted">Carrier ASNs exempted from the Asterisk brute-force scenarios only — SSH/web/geo protection is unaffected. See CLAUDE.md / services/crowdsec.sh for background.</p>
-      <div class="row">
-        <input type="text" id="asn-input" placeholder="e.g. 21928, 14593">
-        <button class="action" id="asn-save">Save</button>
+      <div class="card-head"><h3>Asterisk brute-force ASN exemptions</h3></div>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Carrier ASNs exempted from the Asterisk brute-force scenarios only — SSH/web/geo protection is unaffected. See CLAUDE.md / services/crowdsec.sh for background.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="asn-input" placeholder="e.g. 21928, 14593" style="width:16rem">
+          <button class="action" id="asn-save">Save</button>
+        </div>
+        <div class="table-wrap">
+          <table id="asn-table"><thead><tr><th>ASN</th><th>Carrier</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div id="msg"></div>
       </div>
-      <table id="asn-table" style="margin-top:0.75rem"><thead><tr><th>ASN</th><th>Carrier</th><th></th></tr></thead><tbody></tbody></table>
-      <div id="msg"></div>
     </div>
   </div>
   <div id="tab-extensions" style="display:none">
-    <div class="card pstn-only" id="pstn-restart-banner" style="display:none; border-left:4px solid #d9822b">
-      <b>Unsaved changes may not be live yet.</b>
-      <p class="muted" style="margin:0.25rem 0 0.5rem">
-        Edits here are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
-      </p>
-      <button class="action" id="pstn-restart-btn">Commit Changes (Restart Asterisk)</button>
-      <span id="pstn-restart-msg" class="muted" style="margin-left:0.5rem"></span>
+    <div class="card pstn-only banner" id="pstn-restart-banner" style="display:none">
+      <div class="card-body">
+        <b>Changes may not be live yet.</b>
+        <p class="muted" style="margin:var(--sp-1) 0 var(--sp-2)">
+          Edits are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
+        </p>
+        <button class="action" id="pstn-restart-btn">Commit changes (restart Asterisk)</button>
+        <span id="pstn-restart-msg" class="muted" style="margin-left:var(--sp-2)"></span>
+      </div>
     </div>
+
     <div class="card">
-      <h3 style="margin-top:0">Extensions</h3>
-      <p class="muted">
-        Every SIP extension on this box, one row each. Adding one generates a random password and reloads PJSIP + rebuilds the dialplan automatically — the password is shown once below the table, save it before it scrolls away.
-      </p>
-      <p class="muted">
-        <b>Tier</b> — <b>internal</b>: no PSTN, can still call/receive other extensions and internal ring groups. <b>restricted</b>: internal, plus only the pre-approved US numbers in the next column. <b>full</b>: internal, plus any US number. Changes are usually live on the next call; if one doesn't seem to be taking effect, use "Commit Changes" above.
-      </p>
-      <p class="muted">
-        <b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README for how, and its caveat on the sender-extraction logic still needing real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code> to pick it up.
-      </p>
-      <div class="row ea-only" style="flex-wrap:wrap">
-        <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:10rem">
-        <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:8rem">
-        <select id="ea-dev-category"></select>
-        <select id="ea-dev-conn">
-          <option value="lan">LAN (UDP)</option>
-          <option value="fqdn">Remote/FQDN (TLS)</option>
-        </select>
-        <select id="ea-dev-aa">
-          <option value="">Auto-answer: category default</option>
-          <option value="yes">Auto-answer: yes</option>
-          <option value="no">Auto-answer: no</option>
-        </select>
-        <button class="action" id="ea-dev-save">Add extension</button>
+      <div class="card-head">
+        <h3>Extensions <span class="count muted" id="ext-count"></span></h3>
+        <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
       </div>
-      <table id="ext-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="ext">Ext</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th class="ea-only">Category</th>
-        <th class="sortable ea-only" data-sort="status">Status</th>
-        <th class="ea-only">Transport</th>
-        <th class="sortable pstn-only" data-sort="tier">Tier</th>
-        <th class="pstn-only">Approved numbers (restricted only)</th>
-        <th class="sortable" data-sort="messaging">Messaging</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ext-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card ea-only">
-      <h3 style="margin-top:0">Categories</h3>
-      <p class="muted">Device profiles — an auto-answer default and a description, assignable to any extension above.</p>
-      <div class="row" style="flex-wrap:wrap">
-        <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase, no spaces)" style="width:12rem">
-        <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
-        <select id="ea-cat-aa">
-          <option value="">Auto-answer default: no</option>
-          <option value="yes">Auto-answer default: yes</option>
-        </select>
-        <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
-        <button class="action" id="ea-cat-save">Add category</button>
+      <div class="card-body">
+        <div class="callout" id="ext-password-callout">
+          <div class="grow" id="ext-password-text" style="flex:1"></div>
+          <button class="icon" id="ext-password-dismiss" title="Dismiss">&times;</button>
+        </div>
+
+        <div class="add-form ea-only" id="ext-add-form">
+          <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:11rem">
+          <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:9rem">
+          <select id="ea-dev-category"></select>
+          <select id="ea-dev-conn">
+            <option value="lan">LAN (UDP)</option>
+            <option value="fqdn">Remote/FQDN (TLS)</option>
+          </select>
+          <select id="ea-dev-aa">
+            <option value="">Auto-answer: category default</option>
+            <option value="yes">Auto-answer: yes</option>
+            <option value="no">Auto-answer: no</option>
+          </select>
+          <button class="primary" id="ea-dev-save">Add</button>
+          <button class="action" id="ext-add-cancel">Cancel</button>
+        </div>
+
+        <details class="help">
+          <summary>What these columns mean</summary>
+          <p class="muted"><b>Name</b> and <b>Category</b> are editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card.</p>
+          <p class="muted pstn-only"><b>Tier</b> — <b>internal</b>: no PSTN, can still call/receive other extensions and internal ring groups. <b>restricted</b>: internal, plus only the pre-approved US numbers in the next column. <b>full</b>: internal, plus any US number. Usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
+          <p class="muted"><b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README, including its caveat that the sender-extraction logic still needs real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code>.</p>
+        </details>
+
+        <div class="table-wrap">
+          <table id="ext-table"><thead><tr>
+            <th class="sortable" data-sort="ext">Ext</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th class="ea-only">Category</th>
+            <th class="sortable ea-only" data-sort="status">Status</th>
+            <th class="ea-only">Transport</th>
+            <th class="sortable pstn-only" data-sort="tier">Tier</th>
+            <th class="pstn-only">Approved numbers</th>
+            <th class="sortable" data-sort="messaging">Messaging</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+
+        <div id="ext-savebar">
+          <span class="grow" id="ext-dirty-label"></span>
+          <button class="action" id="ext-discard">Discard</button>
+          <button class="primary" id="ext-save-all">Save changes</button>
+        </div>
       </div>
-      <table id="ea-cat-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="id">ID</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th>Auto-answer</th>
-        <th>Description</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ea-cat-msg" class="muted" style="margin-top:0.5rem"></div>
     </div>
-    <div class="card ea-only">
-      <h3 style="margin-top:0">Rooms (ring groups)</h3>
-      <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
-      <div class="row" style="flex-wrap:wrap">
-        <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:8rem">
-        <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
-        <select id="ea-room-type">
-          <option value="ring">Ring (simultaneous)</option>
-          <option value="page">Page (intercom)</option>
-        </select>
-        <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:6rem">
-        <button class="action" id="ea-room-save">Add room</button>
+
+    <details class="card ea-only" id="card-categories">
+      <summary>Categories <span class="count" id="cat-count"></span></summary>
+      <div class="card-body">
+        <p class="muted">Device profiles — an auto-answer default and a description, assignable to any extension above.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="ea-cat-id" placeholder="ID, e.g. desk (lowercase)" style="width:12rem">
+          <input type="text" id="ea-cat-name" placeholder="Display name" style="width:10rem">
+          <select id="ea-cat-aa">
+            <option value="">Auto-answer default: no</option>
+            <option value="yes">Auto-answer default: yes</option>
+          </select>
+          <input type="text" id="ea-cat-desc" placeholder="Description (optional)" style="width:12rem">
+          <button class="action" id="ea-cat-save">Add category</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ea-cat-table"><thead><tr>
+            <th class="sortable" data-sort="id">ID</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th>Auto-answer</th>
+            <th>Description</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <table id="ea-room-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="extension">Ext</th>
-        <th class="sortable" data-sort="name">Name</th>
-        <th>Members</th>
-        <th>Timeout</th>
-        <th>Type</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="ea-room-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card">
-      <h3 style="margin-top:0">Groups</h3>
-      <p class="muted">
-        Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own Messaging checkbox above would, one time — it isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied. A group can also own a personal number below, which <i>is</i> evaluated live against current membership on every call.
-      </p>
-      <div class="row">
-        <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
-        <button class="action" id="grp-save">Save group</button>
+    </details>
+
+    <details class="card ea-only" id="card-rooms">
+      <summary>Rooms (ring groups) <span class="count" id="room-count"></span></summary>
+      <div class="card-body">
+        <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
+          <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
+          <select id="ea-room-type">
+            <option value="ring">Ring (simultaneous)</option>
+            <option value="page">Page (intercom)</option>
+          </select>
+          <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:7rem">
+          <button class="action" id="ea-room-save">Add room</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ea-room-table"><thead><tr>
+            <th class="sortable" data-sort="extension">Ext</th>
+            <th class="sortable" data-sort="name">Name</th>
+            <th>Members</th>
+            <th>Timeout</th>
+            <th>Type</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <div id="grp-members" class="row" style="flex-wrap:wrap;margin-top:0.5rem"></div>
-      <table id="grp-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="name">Group</th>
-        <th class="sortable" data-sort="members">Members</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="grp-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card pstn-only">
-      <h3 style="margin-top:0">Concurrent-call caps</h3>
-      <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Changes are usually live on the next call; if a call doesn't reflect a recent change, use "Commit Changes" at the top.</p>
-      <div class="row">
-        <label class="muted" style="white-space:nowrap">Max outbound<br><input type="text" id="limit-out" style="width:5rem"></label>
-        <label class="muted" style="white-space:nowrap">Max inbound<br><input type="text" id="limit-in" style="width:5rem"></label>
-        <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
+    </details>
+
+    <details class="card" id="card-groups">
+      <summary>Groups <span class="count" id="grp-count"></span></summary>
+      <div class="card-body">
+        <details class="help">
+          <summary>What groups do</summary>
+          <p class="muted">Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own Messaging checkbox above would, one time. It isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied. A group can also own a personal number below, which <i>is</i> evaluated live against current membership on every call.</p>
+        </details>
+        <div class="row" style="margin-bottom:var(--sp-2)">
+          <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
+          <button class="action" id="grp-save">Save group</button>
+        </div>
+        <div id="grp-members" class="chip-row" style="margin-bottom:var(--sp-3)"></div>
+        <div class="table-wrap">
+          <table id="grp-table"><thead><tr>
+            <th class="sortable" data-sort="name">Group</th>
+            <th class="sortable" data-sort="members">Members</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
       </div>
-      <div id="limits-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
-    <div class="card pstn-only">
-      <h3 style="margin-top:0">Personal numbers</h3>
-      <p class="muted">
-        Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID. You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call; a group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless. Reassigning a DID's owner has been confirmed to sometimes need "Commit Changes" (at the top) before Asterisk actually uses the new owner.
-      </p>
-      <div class="row">
-        <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits, no leading 1)" style="width:12rem">
-        <select id="pd-owner"></select>
-        <button class="action" id="pd-save">Assign</button>
+    </details>
+
+    <details class="card pstn-only" id="card-limits">
+      <summary>Concurrent-call caps</summary>
+      <div class="card-body">
+        <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Usually live on the next call; if a call doesn't reflect a recent change, use "Commit changes" at the top.</p>
+        <div class="row">
+          <label class="muted">Max outbound<br><input type="text" id="limit-out" style="width:5.5rem"></label>
+          <label class="muted">Max inbound<br><input type="text" id="limit-in" style="width:5.5rem"></label>
+          <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
+        </div>
       </div>
-      <table id="pd-table" style="margin-top:0.75rem"><thead><tr>
-        <th class="sortable" data-sort="did">DID</th>
-        <th class="sortable" data-sort="owner">Owner</th>
-        <th></th>
-      </tr></thead><tbody></tbody></table>
-      <div id="pd-msg" class="muted" style="margin-top:0.5rem"></div>
-    </div>
+    </details>
+
+    <details class="card pstn-only" id="card-dids">
+      <summary>Personal numbers <span class="count" id="pd-count"></span></summary>
+      <div class="card-body">
+        <details class="help">
+          <summary>How personal numbers route</summary>
+          <p class="muted">Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID.</p>
+          <p class="muted">You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call. A group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.</p>
+          <p class="muted">Reassigning a DID's owner has been confirmed to sometimes need "Commit changes" (at the top) before Asterisk actually uses the new owner.</p>
+        </details>
+        <div class="row" style="margin-bottom:var(--sp-3)">
+          <input type="text" id="pd-did" placeholder="DID, e.g. 5551234567 (10 digits)" style="width:14rem">
+          <select id="pd-owner"></select>
+          <button class="action" id="pd-save">Assign</button>
+        </div>
+        <div class="table-wrap">
+          <table id="pd-table"><thead><tr>
+            <th class="sortable" data-sort="did">DID</th>
+            <th class="sortable" data-sort="owner">Owner</th>
+            <th></th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </details>
   </div>
 </main>
+<div id="toasts"></div>
 <script>
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
@@ -2728,17 +3006,18 @@ function renderEaCategories() {
     const th = document.querySelector(`#ea-cat-table th[data-sort="${eaCatSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaCatSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("cat-count", eaCategories.length);
   const tbody = document.querySelector("#ea-cat-table tbody");
   tbody.innerHTML = rows.map(c => `<tr data-id="${esc(c.id)}">
     <td>${esc(c.id)}</td>
     <td>${esc(c.name)}</td>
     <td>${c.auto_answer === "yes" ? "yes" : (c.auto_answer === "no" ? "no" : "—")}</td>
     <td>${esc(c.description)}</td>
-    <td>
+    <td class="actions">
       <button class="action" onclick="renameEaCategory('${esc(c.id)}')">Rename</button>
-      <button class="action" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
+      <button class="action danger" onclick="deleteEaCategory('${esc(c.id)}')">Delete</button>
     </td>
-  </tr>`).join("") || '<tr><td colspan=5 class=muted>No categories yet.</td></tr>';
+  </tr>`).join("") || '<tr><td colspan=5 class=empty>No categories yet.</td></tr>';
 }
 
 document.querySelectorAll("#ea-cat-table th.sortable").forEach(th => {
@@ -2760,7 +3039,7 @@ document.getElementById("ea-cat-save").addEventListener("click", async () => {
     body: JSON.stringify({id, name, auto_answer, description}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Category added" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("ea-cat-id").value = "";
     document.getElementById("ea-cat-name").value = "";
@@ -2778,7 +3057,7 @@ async function renameEaCategory(id) {
     body: JSON.stringify({id, name: name.trim()}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  toast(data.message || (data.ok ? "Category renamed" : "Failed"), data.ok ? "ok" : "err");
   loadEaCategories();
 }
 
@@ -2789,8 +3068,19 @@ async function deleteEaCategory(id) {
     body: JSON.stringify({id}),
   });
   const data = await res.json();
-  document.getElementById("ea-cat-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  toast(data.message || (data.ok ? "Category deleted" : "Failed"), data.ok ? "ok" : "err");
   loadEaCategories();
+}
+
+// ── Toasts ────────────────────────────────────────────────────────────────
+// Transient feedback that doesn't push layout around. Anything the user must
+// keep (a one-time device password) uses the persistent callout instead.
+function toast(text, kind) {
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " " + kind : "");
+  el.textContent = text;
+  document.getElementById("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 5000);
 }
 
 // One row per extension, merged from two sources that used to drive two
@@ -2840,10 +3130,17 @@ function extSortValue(e, key) {
   return (e[key] || "").toString().toLowerCase();
 }
 
+function setCount(id, n) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = n ? "(" + n + ")" : "";
+}
+
 function renderExtensions() {
   const tbody = document.querySelector("#ext-table tbody");
+  setCount("ext-count", extRows.length);
   if (!extRows.length) {
-    tbody.innerHTML = '<tr><td colspan=9 class=muted>No extensions found (no Asterisk install detected, or pjsip.conf has no devices yet).</td></tr>';
+    tbody.innerHTML = '<tr><td colspan=9 class=empty>No extensions found — no Asterisk install detected, or pjsip.conf has no devices yet.</td></tr>';
+    updateDirtyState();
     return;
   }
   let rows = extRows.slice();
@@ -2868,21 +3165,20 @@ function renderExtensions() {
     ).join("") || `<option value="${esc(e.category)}" selected>${esc(e.category)}</option>`;
     // Rows for an extension the Easy Asterisk container doesn't know about
     // (in pjsip.conf but not its device list) still get tier/messaging —
-    // only the container-backed controls are dropped, since every one of
-    // them writes through `docker exec` into that container.
+    // only the container-backed controls are inert, since every one of them
+    // writes through `docker exec` into that container.
     const catCell = e.ea
-      ? `<select onchange="changeEaDeviceCategory('${esc(e.ext)}', this.value)">${catOptions}</select>`
-      : '<span class="muted">—</span>';
-    const deviceActions = e.ea
-      ? `<button class="action ea-only" onclick="renameEaDevice('${esc(e.ext)}')">Rename</button>
-         <button class="action ea-only" onclick="deleteEaDevice('${esc(e.ext)}')">Delete</button>`
-      : "";
+      ? `<select class="ext-category">${catOptions}</select>`
+      : '<span class="empty">—</span>';
+    const statusCell = e.ea
+      ? `<span class="pill ${status === "online" ? "online" : "offline"}">${esc(status)}</span>`
+      : '<span class="empty">—</span>';
     return `<tr data-ext="${esc(e.ext)}">
       <td>${esc(e.ext)}</td>
-      <td>${esc(e.name)}</td>
+      <td><input type="text" class="inline-edit ext-name" value="${esc(e.name)}" ${e.ea ? "" : "disabled"} aria-label="Name for extension ${esc(e.ext)}"></td>
       <td class="ea-only">${catCell}</td>
-      <td class="ea-only ${e.ea && status === "online" ? "sev-Informational" : "muted"}">${e.ea ? esc(status) : "—"}</td>
-      <td class="ea-only">${esc(e.transport)}${e.encryption && e.encryption !== "no" ? " / " + esc(e.encryption) : ""}</td>
+      <td class="ea-only">${statusCell}</td>
+      <td class="ea-only muted">${esc(e.transport)}${e.encryption && e.encryption !== "no" ? " / " + esc(e.encryption) : ""}</td>
       <td class="pstn-only">
         <select class="ext-tier">
           <option value="internal" ${e.tier === "internal" ? "selected" : ""}>internal</option>
@@ -2890,11 +3186,10 @@ function renderExtensions() {
           <option value="full" ${e.tier === "full" ? "selected" : ""}>full</option>
         </select>
       </td>
-      <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543 (leading 1 optional)" ${e.tier === "restricted" ? "" : "disabled"}></td>
-      <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""}></td>
-      <td>
-        <button class="action" onclick="saveExtension('${esc(e.ext)}')">Save</button>
-        ${deviceActions}
+      <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${e.tier === "restricted" ? "" : "disabled"} style="width:15rem"></td>
+      <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
+      <td class="actions">
+        <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
       </td>
     </tr>`;
   }).join("");
@@ -2905,11 +3200,125 @@ function renderExtensions() {
     if (tierSel && numsInput) {
       tierSel.addEventListener("change", () => { numsInput.disabled = tierSel.value !== "restricted"; });
     }
+    row.querySelectorAll("input, select").forEach(ctl => {
+      ctl.addEventListener("input", updateDirtyState);
+      ctl.addEventListener("change", updateDirtyState);
+    });
   });
+  updateDirtyState();
+}
+
+// ── Dirty tracking ────────────────────────────────────────────────────────
+// Every editable cell is compared against the loaded model, so the table can
+// mark exactly which rows changed and commit them in one go. The previous
+// design put a Save button on every row with no indication of which ones you
+// had actually touched.
+function rowEdits(tr) {
+  const ext = tr.dataset.ext;
+  const model = extRows.find(e => e.ext === ext);
+  if (!model) return null;
+  const nameEl = tr.querySelector(".ext-name");
+  const catEl = tr.querySelector(".ext-category");
+  const tierEl = tr.querySelector(".ext-tier");
+  const numsEl = tr.querySelector(".ext-numbers");
+  const msgEl = tr.querySelector(".ext-messaging");
+  const edits = {};
+  if (nameEl && !nameEl.disabled && nameEl.value.trim() !== model.name) edits.name = nameEl.value.trim();
+  if (catEl && catEl.value !== model.category) edits.category = catEl.value;
+  if (tierEl && tierEl.value !== model.tier) edits.tier = tierEl.value;
+  if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
+  if (msgEl && msgEl.checked !== !!model.messaging) edits.messaging = msgEl.checked;
+  return {ext, model, edits, tr, count: Object.keys(edits).length};
+}
+
+function collectDirtyRows() {
+  return Array.from(document.querySelectorAll("#ext-table tbody tr[data-ext]"))
+    .map(rowEdits).filter(r => r && r.count > 0);
+}
+
+function updateDirtyState() {
+  const dirty = collectDirtyRows();
+  const dirtyExts = new Set(dirty.map(d => d.ext));
+  document.querySelectorAll("#ext-table tbody tr[data-ext]").forEach(tr => {
+    tr.classList.toggle("dirty", dirtyExts.has(tr.dataset.ext));
+  });
+  const bar = document.getElementById("ext-savebar");
+  bar.classList.toggle("show", dirty.length > 0);
+  document.getElementById("ext-dirty-label").textContent =
+    dirty.length === 1 ? "1 extension edited" : dirty.length + " extensions edited";
+}
+
+document.getElementById("ext-discard").addEventListener("click", () => { renderExtensions(); });
+
+// Saves only the rows that changed, and only the endpoints each change needs.
+// Name and category go through the Easy Asterisk container; tier/numbers/
+// messaging go through the permissions file — or, with no trunk installed,
+// the messaging-only endpoint, which exists precisely because messaging has
+// no PSTN dependency.
+document.getElementById("ext-save-all").addEventListener("click", async () => {
+  const dirty = collectDirtyRows();
+  if (!dirty.length) return;
+  const btn = document.getElementById("ext-save-all");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+
+  let saved = 0;
+  const failures = [];
+  for (const row of dirty) {
+    const {ext, model, edits} = row;
+    try {
+      if ("name" in edits) {
+        const r = await postJSON("/api/ea-devices/rename", {extension: ext, name: edits.name});
+        if (!r.ok) throw new Error(r.message || "rename failed");
+      }
+      if ("category" in edits) {
+        const r = await postJSON("/api/ea-devices/category", {extension: ext, category: edits.category});
+        if (!r.ok) throw new Error(r.message || "category change failed");
+      }
+      if ("tier" in edits || "allowed_numbers" in edits || "messaging" in edits) {
+        const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
+        let r;
+        if (pstnInstalled) {
+          r = await postJSON("/api/pstn-permissions", {
+            ext: ext,
+            tier: "tier" in edits ? edits.tier : model.tier,
+            allowed_numbers: "allowed_numbers" in edits ? edits.allowed_numbers : model.allowed_numbers,
+            messaging: messaging,
+          });
+        } else {
+          r = await postJSON("/api/pstn-messaging", {ext: ext, enabled: messaging});
+        }
+        if (!r.ok) throw new Error(r.message || "permission save failed");
+        if (pstnInstalled) markPstnDirty();
+      }
+      saved++;
+    } catch (err) {
+      failures.push(ext + ": " + err.message);
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = "Save changes";
+  if (failures.length) {
+    toast(`Saved ${saved}, failed ${failures.length} — ` + failures.join("; "), "err");
+  } else {
+    toast(`Saved ${saved} extension${saved === 1 ? "" : "s"}`, "ok");
+  }
+  await loadExtensions();
+});
+
+function postJSON(url, body) {
+  return fetch(url, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  }).then(r => r.json());
 }
 
 document.querySelectorAll("#ext-table th.sortable").forEach(th => {
   th.addEventListener("click", () => {
+    // Re-rendering drops uncommitted edits, so don't silently throw them away.
+    if (collectDirtyRows().length &&
+        !confirm("Sorting reloads the table and discards your unsaved edits. Continue?")) return;
     const key = th.dataset.sort;
     extSort.dir = (extSort.key === key) ? -extSort.dir : 1;
     extSort.key = key;
@@ -2917,93 +3326,53 @@ document.querySelectorAll("#ext-table th.sortable").forEach(th => {
   });
 });
 
-// Two write paths, one button. With a trunk installed the row owns tier +
-// approved numbers + messaging, so it saves all three through the
-// permissions endpoint. Without one there is no tier to speak of and those
-// columns are hidden, so it falls back to the messaging-only endpoint —
-// which exists precisely because messaging has no PSTN dependency.
-async function saveExtension(ext) {
-  const row = document.querySelector(`#ext-table tr[data-ext="${ext}"]`);
-  const messaging = row.querySelector(".ext-messaging").checked;
-  let res;
-  if (pstnInstalled) {
-    res = await fetch("/api/pstn-permissions", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        ext: ext,
-        tier: row.querySelector(".ext-tier").value,
-        allowed_numbers: row.querySelector(".ext-numbers").value,
-        messaging: messaging,
-      }),
-    });
-  } else {
-    res = await fetch("/api/pstn-messaging", {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ext: ext, enabled: messaging}),
-    });
-  }
-  const data = await res.json();
-  document.getElementById("ext-msg").textContent =
-    (data.message || (data.ok ? "Saved" : "Failed")) + " (extension " + ext + ")";
-  if (data.ok && pstnInstalled) markPstnDirty();
-  loadExtensions();
-}
+// ── Add extension ─────────────────────────────────────────────────────────
+const extAddForm = document.getElementById("ext-add-form");
+document.getElementById("ext-add-toggle").addEventListener("click", () => {
+  extAddForm.classList.toggle("open");
+  if (extAddForm.classList.contains("open")) document.getElementById("ea-dev-name").focus();
+});
+document.getElementById("ext-add-cancel").addEventListener("click", () => {
+  extAddForm.classList.remove("open");
+});
+document.getElementById("ext-password-dismiss").addEventListener("click", () => {
+  document.getElementById("ext-password-callout").classList.remove("show");
+});
 
 document.getElementById("ea-dev-save").addEventListener("click", async () => {
   const name = document.getElementById("ea-dev-name").value.trim();
   const extension = document.getElementById("ea-dev-ext").value.trim();
-  const category = document.getElementById("ea-dev-category").value;
-  const conn_type = document.getElementById("ea-dev-conn").value;
-  const aa = document.getElementById("ea-dev-aa").value;
-  const res = await fetch("/api/ea-devices", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name, extension, category, conn_type, auto_answer: aa || null}),
+  const data = await postJSON("/api/ea-devices", {
+    name,
+    extension,
+    category: document.getElementById("ea-dev-category").value,
+    conn_type: document.getElementById("ea-dev-conn").value,
+    auto_answer: document.getElementById("ea-dev-aa").value || null,
   });
-  const data = await res.json();
   if (data.ok) {
-    document.getElementById("ext-msg").textContent =
-      `Added ${data.data.extension} — password: ${data.data.password} (shown once, save it now) — SIP ${data.data.transport} on port ${data.data.port}`;
+    // Persistent, not a toast: this password is shown exactly once.
+    document.getElementById("ext-password-text").innerHTML =
+      `Added extension <b>${esc(data.data.extension)}</b> — password <code>${esc(data.data.password)}</code> ` +
+      `(shown once, save it now). SIP ${esc(data.data.transport)} on port ${esc(String(data.data.port))}.`;
+    document.getElementById("ext-password-callout").classList.add("show");
     document.getElementById("ea-dev-name").value = "";
     document.getElementById("ea-dev-ext").value = "";
+    extAddForm.classList.remove("open");
   } else {
-    document.getElementById("ext-msg").textContent = data.message || "Failed";
+    toast(data.message || "Failed to add extension", "err");
   }
   loadExtensions();
 });
 
-async function renameEaDevice(ext) {
-  const cur = extRows.find(e => e.ext === ext);
-  const name = prompt("New name for extension " + ext + ":", cur ? cur.name : "");
-  if (name === null || !name.trim()) return;
-  const res = await fetch("/api/ea-devices/rename", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext, name: name.trim()}),
-  });
-  const data = await res.json();
-  document.getElementById("ext-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
-  loadExtensions();
-}
-
+// Delete keeps its own control — it's destructive, so it must not ride along
+// with the batched Save. Rename and category changes are part of that batch
+// now, which is why their standalone handlers are gone.
 async function deleteEaDevice(ext) {
-  if (!confirm("Delete device " + ext + "? This cannot be undone.")) return;
-  const res = await fetch("/api/ea-devices/delete", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext}),
-  });
-  const data = await res.json();
-  document.getElementById("ext-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  if (!confirm("Delete extension " + ext + "? This cannot be undone.")) return;
+  const data = await postJSON("/api/ea-devices/delete", {extension: ext});
+  toast(data.message || (data.ok ? "Deleted extension " + ext : "Delete failed"), data.ok ? "ok" : "err");
   loadExtensions();
   loadEaRooms();
-}
-
-async function changeEaDeviceCategory(ext, category) {
-  const res = await fetch("/api/ea-devices/category", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension: ext, category}),
-  });
-  const data = await res.json();
-  document.getElementById("ext-msg").textContent = data.message || (data.ok ? "Category changed" : "Failed");
-  loadExtensions();
 }
 
 async function loadEaRooms() {
@@ -3033,6 +3402,7 @@ function renderEaRooms() {
     const th = document.querySelector(`#ea-room-table th[data-sort="${eaRoomSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${eaRoomSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("room-count", eaRooms.length);
   const tbody = document.querySelector("#ea-room-table tbody");
   tbody.innerHTML = rows.map(r => {
     const memberExts = (r.members || "").split(",").filter(Boolean);
@@ -3055,12 +3425,12 @@ function renderEaRooms() {
       <td>${memberChips || '<span class="muted">none</span>'}<br>${addPicker}</td>
       <td>${esc(r.timeout)}</td>
       <td>${esc(r.type)}</td>
-      <td>
+      <td class="actions">
         <button class="action" onclick="renameEaRoom('${esc(r.extension)}')">Rename</button>
-        <button class="action" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
+        <button class="action danger" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
       </td>
     </tr>`;
-  }).join("") || '<tr><td colspan=6 class=muted>No rooms yet.</td></tr>';
+  }).join("") || '<tr><td colspan=6 class=empty>No rooms yet.</td></tr>';
 }
 
 document.querySelectorAll("#ea-room-table th.sortable").forEach(th => {
@@ -3082,7 +3452,7 @@ document.getElementById("ea-room-save").addEventListener("click", async () => {
     body: JSON.stringify({extension, name, type, timeout}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Room added" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("ea-room-ext").value = "";
     document.getElementById("ea-room-name").value = "";
@@ -3099,7 +3469,7 @@ async function renameEaRoom(ext) {
     body: JSON.stringify({extension: ext, name: name.trim()}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Renamed" : "Failed");
+  toast(data.message || (data.ok ? "Room renamed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3110,7 +3480,7 @@ async function deleteEaRoom(ext) {
     body: JSON.stringify({extension: ext}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  toast(data.message || (data.ok ? "Room deleted" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3123,7 +3493,7 @@ async function addEaRoomMemberFromRow(roomExt, btn) {
     body: JSON.stringify({room: roomExt, device}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Added" : "Failed");
+  toast(data.message || (data.ok ? "Member added" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3133,7 +3503,7 @@ async function removeEaRoomMember(roomExt, device) {
     body: JSON.stringify({room: roomExt, device}),
   });
   const data = await res.json();
-  document.getElementById("ea-room-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  toast(data.message || (data.ok ? "Member removed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
 }
 
@@ -3179,17 +3549,18 @@ function renderGroups() {
     const th = document.querySelector(`#grp-table th[data-sort="${grpSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${grpSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("grp-count", lastGroups.length);
   const tbody = document.querySelector("#grp-table tbody");
   tbody.innerHTML = rows.map(g => `<tr data-group="${esc(g.name)}">
     <td>${esc(g.name)}</td>
     <td>${g.members.map(esc).join(", ") || '<span class="muted">none</span>'}</td>
-    <td>
+    <td class="actions">
       <button class="action" onclick="editGroup('${esc(g.name)}')">Edit</button>
       <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', true)">Enable messaging</button>
       <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', false)">Disable messaging</button>
-      <button class="action" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
+      <button class="action danger" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
     </td>
-  </tr>`).join("") || '<tr><td colspan=3 class=muted>No groups yet.</td></tr>';
+  </tr>`).join("") || '<tr><td colspan=3 class=empty>No groups yet.</td></tr>';
 }
 
 document.querySelectorAll("#grp-table th.sortable").forEach(th => {
@@ -3224,7 +3595,7 @@ document.getElementById("grp-save").addEventListener("click", async () => {
     body: JSON.stringify({name: name, members: members}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Group saved" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok && pstnInstalled) markPstnDirty();
   loadGroups();
 });
@@ -3236,7 +3607,7 @@ async function applyGroupMessaging(name, enabled) {
     body: JSON.stringify({name: name, enabled: enabled}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Applied" : "Failed");
+  toast(data.message || (data.ok ? "Applied to group" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok && pstnInstalled) markPstnDirty();
   loadExtensions();
 }
@@ -3248,7 +3619,7 @@ async function deleteGroup(name) {
     body: JSON.stringify({name: name}),
   });
   const data = await res.json();
-  document.getElementById("grp-msg").textContent = data.message || (data.ok ? "Deleted" : "Failed");
+  toast(data.message || (data.ok ? "Group deleted" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok && pstnInstalled) markPstnDirty();
   loadGroups();
 }
@@ -3261,7 +3632,7 @@ document.getElementById("limits-save").addEventListener("click", async () => {
     body: JSON.stringify({max_outbound: maxOut, max_inbound: maxIn}),
   });
   const data = await res.json();
-  document.getElementById("limits-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Caps saved" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) markPstnDirty();
   loadPstnLimits();
 });
@@ -3281,7 +3652,10 @@ function markPstnDirty() {
   document.getElementById("pstn-restart-banner").style.display = "";
 }
 window.addEventListener("beforeunload", (e) => {
-  if (!pstnDirty) return;
+  // Two independent kinds of "unsaved": edits still sitting in the table, and
+  // saved-but-not-yet-committed PSTN config the dialplan may still be stale on.
+  const tableDirty = typeof collectDirtyRows === "function" && collectDirtyRows().length > 0;
+  if (!pstnDirty && !tableDirty) return;
   e.preventDefault();
   e.returnValue = "";
 });
@@ -3331,6 +3705,7 @@ function renderPersonalDids() {
     const th = document.querySelector(`#pd-table th[data-sort="${pdSort.key}"]`);
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${pdSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
+  setCount("pd-count", lastPersonalDids.length);
   const tbody = document.querySelector("#pd-table tbody");
   tbody.innerHTML = rows.map(d => {
     const ownerDisplay = d.owner.startsWith("@")
@@ -3339,9 +3714,9 @@ function renderPersonalDids() {
     return `<tr>
     <td>${esc(d.did)}</td>
     <td>${ownerDisplay}</td>
-    <td><button class="action" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
+    <td class="actions"><button class="action danger" onclick="removePersonalDid('${esc(d.did)}')">Remove</button></td>
   </tr>`;
-  }).join("") || "<tr><td colspan=3 class=muted>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
+  }).join("") || "<tr><td colspan=3 class=empty>No personal numbers assigned — every extension shares the main trunk DID.</td></tr>";
 }
 
 document.querySelectorAll("#pd-table th.sortable").forEach(th => {
@@ -3368,7 +3743,7 @@ document.getElementById("pd-save").addEventListener("click", async () => {
     body: JSON.stringify({did: did, owner: owner}),
   });
   const data = await res.json();
-  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Saved" : "Failed");
+  toast(data.message || (data.ok ? "Number assigned" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("pd-did").value = "";
     markPstnDirty();
@@ -3383,7 +3758,7 @@ async function removePersonalDid(did) {
     body: JSON.stringify({did: did}),
   });
   const data = await res.json();
-  document.getElementById("pd-msg").textContent = data.message || (data.ok ? "Removed" : "Failed");
+  toast(data.message || (data.ok ? "Number removed" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) markPstnDirty();
   loadPersonalDids();
 }
