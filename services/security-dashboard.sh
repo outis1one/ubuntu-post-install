@@ -2430,6 +2430,17 @@ INDEX_HTML = """<!doctype html>
   }
   details.card > .card-body { padding: 0 var(--sp-4) var(--sp-4); }
 
+  /* Groups cards that belong to the same underlying system (Easy Asterisk
+     device provisioning vs. PSTN-trunk permissions) under one label, so the
+     page itself explains why e.g. "Rooms" and "Groups" both exist instead
+     of reading as duplicates. */
+  .section-head {
+    margin: var(--sp-6) 0 var(--sp-2); padding-top: var(--sp-4);
+    border-top: 1px solid var(--line);
+    color: var(--text-faint); font-weight: 600; font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+
   /* Inline "what does this mean" disclosure — keeps the explanation one click
      away instead of pushing every control below three paragraphs of prose. */
   details.help { margin: 0 0 var(--sp-3); }
@@ -2659,19 +2670,19 @@ INDEX_HTML = """<!doctype html>
       <div class="card-body">
         <b>Changes may not be live yet.</b>
         <p class="muted" style="margin:var(--sp-1) 0 var(--sp-2)">
-          Edits are written to disk immediately, but Asterisk doesn't always pick them up without a restart — confirmed on personal-DID group reassignment specifically. Existing calls are never affected.
+          Edits are written to disk immediately, but Asterisk doesn't always pick them up without a restart. Saving never disturbs an active call by itself — but restarting does, so it isn't automatic; click below (or answer "Restart now?" right after a save) once it's a good time.
         </p>
         <button class="action" id="pstn-restart-btn">Commit changes (restart Asterisk)</button>
         <span id="pstn-restart-msg" class="muted" style="margin-left:var(--sp-2)"></span>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-head">
-        <h3>Extensions <span class="count muted" id="ext-count"></span></h3>
-        <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
-      </div>
+    <details class="card" id="card-extensions" open>
+      <summary>Extensions <span class="count muted" id="ext-count"></span></summary>
       <div class="card-body">
+        <div class="row" style="justify-content:flex-end; margin-bottom:var(--sp-2)">
+          <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
+        </div>
         <div class="callout" id="ext-password-callout">
           <div class="grow" id="ext-password-text" style="flex:1"></div>
           <button class="icon" id="ext-password-dismiss" title="Dismiss">&times;</button>
@@ -2729,7 +2740,9 @@ INDEX_HTML = """<!doctype html>
           <button class="primary" id="ext-save-all">Save changes</button>
         </div>
       </div>
-    </div>
+    </details>
+
+    <div class="section-head ea-only">Easy Asterisk device setup</div>
 
     <details class="card ea-only" id="card-categories">
       <summary>Categories <span class="count" id="cat-count"></span></summary>
@@ -2784,12 +2797,15 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
 
+    <div class="section-head">Groups &amp; personal numbers (PSTN permissions)</div>
+
     <details class="card" id="card-groups">
       <summary>Groups <span class="count" id="grp-count"></span></summary>
       <div class="card-body">
         <details class="help">
           <summary>What groups do</summary>
           <p class="muted">Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own Messaging checkbox above would, one time. It isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied. A group can also own a personal number below, which <i>is</i> evaluated live against current membership on every call.</p>
+          <p class="muted">Not the same thing as a <b>Room</b> above: a Room is a real, dialable ring-group extension that rings its members live on every call. A Group has no extension of its own and can't be dialed — it only exists to save you re-clicking the same setting on several extensions, and to optionally own a personal number.</p>
         </details>
         <div class="row" style="margin-bottom:var(--sp-2)">
           <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
@@ -2802,18 +2818,6 @@ INDEX_HTML = """<!doctype html>
             <th class="sortable" data-sort="members">Members</th>
             <th></th>
           </tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-    </details>
-
-    <details class="card pstn-only" id="card-limits">
-      <summary>Concurrent-call caps</summary>
-      <div class="card-body">
-        <p class="muted">A call over either cap gets a busy signal (and an ntfy alert, if enabled) — existing calls are never affected. Usually live on the next call; if a call doesn't reflect a recent change, use "Commit changes" at the top.</p>
-        <div class="row">
-          <label class="muted">Max outbound<br><input type="text" id="limit-out" style="width:5.5rem"></label>
-          <label class="muted">Max inbound<br><input type="text" id="limit-in" style="width:5.5rem"></label>
-          <button class="action" id="limits-save" style="align-self:flex-end">Save</button>
         </div>
       </div>
     </details>
@@ -3074,7 +3078,7 @@ async function refreshExtensionsTab() {
   await loadExtensions();
   if (eaInstalled) await loadEaRooms();
   await loadGroups();
-  if (pstnInstalled) { await loadPstnLimits(); await loadPersonalDids(); }
+  if (pstnInstalled) await loadPersonalDids();
 }
 
 function renderEaDeviceCategoryOptions() {
@@ -3389,6 +3393,7 @@ document.getElementById("ext-save-all").addEventListener("click", async () => {
   btn.textContent = "Saving…";
 
   let saved = 0;
+  let touchedPstn = false;
   const failures = [];
   for (const row of dirty) {
     const {ext, model, edits} = row;
@@ -3419,7 +3424,7 @@ document.getElementById("ext-save-all").addEventListener("click", async () => {
           r = await postJSON("/api/pstn-messaging", {ext: ext, enabled: messaging});
         }
         if (!r.ok) throw new Error(r.message || "permission save failed");
-        if (pstnInstalled) markPstnDirty();
+        if (pstnInstalled) { markPstnDirty(); touchedPstn = true; }
       }
       saved++;
     } catch (err) {
@@ -3435,6 +3440,7 @@ document.getElementById("ext-save-all").addEventListener("click", async () => {
     toast(`Saved ${saved} extension${saved === 1 ? "" : "s"}`, "ok");
   }
   await loadExtensions();
+  if (touchedPstn) await offerPstnRestart();
 });
 
 function postJSON(url, body) {
@@ -3637,13 +3643,6 @@ async function removeEaRoomMember(roomExt, device) {
   loadEaRooms();
 }
 
-async function loadPstnLimits() {
-  const res = await fetch("/api/pstn-limits");
-  const data = await res.json();
-  document.getElementById("limit-out").value = data.max_outbound;
-  document.getElementById("limit-in").value = data.max_inbound;
-}
-
 // The Groups card's membership picker. Driven by the same merged extension
 // list the table above renders, so a group can never offer an extension the
 // table doesn't show (or miss one it does).
@@ -3726,7 +3725,7 @@ document.getElementById("grp-save").addEventListener("click", async () => {
   });
   const data = await res.json();
   toast(data.message || (data.ok ? "Group saved" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) markPstnDirty();
+  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
   loadGroups();
 });
 
@@ -3738,7 +3737,7 @@ async function applyGroupMessaging(name, enabled) {
   });
   const data = await res.json();
   toast(data.message || (data.ok ? "Applied to group" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) markPstnDirty();
+  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
   loadExtensions();
 }
 
@@ -3750,22 +3749,9 @@ async function deleteGroup(name) {
   });
   const data = await res.json();
   toast(data.message || (data.ok ? "Group deleted" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) markPstnDirty();
+  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
   loadGroups();
 }
-
-document.getElementById("limits-save").addEventListener("click", async () => {
-  const maxOut = document.getElementById("limit-out").value;
-  const maxIn = document.getElementById("limit-in").value;
-  const res = await fetch("/api/pstn-limits", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({max_outbound: maxOut, max_inbound: maxIn}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Caps saved" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok) markPstnDirty();
-  loadPstnLimits();
-});
 
 // "Commit Changes" — see restart_asterisk_container()'s comment in app.py
 // for why this button exists: AST_CONFIG() live-reads of these PSTN config
@@ -3789,7 +3775,7 @@ window.addEventListener("beforeunload", (e) => {
   e.preventDefault();
   e.returnValue = "";
 });
-document.getElementById("pstn-restart-btn").addEventListener("click", async () => {
+async function commitPstnRestart() {
   const msg = document.getElementById("pstn-restart-msg");
   msg.textContent = "Restarting Asterisk…";
   const res = await fetch("/api/asterisk-restart", { method: "POST" });
@@ -3799,7 +3785,24 @@ document.getElementById("pstn-restart-btn").addEventListener("click", async () =
     pstnDirty = false;
     document.getElementById("pstn-restart-banner").style.display = "none";
   }
-});
+  return data.ok;
+}
+document.getElementById("pstn-restart-btn").addEventListener("click", commitPstnRestart);
+
+// The banner above is easy to miss (confirmed live — the actual "phantom"
+// this was built for: an admin saves a permission change, tests a call
+// minutes later against Asterisk's still-stale read, and has no reason to
+// suspect the save itself). Ask right at the moment of save instead of only
+// leaving a passive banner — restart is still opt-in per prompt (not
+// automatic) since it drops any calls in progress right now, which a save
+// action alone never does. Call this once per logical user action (a
+// single save/delete, or one whole batch), never inside a per-row loop, or
+// multiple saves in one batch would each pop their own dialog.
+async function offerPstnRestart() {
+  if (confirm("Saved. Asterisk won't use this change until it restarts, which will hang up any calls in progress right now. Restart Asterisk now?")) {
+    await commitPstnRestart();
+  }
+}
 
 // The personal-DID owner picker spans both lists, so it re-renders from
 // whichever of the two finished last rather than being owned by either.
@@ -3879,6 +3882,7 @@ document.getElementById("pd-save").addEventListener("click", async () => {
     markPstnDirty();
   }
   loadPersonalDids();
+  if (data.ok) await offerPstnRestart();
 });
 
 async function removePersonalDid(did) {
@@ -3889,7 +3893,7 @@ async function removePersonalDid(did) {
   });
   const data = await res.json();
   toast(data.message || (data.ok ? "Number removed" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok) markPstnDirty();
+  if (data.ok) { markPstnDirty(); await offerPstnRestart(); }
   loadPersonalDids();
 }
 
