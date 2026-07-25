@@ -1,11 +1,10 @@
 #!/bin/bash
 # services/pstn-trunk.sh — SIP PSTN trunk add-on for services/asterisk.sh:
 # US-only outbound (NANP dialplan
-# restriction), independent outbound/inbound concurrent-call caps, a 3-tier
-# permission model applied SEPARATELY per direction (each of outbound and
-# inbound is internal-only / restricted to a list / unrestricted, so "dial
-# anyone, only take calls from a short list" and the reverse are both
-# expressible), a configurable inbound ring-group,
+# restriction), independent outbound/inbound concurrent-call caps, a
+# per-extension permission model built on ONE whitelist plus a mode saying
+# which direction(s) it applies to (none / unrestricted / restrict outbound /
+# restrict inbound / restrict both), a configurable inbound ring-group,
 # IP-authenticated trunk (no SIP password stored), ntfy alerts on
 # denied/rejected calls, and a periodic spend/volume check.
 #
@@ -26,7 +25,7 @@
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension inbound/outbound permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension whitelist restricting inbound and/or outbound, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
 # Easy Asterisk (the vendor project services/asterisk.sh builds on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
@@ -52,10 +51,10 @@ register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, pe
 # after any base install update.
 #
 # ── Why permissions are a separate live file, not baked into the dialplan ──
-# pstn-permissions.conf holds each extension's per-direction tiers
-# (tier_out/allowed_out for what it may dial, tier_in/allowed_in for which
-# caller IDs may reach it; 'tier'/'allowed_numbers' persist only as a
-# rollback mirror of the outbound values)
+# pstn-permissions.conf holds each extension's 'restrict' mode and its single
+# 'allowed_numbers' whitelist (the authored pair), plus the
+# tier_out/allowed_out/tier_in/allowed_in derived from them that the dialplan
+# actually reads, plus a legacy 'tier' mirror for rollback
 # and, for restricted, its pipe-separated approved-number list. The dialplan
 # reads it via Asterisk's AST_CONFIG() function, which re-reads the file from
 # disk on every call — so editing this file (by hand, or via the Security
@@ -273,9 +272,9 @@ EOF
 # ── Shared: one inbound ring-group member's live permission check ─────────
 # Emits a block that only adds this extension to PSTN_RING_LIST if it's
 # "full" INBOUND tier, or "restricted" inbound tier AND the caller ID is on
-# its inbound approved list (allowed_in). The outbound tier is not consulted
-# here at all — an extension may dial anywhere and still accept calls from
-# only a handful of numbers, or the reverse. Uses a single-quoted heredoc (fully literal — no bash
+# allowed_in. The outbound side is not consulted here at all, which is what
+# lets "Restrict inbound" mean "dial anywhere, but only these numbers get
+# through to me" — and "Restrict outbound" the reverse. Uses a single-quoted heredoc (fully literal — no bash
 # expansion) captured into a variable, then a pure bash string replace for
 # the extension number placeholder — safer than sed here since it needs no
 # escaping at all (the extension is plain digits, but this avoids relying on
@@ -755,56 +754,96 @@ printf '%s' "$RING_LIST"
 SCRIPT
 }
 
-# ── Migration: single tier → separate inbound/outbound tiers ───────────────
-# Installs made before the split have only 'tier' and 'allowed_numbers', which
-# the new dialplan doesn't read — leaving them untouched would fail closed and
-# silently deny every PSTN call in both directions. Copies the old values into
-# both directions, which reproduces the exact behaviour the box had before,
-# then leaves the originals in place as the rollback mirror (see the header
-# _pstn_write_permissions_file writes).
+# ── Migration: legacy single tier → 'restrict' mode + derived keys ─────────
+# Installs made before the per-direction split have only 'tier' and
+# 'allowed_numbers'. The dialplan now reads tier_out/tier_in, so leaving them
+# alone would fail closed and silently deny every PSTN call both ways.
 #
-# Idempotent: an extension that already has tier_out is skipped, so this runs
-# safely on every update. Backs the file up first — unlike most of this
+# Writes the authored 'restrict' key plus the derived tier_out/allowed_out/
+# tier_in/allowed_in, reproducing exactly the behaviour the box already had:
+# a legacy tier of "full" becomes restrict=open, "restricted" becomes
+# restrict=both (the old single list applied in both directions, which is
+# what the old dialplan did), anything else becomes restrict=none.
+#
+# Idempotent: an extension that already has 'restrict' is left alone, so this
+# runs safely on every update. Backs the file up first — unlike most of this
 # installer, it edits a file the user may have hand-tuned.
 _pstn_migrate_permissions_split() {
     local FILE="$1"
     [[ -f "$FILE" ]] || return 0
-    grep -q '^[[:space:]]*tier[[:space:]]*=' "$FILE" || return 0
-    grep -q '^[[:space:]]*tier_out[[:space:]]*=' "$FILE" && return 0
+    grep -qE '^[[:space:]]*(tier|tier_out)[[:space:]]*=' "$FILE" || return 0
+    grep -qE '^[[:space:]]*restrict[[:space:]]*=' "$FILE" && return 0
 
     cp "$FILE" "$FILE.backup.$(date +%Y%m%d-%H%M%S)"
     local TMP
     TMP="$(mktemp)"
+    # Buffer per section: 'restrict' depends on the tier, and the whitelist
+    # may appear on either side of it, so the whole section has to be read
+    # before any of it can be rewritten.
     awk '
-        # Emit the split keys immediately after each legacy key, preserving
-        # whatever spacing style the file already uses around "=".
-        {
-            line = $0
-            if (match(line, /^[ \t]*tier[ \t]*=[ \t]*/)) {
-                val = line; sub(/^[ \t]*tier[ \t]*=[ \t]*/, "", val)
-                print "tier_out=" val
-                print "tier_in=" val
-                print line
-                next
+        function flush_section() {
+            if (!have) return
+            if (header != "") print header
+            mode = "none"
+            if (tier == "full") mode = "open"
+            else if (tier == "restricted") mode = "both"
+            # An install that predates the split has no tier_out; one made
+            # between the split and this change may, so honour it if present.
+            if (tier_out != "" || tier_in != "") {
+                o = (tier_out != "" ? tier_out : tier)
+                i = (tier_in  != "" ? tier_in  : tier)
+                if (o == "full" && i == "full") mode = "open"
+                else if (o == "restricted" && i == "restricted") mode = "both"
+                else if (o == "restricted") mode = "out"
+                else if (i == "restricted") mode = "in"
+                else mode = "none"
             }
-            if (match(line, /^[ \t]*allowed_numbers[ \t]*=[ \t]*/)) {
-                val = line; sub(/^[ \t]*allowed_numbers[ \t]*=[ \t]*/, "", val)
-                print "allowed_out=" val
-                print "allowed_in=" val
-                print line
-                next
+            print "restrict=" mode
+            if (nums != "") print "allowed_numbers=" nums
+            if (mode == "open") { print "tier_out=full"; print "tier_in=full"; print "tier=full" }
+            else if (mode == "out") {
+                print "tier_out=restricted"; print "allowed_out=" nums
+                print "tier_in=full"; print "tier=restricted"
             }
-            print line
+            else if (mode == "in") {
+                print "tier_out=full"; print "tier_in=restricted"
+                print "allowed_in=" nums; print "tier=full"
+            }
+            else if (mode == "both") {
+                print "tier_out=restricted"; print "allowed_out=" nums
+                print "tier_in=restricted"; print "allowed_in=" nums
+                print "tier=restricted"
+            }
+            for (k = 1; k <= nkeep; k++) print keep[k]
+            header = ""; tier = ""; tier_out = ""; tier_in = ""; nums = ""
+            nkeep = 0; have = 0
         }
+        /^[ \t]*\[/ { flush_section(); header = $0; have = 1; next }
+        {
+            if (!have) { print; next }
+            line = $0
+            key = line; sub(/=.*$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", key)
+            val = line
+            if (index(line, "=") > 0) { sub(/^[^=]*=[ \t]*/, "", val) } else { val = "" }
+            gsub(/[ \t]+$/, "", val)
+            if (key == "tier") { tier = val; next }
+            if (key == "tier_out") { tier_out = val; next }
+            if (key == "tier_in") { tier_in = val; next }
+            if (key == "allowed_numbers" || key == "allowed_out" || key == "allowed_in") {
+                if (nums == "" && val != "") nums = val
+                next
+            }
+            keep[++nkeep] = line
+        }
+        END { flush_section() }
     ' "$FILE" > "$TMP"
 
     if [[ -s "$TMP" ]]; then
         mv "$TMP" "$FILE"
         chmod 664 "$FILE"
-        log_success "Migrated pstn-permissions.conf to separate inbound/outbound tiers (backup saved alongside it)."
-        log_info "Every extension kept its existing behaviour — both directions were set to"
-        log_info "whatever its single tier used to be. Split them per direction in the"
-        log_info "Security Dashboard's Extensions tab."
+        log_success "Migrated pstn-permissions.conf to the 'restrict' model (backup saved alongside it)."
+        log_info "Every extension kept its existing behaviour. Pick which direction(s) each"
+        log_info "whitelist applies to in the Security Dashboard's Extensions tab."
     else
         rm -f "$TMP"
         log_warning "Permission migration produced an empty file — left the original alone."
@@ -847,20 +886,23 @@ _pstn_write_permissions_file() {
     done
     local _written_exts=""
     {
-        echo "; PSTN permission tiers — internal / restricted / full — set SEPARATELY per"
-        echo "; direction:"
-        echo "; - 'tier_out' + 'allowed_out' gate calls this extension PLACES. allowed_out"
-        echo "; holds numbers it may DIAL."
-        echo "; - 'tier_in' + 'allowed_in' gate calls this extension RECEIVES (ring group"
-        echo "; membership and personal-DID routing). allowed_in holds CALLER IDs allowed"
-        echo "; to reach it."
-        echo "; The two are independent, so 'dial anyone, only take calls from a short list'"
-        echo "; and 'answer anyone, only dial a short list' are both expressible. Both lists"
-        echo "; are pipe-separated 11-digit numbers (a REGEX() alternation, see this file's"
-        echo "; own comments on why untrusted call data is never the pattern side)."
-        echo "; 'tier'/'allowed_numbers' are also written, mirroring the OUTBOUND values, so"
-        echo "; that rolling back to a pre-split pstn-trunk.sh keeps working with the old"
-        echo "; single-tier semantics. Nothing reads them once the split dialplan is in."
+        echo "; PSTN permissions. Each extension has ONE whitelist and a 'restrict' mode"
+        echo "; saying which direction(s) that whitelist applies to:"
+        echo ";   none  - no PSTN at all (internal extension calling still works)"
+        echo ";   open  - unrestricted both ways"
+        echo ";   out   - may only DIAL numbers on the whitelist; anyone may call in"
+        echo ";   in    - may only be CALLED BY numbers on the whitelist; may dial anywhere"
+        echo ";   both  - the whitelist applies in both directions"
+        echo "; 'allowed_numbers' is that whitelist: pipe-separated 11-digit numbers, used"
+        echo "; directly as a REGEX() alternation (see this file's own comments on why"
+        echo "; untrusted call data is always the string being tested, never the pattern)."
+        echo ";"
+        echo "; 'restrict' + 'allowed_numbers' are the AUTHORED form — the two keys to edit"
+        echo "; by hand. tier_out/allowed_out/tier_in/allowed_in below them are DERIVED from"
+        echo "; those and are what the dialplan actually reads; 'tier' is a rollback mirror"
+        echo "; of tier_out for pre-split versions of this installer. Change the authored"
+        echo "; keys and re-run this installer (or use the Security Dashboard, which keeps"
+        echo "; all of them in step) rather than editing the derived ones directly."
         echo ";"
         echo "; PLUS two further independent axes per extension:"
         echo "; - 'messaging' for Asterisk's native internal SIP MESSAGE texting (no carrier"
@@ -885,6 +927,7 @@ _pstn_write_permissions_file() {
         local _ext
         for _ext in $FULL_EXTS; do
             echo "[$_ext]"
+            echo "restrict=open"
             echo "tier_out=full"
             echo "tier_in=full"
             echo "tier=full"
@@ -897,12 +940,13 @@ _pstn_write_permissions_file() {
             _ext="$1"; local _nums="$2"
             shift 2
             echo "[$_ext]"
+            echo "restrict=both"
+            echo "allowed_numbers=${_nums}"
             echo "tier_out=restricted"
             echo "allowed_out=${_nums}"
             echo "tier_in=restricted"
             echo "allowed_in=${_nums}"
             echo "tier=restricted"
-            echo "allowed_numbers=${_nums}"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
             echo ""
