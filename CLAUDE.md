@@ -56,6 +56,14 @@ Firewall — behind that one answer. Two lessons worth reusing:
   silently empty on every home/LAN install as a result. Both now apply
   everywhere.
 
+The pre-merge installer is parked at `attic/asterisk-digital-ocean.sh` as a
+rollback path until the unified one is confirmed on real hardware. `attic/`
+is outside `setup.sh`'s `services/*.sh` glob, so nothing there registers or
+runs on its own — see `attic/README.md`, including why it's a way to get the
+old script back rather than an undo button. Delete it once the merge is
+proven; a second copy of the same logic is what the merge existed to remove,
+and fixes are deliberately not backported into it.
+
 ## Minimal Docker service template
 
 ```bash
