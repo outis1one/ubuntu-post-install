@@ -226,9 +226,17 @@ which tab a given extension's settings live on.
 - **Extensions** — one row per extension, merged from \`pjsip.conf\` (which
   always works) and, when the Easy Asterisk container is reachable, its own
   device list. Columns: Ext, Name, then Category/Status/Transport if that
-  container is present, then Tier/Approved-numbers if a PSTN trunk dialplan
-  is installed, then Messaging (always — internal SIP texting has no PSTN
-  dependency at all: no cost, no carrier, no DID).
+  container is present, then four PSTN columns if a trunk dialplan is
+  installed — **Outbound** tier + "Can dial", and **Inbound** tier + "Can be
+  called by" — then Messaging (always: internal SIP texting has no PSTN
+  dependency at all — no cost, no carrier, no DID).
+
+  The two PSTN directions are independent. Each is \`internal\` (no PSTN that
+  way), \`restricted\` (only the numbers beside it) or \`full\` (any US
+  number), and each has its own list, because they hold different things:
+  "Can dial" is numbers this extension may call, "Can be called by" is caller
+  IDs allowed to reach it. Internal extension-to-extension calling and ring
+  groups are never gated by either.
 
   Name and Category are edited **in place**; every cell feeds one batched
   save. Rows you've touched get a highlight and a left rail, a sticky bar
@@ -1134,7 +1142,12 @@ def _write_ini_cp(path, header, cp):
 
 
 PERMISSIONS_HEADER = (
-    "; PSTN permission tiers - internal / restricted / full - PLUS two\n"
+    "; PSTN permission tiers - internal / restricted / full - set SEPARATELY\n"
+    "; per direction: tier_out/allowed_out gate what an extension may DIAL,\n"
+    "; tier_in/allowed_in gate which CALLER IDs may reach it. 'tier' and\n"
+    "; 'allowed_numbers' mirror the outbound values so a rollback to a\n"
+    "; pre-split pstn-trunk.sh still works; nothing reads them otherwise.\n"
+    "; PLUS two\n"
     "; independent per-extension axes: messaging (internal SIP MESSAGE\n"
     "; texting) and personal_did (outbound Caller-ID override; inbound\n"
     "; routing for personal DIDs lives in pstn-personal-dids.conf).\n"
@@ -1173,70 +1186,124 @@ def _read_permissions_cp():
 
 
 def get_all_permissions():
-    """{ext: {"tier": ..., "allowed_numbers": "num|num|...", "messaging":
-    bool}} for every extension with a non-default record. Extensions with
-    no section are implicitly "internal"/messaging-disabled — the
-    dialplan's AST_CONFIG() lookup treats a missing section/key as empty/
-    denied the same way, so there's nothing to return for them here; the
-    UI fills in the defaults for any known extension (from
-    list_extensions()) not present in this dict."""
+    """{ext: {"tier_out", "allowed_out", "tier_in", "allowed_in",
+    "messaging"}} for every extension with a non-default record.
+
+    Outbound and inbound are independent axes: tier_out/allowed_out gate what
+    an extension may DIAL, tier_in/allowed_in gate which CALLER IDs may reach
+    it (ring-group membership and personal-DID routing). That's what makes
+    "dial anyone, only accept calls from a list" and "answer anyone, only
+    dial a list" both expressible.
+
+    Falls back to the pre-split 'tier'/'allowed_numbers' keys for either
+    direction that hasn't been migrated yet, so the UI reads correctly even
+    on a box where services/pstn-trunk.sh hasn't been re-run — the migration
+    itself lives there, not here.
+
+    Extensions with no section are implicitly internal/messaging-disabled —
+    the dialplan's AST_CONFIG() lookup treats a missing section/key as
+    empty/denied the same way, so there's nothing to return for them; the UI
+    fills in defaults for any known extension not present in this dict."""
     cp = _read_permissions_cp()
     result = {}
     for section in cp.sections():
         if not EXTEN_RE.match(section):
             continue
+        legacy_tier = cp.get(section, "tier", fallback="internal")
+        legacy_nums = cp.get(section, "allowed_numbers", fallback="")
         result[section] = {
-            "tier": cp.get(section, "tier", fallback="internal"),
-            "allowed_numbers": cp.get(section, "allowed_numbers", fallback=""),
+            "tier_out": cp.get(section, "tier_out", fallback=legacy_tier),
+            "allowed_out": cp.get(section, "allowed_out", fallback=legacy_nums),
+            "tier_in": cp.get(section, "tier_in", fallback=legacy_tier),
+            "allowed_in": cp.get(section, "allowed_in", fallback=legacy_nums),
             "messaging": cp.getboolean(section, "messaging", fallback=False),
         }
     return result
 
 
-def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
-    """Saves one extension's tier + (for restricted) approved-number list +
-    messaging flag in one action — messaging is an independent axis from
-    the calling tier (see pstn-trunk.sh's file-level comment: an extension
-    can be internal-tier for calling and still messaging-enabled, or vice
-    versa), so it's set/cleared regardless of which tier branch runs below.
-    Numbers are normalized to a pipe-separated list of 11-digit US numbers
-    (a bare 10-digit entry gets a leading "1" added, not dropped — see
-    _normalize_nanp_number) — pipe, not comma, because the dialplan uses
-    this value directly as a REGEX() alternation pattern (see
-    services/pstn-trunk.sh's file-level comment on why the untrusted call
-    data is always the string being tested, never interpolated into the
-    pattern side)."""
+def _apply_direction(cp, ext, prefix, tier, numbers_raw):
+    """Write one direction's tier + number list, returning the cleaned list.
+
+    prefix is "out" or "in". Setting a direction to internal drops only that
+    direction's two keys, never the whole section — an extension can
+    independently carry messaging=yes, a personal_did, and a permissive
+    setting in the OTHER direction, all of which must survive. (Removing the
+    section wholesale here was a real, confirmed bug in the single-tier
+    version of this function.)"""
+    tokens = re.split(r"[,\s|]+", (numbers_raw or "").strip())
+    clean = [n for n in (_normalize_nanp_number(t) for t in tokens if t) if n]
+    joined = "|".join(clean)
+
+    tier_key = "tier_" + prefix
+    nums_key = "allowed_" + prefix
+
+    if tier == "internal":
+        if cp.has_section(ext):
+            for key in (tier_key, nums_key):
+                if cp.has_option(ext, key):
+                    cp.remove_option(ext, key)
+        return clean
+
+    if not cp.has_section(ext):
+        cp.add_section(ext)
+    cp.set(ext, tier_key, tier)
+    if tier == "restricted":
+        cp.set(ext, nums_key, joined)
+    elif cp.has_option(ext, nums_key):
+        cp.remove_option(ext, nums_key)
+    return clean
+
+
+def write_permission(ext, tier_out, allowed_out_raw, tier_in, allowed_in_raw,
+                     messaging_enabled=False):
+    """Saves one extension's outbound tier + numbers, inbound tier + numbers,
+    and messaging flag in one action.
+
+    The two directions are independent: allowed_out holds numbers this
+    extension may DIAL, allowed_in holds CALLER IDs allowed to reach it. They
+    used to be one field serving both, which made "outbound to anyone,
+    inbound from a short list" impossible to express.
+
+    Messaging is a third independent axis (see pstn-trunk.sh's file-level
+    comment: an extension can be internal for calling and still
+    messaging-enabled, or vice versa), so it's set/cleared regardless of
+    either tier.
+
+    Numbers normalize to a pipe-separated list of 11-digit US numbers (a bare
+    10-digit entry gains a leading "1" rather than being dropped — see
+    _normalize_nanp_number). Pipe, not comma, because the dialplan uses the
+    value directly as a REGEX() alternation — see services/pstn-trunk.sh on
+    why untrusted call data is always the string being tested, never
+    interpolated into the pattern side.
+
+    'tier'/'allowed_numbers' are also written, mirroring the outbound values,
+    purely so that rolling back to a pre-split pstn-trunk.sh keeps working
+    with the old single-tier semantics. Nothing reads them once the split
+    dialplan is installed."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     ext = str(ext).strip()
     if not EXTEN_RE.match(ext):
         return False, "Invalid extension"
-    if not TIER_RE.match(tier):
-        return False, "Invalid tier"
-
-    tokens = re.split(r"[,\s|]+", (numbers_raw or "").strip())
-    clean_numbers = [n for n in (_normalize_nanp_number(t) for t in tokens if t) if n]
-    numbers = "|".join(clean_numbers)
+    if not TIER_RE.match(tier_out or ""):
+        return False, "Invalid outbound tier"
+    if not TIER_RE.match(tier_in or ""):
+        return False, "Invalid inbound tier"
 
     cp = _read_permissions_cp()
-    if tier == "internal":
-        # Only drop the tier/allowed_numbers keys, NOT the whole section —
-        # an extension can independently have messaging=yes and/or a
-        # personal_did assigned, and those must survive a tier change back
-        # to internal. Confirmed live as a real bug: cp.remove_section(ext)
-        # here used to silently discard both whenever tier was set to
-        # internal.
+    clean_out = _apply_direction(cp, ext, "out", tier_out, allowed_out_raw)
+    clean_in = _apply_direction(cp, ext, "in", tier_in, allowed_in_raw)
+
+    # Rollback mirror — outbound values under the pre-split key names.
+    if tier_out == "internal":
         if cp.has_section(ext):
-            if cp.has_option(ext, "tier"):
-                cp.remove_option(ext, "tier")
-            if cp.has_option(ext, "allowed_numbers"):
-                cp.remove_option(ext, "allowed_numbers")
+            for key in ("tier", "allowed_numbers"):
+                if cp.has_option(ext, key):
+                    cp.remove_option(ext, key)
     else:
-        if not cp.has_section(ext):
-            cp.add_section(ext)
-        cp.set(ext, "tier", tier)
-        if tier == "restricted":
-            cp.set(ext, "allowed_numbers", numbers)
+        cp.set(ext, "tier", tier_out)
+        if tier_out == "restricted":
+            cp.set(ext, "allowed_numbers", "|".join(clean_out))
         elif cp.has_option(ext, "allowed_numbers"):
             cp.remove_option(ext, "allowed_numbers")
 
@@ -1247,9 +1314,9 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
         cp.remove_option(ext, "messaging")
 
-    # Drop the section entirely once nothing (tier, numbers, messaging,
-    # personal_did) is left in it — only reached this way when tier is
-    # internal, messaging is off, and no personal_did was ever assigned.
+    # Drop the section entirely once nothing is left in it — only reachable
+    # when both directions are internal, messaging is off, and no
+    # personal_did was ever assigned.
     if cp.has_section(ext) and not cp.options(ext):
         cp.remove_section(ext)
 
@@ -1257,8 +1324,14 @@ def write_permission(ext, tier, numbers_raw, messaging_enabled=False):
     if not ok:
         return False, err
 
-    if tier == "restricted" and not clean_numbers:
-        return True, "Saved as restricted with an EMPTY approved list — no PSTN number can reach/be reached by it yet."
+    empty = []
+    if tier_out == "restricted" and not clean_out:
+        empty.append("outbound")
+    if tier_in == "restricted" and not clean_in:
+        empty.append("inbound")
+    if empty:
+        return True, ("Saved, but the " + " and ".join(empty) +
+                      " list is restricted and EMPTY — no PSTN number is permitted in that direction yet.")
     return True, "Saved"
 
 
@@ -2602,7 +2675,8 @@ INDEX_HTML = """<!doctype html>
         <details class="help">
           <summary>What these columns mean</summary>
           <p class="muted"><b>Name</b> and <b>Category</b> are editable in place — click, type, then Save. Adding an extension generates a random password and reloads PJSIP + rebuilds the dialplan automatically; the password is shown once, at the top of this card.</p>
-          <p class="muted pstn-only"><b>Tier</b> — <b>internal</b>: no PSTN, can still call/receive other extensions and internal ring groups. <b>restricted</b>: internal, plus only the pre-approved US numbers in the next column. <b>full</b>: internal, plus any US number. Usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
+            <p class="muted pstn-only"><b>Outbound</b> and <b>Inbound</b> are independent. Each is <b>internal</b> (no PSTN in that direction — internal extension-to-extension calling and ring groups always keep working either way), <b>restricted</b> (only the numbers listed beside it), or <b>full</b> (any US number). So "dial anyone, only take calls from family" is Outbound&nbsp;full + Inbound&nbsp;restricted, and the reverse is just as valid.</p>
+          <p class="muted pstn-only"><b>Can dial</b> holds numbers this extension is allowed to <i>call</i>; <b>Can be called by</b> holds caller IDs allowed to <i>reach</i> it — different lists, which is why they're separate fields. Each is only editable when its own side is set to restricted. Usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
           <p class="muted"><b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README, including its caveat that the sender-extraction logic still needs real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code>.</p>
         </details>
 
@@ -2613,8 +2687,10 @@ INDEX_HTML = """<!doctype html>
             <th class="ea-only">Category</th>
             <th class="sortable ea-only" data-sort="status">Status</th>
             <th class="ea-only">Transport</th>
-            <th class="sortable pstn-only" data-sort="tier">Tier</th>
-            <th class="pstn-only">Approved numbers</th>
+            <th class="sortable pstn-only" data-sort="tier_out">Outbound</th>
+            <th class="pstn-only">Can dial</th>
+            <th class="sortable pstn-only" data-sort="tier_in">Inbound</th>
+            <th class="pstn-only">Can be called by</th>
             <th class="sortable" data-sort="messaging">Messaging</th>
             <th></th>
           </tr></thead><tbody></tbody></table>
@@ -3093,7 +3169,9 @@ async function loadExtensions() {
   const permData = await fetch("/api/pstn-permissions").then(r => r.json());
   const byExt = new Map();
   (permData.extensions || []).forEach(e => byExt.set(e.ext, {
-    ext: e.ext, name: e.name, tier: e.tier, allowed_numbers: e.allowed_numbers,
+    ext: e.ext, name: e.name,
+    tier_out: e.tier_out, allowed_out: e.allowed_out,
+    tier_in: e.tier_in, allowed_in: e.allowed_in,
     messaging: e.messaging, ea: false, category: "", status: "", transport: "", encryption: "",
   }));
 
@@ -3103,7 +3181,10 @@ async function loadExtensions() {
     eaStatusMap = devData.status || {};
     eaDevices.forEach(d => {
       const row = byExt.get(d.extension) || {
-        ext: d.extension, name: d.name, tier: "internal", allowed_numbers: "", messaging: false,
+        ext: d.extension, name: d.name,
+        tier_out: "internal", allowed_out: "",
+        tier_in: "internal", allowed_in: "",
+        messaging: false,
       };
       row.ea = true;
       row.name = row.name || d.name;
@@ -3124,9 +3205,15 @@ async function loadExtensions() {
 let extRows = [];
 let extSort = { key: null, dir: 1 };
 
+// internal < restricted < full, so sorting a tier column groups by how
+// permissive it is rather than alphabetically (full would otherwise sort
+// between the other two).
+const TIER_ORDER = { internal: 0, restricted: 1, full: 2 };
+
 function extSortValue(e, key) {
   if (key === "ext") return parseInt(e.ext, 10);
   if (key === "messaging") return e.messaging ? 1 : 0;
+  if (key === "tier_out" || key === "tier_in") return TIER_ORDER[e[key]] ?? -1;
   return (e[key] || "").toString().toLowerCase();
 }
 
@@ -3135,11 +3222,18 @@ function setCount(id, n) {
   if (el) el.textContent = n ? "(" + n + ")" : "";
 }
 
+function tierSelect(cls, value) {
+  return `<select class="${cls}">` +
+    ["internal", "restricted", "full"].map(t =>
+      `<option value="${t}" ${value === t ? "selected" : ""}>${t}</option>`).join("") +
+    "</select>";
+}
+
 function renderExtensions() {
   const tbody = document.querySelector("#ext-table tbody");
   setCount("ext-count", extRows.length);
   if (!extRows.length) {
-    tbody.innerHTML = '<tr><td colspan=9 class=empty>No extensions found — no Asterisk install detected, or pjsip.conf has no devices yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan=11 class=empty>No extensions found — no Asterisk install detected, or pjsip.conf has no devices yet.</td></tr>';
     updateDirtyState();
     return;
   }
@@ -3179,14 +3273,10 @@ function renderExtensions() {
       <td class="ea-only">${catCell}</td>
       <td class="ea-only">${statusCell}</td>
       <td class="ea-only muted">${esc(e.transport)}${e.encryption && e.encryption !== "no" ? " / " + esc(e.encryption) : ""}</td>
-      <td class="pstn-only">
-        <select class="ext-tier">
-          <option value="internal" ${e.tier === "internal" ? "selected" : ""}>internal</option>
-          <option value="restricted" ${e.tier === "restricted" ? "selected" : ""}>restricted</option>
-          <option value="full" ${e.tier === "full" ? "selected" : ""}>full</option>
-        </select>
-      </td>
-      <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${e.tier === "restricted" ? "" : "disabled"} style="width:15rem"></td>
+      <td class="pstn-only">${tierSelect("ext-tier-out", e.tier_out)}</td>
+      <td class="pstn-only"><input type="text" class="ext-numbers-out" value="${esc(e.allowed_out)}" placeholder="5551234567,5559876543" ${e.tier_out === "restricted" ? "" : "disabled"} style="width:13rem" aria-label="Numbers extension ${esc(e.ext)} may dial"></td>
+      <td class="pstn-only">${tierSelect("ext-tier-in", e.tier_in)}</td>
+      <td class="pstn-only"><input type="text" class="ext-numbers-in" value="${esc(e.allowed_in)}" placeholder="5551234567,5559876543" ${e.tier_in === "restricted" ? "" : "disabled"} style="width:13rem" aria-label="Caller IDs allowed to reach extension ${esc(e.ext)}"></td>
       <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
       <td class="actions">
         <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
@@ -3195,11 +3285,14 @@ function renderExtensions() {
   }).join("");
 
   tbody.querySelectorAll("tr").forEach(row => {
-    const tierSel = row.querySelector(".ext-tier");
-    const numsInput = row.querySelector(".ext-numbers");
-    if (tierSel && numsInput) {
-      tierSel.addEventListener("change", () => { numsInput.disabled = tierSel.value !== "restricted"; });
-    }
+    // Each direction's number field follows its own tier, not the other's.
+    [["out"], ["in"]].forEach(([dir]) => {
+      const tierSel = row.querySelector(".ext-tier-" + dir);
+      const numsInput = row.querySelector(".ext-numbers-" + dir);
+      if (tierSel && numsInput) {
+        tierSel.addEventListener("change", () => { numsInput.disabled = tierSel.value !== "restricted"; });
+      }
+    });
     row.querySelectorAll("input, select").forEach(ctl => {
       ctl.addEventListener("input", updateDirtyState);
       ctl.addEventListener("change", updateDirtyState);
@@ -3219,14 +3312,18 @@ function rowEdits(tr) {
   if (!model) return null;
   const nameEl = tr.querySelector(".ext-name");
   const catEl = tr.querySelector(".ext-category");
-  const tierEl = tr.querySelector(".ext-tier");
-  const numsEl = tr.querySelector(".ext-numbers");
+  const tierOutEl = tr.querySelector(".ext-tier-out");
+  const numsOutEl = tr.querySelector(".ext-numbers-out");
+  const tierInEl = tr.querySelector(".ext-tier-in");
+  const numsInEl = tr.querySelector(".ext-numbers-in");
   const msgEl = tr.querySelector(".ext-messaging");
   const edits = {};
   if (nameEl && !nameEl.disabled && nameEl.value.trim() !== model.name) edits.name = nameEl.value.trim();
   if (catEl && catEl.value !== model.category) edits.category = catEl.value;
-  if (tierEl && tierEl.value !== model.tier) edits.tier = tierEl.value;
-  if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
+  if (tierOutEl && tierOutEl.value !== model.tier_out) edits.tier_out = tierOutEl.value;
+  if (numsOutEl && numsOutEl.value !== model.allowed_out) edits.allowed_out = numsOutEl.value;
+  if (tierInEl && tierInEl.value !== model.tier_in) edits.tier_in = tierInEl.value;
+  if (numsInEl && numsInEl.value !== model.allowed_in) edits.allowed_in = numsInEl.value;
   if (msgEl && msgEl.checked !== !!model.messaging) edits.messaging = msgEl.checked;
   return {ext, model, edits, tr, count: Object.keys(edits).length};
 }
@@ -3275,14 +3372,20 @@ document.getElementById("ext-save-all").addEventListener("click", async () => {
         const r = await postJSON("/api/ea-devices/category", {extension: ext, category: edits.category});
         if (!r.ok) throw new Error(r.message || "category change failed");
       }
-      if ("tier" in edits || "allowed_numbers" in edits || "messaging" in edits) {
+      const permKeys = ["tier_out", "allowed_out", "tier_in", "allowed_in", "messaging"];
+      if (permKeys.some(k => k in edits)) {
         const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
         let r;
         if (pstnInstalled) {
+          // Send the whole permission record, not just the changed fields —
+          // the endpoint rewrites both directions, so omitting an unchanged
+          // one would silently reset it.
           r = await postJSON("/api/pstn-permissions", {
             ext: ext,
-            tier: "tier" in edits ? edits.tier : model.tier,
-            allowed_numbers: "allowed_numbers" in edits ? edits.allowed_numbers : model.allowed_numbers,
+            tier_out: "tier_out" in edits ? edits.tier_out : model.tier_out,
+            allowed_out: "allowed_out" in edits ? edits.allowed_out : model.allowed_out,
+            tier_in: "tier_in" in edits ? edits.tier_in : model.tier_in,
+            allowed_in: "allowed_in" in edits ? edits.allowed_in : model.allowed_in,
             messaging: messaging,
           });
         } else {
@@ -3815,9 +3918,12 @@ class Handler(BaseHTTPRequestHandler):
             perms = get_all_permissions()
             extensions = []
             for e in list_extensions():
-                p = perms.get(e["ext"], {"tier": "internal", "allowed_numbers": "", "messaging": False})
-                extensions.append({"ext": e["ext"], "name": e["name"], "tier": p["tier"],
-                                    "allowed_numbers": p["allowed_numbers"], "messaging": p["messaging"]})
+                p = perms.get(e["ext"], {"tier_out": "internal", "allowed_out": "",
+                                          "tier_in": "internal", "allowed_in": "", "messaging": False})
+                extensions.append({"ext": e["ext"], "name": e["name"],
+                                    "tier_out": p["tier_out"], "allowed_out": p["allowed_out"],
+                                    "tier_in": p["tier_in"], "allowed_in": p["allowed_in"],
+                                    "messaging": p["messaging"]})
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
@@ -3860,8 +3966,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(ban_asn(payload.get("asn", "")))
         elif self.path == "/api/pstn-permissions":
             ok, message = write_permission(
-                payload.get("ext", ""), payload.get("tier", ""), payload.get("allowed_numbers", ""),
-                bool(payload.get("messaging", False))
+                payload.get("ext", ""),
+                payload.get("tier_out", ""), payload.get("allowed_out", ""),
+                payload.get("tier_in", ""), payload.get("allowed_in", ""),
+                bool(payload.get("messaging", False)),
             )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-limits":

@@ -2,8 +2,10 @@
 # services/pstn-trunk.sh — SIP PSTN trunk add-on for services/asterisk.sh:
 # US-only outbound (NANP dialplan
 # restriction), independent outbound/inbound concurrent-call caps, a 3-tier
-# permission model per extension (internal-only / restricted to pre-approved
-# numbers / full US calling), a configurable inbound ring-group,
+# permission model applied SEPARATELY per direction (each of outbound and
+# inbound is internal-only / restricted to a list / unrestricted, so "dial
+# anyone, only take calls from a short list" and the reverse are both
+# expressible), a configurable inbound ring-group,
 # IP-authenticated trunk (no SIP password stored), ntfy alerts on
 # denied/rejected calls, and a periodic spend/volume check.
 #
@@ -24,7 +26,7 @@
 #
 # Part of the modular post-install system (sourced by setup.sh).
 
-register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
+register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, per-extension inbound/outbound permission tiers, spend/volume alerts (any IP-authenticated provider — VoIP.ms and Anveo Direct both confirmed)"
 
 # ── Surviving Easy Asterisk's regeneration ──────────────────────────────────
 # Easy Asterisk (the vendor project services/asterisk.sh builds on) fully OVERWRITES both pjsip.conf and extensions.conf from its own
@@ -50,7 +52,10 @@ register_service pstn-trunk homelab "SIP PSTN trunk for asterisk — US-only, pe
 # after any base install update.
 #
 # ── Why permissions are a separate live file, not baked into the dialplan ──
-# pstn-permissions.conf holds each extension's tier (internal/restricted/full)
+# pstn-permissions.conf holds each extension's per-direction tiers
+# (tier_out/allowed_out for what it may dial, tier_in/allowed_in for which
+# caller IDs may reach it; 'tier'/'allowed_numbers' persist only as a
+# rollback mirror of the outbound values)
 # and, for restricted, its pipe-separated approved-number list. The dialplan
 # reads it via Asterisk's AST_CONFIG() function, which re-reads the file from
 # disk on every call — so editing this file (by hand, or via the Security
@@ -267,8 +272,10 @@ EOF
 
 # ── Shared: one inbound ring-group member's live permission check ─────────
 # Emits a block that only adds this extension to PSTN_RING_LIST if it's
-# "full" tier, or "restricted" tier AND the inbound Caller-ID is on its
-# approved list. Uses a single-quoted heredoc (fully literal — no bash
+# "full" INBOUND tier, or "restricted" inbound tier AND the caller ID is on
+# its inbound approved list (allowed_in). The outbound tier is not consulted
+# here at all — an extension may dial anywhere and still accept calls from
+# only a handful of numbers, or the reverse. Uses a single-quoted heredoc (fully literal — no bash
 # expansion) captured into a variable, then a pure bash string replace for
 # the extension number placeholder — safer than sed here since it needs no
 # escaping at all (the extension is plain digits, but this avoids relying on
@@ -282,9 +289,9 @@ _pstn_ring_member_block() {
     # (bare "?label" / "Goto(label)"), not "label,1" (which addresses a
     # different, nonexistent extension named "label" instead).
     block=$(cat << 'MEMBER'
- same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier)})
+ same => n,Set(PSTN_M_TIER=${AST_CONFIG(pstn-permissions.conf,__EXT__,tier_in)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "full"]?ring__EXT__)
- same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_numbers)})
+ same => n,Set(PSTN_M_ALLOWED=${AST_CONFIG(pstn-permissions.conf,__EXT__,allowed_in)})
  same => n,GotoIf($["${PSTN_M_TIER}" = "restricted" & ${REGEX("^(${PSTN_M_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?ring__EXT__)
  same => n,Goto(skip__EXT__)
  same => n(ring__EXT__),Set(PSTN_RING_LIST=${PSTN_RING_LIST}${PSTN_RING_SEP}PJSIP/__EXT__)
@@ -350,10 +357,10 @@ exten => _1NXXNXXXXXX,1,NoOp(PSTN outbound call attempt from ${CHANNEL} to ${EXT
  same => n,GotoIf($[${REGEX("^(242|246|264|268|284|340|345|441|473|649|658|664|670|671|684|721|758|767|784|787|809|829|849|868|869|876|939)$" ${PSTN_AREA_CODE})} = 1]?pstn_intl_blocked,1)
  same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
  same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
- same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier_out)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_check_busy,1)
  same => n,GotoIf($["${PSTN_TIER}" = "restricted"]?pstn_check_allow_out,1)
- same => n,NoOp(Denied - ${PSTN_CALLER} has no PSTN permission, tier: ${PSTN_TIER})
+ same => n,NoOp(Denied - ${PSTN_CALLER} has no outbound PSTN permission, tier_out: ${PSTN_TIER})
 __ALERT_DENY_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -392,9 +399,9 @@ exten => _011X.,1,NoOp(PSTN international outbound call attempt from ${CHANNEL} 
  same => n,GotoIf($["${PSTN_KILLED}" = "1"]?pstn_killed,1)
  same => n,Set(PSTN_CALLER=${CUT(CHANNEL,/,2)})
  same => n,Set(PSTN_CALLER=${CUT(PSTN_CALLER,-,1)})
- same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier)})
+ same => n,Set(PSTN_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},tier_out)})
  same => n,GotoIf($["${PSTN_TIER}" = "full"]?pstn_intl_check_country,1)
- same => n,NoOp(Denied intl - ${PSTN_CALLER} tier ${PSTN_TIER} not eligible for international calling)
+ same => n,NoOp(Denied intl - ${PSTN_CALLER} tier_out ${PSTN_TIER} not eligible for international calling)
 __ALERT_DENY_INTL_TIER_LINE__
  same => n,Busy(15)
  same => n,Hangup()
@@ -410,7 +417,7 @@ __ALERT_DENY_INTL_COUNTRY_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
-exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_numbers)})
+exten => pstn_check_allow_out,1,Set(PSTN_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_CALLER},allowed_out)})
  same => n,GotoIf($[${REGEX("^(${PSTN_ALLOWED})$" ${PSTN_DIALED})} = 1]?pstn_check_busy,1)
  same => n,NoOp(Denied - ${PSTN_DIALED} not on ${PSTN_CALLER}'s approved number list)
 __ALERT_DENY_NUMBER_LINE__
@@ -608,9 +615,9 @@ __ALERT_KILLED_IN_LINE__
 ; restart — see restart_asterisk_container() in services/security-dashboard.sh)
 ; before AST_CONFIG() actually returns the new value.
 exten => pstn_personal_inbound,1,GotoIf($["${PSTN_PERSONAL_OWNER:0:1}" = "@"]?pstn_personal_group_ring,1)
- same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier)})
+ same => n,Set(PSTN_OWNER_TIER=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},tier_in)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "full"]?pstn_personal_ring,1)
- same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_numbers)})
+ same => n,Set(PSTN_OWNER_ALLOWED=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},allowed_in)})
  same => n,GotoIf($["${PSTN_OWNER_TIER}" = "restricted" & ${REGEX("^(${PSTN_OWNER_ALLOWED})$" ${PSTN_CALLERID_NORM})}=1]?pstn_personal_ring,1)
  same => n,NoOp(Denied - personal DID ${PSTN_DID_CALLED}'s owner ${PSTN_PERSONAL_OWNER} not authorized for this caller)
 __ALERT_DENY_PERSONAL_LINE__
@@ -734,11 +741,11 @@ IFS=',' read -ra MEMBERS <<< "$MEMBERS_RAW"
 for _ext in "${MEMBERS[@]}"; do
     _ext="$(echo "$_ext" | xargs)"
     [[ -z "$_ext" ]] && continue
-    _tier="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "tier")"
+    _tier="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "tier_in")"
     if [[ "$_tier" == "full" ]]; then
         RING_LIST="${RING_LIST}${RING_LIST:+&}PJSIP/${_ext}"
     elif [[ "$_tier" == "restricted" ]]; then
-        _allowed="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "allowed_numbers")"
+        _allowed="$(_ini_get "$CONF_DIR/pstn-permissions.conf" "$_ext" "allowed_in")"
         if [[ -n "$_allowed" ]] && [[ "$CALLER" =~ ^(${_allowed})$ ]]; then
             RING_LIST="${RING_LIST}${RING_LIST:+&}PJSIP/${_ext}"
         fi
@@ -746,6 +753,62 @@ for _ext in "${MEMBERS[@]}"; do
 done
 printf '%s' "$RING_LIST"
 SCRIPT
+}
+
+# ── Migration: single tier → separate inbound/outbound tiers ───────────────
+# Installs made before the split have only 'tier' and 'allowed_numbers', which
+# the new dialplan doesn't read — leaving them untouched would fail closed and
+# silently deny every PSTN call in both directions. Copies the old values into
+# both directions, which reproduces the exact behaviour the box had before,
+# then leaves the originals in place as the rollback mirror (see the header
+# _pstn_write_permissions_file writes).
+#
+# Idempotent: an extension that already has tier_out is skipped, so this runs
+# safely on every update. Backs the file up first — unlike most of this
+# installer, it edits a file the user may have hand-tuned.
+_pstn_migrate_permissions_split() {
+    local FILE="$1"
+    [[ -f "$FILE" ]] || return 0
+    grep -q '^[[:space:]]*tier[[:space:]]*=' "$FILE" || return 0
+    grep -q '^[[:space:]]*tier_out[[:space:]]*=' "$FILE" && return 0
+
+    cp "$FILE" "$FILE.backup.$(date +%Y%m%d-%H%M%S)"
+    local TMP
+    TMP="$(mktemp)"
+    awk '
+        # Emit the split keys immediately after each legacy key, preserving
+        # whatever spacing style the file already uses around "=".
+        {
+            line = $0
+            if (match(line, /^[ \t]*tier[ \t]*=[ \t]*/)) {
+                val = line; sub(/^[ \t]*tier[ \t]*=[ \t]*/, "", val)
+                print "tier_out=" val
+                print "tier_in=" val
+                print line
+                next
+            }
+            if (match(line, /^[ \t]*allowed_numbers[ \t]*=[ \t]*/)) {
+                val = line; sub(/^[ \t]*allowed_numbers[ \t]*=[ \t]*/, "", val)
+                print "allowed_out=" val
+                print "allowed_in=" val
+                print line
+                next
+            }
+            print line
+        }
+    ' "$FILE" > "$TMP"
+
+    if [[ -s "$TMP" ]]; then
+        mv "$TMP" "$FILE"
+        chmod 664 "$FILE"
+        log_success "Migrated pstn-permissions.conf to separate inbound/outbound tiers (backup saved alongside it)."
+        log_info "Every extension kept its existing behaviour — both directions were set to"
+        log_info "whatever its single tier used to be. Split them per direction in the"
+        log_info "Security Dashboard's Extensions tab."
+    else
+        rm -f "$TMP"
+        log_warning "Permission migration produced an empty file — left the original alone."
+    fi
 }
 
 # ── Shared: initial concurrency limits (fresh install / explicit reset only
@@ -784,8 +847,22 @@ _pstn_write_permissions_file() {
     done
     local _written_exts=""
     {
-        echo "; PSTN permission tiers — internal / restricted / full — PLUS two independent"
-        echo "; axes per extension:"
+        echo "; PSTN permission tiers — internal / restricted / full — set SEPARATELY per"
+        echo "; direction:"
+        echo "; - 'tier_out' + 'allowed_out' gate calls this extension PLACES. allowed_out"
+        echo "; holds numbers it may DIAL."
+        echo "; - 'tier_in' + 'allowed_in' gate calls this extension RECEIVES (ring group"
+        echo "; membership and personal-DID routing). allowed_in holds CALLER IDs allowed"
+        echo "; to reach it."
+        echo "; The two are independent, so 'dial anyone, only take calls from a short list'"
+        echo "; and 'answer anyone, only dial a short list' are both expressible. Both lists"
+        echo "; are pipe-separated 11-digit numbers (a REGEX() alternation, see this file's"
+        echo "; own comments on why untrusted call data is never the pattern side)."
+        echo "; 'tier'/'allowed_numbers' are also written, mirroring the OUTBOUND values, so"
+        echo "; that rolling back to a pre-split pstn-trunk.sh keeps working with the old"
+        echo "; single-tier semantics. Nothing reads them once the split dialplan is in."
+        echo ";"
+        echo "; PLUS two further independent axes per extension:"
         echo "; - 'messaging' for Asterisk's native internal SIP MESSAGE texting (no carrier"
         echo "; SMS, no PSTN, no cost — a separate axis from PSTN calling, since the risk"
         echo "; profile is different: an extension can be internal-tier for calling and"
@@ -808,6 +885,8 @@ _pstn_write_permissions_file() {
         local _ext
         for _ext in $FULL_EXTS; do
             echo "[$_ext]"
+            echo "tier_out=full"
+            echo "tier_in=full"
             echo "tier=full"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
             [[ -n "${_personal_did_map[$_ext]:-}" ]] && echo "personal_did=${_personal_did_map[$_ext]}"
@@ -818,6 +897,10 @@ _pstn_write_permissions_file() {
             _ext="$1"; local _nums="$2"
             shift 2
             echo "[$_ext]"
+            echo "tier_out=restricted"
+            echo "allowed_out=${_nums}"
+            echo "tier_in=restricted"
+            echo "allowed_in=${_nums}"
             echo "tier=restricted"
             echo "allowed_numbers=${_nums}"
             [[ " $MESSAGING_EXTS " == *" $_ext "* ]] && echo "messaging=yes"
@@ -1458,6 +1541,10 @@ _pstn_apply_settings() {
     _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$NTFY_URL"
     _pstn_write_inbound_dialplan_include "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf" "$RING_EXTS" "$NTFY_URL"
     _pstn_write_personal_group_ring_script "$ASTERISK_DIR/pstn-personal-group-ring.sh"
+    # Must run alongside the dialplan write, not after a reload: the dialplan
+    # above reads tier_out/tier_in, so an un-migrated permissions file would
+    # deny every call in the window between the two.
+    _pstn_migrate_permissions_split "$ASTERISK_DIR/pstn-permissions.conf"
     _pstn_write_usage_alert_script "$EA_DIR/pstn-trunk-usage-alert.sh" "$EA_DIR" "$ASTERISK_DIR" \
         "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL" "$CONTAINER_NAME"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
