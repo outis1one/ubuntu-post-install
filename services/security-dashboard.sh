@@ -1584,6 +1584,64 @@ def list_personal_dids():
     return result
 
 
+def _group_current_did(group_name):
+    """The DID currently owned by "@group_name", or None. Personal DIDs are
+    keyed by DID number, not by owner, so finding "this group's DID" means
+    scanning for the matching owner value."""
+    for d in list_personal_dids():
+        if d["owner"] == "@" + group_name:
+            return d["did"]
+    return None
+
+
+def _reconcile_group_cid_members(members, old_did=None, new_did=None):
+    """Makes a Ring Group's DID double as its members' outbound Caller-ID
+    override, without a Groups-card-style bulk action and without a new
+    field to track "individually assigned" vs "inherited from the group".
+
+    Boundary used instead of a tracking field: a member's existing
+    personal_did is only ever touched here if it's currently EMPTY (safe
+    to fill in) or if it currently equals old_did (safe to assume it came
+    from this same group, so safe to clear/replace). Anything else —
+    an individually-assigned number, or one inherited from a DIFFERENT
+    group — is left alone.
+
+    Known, accepted gap: if a member is individually assigned a number
+    that happens to exactly equal a group's DID, then later leaves that
+    group (or the group's DID changes), this can't tell the difference
+    and clears/replaces it anyway. Rare, and low-stakes — the member
+    just falls back to the shared trunk DID for Caller-ID, not a loss of
+    access — preferred here over the bookkeeping a fully precise version
+    would need. Called with the group's CURRENT DID as new_did (and
+    whatever it used to be, if anything, as old_did) any time either the
+    group's DID assignment or its membership changes."""
+    if old_did == new_did:
+        return
+    perms_cp = _read_permissions_cp()
+    changed = False
+    for ext in members:
+        if not perms_cp.has_section(ext):
+            if new_did:
+                perms_cp.add_section(ext)
+                perms_cp.set(ext, "personal_did", new_did)
+                changed = True
+            continue
+        existing = perms_cp.get(ext, "personal_did", fallback="")
+        if new_did and not existing:
+            perms_cp.set(ext, "personal_did", new_did)
+            changed = True
+        elif old_did and existing == old_did:
+            if new_did:
+                perms_cp.set(ext, "personal_did", new_did)
+            else:
+                perms_cp.remove_option(ext, "personal_did")
+                if not perms_cp.options(ext):
+                    perms_cp.remove_section(ext)
+            changed = True
+    if changed:
+        _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, perms_cp)
+
+
 def write_personal_did(did, owner):
     """Assigns did -> owner, keeping pstn-personal-dids.conf (inbound
     routing, read by the dialplan) and pstn-permissions.conf's
@@ -1595,16 +1653,17 @@ def write_personal_did(did, owner):
     rather than requiring the caller to clean up the old assignment
     itself.
 
-    owner may also be a group reference, written as "@GroupName" (the '@'
-    makes it unambiguous against a same-named numeric extension - group
-    names are free text and could otherwise collide, e.g. a group literally
-    named "201"). A group-owned DID rings every CURRENT member whose own
-    tier/approved-numbers authorize the caller, computed fresh on every
-    call (see pstn-personal-group-ring.sh) rather than baked in at
-    assignment time - membership changes take effect immediately, unlike
-    the Groups card's other bulk actions. Group ownership has no single
-    extension to hang an outbound Caller-ID override on, so it never
-    touches pstn-permissions.conf the way a single-extension owner does."""
+    owner may also be a Ring Group reference, written as "@GroupName" (the
+    '@' makes it unambiguous against a same-named numeric extension - Ring
+    Group names are free text and could otherwise collide, e.g. a group
+    literally named "201"). A group-owned DID rings every CURRENT member
+    whose own tier/approved-numbers authorize the caller, computed fresh on
+    every call (see pstn-personal-group-ring.sh) rather than baked in at
+    assignment time - membership changes take effect immediately. It also
+    becomes every current member's outbound Caller-ID override, the same
+    field a single-extension owner gets, via _reconcile_group_cid_members()
+    below - see that function's own comment for the exact rule (an
+    individual assignment always wins over the group's)."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     did = str(did).strip()
@@ -1624,6 +1683,7 @@ def write_personal_did(did, owner):
 
     dids_cp = _read_personal_dids_cp()
     perms_cp = _read_permissions_cp()
+    old_group_did = _group_current_did(group_name) if is_group else None
 
     if not is_group:
         for section in perms_cp.sections():
@@ -1645,6 +1705,8 @@ def write_personal_did(did, owner):
         return False, err
 
     if is_group:
+        members = [m.strip() for m in _read_groups_cp().get(group_name, "members", fallback="").split(",") if m.strip()]
+        _reconcile_group_cid_members(members, old_did=old_group_did, new_did=did)
         return True, "Assigned %s to group %s" % (did, group_name)
 
     if not perms_cp.has_section(owner):
@@ -1662,6 +1724,12 @@ def write_personal_did(did, owner):
 
 
 def remove_personal_did(did):
+    """Unassigns a DID entirely. The personal_did= cleanup loop below is a
+    plain value match, not owner-type-aware, so it already correctly clears
+    it from every Ring Group member who'd inherited this exact DID as their
+    outbound Caller-ID (see _reconcile_group_cid_members) as well as a
+    single extension's own direct assignment - no separate group-aware path
+    needed here."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     did = str(did).strip()
@@ -2138,6 +2206,10 @@ def ea_create_room(extension, name, room_type="ring", timeout="60", members=None
         return False, err
     ea_rebuild_dialplan()
     sync_room_group_mirror(name, clean_members)
+    # Normally a no-op for a brand-new group (nothing owns this name yet),
+    # but defensive against a same-named room having existed before and
+    # left a personal-DID assignment behind.
+    _reconcile_group_cid_members(clean_members, old_did=None, new_did=_group_current_did(name))
     return True, "Room created"
 
 
@@ -2163,6 +2235,13 @@ def ea_delete_room(extension):
         return False, err
     ea_rebuild_dialplan()
     if old_room:
+        # Unassign the DID first (this also clears it from every member's
+        # personal_did — see remove_personal_did's own comment), THEN
+        # clean up the pstn-groups.conf mirror — a deleted group can't
+        # meaningfully still own a personal number.
+        old_did = _group_current_did(old_room["name"])
+        if old_did:
+            remove_personal_did(old_did)
         sync_room_group_mirror(None, [], old_name=old_room["name"])
     return True, "Room deleted"
 
@@ -2198,7 +2277,17 @@ def ea_rename_room(extension, new_name):
         return False, err
     ea_rebuild_dialplan()
     old_members = [m for m in (old_room["members"] if old_room else "").split(",") if m]
+    old_did = _group_current_did(old_room["name"]) if old_room else None
     sync_room_group_mirror(new_name, old_members, old_name=old_room["name"] if old_room else None)
+    if old_did:
+        # Membership and the DID itself haven't changed, just the label —
+        # repoint pstn-personal-dids.conf's owner at the new name instead of
+        # leaving it referencing one that no longer has a mirror section
+        # (which would silently break that DID's inbound ring-fan-out).
+        dids_cp = _read_personal_dids_cp()
+        if dids_cp.has_section(old_did):
+            dids_cp.set(old_did, "owner", "@" + new_name)
+            _write_ini_cp(_personal_dids_path(), PERSONAL_DIDS_HEADER, dids_cp)
     return True, "Room renamed"
 
 
@@ -2206,7 +2295,9 @@ def _ea_update_room_members(extension, new_members):
     path = _ea_rooms_host_path()
     if not path or not os.path.isfile(path):
         return False, "Rooms file not found"
-    room_name = next((r["name"] for r in ea_list_rooms() if r["extension"] == extension), None)
+    old_room = next((r for r in ea_list_rooms() if r["extension"] == extension), None)
+    room_name = old_room["name"] if old_room else None
+    old_members = set(m for m in (old_room["members"] if old_room else "").split(",") if m)
     with open(path) as f:
         lines = f.readlines()
     new_lines = []
@@ -2228,7 +2319,12 @@ def _ea_update_room_members(extension, new_members):
         return False, err
     ea_rebuild_dialplan()
     if room_name:
-        sync_room_group_mirror(room_name, [m for m in new_members.split(",") if m])
+        new_members_set = set(m for m in new_members.split(",") if m)
+        sync_room_group_mirror(room_name, list(new_members_set))
+        current_did = _group_current_did(room_name)
+        if current_did:
+            _reconcile_group_cid_members(old_members - new_members_set, old_did=current_did, new_did=None)
+            _reconcile_group_cid_members(new_members_set - old_members, old_did=None, new_did=current_did)
     return True, "Room members updated"
 
 
@@ -2673,6 +2769,7 @@ INDEX_HTML = """<!doctype html>
             <th>Members</th>
             <th>Timeout</th>
             <th>Type</th>
+            <th class="pstn-only">Personal number</th>
             <th></th>
           </tr></thead><tbody></tbody></table>
         </div>
@@ -3288,6 +3385,21 @@ async function loadEaRooms() {
   eaRooms = data.rooms || [];
   renderEaRooms();
   renderPersonalDidOwnerOptions();
+  suggestRoomExtension();
+}
+
+// Fills the ring group extension field with the next number not already
+// used by a device or another ring group, starting at 500 (the range the
+// field's own placeholder has always suggested) — only when the field is
+// currently empty, so it never clobbers something the admin is mid-typing
+// or deliberately cleared. One less thing to have to think up by hand.
+function suggestRoomExtension() {
+  const field = document.getElementById("ea-room-ext");
+  if (!field || field.value.trim()) return;
+  const taken = new Set([...extRows.map(e => e.ext), ...eaRooms.map(r => r.extension)]);
+  let n = 500;
+  while (taken.has(String(n))) n++;
+  field.value = String(n);
 }
 
 function eaRoomSortValue(r, key) {
@@ -3327,18 +3439,24 @@ function renderEaRooms() {
       ? `<select style="width:auto">${available.map(d => `<option value="${esc(d.extension)}">${esc(d.extension)} — ${esc(d.name)}</option>`).join("")}</select>
          <button class="action" onclick="addEaRoomMemberFromRow('${esc(r.extension)}', this)">+</button>`
       : '<span class="muted">no more devices</span>';
+    const didRecord = lastPersonalDids.find(d => d.owner === "@" + r.name);
+    const didCell = didRecord
+      ? `${esc(didRecord.did)} <button class="action" onclick="removeRoomDid('${esc(didRecord.did)}')">Remove</button>`
+      : `<input type="text" class="room-did-input" placeholder="10-digit DID" style="width:9rem">
+         <button class="action" onclick="assignRoomDid('${esc(r.name)}', this)">Assign</button>`;
     return `<tr data-ext="${esc(r.extension)}">
       <td>${esc(r.extension)}</td>
       <td>${esc(r.name)}</td>
       <td>${memberChips || '<span class="muted">none</span>'}<br>${addPicker}</td>
       <td>${esc(r.timeout)}</td>
       <td>${esc(r.type)}</td>
+      <td class="pstn-only">${didCell}</td>
       <td class="actions">
         <button class="action" onclick="renameEaRoom('${esc(r.extension)}')">Rename</button>
         <button class="action danger" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
       </td>
     </tr>`;
-  }).join("") || '<tr><td colspan=6 class=empty>No rooms yet.</td></tr>';
+  }).join("") || '<tr><td colspan=7 class=empty>No rooms yet.</td></tr>';
 }
 
 document.querySelectorAll("#ea-room-table th.sortable").forEach(th => {
@@ -3435,6 +3553,38 @@ async function removeEaRoomMember(roomExt, device) {
   toast(data.message || (data.ok ? "Member removed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
   if (data.ok && pstnRelevant) { markPstnDirty(); await offerPstnRestart(); }
+}
+
+// Assign/remove a Ring Group's personal number right from its own row —
+// same underlying write as the Personal Numbers card's owner picker
+// ("@name"), just surfaced here too so a group's DID doesn't require a
+// separate trip to that card.
+async function assignRoomDid(roomName, btn) {
+  const input = btn.previousElementSibling;
+  const did = input.value.trim();
+  if (!did) return;
+  const res = await fetch("/api/pstn-personal-dids", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did, owner: "@" + roomName}),
+  });
+  const data = await res.json();
+  toast(data.message || (data.ok ? "Number assigned" : "Failed"), data.ok ? "ok" : "err");
+  await loadPersonalDids();
+  loadEaRooms();
+  if (data.ok) { markPstnDirty(); await offerPstnRestart(); }
+}
+
+async function removeRoomDid(did) {
+  if (!confirm("Remove personal number " + did + " from this ring group? Members lose it as their outbound Caller-ID and stop ringing on inbound calls to it.")) return;
+  const res = await fetch("/api/pstn-personal-dids/delete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({did: did}),
+  });
+  const data = await res.json();
+  toast(data.message || (data.ok ? "Number removed" : "Failed"), data.ok ? "ok" : "err");
+  await loadPersonalDids();
+  loadEaRooms();
+  if (data.ok) { markPstnDirty(); await offerPstnRestart(); }
 }
 
 // "Commit Changes" — see restart_asterisk_container()'s comment in app.py
@@ -3552,6 +3702,9 @@ async function loadPersonalDids() {
   const data = await res.json();
   lastPersonalDids = data.dids || [];
   renderPersonalDids();
+  // Ring Groups' own Personal number column reads this same data — re-render
+  // it too so a group's assigned DID shows up even though rooms load first.
+  renderEaRooms();
 }
 
 document.getElementById("pd-save").addEventListener("click", async () => {
