@@ -103,7 +103,7 @@ install_security-dashboard() {
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ SECURITY DASHBOARD                                               │"
     echo "│ Asterisk failed-connection log + one Extensions tab (devices,   │"
-    echo "│ categories, rooms, groups, PSTN tiers, DIDs) + CrowdSec bans,   │"
+    echo "│ ring groups, PSTN tiers, personal DIDs) + CrowdSec bans,        │"
     echo "│ one page. Runs natively on the host (not Docker) so it can call │"
     echo "│ cscli and read Asterisk's files directly. Authelia-protected.   │"
     echo "└─────────────────────────────────────────────────────────────────┘"
@@ -248,45 +248,47 @@ which tab a given extension's settings live on.
   first. Delete keeps its own control per row, since it's destructive and
   must not ride along with a batch.
 
-  Everything below the table — Categories, Rooms, Groups, Concurrent-call
-  caps, Personal numbers — is a collapsed section with an item count in its
-  header, so the tab opens on the extensions table rather than on six
-  expanded cards. Long explanations sit behind "what this means"
-  disclosures for the same reason. The table scrolls horizontally inside
-  its own card, so the page never scrolls sideways on a phone.
-  - **Extensions** — add/rename/delete a SIP extension, reassign its category;
-    live registered/unregistered status per device. This is a native
-    reimplementation of Easy Asterisk's own vendored web admin
-    (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s device/category/room
-    management), not a link or an iframe to that separate process — one page,
-    one login. Reads \`pjsip.conf\`/\`categories.conf\`/\`rooms.conf\` directly
-    (same formats the vendor's own \`easy-asterisk --rebuild-dialplan\` CLI
-    still generates the dialplan from); writes go through
-    \`docker exec ... tee\` (root, sudo-gated) instead of a direct host-side
-    file write, since Easy Asterisk's container writes these as its own
-    internal user and a host-side write would just be fighting that ownership
-    again on the next restart. Every write reloads PJSIP and/or rebuilds the
-    dialplan automatically, the same way the vendored admin's own actions do.
-  - **Categories** — device profiles (an auto-answer default + description).
-  - **Rooms** — ring groups/paging groups; add/remove members per room.
-  - **Groups** — name a set of extensions and bulk-enable/disable messaging
-    for all of them at once. A management convenience only, not a runtime
-    concept: applying an action just writes the same per-extension
-    \`pstn-permissions.conf\` key each member's own checkbox would, and
-    membership changes never retroactively affect anything already applied.
-    (A group owning a personal DID *is* evaluated live against current
-    membership, though — see below.)
-  - **Concurrent-call caps** and **Personal numbers** appear only once
-    \`services/pstn-trunk.sh\`'s dialplan is actually installed
-    (\`pstn-trunk-dialplan.conf\` present), so the page never shows a
-    real-looking-but-unenforced editor. Caps are the outbound/inbound
-    concurrent-call limits; personal numbers map a DID to an owner extension
-    or group, additive to the shared trunk DID. Writes go directly to
-    \`pstn-limits.conf\` / \`pstn-permissions.conf\` / \`pstn-personal-dids.conf\`,
-    which the dialplan reads fresh on every call. The spend-cap kill-switch
-    and international-calling allow-list are deliberately **not** managed
-    here — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since both are more
-    security-sensitive than what this tab already exposes.
+  Everything below the table — Ring Groups, Personal numbers — is a
+  collapsed section with an item count in its header, so the tab opens on
+  the extensions table rather than on several expanded cards. Long
+  explanations sit behind "what this means" disclosures for the same
+  reason. The table scrolls horizontally inside its own card, so the page
+  never scrolls sideways on a phone.
+  - **Extensions** — add/rename/delete a SIP extension, tag it as a mobile
+    device (enables RTP NAT-keepalive tuning); live registered/unregistered
+    status per device. This is a native reimplementation of Easy Asterisk's
+    own vendored web admin (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s
+    device/room management), not a link or an iframe to that separate
+    process — one page, one login. Reads \`pjsip.conf\`/\`rooms.conf\`
+    directly (same formats the vendor's own \`easy-asterisk
+    --rebuild-dialplan\` CLI still generates the dialplan from); writes go
+    through \`docker exec ... tee\` (root, sudo-gated) instead of a direct
+    host-side file write, since Easy Asterisk's container writes these as
+    its own internal user and a host-side write would just be fighting that
+    ownership again on the next restart. Every write reloads PJSIP and/or
+    rebuilds the dialplan automatically, the same way the vendored admin's
+    own actions do.
+  - **Ring Groups** — pick extensions, name them, and they ring or page
+    together as one real, dialable Easy Asterisk extension (the vendor's
+    own "rooms" concept, renamed here since that's clearer about what it
+    does). Can also be assigned a personal DID below instead of a single
+    extension — every current member whose own tier/approved-numbers
+    authorize the caller rings, checked fresh on every call. A hidden
+    \`pstn-groups.conf\` mirror of current membership (see
+    \`sync_room_group_mirror()\` in app.py) is what actually makes that
+    live-checked lookup possible without teaching \`pstn-trunk.sh\`
+    anything about \`rooms.conf\`'s format — there's no separate UI for it,
+    editing a Ring Group's membership here keeps it in step automatically.
+  - **Personal numbers** appears only once \`services/pstn-trunk.sh\`'s
+    dialplan is actually installed (\`pstn-trunk-dialplan.conf\` present),
+    so the page never shows a real-looking-but-unenforced editor. Maps a
+    DID to an owner extension or Ring Group, additive to the shared trunk
+    DID. Writes go directly to \`pstn-permissions.conf\` /
+    \`pstn-personal-dids.conf\`, which the dialplan reads fresh on every
+    call. Concurrent-call caps, the spend-cap kill-switch, and the
+    international-calling allow-list are deliberately **not** managed here
+    — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since all three are
+    more security-sensitive than what this tab already exposes.
 - **CrowdSec** — its nav button only appears once \`cscli\` is detected on
   this host. Current bans (\`cscli decisions list\`), a delete/unban button
   per entry, carrier/ASN + country columns (sortable per column), and
@@ -323,7 +325,7 @@ sudo journalctl -u security-dashboard -f
   Asterisk-scenario YAMLs, since \`secdash\` has no write access to those
   root-owned files directly and shouldn't). Extension/device management (only
   added if an Asterisk install is detected): \`docker exec -i <container> tee\` against
-  exactly \`pjsip.conf\`/\`categories.conf\`/\`rooms.conf\`, plus
+  exactly \`pjsip.conf\`/\`rooms.conf\`, plus
   \`asterisk -rx "module reload res_pjsip.so"\`,
   \`asterisk -rx "pjsip show endpoints"\`, and
   \`easy-asterisk --rebuild-dialplan\` — all scoped to the one Asterisk
@@ -1390,16 +1392,13 @@ def write_messaging(ext, enabled):
 GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9_ -]{1,40}$")
 
 GROUPS_HEADER = (
-    "; Named extension groups - a management convenience only, NEVER read by\n"
-    "; the dialplan itself (which only ever looks at per-extension keys in\n"
-    "; pstn-permissions.conf - see that file). Applying a group action (e.g.\n"
-    "; \"enable messaging\") writes those same per-extension keys for every\n"
-    "; CURRENT member, exactly as if each had been checked individually - it's\n"
-    "; a one-time bulk write, not an ongoing binding. Editing membership here\n"
-    "; does not retroactively change anything already applied to former\n"
-    "; members, and adding someone to a group does not automatically apply\n"
-    "; the group's settings - use the dashboard's \"Enable/Disable\" actions\n"
-    "; for that, any time membership changes.\n\n"
+    "; Auto-generated mirror of Ring Groups' membership (see sync_room_group_\n"
+    "; mirror() in app.py) - NOT a user-facing feature of its own. There is no\n"
+    "; dashboard UI for this file; edit Ring Group membership on the\n"
+    "; Extensions tab instead and this file follows automatically. Its only\n"
+    "; reader is pstn-personal-group-ring.sh (services/pstn-trunk.sh), which\n"
+    "; looks up a Ring Group's members by name when a personal DID is owned\n"
+    "; by that group rather than a single extension.\n\n"
 )
 
 
@@ -1416,18 +1415,6 @@ def _read_groups_cp():
         except configparser.Error:
             pass
     return cp
-
-
-def list_groups():
-    """[{"name": ..., "members": [ext, ...]}], sorted by name."""
-    cp = _read_groups_cp()
-    result = []
-    for section in cp.sections():
-        members_raw = cp.get(section, "members", fallback="")
-        members = [m.strip() for m in members_raw.split(",") if m.strip()]
-        result.append({"name": section, "members": members})
-    result.sort(key=lambda g: g["name"].lower())
-    return result
 
 
 def write_group(name, members):
@@ -1462,26 +1449,27 @@ def delete_group(name):
     return True, "Deleted group '%s' (members' own settings were not changed)" % name
 
 
-def apply_group_messaging(name, enabled):
-    """Sets messaging=<enabled> for every CURRENT member of the group, one
-    at a time via write_messaging() - the exact same write path an
-    individual checkbox uses. Returns a summary of how many succeeded."""
-    groups = {g["name"]: g["members"] for g in list_groups()}
-    if name not in groups:
-        return False, "Group not found"
-    members = groups[name]
-    if not members:
-        return True, "Group '%s' has no members - nothing to change" % name
-    failed = []
-    for ext in members:
-        ok, _msg = write_messaging(ext, enabled)
-        if not ok:
-            failed.append(ext)
-    if failed:
-        return False, "Applied to %d/%d member(s) - failed: %s" % (
-            len(members) - len(failed), len(members), ", ".join(failed))
-    return True, "Messaging %s for all %d member(s) of '%s'" % (
-        "enabled" if enabled else "disabled", len(members), name)
+def sync_room_group_mirror(room_name, members, old_name=None):
+    """Keeps pstn-groups.conf in step with a Ring Group's (Easy Asterisk
+    Room's) membership, so pstn-trunk.sh's existing group-owned-personal-DID
+    machinery (pstn-personal-group-ring.sh, unchanged) can point at a Ring
+    Group by name without pstn-trunk.sh ever needing to know rooms.conf's
+    format. Ring Groups are now the only UI for building a named extension
+    set — this mirror, silent to the admin, is the only reason
+    pstn-groups.conf still exists on disk at all.
+
+    old_name is passed on rename/delete so the STALE section (under the
+    previous name) gets removed rather than left orphaned alongside the
+    new one — pstn-personal-group-ring.sh looks sections up by exact name,
+    so a leftover old-name section is inert, just clutter, not a routing
+    risk; still, no reason to leave it.
+
+    room_name=None means the room itself was deleted; only the old_name
+    cleanup runs in that case."""
+    if old_name and old_name != room_name:
+        delete_group(old_name)
+    if room_name is not None:
+        write_group(room_name, members)
 
 
 LIMIT_RE = re.compile(r"^\d+$")
@@ -1701,14 +1689,14 @@ def remove_personal_did(did):
     return True, "Removed %s" % did
 
 
-# ── Easy Asterisk device management (devices, categories, rooms/ring-groups) ──
+# ── Easy Asterisk device management (devices, rooms/ring-groups) ──────────
 # Full reimplementation of vendor/easy-asterisk/easy-asterisk-v0.10.0.sh's
 # vendored web admin (its own separate process, normally reached via its own
 # port/domain) as native code here instead — one tab, one process, no
 # separate app to proxy or embed. Keeps writing the EXACT same file formats
 # (pjsip.conf's "; === Device: Name (category) [AA:yes/no] ===" comment +
-# bracket-section convention, categories.conf/rooms.conf's pipe-delimited
-# rows) the vendor's own `easy-asterisk --rebuild-dialplan` CLI still reads
+# bracket-section convention, rooms.conf's pipe-delimited rows) the vendor's
+# own `easy-asterisk --rebuild-dialplan` CLI still reads
 # to generate the dialplan — this is a new front door onto the same
 # underlying config, not a fork of dialplan generation itself.
 #
@@ -2122,6 +2110,12 @@ def ea_create_room(extension, name, room_type="ring", timeout="60"):
         return False, "Invalid extension"
     if not name:
         return False, "Name required"
+    # Same pattern write_group() requires — a Ring Group's name doubles as
+    # its pstn-groups.conf mirror section name (see sync_room_group_mirror),
+    # so anything not valid there would silently fail to sync the moment
+    # this room gets assigned a personal number.
+    if not GROUP_NAME_RE.match(name):
+        return False, "Name must be 1-40 characters (letters, digits, spaces, - or _)"
 
     current = ""
     if os.path.isfile(path):
@@ -2142,6 +2136,7 @@ def ea_create_room(extension, name, room_type="ring", timeout="60"):
     if not ok:
         return False, err
     ea_rebuild_dialplan()
+    sync_room_group_mirror(name, [])
     return True, "Room created"
 
 
@@ -2149,6 +2144,7 @@ def ea_delete_room(extension):
     path = _ea_rooms_host_path()
     if not path or not os.path.isfile(path):
         return False, "Rooms file not found"
+    old_room = next((r for r in ea_list_rooms() if r["extension"] == extension), None)
     with open(path) as f:
         lines = f.readlines()
     new_lines = []
@@ -2165,6 +2161,8 @@ def ea_delete_room(extension):
     if not ok:
         return False, err
     ea_rebuild_dialplan()
+    if old_room:
+        sync_room_group_mirror(None, [], old_name=old_room["name"])
     return True, "Room deleted"
 
 
@@ -2175,6 +2173,9 @@ def ea_rename_room(extension, new_name):
     new_name = (new_name or "").strip()
     if not new_name:
         return False, "Name required"
+    if not GROUP_NAME_RE.match(new_name):
+        return False, "Name must be 1-40 characters (letters, digits, spaces, - or _)"
+    old_room = next((r for r in ea_list_rooms() if r["extension"] == extension), None)
     with open(path) as f:
         lines = f.readlines()
     new_lines = []
@@ -2195,6 +2196,8 @@ def ea_rename_room(extension, new_name):
     if not ok:
         return False, err
     ea_rebuild_dialplan()
+    old_members = [m for m in (old_room["members"] if old_room else "").split(",") if m]
+    sync_room_group_mirror(new_name, old_members, old_name=old_room["name"] if old_room else None)
     return True, "Room renamed"
 
 
@@ -2202,6 +2205,7 @@ def _ea_update_room_members(extension, new_members):
     path = _ea_rooms_host_path()
     if not path or not os.path.isfile(path):
         return False, "Rooms file not found"
+    room_name = next((r["name"] for r in ea_list_rooms() if r["extension"] == extension), None)
     with open(path) as f:
         lines = f.readlines()
     new_lines = []
@@ -2222,6 +2226,8 @@ def _ea_update_room_members(extension, new_members):
     if not ok:
         return False, err
     ea_rebuild_dialplan()
+    if room_name:
+        sync_room_group_mirror(room_name, [m for m in new_members.split(",") if m])
     return True, "Room members updated"
 
 
@@ -2491,7 +2497,7 @@ INDEX_HTML = """<!doctype html>
   #msg { margin-top: var(--sp-2); font-size: 0.85rem; }
 
   /* Capability gating for the Extensions tab. Everything that needs the Easy
-     Asterisk container (device/category/room writes) is .ea-only; everything
+     Asterisk container (device/room writes) is .ea-only; everything
      that needs a PSTN trunk dialplan is .pstn-only. Both classes start ON the
      body so nothing flashes before /api/ea-status and /api/pstn-status answer,
      and they're removed once those confirm. Marking cells rather than juggling
@@ -2511,13 +2517,13 @@ INDEX_HTML = """<!doctype html>
 <header>
   <h1>Security Dashboard</h1>
   <nav>
-    <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" data-tab="extensions">Extensions</button>
+    <button class="tab-btn" data-tab="security">Security Log</button>
+    <button class="tab-btn active" data-tab="extensions">Extensions</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
 <main>
-  <div id="tab-security">
+  <div id="tab-security" style="display:none">
     <div class="card">
       <div class="card-body">
         <p class="muted" style="margin-top:0">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
@@ -2565,7 +2571,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div>
   </div>
-  <div id="tab-extensions" style="display:none">
+  <div id="tab-extensions">
     <div class="card pstn-only banner" id="pstn-restart-banner" style="display:none">
       <div class="card-body">
         <b>Changes may not be live yet.</b>
@@ -2644,18 +2650,18 @@ INDEX_HTML = """<!doctype html>
     <div class="section-head ea-only">Easy Asterisk device setup</div>
 
     <details class="card ea-only" id="card-rooms">
-      <summary>Rooms (ring groups) <span class="count" id="room-count"></span></summary>
+      <summary>Ring Groups <span class="count" id="room-count"></span></summary>
       <div class="card-body">
-        <p class="muted">A shared extension that rings (or pages) every member device at once.</p>
+        <p class="muted">Pick extensions, give them a name, and they ring (or page/auto-answer) together as one dialable extension — and can optionally be assigned a personal number below, so an inbound call to that number rings every current member.</p>
         <div class="row" style="margin-bottom:var(--sp-3)">
           <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
-          <input type="text" id="ea-room-name" placeholder="Name, e.g. All Ring" style="width:10rem">
+          <input type="text" id="ea-room-name" placeholder="Name, e.g. Sales" style="width:10rem">
           <select id="ea-room-type">
-            <option value="ring">Ring (simultaneous)</option>
-            <option value="page">Page (intercom)</option>
+            <option value="ring">Ring (members answer normally)</option>
+            <option value="page">Page (auto-answer/intercom)</option>
           </select>
           <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:7rem">
-          <button class="action" id="ea-room-save">Add room</button>
+          <button class="action" id="ea-room-save">Add ring group</button>
         </div>
         <div class="table-wrap">
           <table id="ea-room-table"><thead><tr>
@@ -2670,30 +2676,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </details>
 
-    <div class="section-head">Groups &amp; personal numbers (PSTN permissions)</div>
-
-    <details class="card" id="card-groups">
-      <summary>Groups <span class="count" id="grp-count"></span></summary>
-      <div class="card-body">
-        <details class="help">
-          <summary>What groups do</summary>
-          <p class="muted">Named sets of extensions for bulk actions — e.g. enable messaging for everyone in "Sales" at once. A management convenience only: applying an action writes the same per-extension setting each member's own Messaging checkbox above would, one time. It isn't a runtime concept the dialplan knows about, and membership changes never retroactively affect anything already applied. A group can also own a personal number below, which <i>is</i> evaluated live against current membership on every call.</p>
-          <p class="muted">Not the same thing as a <b>Room</b> above: a Room is a real, dialable ring-group extension that rings its members live on every call. A Group has no extension of its own and can't be dialed — it only exists to save you re-clicking the same setting on several extensions, and to optionally own a personal number.</p>
-        </details>
-        <div class="row" style="margin-bottom:var(--sp-2)">
-          <input type="text" id="grp-name" placeholder="Group name, e.g. Sales" style="width:12rem">
-          <button class="action" id="grp-save">Save group</button>
-        </div>
-        <div id="grp-members" class="chip-row" style="margin-bottom:var(--sp-3)"></div>
-        <div class="table-wrap">
-          <table id="grp-table"><thead><tr>
-            <th class="sortable" data-sort="name">Group</th>
-            <th class="sortable" data-sort="members">Members</th>
-            <th></th>
-          </tr></thead><tbody></tbody></table>
-        </div>
-      </div>
-    </details>
+    <div class="section-head">Personal numbers (PSTN permissions)</div>
 
     <details class="card pstn-only" id="card-dids">
       <summary>Personal numbers <span class="count" id="pd-count"></span></summary>
@@ -2701,7 +2684,7 @@ INDEX_HTML = """<!doctype html>
         <details class="help">
           <summary>How personal numbers route</summary>
           <p class="muted">Multiple DIDs can share this one trunk. Assigning a DID to an extension routes inbound calls to that DID straight to its owner (still gated by the owner's own tier/approved-numbers above — no ring-group fallback), and makes that extension's outbound calls show this DID as Caller-ID instead of the shared trunk DID.</p>
-          <p class="muted">You can also assign a DID to a <b>group</b> instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call. A group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.</p>
+          <p class="muted">You can also assign a DID to a <b>Ring Group</b> above instead of a single extension — every current member whose own tier/approved-numbers authorize the caller rings, checked fresh against the group's current membership on every call. A Ring Group has no single extension to hang the outbound Caller-ID override on, so that part only applies to single-extension assignments. The shared DID/ring-group keeps working regardless.</p>
           <p class="muted">Reassigning a DID's owner has been confirmed to sometimes need "Commit changes" (at the top) before Asterisk actually uses the new owner.</p>
         </details>
         <div class="row" style="margin-bottom:var(--sp-3)">
@@ -2737,7 +2720,7 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
 // What this box can actually do, resolved once per page load. Everything the
 // Extensions tab shows is gated on these two rather than on separate nav
 // buttons: the extension list itself only needs pjsip.conf, so it's always
-// worth showing, while device/category/room editing needs a reachable Easy
+// worth showing, while device/room editing needs a reachable Easy
 // Asterisk container and tier/DID editing needs a PSTN trunk dialplan. One
 // tab that grows columns and cards as those appear beats three tabs that
 // each list the same extensions from a different angle.
@@ -2943,11 +2926,10 @@ async function initExtensionsTab() {
 
 // Sequenced (not parallel) — room rows render a member-add picker that needs
 // eaDevices (populated by loadExtensions), and the personal-DID owner picker
-// needs both extensions and groups.
+// needs both extensions and rooms.
 async function refreshExtensionsTab() {
   await loadExtensions();
   if (eaInstalled) await loadEaRooms();
-  await loadGroups();
   if (pstnInstalled) await loadPersonalDids();
 }
 
@@ -2999,7 +2981,6 @@ async function loadExtensions() {
 
   extRows = Array.from(byExt.values());
   renderExtensions();
-  renderGroupMemberPickers();
   renderPersonalDidOwnerOptions();
 }
 
@@ -3286,6 +3267,7 @@ async function loadEaRooms() {
   const data = await res.json();
   eaRooms = data.rooms || [];
   renderEaRooms();
+  renderPersonalDidOwnerOptions();
 }
 
 function eaRoomSortValue(r, key) {
@@ -3366,10 +3348,20 @@ document.getElementById("ea-room-save").addEventListener("click", async () => {
   loadEaRooms();
 });
 
+// Whether a Ring Group's membership change is PSTN-relevant right now — only
+// true once it's actually assigned as a personal number's owner (see
+// sync_room_group_mirror() in app.py). Most Ring Groups never are, and
+// prompting a restart on every ordinary membership tweak would be noise;
+// this keeps the restart nudge scoped to edits that can actually go stale.
+function roomOwnsPersonalDid(roomName) {
+  return lastPersonalDids.some(d => d.owner === "@" + roomName);
+}
+
 async function renameEaRoom(ext) {
   const cur = eaRooms.find(r => r.extension === ext);
   const name = prompt("New name for room " + ext + ":", cur ? cur.name : "");
   if (name === null || !name.trim()) return;
+  const wasPstnRelevant = cur && pstnInstalled && roomOwnsPersonalDid(cur.name);
   const res = await fetch("/api/ea-rooms/rename", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({extension: ext, name: name.trim()}),
@@ -3377,10 +3369,13 @@ async function renameEaRoom(ext) {
   const data = await res.json();
   toast(data.message || (data.ok ? "Room renamed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
+  if (data.ok && wasPstnRelevant) { markPstnDirty(); await offerPstnRestart(); }
 }
 
 async function deleteEaRoom(ext) {
   if (!confirm("Delete room " + ext + "? This cannot be undone.")) return;
+  const cur = eaRooms.find(r => r.extension === ext);
+  const wasPstnRelevant = cur && pstnInstalled && roomOwnsPersonalDid(cur.name);
   const res = await fetch("/api/ea-rooms/delete", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({extension: ext}),
@@ -3388,12 +3383,15 @@ async function deleteEaRoom(ext) {
   const data = await res.json();
   toast(data.message || (data.ok ? "Room deleted" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
+  if (data.ok && wasPstnRelevant) { markPstnDirty(); await offerPstnRestart(); }
 }
 
 async function addEaRoomMemberFromRow(roomExt, btn) {
   const select = btn.previousElementSibling;
   const device = select.value;
   if (!device) return;
+  const cur = eaRooms.find(r => r.extension === roomExt);
+  const pstnRelevant = cur && pstnInstalled && roomOwnsPersonalDid(cur.name);
   const res = await fetch("/api/ea-rooms/members/add", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({room: roomExt, device}),
@@ -3401,9 +3399,12 @@ async function addEaRoomMemberFromRow(roomExt, btn) {
   const data = await res.json();
   toast(data.message || (data.ok ? "Member added" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
+  if (data.ok && pstnRelevant) { markPstnDirty(); await offerPstnRestart(); }
 }
 
 async function removeEaRoomMember(roomExt, device) {
+  const cur = eaRooms.find(r => r.extension === roomExt);
+  const pstnRelevant = cur && pstnInstalled && roomOwnsPersonalDid(cur.name);
   const res = await fetch("/api/ea-rooms/members/remove", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({room: roomExt, device}),
@@ -3411,116 +3412,7 @@ async function removeEaRoomMember(roomExt, device) {
   const data = await res.json();
   toast(data.message || (data.ok ? "Member removed" : "Failed"), data.ok ? "ok" : "err");
   loadEaRooms();
-}
-
-// The Groups card's membership picker. Driven by the same merged extension
-// list the table above renders, so a group can never offer an extension the
-// table doesn't show (or miss one it does).
-function renderGroupMemberPickers() {
-  const grpMembers = document.getElementById("grp-members");
-  grpMembers.innerHTML = extRows.map(e => `
-    <label class="muted" style="white-space:nowrap">
-      <input type="checkbox" class="grp-member-cb" value="${esc(e.ext)}"> ${esc(e.ext)} — ${esc(e.name)}
-    </label>
-  `).join("") || '<span class="muted">No extensions found</span>';
-}
-
-let lastGroups = [];
-let grpSort = { key: null, dir: 1 };
-
-function grpSortValue(g, key) {
-  if (key === "members") return g.members.join(", ").toLowerCase();
-  return (g.name || "").toLowerCase();
-}
-
-function renderGroups() {
-  let rows = lastGroups.slice();
-  if (grpSort.key) {
-    rows.sort((a, b) => {
-      const av = grpSortValue(a, grpSort.key), bv = grpSortValue(b, grpSort.key);
-      if (av < bv) return -1 * grpSort.dir;
-      if (av > bv) return 1 * grpSort.dir;
-      return 0;
-    });
-  }
-  document.querySelectorAll("#grp-table th.sortable .arrow").forEach(a => a.remove());
-  if (grpSort.key) {
-    const th = document.querySelector(`#grp-table th[data-sort="${grpSort.key}"]`);
-    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${grpSort.dir === 1 ? "▲" : "▼"}</span>`);
-  }
-  setCount("grp-count", lastGroups.length);
-  const tbody = document.querySelector("#grp-table tbody");
-  tbody.innerHTML = rows.map(g => `<tr data-group="${esc(g.name)}">
-    <td>${esc(g.name)}</td>
-    <td>${g.members.map(esc).join(", ") || '<span class="muted">none</span>'}</td>
-    <td class="actions">
-      <button class="action" onclick="editGroup('${esc(g.name)}')">Edit</button>
-      <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', true)">Enable messaging</button>
-      <button class="action" onclick="applyGroupMessaging('${esc(g.name)}', false)">Disable messaging</button>
-      <button class="action danger" onclick="deleteGroup('${esc(g.name)}')">Delete</button>
-    </td>
-  </tr>`).join("") || '<tr><td colspan=3 class=empty>No groups yet.</td></tr>';
-}
-
-document.querySelectorAll("#grp-table th.sortable").forEach(th => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    grpSort.dir = (grpSort.key === key) ? -grpSort.dir : 1;
-    grpSort.key = key;
-    renderGroups();
-  });
-});
-
-async function loadGroups() {
-  const res = await fetch("/api/pstn-groups");
-  const data = await res.json();
-  lastGroups = data.groups || [];
-  renderGroups();
-  renderPersonalDidOwnerOptions();
-}
-
-function editGroup(name) {
-  const g = lastGroups.find(x => x.name === name);
-  if (!g) return;
-  document.getElementById("grp-name").value = g.name;
-  document.querySelectorAll(".grp-member-cb").forEach(cb => { cb.checked = g.members.includes(cb.value); });
-}
-
-document.getElementById("grp-save").addEventListener("click", async () => {
-  const name = document.getElementById("grp-name").value.trim();
-  const members = Array.from(document.querySelectorAll(".grp-member-cb:checked")).map(cb => cb.value);
-  const res = await fetch("/api/pstn-groups", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name: name, members: members}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Group saved" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
-  loadGroups();
-});
-
-async function applyGroupMessaging(name, enabled) {
-  if (!confirm(`${enabled ? "Enable" : "Disable"} messaging for every current member of "${name}"?`)) return;
-  const res = await fetch("/api/pstn-groups/apply-messaging", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name: name, enabled: enabled}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Applied to group" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
-  loadExtensions();
-}
-
-async function deleteGroup(name) {
-  if (!confirm(`Delete group "${name}"? This does not change any member's current settings.`)) return;
-  const res = await fetch("/api/pstn-groups/delete", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name: name}),
-  });
-  const data = await res.json();
-  toast(data.message || (data.ok ? "Group deleted" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok && pstnInstalled) { markPstnDirty(); await offerPstnRestart(); }
-  loadGroups();
+  if (data.ok && pstnRelevant) { markPstnDirty(); await offerPstnRestart(); }
 }
 
 // "Commit Changes" — see restart_asterisk_container()'s comment in app.py
@@ -3576,12 +3468,14 @@ async function offerPstnRestart() {
 
 // The personal-DID owner picker spans both lists, so it re-renders from
 // whichever of the two finished last rather than being owned by either.
+// "@name" mirrors what sync_room_group_mirror()/pstn-personal-group-ring.sh
+// expect — a Ring Group's NAME, not its extension, is the join key.
 function renderPersonalDidOwnerOptions() {
   const ownerSel = document.getElementById("pd-owner");
   if (!ownerSel) return;
   const extOptions = extRows.map(e => `<option value="${esc(e.ext)}">${esc(e.ext)} — ${esc(e.name)}</option>`).join("");
-  const groupOptions = lastGroups.map(g => `<option value="@${esc(g.name)}">Group: ${esc(g.name)}</option>`).join("");
-  ownerSel.innerHTML = (extOptions + groupOptions) || '<option value="">No extensions found</option>';
+  const roomOptions = eaRooms.map(r => `<option value="@${esc(r.name)}">Ring Group: ${esc(r.name)}</option>`).join("");
+  ownerSel.innerHTML = (extOptions + roomOptions) || '<option value="">No extensions found</option>';
 }
 
 let lastPersonalDids = [];
@@ -3733,8 +3627,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"dids": dids})
         elif self.path == "/api/pstn-status":
             self._json({"installed": pstn_installed()})
-        elif self.path == "/api/pstn-groups":
-            self._json({"groups": list_groups()})
         elif self.path == "/api/crowdsec-status":
             self._json({"installed": crowdsec_installed()})
         elif self.path == "/api/ea-status":
@@ -3780,15 +3672,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-messaging":
             ok, message = write_messaging(payload.get("ext", ""), bool(payload.get("enabled", False)))
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/pstn-groups":
-            ok, message = write_group(payload.get("name", ""), payload.get("members", []))
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/pstn-groups/delete":
-            ok, message = delete_group(payload.get("name", ""))
-            self._json({"ok": ok, "message": message})
-        elif self.path == "/api/pstn-groups/apply-messaging":
-            ok, message = apply_group_messaging(payload.get("name", ""), bool(payload.get("enabled", False)))
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/asterisk-restart":
             ok, message = restart_asterisk_container()
