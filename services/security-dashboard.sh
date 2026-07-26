@@ -3066,7 +3066,7 @@ async function loadExtensions() {
     eaDevices.forEach(d => {
       const row = byExt.get(d.extension) || {
         ext: d.extension, name: d.name,
-        restrict: "none", allowed_numbers: "",
+        restrict: "internal", allowed_numbers: "",
         messaging: false,
       };
       row.ea = true;
