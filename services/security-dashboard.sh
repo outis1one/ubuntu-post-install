@@ -3220,7 +3220,7 @@ function rowEdits(tr) {
   const numsEl = tr.querySelector(".ext-numbers");
   const msgEl = tr.querySelector(".ext-messaging");
   const edits = {};
-  if (nameEl && !nameEl.disabled && nameEl.value.trim() !== model.name) edits.name = nameEl.value.trim();
+  if (nameEl && !nameEl.disabled && nameEl.value.trim() !== (model.name || "").trim()) edits.name = nameEl.value.trim();
   if (mobileEl && mobileEl.checked !== (model.category === "mobile")) edits.category = mobileEl.checked ? "mobile" : "standard";
   if (modeEl && modeEl.value !== model.restrict) edits.restrict = modeEl.value;
   if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
