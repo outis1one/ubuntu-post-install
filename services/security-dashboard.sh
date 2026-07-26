@@ -2100,7 +2100,7 @@ def ea_list_rooms():
     return rooms
 
 
-def ea_create_room(extension, name, room_type="ring", timeout="60"):
+def ea_create_room(extension, name, room_type="ring", timeout="60", members=None):
     path = _ea_rooms_host_path()
     if not path:
         return False, "No Asterisk install detected on this box"
@@ -2116,6 +2116,7 @@ def ea_create_room(extension, name, room_type="ring", timeout="60"):
     # this room gets assigned a personal number.
     if not GROUP_NAME_RE.match(name):
         return False, "Name must be 1-40 characters (letters, digits, spaces, - or _)"
+    clean_members = [str(m).strip() for m in (members or []) if EA_EXT_RE.match(str(m).strip())]
 
     current = ""
     if os.path.isfile(path):
@@ -2131,12 +2132,12 @@ def ea_create_room(extension, name, room_type="ring", timeout="60"):
 
     if not current.endswith("\n"):
         current += "\n"
-    new_content = current + "%s|%s||%s|%s\n" % (extension, name, timeout, room_type)
+    new_content = current + "%s|%s|%s|%s|%s\n" % (extension, name, ",".join(clean_members), timeout, room_type)
     ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, new_content)
     if not ok:
         return False, err
     ea_rebuild_dialplan()
-    sync_room_group_mirror(name, [])
+    sync_room_group_mirror(name, clean_members)
     return True, "Room created"
 
 
@@ -2653,7 +2654,7 @@ INDEX_HTML = """<!doctype html>
       <summary>Ring Groups <span class="count" id="room-count"></span></summary>
       <div class="card-body">
         <p class="muted">Pick extensions, give them a name, and they ring (or page/auto-answer) together as one dialable extension — and can optionally be assigned a personal number below, so an inbound call to that number rings every current member.</p>
-        <div class="row" style="margin-bottom:var(--sp-3)">
+        <div class="row" style="margin-bottom:var(--sp-2)">
           <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
           <input type="text" id="ea-room-name" placeholder="Name, e.g. Sales" style="width:10rem">
           <select id="ea-room-type">
@@ -2663,6 +2664,8 @@ INDEX_HTML = """<!doctype html>
           <input type="text" id="ea-room-timeout" placeholder="Timeout (s)" value="60" style="width:7rem">
           <button class="action" id="ea-room-save">Add ring group</button>
         </div>
+        <div class="muted" style="margin-bottom:var(--sp-1)">Members:</div>
+        <div id="ea-room-members" class="chip-row" style="margin-bottom:var(--sp-3)"></div>
         <div class="table-wrap">
           <table id="ea-room-table"><thead><tr>
             <th class="sortable" data-sort="extension">Ext</th>
@@ -2981,7 +2984,24 @@ async function loadExtensions() {
 
   extRows = Array.from(byExt.values());
   renderExtensions();
+  renderRoomMemberPicker();
   renderPersonalDidOwnerOptions();
+}
+
+// The new-ring-group form's member checkboxes — driven by the same merged
+// extension list the table above renders, so it can never offer an
+// extension the table doesn't show (or miss one it does). Existing rooms'
+// membership is edited via the per-row add/remove control in the table
+// instead — this picker is only for building a group's initial membership
+// at creation time.
+function renderRoomMemberPicker() {
+  const el = document.getElementById("ea-room-members");
+  if (!el) return;
+  el.innerHTML = extRows.map(e => `
+    <label class="muted" style="white-space:nowrap">
+      <input type="checkbox" class="ea-room-member-cb" value="${esc(e.ext)}"> ${esc(e.ext)} — ${esc(e.name)}
+    </label>
+  `).join("") || '<span class="muted">No extensions found</span>';
 }
 
 let extRows = [];
@@ -3335,15 +3355,17 @@ document.getElementById("ea-room-save").addEventListener("click", async () => {
   const name = document.getElementById("ea-room-name").value.trim();
   const type = document.getElementById("ea-room-type").value;
   const timeout = document.getElementById("ea-room-timeout").value.trim() || "60";
+  const members = Array.from(document.querySelectorAll(".ea-room-member-cb:checked")).map(cb => cb.value);
   const res = await fetch("/api/ea-rooms", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({extension, name, type, timeout}),
+    body: JSON.stringify({extension, name, type, timeout, members}),
   });
   const data = await res.json();
-  toast(data.message || (data.ok ? "Room added" : "Failed"), data.ok ? "ok" : "err");
+  toast(data.message || (data.ok ? "Ring group added" : "Failed"), data.ok ? "ok" : "err");
   if (data.ok) {
     document.getElementById("ea-room-ext").value = "";
     document.getElementById("ea-room-name").value = "";
+    document.querySelectorAll(".ea-room-member-cb:checked").forEach(cb => { cb.checked = false; });
   }
   loadEaRooms();
 });
@@ -3697,7 +3719,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/ea-rooms":
             ok, message = ea_create_room(
                 payload.get("extension", ""), payload.get("name", ""),
-                payload.get("type", "ring"), payload.get("timeout", "60")
+                payload.get("type", "ring"), payload.get("timeout", "60"),
+                payload.get("members", [])
             )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-rooms/delete":
