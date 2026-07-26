@@ -2511,13 +2511,13 @@ INDEX_HTML = """<!doctype html>
 <header>
   <h1>Security Dashboard</h1>
   <nav>
-    <button class="tab-btn active" data-tab="security">Security Log</button>
-    <button class="tab-btn" data-tab="extensions">Extensions</button>
+    <button class="tab-btn" data-tab="security">Security Log</button>
+    <button class="tab-btn active" data-tab="extensions">Extensions</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
 <main>
-  <div id="tab-security">
+  <div id="tab-security" style="display:none">
     <div class="card">
       <div class="card-body">
         <p class="muted" style="margin-top:0">Recent Asterisk SIP security events, newest first. Errors/warnings are real auth failures; informational lines are normal registration traffic.</p>
@@ -2565,7 +2565,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div>
   </div>
-  <div id="tab-extensions" style="display:none">
+  <div id="tab-extensions">
     <div class="card pstn-only banner" id="pstn-restart-banner" style="display:none">
       <div class="card-body">
         <b>Changes may not be live yet.</b>
