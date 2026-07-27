@@ -723,7 +723,6 @@ install_sms-inbound() {
     local MGR_STATE
     MGR_STATE="$(_sms_write_manager_conf "$ASTERISK_DIR" "$AMI_SECRET")"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
-    _sms_grant_asterisk_read_access "$SMS_SVC_USER" "$ASTERISK_DIR"
 
     if [[ "$MGR_STATE" != "unchanged" ]]; then
         echo ""
@@ -742,6 +741,20 @@ install_sms-inbound() {
             log_warning "you restart: docker restart $CONTAINER_NAME"
         fi
     fi
+
+    # Grant smsrelay's ACL access AFTER any Asterisk container restart above,
+    # not before. The container's entrypoint re-chowns (and, apparently on
+    # this image, re-chmods) its mounted config directory on every restart —
+    # chown alone leaves ACL entries alone (that's the whole reason this uses
+    # ACLs over chmod/group membership in the first place, see CLAUDE.md),
+    # but a chmod recomputes the ACL mask entry and can silently weaken a
+    # grant made before it. Confirmed live: pstn-personal-dids.conf was
+    # readable by smsrelay immediately after a manual grant+test, then
+    # unreadable again ("does not exist" — os.path.isfile() swallows the
+    # PermissionError) right after the very next fresh install, which
+    # restarts Asterisk for the new AMI secret. Granting last means nothing
+    # runs afterward in this same install to undo it.
+    _sms_grant_asterisk_read_access "$SMS_SVC_USER" "$ASTERISK_DIR"
 
     # ── Relay service ─────────────────────────────────────────────────────────
     mkdir -p "$SMS_APP_DIR"
