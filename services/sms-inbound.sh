@@ -496,7 +496,19 @@ Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# NOT "true" -- that doesn't just restrict permissions, it mounts an
+# empty, invisible filesystem over /home, /root and /run/user for this
+# unit, full stop. ASTERISK_CONFIG_DIR lives under /root/docker/... (or
+# /home/<user>/docker/... on a non-root install), so with ProtectHome=true
+# the relay process can never see it, no ACL or ownership on the real
+# filesystem can fix that, and every read looks exactly like "the file
+# doesn't exist" from inside the unit while a plain, unsandboxed shell
+# (e.g. `sudo -u smsrelay cat ...`) reads it fine. Confirmed live: this
+# was the actual cause of every "does not exist" seen while chasing what
+# looked like an ACL-ordering problem -- read-only still protects /home
+# and /root from being written to by this service (all it should ever
+# need is read), it just stops hiding them outright.
+ProtectHome=read-only
 PrivateTmp=true
 
 [Install]
