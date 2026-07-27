@@ -333,12 +333,21 @@ def _ami_read_response(sock_file):
 def ami_deliver(from_number, to_exts, body):
     """Logs into AMI once and sends one MessageSend action per recipient.
 
-    UNVERIFIED against a real Asterisk instance as of this being written —
-    "message" as the AMI permission class, and To/From/Body as MessageSend's
-    exact parameter names, are both believed correct but haven't been
-    confirmed live. Every AMI response is logged in full specifically so the
-    first real delivery attempt shows exactly what Asterisk said if
-    something here is wrong, rather than failing silently.
+    "message" as the AMI permission class is confirmed live (login succeeds).
+    Destination (not To) is what actually resolves an outgoing message's
+    endpoint/technology -- confirmed against this box's own
+    `manager show command MessageSend`: To alone is documented as a
+    backward-compatible fallback for the destination, but live testing
+    (bare "pjsip:212", then "pjsip:212@domain", both for To with no
+    Destination) produced zero SIP wire traffic in either case -- `pjsip
+    set logger on` during a real attempt showed Asterisk never even tried
+    reaching the target's registered contact, so that fallback path isn't
+    actually wired up on this Asterisk version regardless of what the docs
+    promise. Destination's documented "endpoint" form -- bare "pjsip:<ext>",
+    no domain -- resolves via the endpoint's own default aor/contact, which
+    is exactly the live, registered contact `pjsip show contacts` already
+    confirmed exists. Every AMI response is still logged in full so the
+    next attempt is self-diagnosing if this isn't the whole fix either.
 
     Returns (delivered_count, total_count)."""
     if not AMI_SECRET:
@@ -367,16 +376,9 @@ def ami_deliver(from_number, to_exts, body):
 
         from_uri = "<sip:{}@{}>".format(from_number or "unknown", SMS_DOMAIN or "localhost")
         for ext in to_exts:
-            # A bare "pjsip:{ext}" (no domain) for To, tried first, produced
-            # zero SIP wire traffic at all -- confirmed live via `pjsip set
-            # logger on` during a real delivery attempt, so the failure was
-            # happening at URI resolution inside Asterisk, before it ever
-            # tried to reach the registered contact. From already carried a
-            # domain; To didn't. Qualifying To the same way to test whether
-            # that asymmetry was the actual problem.
             resp = send_action([
                 ("Action", "MessageSend"),
-                ("To", "pjsip:{}@{}".format(ext, SMS_DOMAIN or "localhost")),
+                ("Destination", "pjsip:{}".format(ext)),
                 ("From", from_uri),
                 ("Body", body),
             ])
