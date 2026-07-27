@@ -1,85 +1,201 @@
 #!/bin/bash
-# services/sms-inbound.sh — Inbound SMS from a VoIP DID → ntfy push notification.
+# services/sms-inbound.sh — Inbound SMS from a VoIP DID, delivered into
+# Asterisk as a SIP MESSAGE so it lands in Sipnetic (or any softphone with
+# the internal texting feature) like a real text thread.
 # Part of the modular post-install system (sourced by setup.sh).
 #
-# Built for one specific job: getting SMS **verification codes** sent to a
-# VoIP number onto a phone that has no SIM. It deliberately does not try to be
-# a texting app. Sending is not handled here at all (see the README this
-# writes for why), and inbound messages arrive as push notifications rather
-# than being routed into Asterisk as SIP MESSAGE — a code you need to read and
-# type is better served by a notification than by a chat thread buried in a
-# softphone.
+# Was originally "SMS -> ntfy push", built for one-off verification codes.
+# Confirmed live this session that the DID's own "SMS over SIP" delivery
+# (Anveo's MESSAGE/INVITE-over-SIP option) simply isn't offered on this
+# account/DID — the SMS tab only ever showed the HTTP "Forward to URL"
+# option. So this reuses that exact same HTTP-webhook mechanism (proven
+# working already) but changes what happens on receipt: instead of a push
+# notification, the relay looks up which extension(s) own the destination
+# DID (services/pstn-trunk.sh's personal-DID/Ring-Group ownership data —
+# the SAME mapping inbound voice calls already use) and delivers the text
+# to them via Asterisk's Manager Interface (AMI), the same way
+# services/asterisk.sh's internal SIP MESSAGE texting already works
+# end-to-end. ntfy is gone from this path entirely — deliberate, not an
+# oversight, since the point now is a real two-way texting experience, not
+# a one-way notification.
 #
-# Two modes, both configured entirely from the DID provider's own "forward
-# incoming SMS to a URL" setting:
-#
-#   direct — the provider calls ntfy itself. No server component at all; the
-#            installer just prints the URL to paste into the provider portal.
-#   relay  — a small systemd HTTP service on this box receives the provider's
-#            request and re-publishes to ntfy properly. Costs one more moving
-#            part, and buys correct handling of messages containing "&", a
-#            secret that isn't your ntfy token, and no ntfy credentials stored
-#            in a third party's web portal.
+# Sending (SMS out to a real number) is NOT handled here — that's a
+# separate, still-pending piece (see docs/anveo-direct-setup-guide.md's SMS
+# section) blocked on the provider activating API-based sending, unrelated
+# to this file. This file is inbound-only, the same as it always was.
 #
 # No standalone bootstrap block here, matching services/pstn-trunk.sh — this
-# is an add-on for a box the repo already set up, not something you'd curl
-# onto a bare machine on its own.
+# is an add-on for a box the repo already set up (specifically: needs
+# services/asterisk.sh AND services/pstn-trunk.sh already installed, since
+# it reads pstn-trunk's DID-ownership files and needs a live Asterisk to
+# talk to over AMI), not something you'd curl onto a bare machine on its own.
 
-register_service sms-inbound homelab "Inbound SMS (verification codes) from a VoIP DID → ntfy push" 8093
+register_service sms-inbound homelab "Inbound SMS from a VoIP DID, delivered into Asterisk (Sipnetic) via AMI" 8093
 
 SMS_APP_DIR="/opt/sms-inbound"
 SMS_SETTINGS="$SMS_APP_DIR/settings.env"
 SMS_SVC_USER="smsrelay"
 
-# ── ntfy target discovery ──────────────────────────────────────────────────
-# A locally-installed ntfy (services/ntfy.sh) is the right default: it keeps
-# verification codes on hardware you control instead of a public relay. Its
-# base-url is the one authoritative place to read the reachable hostname from,
-# since that's what ntfy itself uses to build notification links.
-_sms_detect_ntfy_base() {
-    local _cfg="$DOCKER_DIR/ntfy/config/server.yml"
-    [[ -f "$_cfg" ]] || return 1
-    local _url
-    _url="$(grep -oP '(?<=base-url: ")[^"]+' "$_cfg" 2>/dev/null || true)"
-    [[ -n "$_url" && "$_url" != "https://ntfy.example.com" ]] || return 1
-    echo "$_url"
+# ── Asterisk detection — same layout probe as services/pstn-trunk.sh and
+# services/security-dashboard.sh, duplicated here rather than shared since
+# there's no cross-service helper for it yet. Prefers the droplet layout if
+# both happen to exist, for the same reason those two files do.
+_sms_detect_ea_dir() {
+    if [[ -d "$DOCKER_DIR/asterisk-digital-ocean" ]]; then
+        echo "$DOCKER_DIR/asterisk-digital-ocean"
+    elif [[ -d "$DOCKER_DIR/asterisk" ]]; then
+        echo "$DOCKER_DIR/asterisk"
+    fi
+}
+
+_sms_detect_container_name() {
+    local _ea_dir="$1"
+    if [[ "$_ea_dir" == *asterisk-digital-ocean ]]; then
+        echo "easy-asterisk-do"
+    else
+        echo "easy-asterisk"
+    fi
+}
+
+# ── AMI: a scoped manager.conf user, MessageSend only ───────────────────────
+# Localhost-only (bindaddr + permit below) since the relay runs on this same
+# host, not over the network — no firewall port to open for this. "message"
+# is the AMI permission class MessageSend needs; this hasn't been confirmed
+# against a live MessageSend call yet (see the relay's own comment on
+# ami_deliver) — if the very first real delivery attempt gets an AMI
+# permission error in the journal, widen read/write here first before
+# looking anywhere else.
+#
+# Idempotent: creates manager.conf fresh if absent, otherwise ensures
+# enabled=yes and the [smsrelay] section exist without disturbing anything
+# else already in the file (this box's manager.conf isn't vendor-managed/
+# regenerated the way pjsip.conf and rooms.conf are, so there's no
+# "overwrite unconditionally" contract to honor or fight here).
+_sms_write_manager_conf() {
+    local _asterisk_dir="$1" _secret="$2"
+    local _mgr="$_asterisk_dir/manager.conf"
+
+    if [[ ! -f "$_mgr" ]]; then
+        cat > "$_mgr" << MGR
+; Written by services/sms-inbound.sh — the [smsrelay] section below is
+; managed there (re-run that installer to rotate the secret). Anything
+; else you add here by hand is left alone on future runs.
+[general]
+enabled = yes
+port = 5038
+bindaddr = 127.0.0.1
+displayconnects = no
+
+[smsrelay]
+secret = ${_secret}
+read = message
+write = message
+deny = 0.0.0.0/0
+permit = 127.0.0.1/255.255.255.255
+MGR
+        echo "fresh"
+        return 0
+    fi
+
+    local _changed=false
+    if ! grep -q '^enabled[[:space:]]*=[[:space:]]*yes' "$_mgr"; then
+        if grep -q '^\[general\]' "$_mgr"; then
+            sed -i '/^\[general\]/a enabled = yes' "$_mgr"
+        else
+            printf '[general]\nenabled = yes\nport = 5038\nbindaddr = 127.0.0.1\n\n%s' "$(cat "$_mgr")" > "$_mgr.tmp" \
+                && mv "$_mgr.tmp" "$_mgr"
+        fi
+        _changed=true
+    fi
+    if grep -q '^\[smsrelay\]' "$_mgr"; then
+        sed -i "/^\[smsrelay\]/,/^\[/{s/^secret[[:space:]]*=.*/secret = ${_secret}/}" "$_mgr"
+    else
+        cat >> "$_mgr" << MGR
+
+[smsrelay]
+secret = ${_secret}
+read = message
+write = message
+deny = 0.0.0.0/0
+permit = 127.0.0.1/255.255.255.255
+MGR
+        _changed=true
+    fi
+    [[ "$_changed" == true ]] && echo "changed" || echo "unchanged"
+}
+
+# ── ACL grant: read-only access to pstn-trunk's DID-ownership files ────────
+# Same technique services/security-dashboard.sh's _secdash_grant_asterisk_
+# access uses, and the same reason: the Asterisk container's own entrypoint
+# re-chowns /etc/asterisk to asterisk:asterisk on every restart, which plain
+# chmod/group-membership grants don't survive but POSIX ACLs do (chown
+# doesn't touch ACL entries). Read + traversal only — smsrelay never writes
+# anything in this directory.
+_sms_grant_asterisk_read_access() {
+    local _svc_user="$1" _asterisk_dir="$2"
+    command -v setfacl >/dev/null 2>&1 || run_cmd apt-get install -y acl >/dev/null 2>&1
+    if ! command -v setfacl >/dev/null 2>&1; then
+        log_warning "Package 'acl' unavailable — falling back to a one-time chmod, which can"
+        log_warning "silently break again the next time the Asterisk container restarts and"
+        log_warning "re-chowns its config directory. Install 'acl' and re-run to fix properly."
+        chmod 755 "$_asterisk_dir" 2>/dev/null || true
+        return 0
+    fi
+
+    local _dir
+    _dir="$(dirname "$_asterisk_dir")"
+    while [[ "$_dir" != "/" && -n "$_dir" ]]; do
+        sudo -u "$_svc_user" test -x "$_dir" 2>/dev/null && break
+        setfacl -m "u:${_svc_user}:x" "$_dir" 2>/dev/null || true
+        _dir="$(dirname "$_dir")"
+    done
+    setfacl -R -m "u:${_svc_user}:rX" "$_asterisk_dir" 2>/dev/null || true
+    setfacl -R -d -m "u:${_svc_user}:rX" "$_asterisk_dir" 2>/dev/null || true
 }
 
 # ── The relay ──────────────────────────────────────────────────────────────
-# Stdlib only, same reasoning as services/security-dashboard.sh: this shares a
-# small droplet with Asterisk, Caddy and CrowdSec and shouldn't cost a
+# Stdlib only, same reasoning as services/security-dashboard.sh: this shares
+# a small droplet with Asterisk, Caddy and CrowdSec and shouldn't cost a
 # framework's worth of RAM to forward a few dozen text messages a month.
 _sms_write_relay_app() {
     local _dir="$1"
     mkdir -p "$_dir"
     cat > "$_dir/relay.py" << 'PYRELAY'
 #!/usr/bin/env python3
-"""Inbound SMS webhook -> ntfy push.
+"""Inbound SMS webhook -> delivered into Asterisk as a SIP MESSAGE via AMI.
 
 Receives the HTTP request a DID provider makes when an SMS arrives (Anveo
-issues a plain GET with the message interpolated into the query string) and
-re-publishes it to ntfy as a POST, which is the part the provider can't do
-itself.
+issues a plain GET with the message interpolated into the query string),
+looks up which extension(s) currently own the destination DID (same
+pstn-personal-dids.conf / pstn-groups.conf data services/pstn-trunk.sh's
+own inbound-voice ring logic reads), and asks Asterisk over its Manager
+Interface to deliver the text to each of them.
 
-Deliberately minimal: one path, one secret, no state, no database.
+Deliberately minimal: one path, one secret, no state, no database, no
+non-stdlib dependencies (same reasoning as services/security-dashboard.sh).
 """
+import configparser
 import hmac
 import os
+import re
+import socket
 import time
 import urllib.parse
-import urllib.request
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("SMS_RELAY_PORT", "8093"))
 TOKEN = os.environ.get("SMS_RELAY_TOKEN", "")
-NTFY_URL = os.environ.get("SMS_NTFY_URL", "")
-NTFY_TOKEN = os.environ.get("SMS_NTFY_TOKEN", "")
-NTFY_PRIORITY = os.environ.get("SMS_NTFY_PRIORITY", "high")
+ASTERISK_CONFIG_DIR = os.environ.get("SMS_ASTERISK_CONFIG_DIR", "")
+AMI_HOST = os.environ.get("SMS_AMI_HOST", "127.0.0.1")
+AMI_PORT = int(os.environ.get("SMS_AMI_PORT", "5038"))
+AMI_USER = os.environ.get("SMS_AMI_USER", "smsrelay")
+AMI_SECRET = os.environ.get("SMS_AMI_SECRET", "")
+SMS_DOMAIN = os.environ.get("SMS_DOMAIN", "")
 
-# The token is the only thing standing between the public internet and your
-# push topic, so cap how fast anyone can hammer it. Well above any real SMS
-# volume; low enough that a leaked URL can't be used to spam the phone.
+# The token is the only thing standing between the public internet and this
+# box's Asterisk. Well above any real SMS volume; low enough that a leaked
+# URL can't be used to spam extensions or hammer the AMI connection.
 RATE_LIMIT = 60          # requests
 RATE_WINDOW = 60         # seconds
 _hits = deque()
@@ -124,25 +240,126 @@ def extract_param(query, name):
     return values[0] if values else ""
 
 
-def publish(sender, recipient, message):
-    title = "SMS from {}".format(sender or "unknown")
-    if recipient:
-        title += " to {}".format(recipient)
-    req = urllib.request.Request(
-        NTFY_URL,
-        data=message.encode("utf-8"),
-        method="POST",
-        headers={
-            "Title": title,
-            "Priority": NTFY_PRIORITY,
-            "Tags": "incoming_envelope",
-            "Content-Type": "text/plain; charset=utf-8",
-        },
-    )
-    if NTFY_TOKEN:
-        req.add_header("Authorization", "Bearer " + NTFY_TOKEN)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return 200 <= resp.status < 300
+def _normalize_did(raw):
+    """10 or 11(leading-1) digit US number -> bare 10-digit, matching
+    pstn-personal-dids.conf's section-name convention (see
+    services/security-dashboard.sh's _normalize_personal_did_input)."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else None
+
+
+def _read_conf(path):
+    cp = configparser.ConfigParser(delimiters=("=",))
+    if path and os.path.isfile(path):
+        try:
+            cp.read(path)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def resolve_recipients(to_raw):
+    """Destination DID -> list of extensions that should receive this text.
+
+    Single-extension ownership -> that one extension. Ring-Group ownership
+    ("@GroupName") -> every CURRENT member, read live from
+    pstn-groups.conf — same mirror services/security-dashboard.sh's
+    sync_room_group_mirror() keeps in step with actual Ring Group
+    membership, so this always reflects who's in the group right now, not
+    who was in it when the DID was assigned. Empty list = nobody currently
+    owns this DID; the caller logs that and gives up rather than guessing
+    where to deliver it."""
+    if not ASTERISK_CONFIG_DIR:
+        return []
+    did = _normalize_did(to_raw)
+    if not did:
+        return []
+    dids_cp = _read_conf(os.path.join(ASTERISK_CONFIG_DIR, "pstn-personal-dids.conf"))
+    if not dids_cp.has_section(did):
+        return []
+    owner = dids_cp.get(did, "owner", fallback="").strip()
+    if not owner:
+        return []
+    if owner.startswith("@"):
+        groups_cp = _read_conf(os.path.join(ASTERISK_CONFIG_DIR, "pstn-groups.conf"))
+        group_name = owner[1:]
+        members_raw = groups_cp.get(group_name, "members", fallback="")
+        return [m.strip() for m in members_raw.split(",") if m.strip()]
+    return [owner]
+
+
+class AMIError(Exception):
+    pass
+
+
+def _ami_read_response(sock_file):
+    """One AMI message = lines up to a blank line. Returns {Key: Value}."""
+    resp = {}
+    while True:
+        line = sock_file.readline()
+        if not line:
+            raise AMIError("connection closed while reading AMI response")
+        line = line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line == "":
+            break
+        if ":" in line:
+            k, v = line.split(":", 1)
+            resp[k.strip()] = v.strip()
+    return resp
+
+
+def ami_deliver(from_number, to_exts, body):
+    """Logs into AMI once and sends one MessageSend action per recipient.
+
+    UNVERIFIED against a real Asterisk instance as of this being written —
+    "message" as the AMI permission class, and To/From/Body as MessageSend's
+    exact parameter names, are both believed correct but haven't been
+    confirmed live. Every AMI response is logged in full specifically so the
+    first real delivery attempt shows exactly what Asterisk said if
+    something here is wrong, rather than failing silently.
+
+    Returns (delivered_count, total_count)."""
+    if not AMI_SECRET:
+        print("ami_deliver: SMS_AMI_SECRET not set, cannot deliver", flush=True)
+        return 0, len(to_exts)
+
+    delivered = 0
+    with socket.create_connection((AMI_HOST, AMI_PORT), timeout=10) as sock:
+        sock_file = sock.makefile("rb")
+        banner = sock_file.readline()  # AMI sends a version banner first
+        print("AMI banner: {}".format(banner.decode("utf-8", errors="replace").strip()), flush=True)
+
+        def send_action(fields):
+            payload = "".join("{}: {}\r\n".format(k, v) for k, v in fields) + "\r\n"
+            sock.sendall(payload.encode("utf-8"))
+            return _ami_read_response(sock_file)
+
+        login_resp = send_action([
+            ("Action", "Login"),
+            ("Username", AMI_USER),
+            ("Secret", AMI_SECRET),
+        ])
+        print("AMI login response: {}".format(login_resp), flush=True)
+        if login_resp.get("Response") != "Success":
+            raise AMIError("AMI login failed: {}".format(login_resp))
+
+        from_uri = "<sip:{}@{}>".format(from_number or "unknown", SMS_DOMAIN or "localhost")
+        for ext in to_exts:
+            resp = send_action([
+                ("Action", "MessageSend"),
+                ("To", "pjsip:{}".format(ext)),
+                ("From", from_uri),
+                ("Body", body),
+            ])
+            print("AMI MessageSend to {}: {}".format(ext, resp), flush=True)
+            if resp.get("Response") == "Success":
+                delivered += 1
+
+        send_action([("Action", "Logoff")])
+
+    return delivered, len(to_exts)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -169,18 +386,26 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(400)
             return
 
+        exts = resolve_recipients(recipient)
+        if not exts:
+            # Never log the body: could be a verification code or anything
+            # else sensitive, and the journal is more widely readable than
+            # this delivery path is supposed to be.
+            print("sms from={} to={} chars={} -- no owner found for this DID, dropped".format(
+                sender or "?", recipient or "?", len(message)), flush=True)
+            self._respond(204)  # acknowledge to the provider either way — an unowned DID isn't its problem
+            return
+
         try:
-            ok = publish(sender, recipient, message)
+            delivered, total = ami_deliver(sender, exts, message)
         except Exception as exc:                      # noqa: BLE001
-            print("publish failed: {}".format(exc), flush=True)
+            print("ami_deliver failed: {}".format(exc), flush=True)
             self._respond(502)
             return
 
-        # Never log the body: these are one-time passcodes, and the journal is
-        # readable by more people than the push notification is.
-        print("sms from={} to={} chars={} published={}".format(
-            sender or "?", recipient or "?", len(message), ok), flush=True)
-        self._respond(204 if ok else 502)
+        print("sms from={} to={} chars={} delivered={}/{} recipients={}".format(
+            sender or "?", recipient or "?", len(message), delivered, total, exts), flush=True)
+        self._respond(204 if delivered else 502)
 
     def do_GET(self):
         self._handle()
@@ -196,8 +421,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if not NTFY_URL or not TOKEN:
-        raise SystemExit("SMS_NTFY_URL and SMS_RELAY_TOKEN must both be set")
+    if not TOKEN or not AMI_SECRET:
+        raise SystemExit("SMS_RELAY_TOKEN and SMS_AMI_SECRET must both be set")
     ThreadingHTTPServer.allow_reuse_address = True
     # 0.0.0.0, not loopback: Caddy runs in a container and reaches this over
     # the Docker bridge gateway, which a loopback-only bind refuses. Access is
@@ -215,10 +440,10 @@ PYRELAY
 }
 
 _sms_write_systemd_unit() {
-    local _port="$1" _token="$2" _ntfy_url="$3" _ntfy_token="$4"
+    local _port="$1" _token="$2" _asterisk_dir="$3" _ami_secret="$4" _domain="$5"
     cat > /etc/systemd/system/sms-inbound.service << SMSSVC
 [Unit]
-Description=Inbound SMS webhook to ntfy relay
+Description=Inbound SMS webhook, delivered into Asterisk via AMI
 After=network.target
 
 [Service]
@@ -227,8 +452,12 @@ User=$SMS_SVC_USER
 Group=$SMS_SVC_USER
 Environment=SMS_RELAY_PORT=$_port
 Environment=SMS_RELAY_TOKEN=$_token
-Environment=SMS_NTFY_URL=$_ntfy_url
-Environment=SMS_NTFY_TOKEN=$_ntfy_token
+Environment=SMS_ASTERISK_CONFIG_DIR=$_asterisk_dir
+Environment=SMS_AMI_HOST=127.0.0.1
+Environment=SMS_AMI_PORT=5038
+Environment=SMS_AMI_USER=smsrelay
+Environment=SMS_AMI_SECRET=$_ami_secret
+Environment=SMS_DOMAIN=$_domain
 ExecStart=/usr/bin/python3 $SMS_APP_DIR/relay.py
 Restart=on-failure
 RestartSec=3
@@ -298,20 +527,19 @@ CBLOCK
 }
 
 _sms_write_readme() {
-    local _mode="$1" _url="$2" _ntfy_url="$3" _relay_domain="$4"
+    local _url="$1" _relay_domain="$2"
     write_readme "$SMS_APP_DIR" << MD
-# Inbound SMS → ntfy
+# Inbound SMS → Sipnetic (via AMI)
 
-Gets SMS sent to a VoIP DID onto a phone as a push notification. Built for
-**verification codes**, not for conversations.
-
-Mode: **${_mode}**
+Gets SMS sent to one of your PSTN DIDs delivered into Asterisk as a SIP
+MESSAGE, landing in Sipnetic the same way internal texting already does —
+not a push notification, a real message in the softphone.
 
 ## The URL to paste into your DID provider
 
 In the provider portal, open the DID's SMS settings and paste this into the
-"forward to URL" field (on Anveo: Phone Numbers → the DID → SMS tab, tick the
-checkbox, paste, press SAVE — RETURN discards):
+"Forward to URL" field (on Anveo: Phone Numbers → the DID → SMS tab, tick
+the checkbox, paste, press SAVE — RETURN discards):
 
 \`\`\`
 ${_url}
@@ -322,114 +550,105 @@ message text without escaping it, so a body containing \`&\` splits into extra
 query parameters; with the message last, everything after it can be read back
 verbatim.
 
-Treat this URL like a password — anyone holding it can push notifications to
-your phone.
+Treat this URL like a password — anyone holding it can trigger a message
+delivery into your Asterisk.
+
+## How delivery is decided
+
+The relay looks up who currently owns the destination DID, using the exact
+same data the inbound-voice ring logic reads (\`pstn-personal-dids.conf\` /
+\`pstn-groups.conf\`, managed from the Security Dashboard's Extensions tab —
+see the Personal Numbers card and Ring Groups' own DID field there):
+
+- **Owned by a single extension** — that extension gets the text.
+- **Owned by a Ring Group** — every CURRENT member gets it, checked fresh on
+  every delivery (not baked in at assignment time), same as inbound voice
+  ring-group calls already work.
+- **Not owned by anyone** — logged and dropped. Assign the DID to an
+  extension or Ring Group first.
 
 ## What this does not do
 
-- **Sending.** There's no outbound path here. On Anveo, outbound SMS needs an
-  Anveo *Retail* account rather than Anveo Direct; a free texting app covers
-  the sending side without involving this box at all.
+- **Sending.** There's no outbound path here — that's a separate piece,
+  still pending on Anveo activating API-based SMS sending for this account
+  (see \`docs/anveo-direct-setup-guide.md\`).
 - **MMS.** No VoIP provider delivers MMS over SIP, and MMS to a VoIP DID
   generally either drops or arrives as a media link through a separate API.
   US **group texts are MMS**, so expect to miss those entirely.
-- **Native Messages integration.** Android's Messages app reads the telephony
-  SMS provider, which only the cellular radio (or the default SMS app) writes
-  to; iOS lets nothing write to Messages. Codes arrive as ntfy notifications,
-  which for a passcode you're about to type is the more useful place anyway.
-
-## Will verification codes actually arrive?
-
-Two separate hurdles, both outside this box:
-
-1. **Short codes.** Most codes come from short codes (262966, 32665...).
-   Anveo supports short-code SMS to its DIDs, which is unusual — VoIP.ms, for
-   example, does not except for Google. Check that short codes are enabled on
-   your specific DID; not every number in the pool has it.
-2. **VoIP rejection at signup.** Many services refuse a number their lookup
-   flags as VoIP, before any SMS is sent. Anveo also sells **mobile** DIDs,
-   sourced from wireless carriers, which are classified as mobile in the
-   industry databases those checks use — a much better bet for this purpose
-   than a geographic landline-class DID, at a higher monthly price. If codes
-   are the whole reason for the number, order a mobile one.
 
 ## Security
 
-Verification codes are bearer credentials for your accounts. Two things
-matter:
-
-- **The ntfy topic is a secret.** This installer generated a long random topic
-  name, which makes it unguessable, but the repo's ntfy defaults to
-  \`auth-default-access: read-write\` — anyone who *learns* the name can read
-  it. Adding an ntfy access token and restricting the topic is worthwhile:
-  \`\`\`bash
-  docker exec -it ntfy ntfy access                   # show current rules
-  docker exec -it ntfy ntfy user add --role=user reader
-  docker exec -it ntfy ntfy access reader '<topic>' read-only
-  docker exec -it ntfy ntfy access '*' '<topic>' deny
-  \`\`\`
-- **Don't publish to a public relay.** \`ntfy.sh\` topics are readable by
-  anyone who knows the name; a self-hosted instance keeps codes on your own
-  hardware.
-
-Current ntfy target: \`${_ntfy_url}\`
+- **The relay token is a secret.** This installer generated a long random
+  one; anyone holding the full URL can trigger a delivery into your
+  Asterisk (though only to whichever DID they claim as \`to=\`, and only
+  reaching whoever currently owns that DID).
+- **AMI access is scoped and localhost-only.** The \`smsrelay\` manager.conf
+  user can only run \`MessageSend\`, and can only connect from 127.0.0.1 —
+  it has no path to originate calls, read call data, or touch configuration.
 
 ## Manage
 
 \`\`\`bash
-systemctl status sms-inbound       # relay mode only
-journalctl -u sms-inbound -f       # from/to and length, never the message body
-sudo ./setup.sh sms-inbound        # re-run to change settings
+systemctl status sms-inbound
+journalctl -u sms-inbound -f      # from/to, recipient count, and full AMI
+                                   # responses — never the message body
+sudo ./setup.sh sms-inbound       # re-run to change settings or rotate secrets
 \`\`\`
-
-The relay logs who sent what and how long it was, deliberately never the
-message itself — the journal has a wider audience than the notification does.
 
 $( [[ -n "$_relay_domain" ]] && printf 'Public endpoint: `https://%s` (Caddy → the relay on this box).\n' "$_relay_domain" )
 
 ## Testing it
 
 Substitute a real message for the provider's placeholder and call the URL
-yourself — no need to wait for a text:
+yourself — no need to wait for a text (use a DID that's actually assigned to
+an extension or Ring Group, or it'll just log "no owner found" and drop it):
 
 \`\`\`bash
 curl -s -o /dev/null -w '%{http_code}\\n' \\
-  "$(printf '%s' "$_url" | sed 's/\$\[from\]\$/15555550123/; s/\$\[to\]\$/15555550199/; s/\$\[message\]\$/test+code+123456/')"
+  "$(printf '%s' "$_url" | sed 's/\$\[from\]\$/15555550123/; s/\$\[to\]\$/15555550199/; s/\$\[message\]\$/test+message/')"
 \`\`\`
 
-$( if [[ "$_mode" == "relay" ]]; then cat << 'RELAYTEST'
-**204** means the relay accepted it and ntfy took the message — your phone
-should buzz. **404** means the token in the path is wrong, **502** means ntfy
-rejected the publish (check the ntfy token and topic), **429** means the rate
-limit tripped (60 requests/minute).
-RELAYTEST
-else cat << 'DIRECTTEST'
-**200** means ntfy accepted the publish and your phone should buzz. **401**
-or **403** means the `auth=` parameter is wrong or the topic is restricted;
-**404** means the topic URL is malformed.
-DIRECTTEST
-fi )
+**204** means it was delivered (or, if nothing owns that DID, acknowledged
+and dropped — check \`journalctl -u sms-inbound\` to tell which). **404**
+means the token in the path is wrong. **429** means the rate limit tripped
+(60 requests/minute). **502** means AMI delivery itself failed — check the
+journal for the full AMI response before assuming which end is wrong.
 MD
 }
 
 install_sms-inbound() {
-    log_info "Setting up inbound SMS → ntfy..."
+    log_info "Setting up inbound SMS → Sipnetic (via Asterisk's Manager Interface)..."
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would detect a local ntfy install and reuse its base-url, or prompt for one"
-        echo "[DRY-RUN] Would generate a long random ntfy topic (verification codes must not land"
-        echo "[DRY-RUN]   on a guessable topic — the repo's ntfy defaults to read-write access)"
-        echo "[DRY-RUN] Would offer two modes:"
-        echo "[DRY-RUN]   direct — print a provider 'forward SMS to URL' string pointing straight"
-        echo "[DRY-RUN]            at ntfy; no server component installed"
-        echo "[DRY-RUN]   relay  — install $SMS_APP_DIR/relay.py as a systemd service, front it with"
-        echo "[DRY-RUN]            Caddy on a domain you'll be prompted for (no Authelia — the SMS"
-        echo "[DRY-RUN]            provider can't log in; a random token in the path is the secret),"
-        echo "[DRY-RUN]            and open the port to caddy_net only"
+        echo "[DRY-RUN] Would detect the Asterisk install and its DID-ownership config"
+        echo "[DRY-RUN]   (pstn-personal-dids.conf / pstn-groups.conf) — requires"
+        echo "[DRY-RUN]   services/asterisk.sh and services/pstn-trunk.sh already installed"
+        echo "[DRY-RUN] Would write a scoped AMI user (MessageSend only, localhost-only) into"
+        echo "[DRY-RUN]   manager.conf, and grant the relay's system user read-only ACL access"
+        echo "[DRY-RUN]   to Asterisk's config directory"
+        echo "[DRY-RUN] Would install $SMS_APP_DIR/relay.py as a systemd service, front it with"
+        echo "[DRY-RUN]   Caddy on a domain you'll be prompted for (no Authelia — the SMS"
+        echo "[DRY-RUN]   provider can't log in; a random token in the path is the secret)"
         echo "[DRY-RUN] Would print the exact URL to paste into the DID provider's SMS settings"
-        echo "[DRY-RUN] Would write $SMS_APP_DIR/README.md covering short codes, mobile DIDs, MMS"
-        echo "[DRY-RUN]   and why the native Messages app never sees these"
+        echo "[DRY-RUN] Would write $SMS_APP_DIR/README.md"
         return 0
+    fi
+
+    local EA_DIR="" CONTAINER_NAME=""
+    EA_DIR="$(_sms_detect_ea_dir)"
+    if [[ -z "$EA_DIR" ]]; then
+        log_error "No Asterisk install detected (services/asterisk.sh) — this service delivers"
+        log_error "into a running Asterisk over its Manager Interface, so there's nothing to"
+        log_error "wire up without one. Run 'sudo ./setup.sh asterisk' first."
+        return 1
+    fi
+    CONTAINER_NAME="$(_sms_detect_container_name "$EA_DIR")"
+    local ASTERISK_DIR="$EA_DIR/config/asterisk"
+    if [[ ! -f "$ASTERISK_DIR/pstn-personal-dids.conf" ]]; then
+        log_warning "No pstn-personal-dids.conf found yet (services/pstn-trunk.sh) — this relay"
+        log_warning "will run, but every inbound text will be logged as 'no owner found' and"
+        log_warning "dropped until at least one DID is assigned to an extension or Ring Group"
+        log_warning "from the Security Dashboard's Extensions tab."
     fi
 
     # ── Existing install? ─────────────────────────────────────────────────────
@@ -442,16 +661,13 @@ install_sms-inbound() {
             update)
                 # shellcheck disable=SC1090
                 source "$SMS_SETTINGS"
-                if [[ "${SMS_MODE:-}" == "relay" ]]; then
-                    _sms_write_relay_app "$SMS_APP_DIR"
-                    chown -R "$SMS_SVC_USER:$SMS_SVC_USER" "$SMS_APP_DIR" 2>/dev/null || true
-                    _sms_write_systemd_unit "${SMS_RELAY_PORT}" "${SMS_RELAY_TOKEN}" "${SMS_NTFY_URL}" "${SMS_NTFY_TOKEN:-}"
-                    systemctl restart sms-inbound \
-                        && log_success "Relay refreshed and restarted." \
-                        || log_warning "Restart failed — check: journalctl -u sms-inbound -n 50"
-                else
-                    log_info "Direct mode — nothing to refresh on this box."
-                fi
+                _sms_write_relay_app "$SMS_APP_DIR"
+                chown -R "$SMS_SVC_USER:$SMS_SVC_USER" "$SMS_APP_DIR" 2>/dev/null || true
+                _sms_write_systemd_unit "${SMS_RELAY_PORT}" "${SMS_RELAY_TOKEN}" "$ASTERISK_DIR" "${SMS_AMI_SECRET}" "${SMS_DOMAIN:-}"
+                _sms_grant_asterisk_read_access "$SMS_SVC_USER" "$ASTERISK_DIR"
+                systemctl restart sms-inbound \
+                    && log_success "Relay refreshed and restarted." \
+                    || log_warning "Restart failed — check: journalctl -u sms-inbound -n 50"
                 echo ""
                 log_success "Settings, Caddy and firewall rules were left untouched."
                 echo "  Provider URL: ${SMS_FORWARD_URL}"
@@ -466,144 +682,111 @@ install_sms-inbound() {
         esac
     fi
 
-    # ── ntfy target ───────────────────────────────────────────────────────────
-    echo ""
-    local NTFY_BASE=""
-    if NTFY_BASE="$(_sms_detect_ntfy_base)"; then
-        log_success "Found a configured local ntfy at $NTFY_BASE — using it."
-        log_info "Self-hosted is the right answer here: these are verification codes."
-    else
-        log_warning "No configured local ntfy found (services/ntfy.sh installs one)."
-        log_warning "A public relay like ntfy.sh works, but its topics are readable by anyone"
-        log_warning "who learns the name — a poor place for one-time passcodes."
-        prompt_text "ntfy base URL [https://ntfy.sh]:" "https://ntfy.sh" NTFY_BASE
-    fi
-    NTFY_BASE="${NTFY_BASE%/}"
+    # ── AMI + relay system user ─────────────────────────────────────────────
+    id -u "$SMS_SVC_USER" &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin "$SMS_SVC_USER"
 
-    # A long random topic, not "sms": with ntfy's default read-write access the
-    # topic name IS the read credential, so it needs real entropy rather than
-    # something guessable.
-    local NTFY_TOPIC=""
-    NTFY_TOPIC="sms-$(generate_password 24)"
-    log_info "Generated ntfy topic: $NTFY_TOPIC"
-    log_info "Subscribe to it in the ntfy app — that's where codes will appear."
+    local AMI_SECRET
+    AMI_SECRET="$(generate_password 32)"
+    local MGR_STATE
+    MGR_STATE="$(_sms_write_manager_conf "$ASTERISK_DIR" "$AMI_SECRET")"
+    ensure_docker_dir_ownership "$ASTERISK_DIR"
+    _sms_grant_asterisk_read_access "$SMS_SVC_USER" "$ASTERISK_DIR"
 
-    local NTFY_TOKEN_VAL=""
-    prompt_text "ntfy access token, if your instance requires one for publishing [blank=none]:" "" NTFY_TOKEN_VAL
-
-    local NTFY_TOPIC_URL="${NTFY_BASE}/${NTFY_TOPIC}"
-
-    # ── Mode ──────────────────────────────────────────────────────────────────
-    echo ""
-    echo "  How should the provider reach ntfy?"
-    echo "    1) Relay (recommended) — a small service here receives the provider's"
-    echo "                             request and republishes properly. Handles '&' in"
-    echo "                             message bodies, and your ntfy token never gets"
-    echo "                             stored in the provider's web portal."
-    echo "    2) Direct               — the provider calls ntfy itself. Nothing installed"
-    echo "                             on this box, but the URL you paste into the portal"
-    echo "                             carries your ntfy credentials, and a message"
-    echo "                             containing '&' truncates."
-    local MODE_CHOICE=""
-    prompt_text "Choose [1]:" "1" MODE_CHOICE
-
-    mkdir -p "$SMS_APP_DIR"
-    local SMS_MODE="relay" FORWARD_URL="" RELAY_DOMAIN="" RELAY_PORT="" RELAY_TOKEN=""
-
-    if [[ "$MODE_CHOICE" == "2" ]]; then
-        SMS_MODE="direct"
-        # ntfy accepts publishing over GET at /{topic}/(publish|send|trigger),
-        # reading message/title from the query string — which is exactly the
-        # shape a provider's "forward to URL" feature can produce. Auth, when
-        # needed, rides in ?auth= as base64url (no padding) of the literal
-        # Authorization header value.
-        local _auth_q=""
-        if [[ -n "$NTFY_TOKEN_VAL" ]]; then
-            _auth_q="&auth=$(printf 'Bearer %s' "$NTFY_TOKEN_VAL" | basenc --base64url 2>/dev/null | tr -d '=' \
-                || printf 'Bearer %s' "$NTFY_TOKEN_VAL" | base64 | tr '+/' '-_' | tr -d '=\n')"
-        fi
-        # Message placeholder LAST, so a body containing '&' loses only the
-        # tail rather than corrupting the title or the auth parameter.
-        FORWARD_URL="${NTFY_BASE}/${NTFY_TOPIC}/trigger?title=SMS+from+\$[from]\$&priority=high${_auth_q}&message=\$[message]\$"
-    else
-        # ── Relay ─────────────────────────────────────────────────────────────
-        id -u "$SMS_SVC_USER" &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin "$SMS_SVC_USER"
-
-        RELAY_PORT=8093
-        local _limit=$((RELAY_PORT + 100))
-        while ss -tlnH "sport = :${RELAY_PORT}" 2>/dev/null | grep -q . && [[ "$RELAY_PORT" -lt "$_limit" ]]; do
-            RELAY_PORT=$((RELAY_PORT + 1))
-        done
-        [[ "$RELAY_PORT" != 8093 ]] && log_info "Port 8093 was taken — the relay will use ${RELAY_PORT}."
-
-        RELAY_TOKEN="$(generate_password 32)"
-
-        _sms_write_relay_app "$SMS_APP_DIR"
-        chown -R "$SMS_SVC_USER:$SMS_SVC_USER" "$SMS_APP_DIR"
-        _sms_write_systemd_unit "$RELAY_PORT" "$RELAY_TOKEN" "$NTFY_TOPIC_URL" "$NTFY_TOKEN_VAL"
-        systemctl enable --now sms-inbound >/dev/null 2>&1 \
-            && log_success "Relay service started on port ${RELAY_PORT}." \
-            || log_warning "Relay failed to start — check: journalctl -u sms-inbound -n 50"
-
-        # The provider calls this from the public internet, so it needs a real
-        # certificate — providers generally refuse self-signed targets.
+    if [[ "$MGR_STATE" != "unchanged" ]]; then
         echo ""
-        local _default_domain=""
-        [[ -n "${SITE_DOMAIN:-}" && "$SITE_DOMAIN" != "example.com" ]] && _default_domain="sms.${SITE_DOMAIN}"
-        prompt_text "Public domain for the webhook (A record must point here) [${_default_domain:-required}]:" "$_default_domain" RELAY_DOMAIN
-
-        if [[ -z "$RELAY_DOMAIN" ]]; then
-            log_warning "No domain entered — the relay is running but nothing can reach it yet."
-            log_warning "Re-run this service once DNS is ready, or front it with Caddy by hand."
-        elif [[ -d "$DOCKER_DIR/caddy" ]]; then
-            _sms_configure_caddy "$RELAY_DOMAIN" "$RELAY_PORT"
+        log_warning "AMI was just enabled/changed on this box — Asterisk needs a restart to pick"
+        log_warning "that up (confirmed elsewhere this session: a plain reload isn't reliable for"
+        log_warning "config that's new to the running process). This drops any calls in progress"
+        log_warning "right now."
+        local _restart_ami=""
+        prompt_yn "Restart Asterisk now to enable AMI? (y/n):" "y" _restart_ami
+        if [[ "$_restart_ami" =~ ^[Yy]$ ]]; then
+            docker restart "$CONTAINER_NAME" &>/dev/null \
+                && log_success "Restarted." \
+                || log_warning "Restart failed — check: docker logs $CONTAINER_NAME"
         else
-            log_warning "Caddy isn't installed here — proxy https://${RELAY_DOMAIN} to"
-            log_warning "127.0.0.1:${RELAY_PORT} yourself, with a real certificate."
+            log_warning "Not restarted — the relay will run, but AMI logins will fail until"
+            log_warning "you restart: docker restart $CONTAINER_NAME"
         fi
-
-        if command -v ufw &>/dev/null; then
-            if [[ -d "$DOCKER_DIR/caddy" ]]; then
-                # Caddy reaches this over the caddy_net bridge, so the port has
-                # no business being open to the internet — but a bare `ufw
-                # delete allow` would block Caddy too (see CLAUDE.md).
-                ufw delete allow "${RELAY_PORT}/tcp" 2>/dev/null || true
-                ufw_allow_from_caddy_net "${RELAY_PORT}"
-            else
-                ufw allow "${RELAY_PORT}/tcp"
-            fi
-            ensure_ufw_enabled
-        fi
-
-        FORWARD_URL="https://${RELAY_DOMAIN:-<your-domain>}/sms/${RELAY_TOKEN}?from=\$[from]\$&to=\$[to]\$&message=\$[message]\$"
     fi
+
+    # ── Relay service ─────────────────────────────────────────────────────────
+    mkdir -p "$SMS_APP_DIR"
+    local RELAY_PORT=8093
+    local _limit=$((RELAY_PORT + 100))
+    while ss -tlnH "sport = :${RELAY_PORT}" 2>/dev/null | grep -q . && [[ "$RELAY_PORT" -lt "$_limit" ]]; do
+        RELAY_PORT=$((RELAY_PORT + 1))
+    done
+    [[ "$RELAY_PORT" != 8093 ]] && log_info "Port 8093 was taken — the relay will use ${RELAY_PORT}."
+
+    local RELAY_TOKEN
+    RELAY_TOKEN="$(generate_password 32)"
+
+    local SMS_DOMAIN=""
+    [[ -f "$EA_DIR/.env" ]] && SMS_DOMAIN="$(grep -E '^DOMAIN_NAME=' "$EA_DIR/.env" | cut -d= -f2-)"
+
+    _sms_write_relay_app "$SMS_APP_DIR"
+    chown -R "$SMS_SVC_USER:$SMS_SVC_USER" "$SMS_APP_DIR"
+    _sms_write_systemd_unit "$RELAY_PORT" "$RELAY_TOKEN" "$ASTERISK_DIR" "$AMI_SECRET" "$SMS_DOMAIN"
+    systemctl enable --now sms-inbound >/dev/null 2>&1 \
+        && log_success "Relay service started on port ${RELAY_PORT}." \
+        || log_warning "Relay failed to start — check: journalctl -u sms-inbound -n 50"
+
+    # The provider calls this from the public internet, so it needs a real
+    # certificate — providers generally refuse self-signed targets.
+    echo ""
+    local RELAY_DOMAIN=""
+    local _default_domain=""
+    [[ -n "${SITE_DOMAIN:-}" && "$SITE_DOMAIN" != "example.com" ]] && _default_domain="sms.${SITE_DOMAIN}"
+    prompt_text "Public domain for the webhook (A record must point here) [${_default_domain:-required}]:" "$_default_domain" RELAY_DOMAIN
+
+    if [[ -z "$RELAY_DOMAIN" ]]; then
+        log_warning "No domain entered — the relay is running but nothing can reach it yet."
+        log_warning "Re-run this service once DNS is ready, or front it with Caddy by hand."
+    elif [[ -d "$DOCKER_DIR/caddy" ]]; then
+        _sms_configure_caddy "$RELAY_DOMAIN" "$RELAY_PORT"
+    else
+        log_warning "Caddy isn't installed here — proxy https://${RELAY_DOMAIN} to"
+        log_warning "127.0.0.1:${RELAY_PORT} yourself, with a real certificate."
+    fi
+
+    if command -v ufw &>/dev/null; then
+        if [[ -d "$DOCKER_DIR/caddy" ]]; then
+            # Caddy reaches this over the caddy_net bridge, so the port has
+            # no business being open to the internet — but a bare `ufw
+            # delete allow` would block Caddy too (see CLAUDE.md).
+            ufw delete allow "${RELAY_PORT}/tcp" 2>/dev/null || true
+            ufw_allow_from_caddy_net "${RELAY_PORT}"
+        else
+            ufw allow "${RELAY_PORT}/tcp"
+        fi
+        ensure_ufw_enabled
+    fi
+
+    local FORWARD_URL="https://${RELAY_DOMAIN:-<your-domain>}/sms/${RELAY_TOKEN}?from=\$[from]\$&to=\$[to]\$&message=\$[message]\$"
 
     # ── Persist settings ──────────────────────────────────────────────────────
     cat > "$SMS_SETTINGS" << ENV
 # Written by services/sms-inbound.sh — re-run that to change any of this.
-SMS_MODE="${SMS_MODE}"
-SMS_NTFY_URL="${NTFY_TOPIC_URL}"
-SMS_NTFY_TOKEN="${NTFY_TOKEN_VAL}"
 SMS_RELAY_PORT="${RELAY_PORT}"
 SMS_RELAY_TOKEN="${RELAY_TOKEN}"
 SMS_RELAY_DOMAIN="${RELAY_DOMAIN}"
+SMS_AMI_SECRET="${AMI_SECRET}"
+SMS_DOMAIN="${SMS_DOMAIN}"
 # The exact string to paste into the DID provider's "forward SMS to URL" box.
-# Secret: anyone holding it can push notifications to your phone.
+# Secret: anyone holding it can trigger a delivery into your Asterisk.
 SMS_FORWARD_URL="${FORWARD_URL}"
 ENV
     chmod 600 "$SMS_SETTINGS"
 
-    _sms_write_readme "$SMS_MODE" "$FORWARD_URL" "$NTFY_TOPIC_URL" "$RELAY_DOMAIN"
+    _sms_write_readme "$FORWARD_URL" "$RELAY_DOMAIN"
 
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""
-    log_success "Inbound SMS → ntfy configured (${SMS_MODE} mode)."
+    log_success "Inbound SMS → Sipnetic configured."
     echo ""
-    echo "  1. Subscribe to this topic in the ntfy app:"
-    echo "       ${NTFY_TOPIC_URL}"
-    echo ""
-    echo "  2. In your DID provider's portal, open the number's SMS settings and"
-    echo "     paste this into the \"forward to URL\" field, exactly:"
+    echo "  1. In your DID provider's portal, open the number's SMS settings and"
+    echo "     paste this into the \"Forward to URL\" field, exactly:"
     echo ""
     echo "       ${FORWARD_URL}"
     echo ""
@@ -611,14 +794,17 @@ ENV
     echo "     paste, then press SAVE (RETURN discards). Reopen the tab after"
     echo "     saving to confirm the whole URL came back — it is a long string."
     echo ""
-    echo "  3. Text the number from another phone. The notification should"
-    echo "     arrive within a few seconds."
+    echo "  2. Make sure that DID is assigned to an extension or Ring Group on the"
+    echo "     Security Dashboard's Extensions tab — an unassigned DID just gets"
+    echo "     logged and dropped."
     echo ""
-    log_warning "That URL is a secret — anyone with it can push to your phone."
-    if [[ "$SMS_MODE" == "direct" ]]; then
-        log_warning "It also carries your ntfy credentials, because the provider talks to ntfy"
-        log_warning "directly in this mode. Relay mode avoids that if you'd rather it didn't."
-    fi
+    echo "  3. Text the number from another phone, then check:"
+    echo "       journalctl -u sms-inbound -f"
+    echo "     for delivery status and the full AMI response — this is the first"
+    echo "     real test of the AMI plumbing, so check here if it doesn't land in"
+    echo "     Sipnetic even though the journal shows it as delivered."
+    echo ""
+    log_warning "That URL is a secret — anyone with it can trigger a delivery into your Asterisk."
     echo "  Details, caveats and testing: $SMS_APP_DIR/README.md"
     echo ""
 }
