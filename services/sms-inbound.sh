@@ -786,16 +786,27 @@ install_sms-inbound() {
     local FORWARD_URL="https://${RELAY_DOMAIN:-<your-domain>}/sms/${RELAY_TOKEN}?from=\$[from]\$&to=\$[to]\$&message=\$[message]\$"
 
     # ── Persist settings ──────────────────────────────────────────────────────
+    # Single-quoted values: this file gets `source`d again on the next
+    # "update" run, and SMS_FORWARD_URL's value contains Anveo's own
+    # template placeholders ($[from]$, $[to]$, $[message]$ - literal text
+    # Anveo substitutes on its end). Double-quoting would leave those
+    # sitting unescaped in the sourced file, and bash reads "$[from]" as
+    # legacy arithmetic expansion ($[...] == $((...))) - a bare variable
+    # name inside it under `set -u` (see setup.sh) is "from: unbound
+    # variable", killing the whole installer. Single quotes make the
+    # sourced value a literal string, no re-expansion, regardless of what
+    # it contains. Confirmed live: this crashed "update" mode outright on
+    # the very next run after a fresh install wrote this file.
     cat > "$SMS_SETTINGS" << ENV
 # Written by services/sms-inbound.sh — re-run that to change any of this.
-SMS_RELAY_PORT="${RELAY_PORT}"
-SMS_RELAY_TOKEN="${RELAY_TOKEN}"
-SMS_RELAY_DOMAIN="${RELAY_DOMAIN}"
-SMS_AMI_SECRET="${AMI_SECRET}"
-SMS_DOMAIN="${SMS_DOMAIN}"
+SMS_RELAY_PORT='${RELAY_PORT}'
+SMS_RELAY_TOKEN='${RELAY_TOKEN}'
+SMS_RELAY_DOMAIN='${RELAY_DOMAIN}'
+SMS_AMI_SECRET='${AMI_SECRET}'
+SMS_DOMAIN='${SMS_DOMAIN}'
 # The exact string to paste into the DID provider's "forward SMS to URL" box.
 # Secret: anyone holding it can trigger a delivery into your Asterisk.
-SMS_FORWARD_URL="${FORWARD_URL}"
+SMS_FORWARD_URL='${FORWARD_URL}'
 ENV
     chmod 600 "$SMS_SETTINGS"
 
