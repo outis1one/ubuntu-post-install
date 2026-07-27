@@ -393,6 +393,19 @@ class Handler(BaseHTTPRequestHandler):
         # Constant-time compare: the token is a secret, and a naive ==
         # leaks its prefix to anyone willing to time enough requests.
         if not TOKEN or not hmac.compare_digest(path.rstrip("/"), "/sms/" + TOKEN):
+            # A silent 404 here used to mean this line never printed at
+            # all -- "the box is up but nothing is happening" was
+            # indistinguishable from "no request ever arrived". Every
+            # RELAY_TOKEN rotation (a full reinstall generates a new one)
+            # invalidates whatever URL is still pasted into the provider,
+            # and that's exactly what this looks like: log something,
+            # never the attempted path itself (arbitrary attacker/scanner
+            # input, no reason to trust or echo it into the journal).
+            print("sms webhook: request with unrecognized path/token (len={}) from {} -- "
+                  "does the URL pasted into the provider match this box's current "
+                  "SMS_FORWARD_URL in /opt/sms-inbound/settings.env?".format(
+                      len(path), self.client_address[0]),
+                  flush=True)
             self._respond(404)
             return
         if rate_limited():
