@@ -191,6 +191,22 @@ _pstn_ensure_live_includes() {
         fi
     fi
 
+    # SMS-over-SIP's own context — same reasoning as above (own #include, not
+    # sharing a file), anchored on the voice-inbound include so all three
+    # trunk includes sit together.
+    if [[ -f "$EXT_LIVE" ]] && ! grep -q 'pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"; then
+        if grep -q '^#include pstn-trunk-inbound-dialplan.conf$' "$EXT_LIVE"; then
+            sed -i '/^#include pstn-trunk-inbound-dialplan.conf$/a #include pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the SMS-over-SIP #include directly into the live extensions.conf."
+        elif grep -q '^\[intercom\]$' "$EXT_LIVE"; then
+            sed -i '/^\[intercom\]$/a #include pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"
+            log_success "Patched the SMS-over-SIP #include directly into the live extensions.conf."
+        else
+            log_warning "Couldn't find an anchor for the SMS-over-SIP include in the live extensions.conf — add"
+            log_warning "'#include pstn-sms-inbound-dialplan.conf' manually, then reload."
+        fi
+    fi
+
     docker exec "$CONTAINER_NAME" asterisk -rx "module reload res_pjsip.so" &>/dev/null || true
     docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
 
@@ -268,6 +284,17 @@ _pstn_write_pjsip_include() {
 ; personal_did extension's outbound calls still show the shared trunk DID
 ; after this, the provider needs the CID delivered a different way (e.g.
 ; a per-DID sub-account or registration) and this will need revisiting.
+;
+; message_context=pstn-sms-inbound below is the SMS-over-SIP counterpart to
+; services/asterisk.sh's message_context=sip-messaging for internal
+; texting — same reason: without a dedicated context, an inbound SIP
+; MESSAGE would fall back to this endpoint's own context=from-pstn-trunk,
+; which already owns "_X." for INVITE-based inbound calls, and a competing
+; declaration there risks breaking that. Only meaningful if
+; _pstn_write_sms_inbound_dialplan has actually written that context —
+; harmless (message_context pointing at a context with no matching
+; extension just gets Asterisk's own default handling) if SMS-over-SIP
+; was never configured on this box.
 
 [pstn-trunk]
 type=aor
@@ -296,8 +323,55 @@ trust_id_inbound=yes
 send_pai=yes
 send_rpid=yes
 direct_media=no
+message_context=pstn-sms-inbound
 EOF
     sed -i "s/__PSTN_SERVER__/${SERVER}/g; s/__PSTN_DID__/${DID}/g" "$FILE"
+}
+
+# ── Shared: SMS-over-SIP inbound (Anveo "SMS over SIP", MESSAGE method) ────
+# DELIBERATELY diagnostic-first, not routing-first. Anveo's own docs for
+# this feature are thin (confirmed live, same session: their SMSbySMS HTTP
+# docs described a dead endpoint, and their general-API docs disagreed with
+# each other on version number, host path AND auth model — see
+# docs/anveo-direct-setup-guide.md's SMS section history). Given that track
+# record, this does NOT assume X-ANVEO-SMS-FROM/X-ANVEO-SMS-TO behave
+# exactly as documented — it logs every plausible source for the sender
+# number, destination DID, and body, and stops (Hangup, same terminator the
+# existing internal [sip-messaging] context uses), so the FIRST real test
+# text shows exactly what Anveo actually sends before anything tries to
+# parse and route it automatically. Once a real message has been observed
+# in the log, the extraction/routing logic (owner lookup via
+# pstn-personal-dids.conf, ring-group fan-out) gets built against confirmed
+# fields instead of the docs' word for it.
+#
+# message_context=pstn-sms-inbound on the trunk endpoint (see
+# _pstn_write_pjsip_include) is what routes an inbound MESSAGE here instead
+# of falling back to context=from-pstn-trunk, which already owns "_X." for
+# INVITE-based inbound calls — same reasoning as
+# services/asterisk.sh's message_context=sip-messaging for internal texting,
+# just the external-provider counterpart of it.
+_pstn_write_sms_inbound_dialplan() {
+    local FILE="$1"
+    cat > "$FILE" << 'EOF'
+; SMS-over-SIP inbound (Anveo MESSAGE method) — services/pstn-trunk.sh.
+; Regenerated on every install/update; edit there, not here directly.
+;
+; Diagnostic-first on purpose — see _pstn_write_sms_inbound_dialplan's own
+; comment in pstn-trunk.sh. This ONLY logs what arrived; it does not yet
+; deliver anything into a mailbox/extension. Send a real test text, then:
+;   docker exec <container> asterisk -rx "core set verbose 5"
+;   (send the text)
+;   check the console/full log for the "SMS-over-SIP MESSAGE received" line
+[pstn-sms-inbound]
+exten => _X.,1,NoOp(SMS-over-SIP MESSAGE received — dialplan EXTEN=${EXTEN})
+ same => n,Set(SMS_HDR_FROM=${PJSIP_HEADER(read,X-ANVEO-SMS-FROM)})
+ same => n,Set(SMS_HDR_TO=${PJSIP_HEADER(read,X-ANVEO-SMS-TO)})
+ same => n,Set(SMS_MSG_FROM=${MESSAGE(from)})
+ same => n,Set(SMS_MSG_TO=${MESSAGE(to)})
+ same => n,Set(SMS_BODY=${MESSAGE(body)})
+ same => n,NoOp(DIAGNOSTIC (not yet routed) -- X-ANVEO-SMS-FROM=[${SMS_HDR_FROM}] X-ANVEO-SMS-TO=[${SMS_HDR_TO}] MESSAGE(from)=[${SMS_MSG_FROM}] MESSAGE(to)=[${SMS_MSG_TO}] EXTEN=[${EXTEN}] body=[${SMS_BODY}])
+ same => n,Hangup()
+EOF
 }
 
 # ── Shared: one inbound ring-group member's live permission check ─────────
@@ -1616,6 +1690,7 @@ _pstn_apply_settings() {
     _pstn_write_pjsip_include "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$SERVER" "$SERVER_IPS" "$DID"
     _pstn_write_dialplan_include "$ASTERISK_DIR/pstn-trunk-dialplan.conf" "$DID" "$NTFY_URL"
     _pstn_write_inbound_dialplan_include "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf" "$RING_EXTS" "$NTFY_URL"
+    _pstn_write_sms_inbound_dialplan "$ASTERISK_DIR/pstn-sms-inbound-dialplan.conf"
     _pstn_write_personal_group_ring_script "$ASTERISK_DIR/pstn-personal-group-ring.sh"
     # Must run alongside the dialplan write, not after a reload: the dialplan
     # above reads tier_out/tier_in, so an un-migrated permissions file would
@@ -1625,7 +1700,7 @@ _pstn_apply_settings() {
         "$RATE" "$MONTH_THRESHOLD" "$BURST_THRESHOLD" "$MAX_MONTHLY_SPEND" "$NTFY_URL" "$CONTAINER_NAME"
     ensure_docker_dir_ownership "$ASTERISK_DIR"
     chmod 644 "$ASTERISK_DIR/pstn-trunk-pjsip.conf" "$ASTERISK_DIR/pstn-trunk-dialplan.conf" \
-        "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf"
+        "$ASTERISK_DIR/pstn-trunk-inbound-dialplan.conf" "$ASTERISK_DIR/pstn-sms-inbound-dialplan.conf"
     chmod 755 "$ASTERISK_DIR/pstn-personal-group-ring.sh"
 
     # Values are double-quoted: this file is `source`d back in on "update"
@@ -2489,5 +2564,29 @@ MD
     log_info "Everyone's at 'internal' tier (no PSTN, no messaging) until you grant access"
     log_info "via the Security Dashboard's PSTN Trunk tab — sudo ./setup.sh security-dashboard"
     log_info "if it isn't installed yet."
+    echo ""
+
+    # SMS-over-SIP (Anveo, MESSAGE method) — reuses whatever FQDN
+    # services/asterisk.sh already set up for SIP (the same one the voice
+    # trunk answers on), read straight from its own .env rather than
+    # prompting again for something already configured.
+    local _SMS_DOMAIN=""
+    [[ -f "$EA_DIR/.env" ]] && _SMS_DOMAIN="$(grep -E '^DOMAIN_NAME=' "$EA_DIR/.env" | cut -d= -f2-)"
+    if [[ -n "$_SMS_DOMAIN" ]]; then
+        log_info "SMS over SIP (optional, Anveo-specific — if your provider supports it):"
+        log_info "  In the DID's SMS tab, choose the MESSAGE method and set the SIP URI to:"
+        echo "    smshandler@${_SMS_DOMAIN}:5060"
+        log_info "  That's the same FQDN already set up for this box's SIP (Anveo requires a"
+        log_info "  literal host:port here — no DNS SRV support — and ignores registration"
+        log_info "  entirely for this delivery method)."
+        log_info "  This only logs what arrives for now, on purpose — send one real test text"
+        log_info "  after configuring it, then check:"
+        echo "    docker exec $CONTAINER_NAME asterisk -rx \"core set verbose 5\""
+        log_info "  and look for the 'SMS-over-SIP MESSAGE received' line to confirm which"
+        log_info "  headers Anveo actually sends before anything tries to route it."
+    else
+        log_warning "SMS over SIP: no DOMAIN_NAME found in $EA_DIR/.env — this box has no FQDN"
+        log_warning "set up for SIP, so there's no domain to give Anveo for smshandler@...:5060."
+    fi
     echo ""
 }
