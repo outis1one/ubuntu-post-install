@@ -732,12 +732,21 @@ install_sms-inbound() {
 
     # ── Relay service ─────────────────────────────────────────────────────────
     mkdir -p "$SMS_APP_DIR"
+    # Stop any instance of this exact service BEFORE scanning for a free
+    # port. Otherwise a fresh install run while the service is still up
+    # from a previous run always finds its own old process squatting on
+    # 8093, "frees" itself onto 8094 instead, and `enable --now` below is
+    # then a no-op against an already-active unit — leaving the OLD
+    # process (old token, old AMI secret) as the one actually serving
+    # traffic while the newly-written config sits unused. Confirmed live:
+    # exactly this sequence on a re-run right after a fresh install.
+    systemctl stop sms-inbound 2>/dev/null || true
     local RELAY_PORT=8093
     local _limit=$((RELAY_PORT + 100))
     while ss -tlnH "sport = :${RELAY_PORT}" 2>/dev/null | grep -q . && [[ "$RELAY_PORT" -lt "$_limit" ]]; do
         RELAY_PORT=$((RELAY_PORT + 1))
     done
-    [[ "$RELAY_PORT" != 8093 ]] && log_info "Port 8093 was taken — the relay will use ${RELAY_PORT}."
+    [[ "$RELAY_PORT" != 8093 ]] && log_info "Port 8093 was taken by something else — the relay will use ${RELAY_PORT}."
 
     local RELAY_TOKEN
     RELAY_TOKEN="$(generate_password 32)"
