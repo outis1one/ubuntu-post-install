@@ -367,9 +367,16 @@ def ami_deliver(from_number, to_exts, body):
 
         from_uri = "<sip:{}@{}>".format(from_number or "unknown", SMS_DOMAIN or "localhost")
         for ext in to_exts:
+            # A bare "pjsip:{ext}" (no domain) for To, tried first, produced
+            # zero SIP wire traffic at all -- confirmed live via `pjsip set
+            # logger on` during a real delivery attempt, so the failure was
+            # happening at URI resolution inside Asterisk, before it ever
+            # tried to reach the registered contact. From already carried a
+            # domain; To didn't. Qualifying To the same way to test whether
+            # that asymmetry was the actual problem.
             resp = send_action([
                 ("Action", "MessageSend"),
-                ("To", "pjsip:{}".format(ext)),
+                ("To", "pjsip:{}@{}".format(ext, SMS_DOMAIN or "localhost")),
                 ("From", from_uri),
                 ("Body", body),
             ])
