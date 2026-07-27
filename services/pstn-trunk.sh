@@ -192,19 +192,16 @@ _pstn_ensure_live_includes() {
     fi
 
     # SMS-over-SIP's own context — same reasoning as above (own #include, not
-    # sharing a file), anchored on the voice-inbound include so all three
-    # trunk includes sit together.
+    # sharing a file). Appended at the absolute END of the file rather than
+    # interleaved between the other two trunk includes — deliberately
+    # minimal disturbance to their existing adjacency, since the exact
+    # mechanism behind the [from-pstn-trunk]-must-be-alone quirk documented
+    # above was never fully understood, only worked around; inserting a new
+    # #include line between two already-working ones is exactly the kind of
+    # structural change that class of bug turned out to be sensitive to.
     if [[ -f "$EXT_LIVE" ]] && ! grep -q 'pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"; then
-        if grep -q '^#include pstn-trunk-inbound-dialplan.conf$' "$EXT_LIVE"; then
-            sed -i '/^#include pstn-trunk-inbound-dialplan.conf$/a #include pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"
-            log_success "Patched the SMS-over-SIP #include directly into the live extensions.conf."
-        elif grep -q '^\[intercom\]$' "$EXT_LIVE"; then
-            sed -i '/^\[intercom\]$/a #include pstn-sms-inbound-dialplan.conf' "$EXT_LIVE"
-            log_success "Patched the SMS-over-SIP #include directly into the live extensions.conf."
-        else
-            log_warning "Couldn't find an anchor for the SMS-over-SIP include in the live extensions.conf — add"
-            log_warning "'#include pstn-sms-inbound-dialplan.conf' manually, then reload."
-        fi
+        printf '\n#include pstn-sms-inbound-dialplan.conf\n' >> "$EXT_LIVE"
+        log_success "Patched the SMS-over-SIP #include directly into the live extensions.conf."
     fi
 
     docker exec "$CONTAINER_NAME" asterisk -rx "module reload res_pjsip.so" &>/dev/null || true
@@ -219,10 +216,30 @@ _pstn_ensure_live_includes() {
     # from-pstn-trunk` on the box revealed it). Verify the reload actually
     # produced the context and say so plainly if it didn't, instead of
     # silently trusting the reload command's own exit status.
+    #
+    # Confirmed live again (this session): adding pstn-sms-inbound-dialplan's
+    # #include for the first time made THIS check fail for from-pstn-trunk
+    # too, on a box where it had been working — "dialplan reload" alone
+    # isn't reliable for picking up a context that's genuinely NEW to the
+    # running process (as opposed to a change to one already loaded), even
+    # though it's fine for edits to existing ones (the "no restart needed"
+    # premise most of the rest of this file relies on). A full container
+    # restart is the one thing that's reliably fixed this every time it's
+    # come up — try that automatically instead of just warning and leaving
+    # inbound calls broken until the operator finds this on their own.
     if ! docker exec "$CONTAINER_NAME" asterisk -rx "dialplan show from-pstn-trunk" 2>/dev/null | grep -q "'_X\.'"; then
-        log_warning "Reloaded the dialplan, but 'from-pstn-trunk' still has no matching"
-        log_warning "extension — inbound PSTN calls will get an immediate SIP rejection."
-        log_warning "Check: docker exec $CONTAINER_NAME asterisk -rx \"dialplan show from-pstn-trunk\""
+        log_warning "Dialplan reload didn't pick up 'from-pstn-trunk' — restarting the container"
+        log_warning "instead (a plain reload isn't always enough for a context that's new to the"
+        log_warning "running process)..."
+        docker restart "$CONTAINER_NAME" &>/dev/null || true
+        sleep 5
+        if docker exec "$CONTAINER_NAME" asterisk -rx "dialplan show from-pstn-trunk" 2>/dev/null | grep -q "'_X\.'"; then
+            log_success "Restart fixed it — 'from-pstn-trunk' is loaded and inbound calls should work again."
+        else
+            log_warning "Still no matching extension after a restart — inbound PSTN calls will get an"
+            log_warning "immediate SIP rejection. Check: docker exec $CONTAINER_NAME asterisk -rx \"dialplan show from-pstn-trunk\""
+            log_warning "and docker logs $CONTAINER_NAME for anything Asterisk logged on startup."
+        fi
     fi
 }
 
@@ -1960,6 +1977,7 @@ install_pstn-trunk() {
                     # Always asked, every run, update mode included — see
                     # _pstn_run_international_step's own comment for why.
                     _pstn_run_international_step "$ASTERISK_DIR"
+                    _pstn_print_sms_over_sip_info "$EA_DIR" "${CONTAINER_NAME:-easy-asterisk-do}"
                     return 0
                 else
                     log_warning "No $SETTINGS_FILE found (pre-dates this settings-file version) — falling back to a fresh install (every prompt below)."
@@ -2565,7 +2583,16 @@ MD
     log_info "via the Security Dashboard's PSTN Trunk tab — sudo ./setup.sh security-dashboard"
     log_info "if it isn't installed yet."
     echo ""
+    _pstn_print_sms_over_sip_info "$EA_DIR" "$CONTAINER_NAME"
+}
 
+# Shared: printed at the end of BOTH the update path (which returns early,
+# well before install_pstn-trunk's own tail below) and the fresh-install
+# tail — confirmed live: this used to live only in the fresh-install tail,
+# so it silently never printed on a plain "update in place" run, the far
+# more common case once a trunk already exists.
+_pstn_print_sms_over_sip_info() {
+    local EA_DIR="$1" CONTAINER_NAME="$2"
     # SMS-over-SIP (Anveo, MESSAGE method) — reuses whatever FQDN
     # services/asterisk.sh already set up for SIP (the same one the voice
     # trunk answers on), read straight from its own .env rather than
