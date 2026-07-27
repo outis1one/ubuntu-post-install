@@ -199,7 +199,7 @@ In the Security Dashboard's PSTN Trunk tab:
   # container is named easy-asterisk-do instead
   ```
 
-## 8. SMS — receiving verification codes
+## 8. SMS — receiving texts in Sipnetic
 
 Voice and SMS are separate features on an Anveo DID and are configured in
 different places. This section covers **receiving** only; see "What about
@@ -242,41 +242,49 @@ Run the installer and follow what it prints:
 sudo ./setup.sh sms-inbound
 ```
 
-It generates a long random ntfy topic, then offers two ways for Anveo to
-reach it:
+A small systemd service on the droplet receives Anveo's webhook request,
+looks up which extension (or Ring Group) currently owns the destination DID
+— the exact same `pstn-personal-dids.conf`/`pstn-groups.conf` data
+inbound-voice ring logic already reads — and delivers the text into
+Asterisk over its Manager Interface as a SIP `MESSAGE`, landing in Sipnetic
+the same way this project's internal extension-to-extension texting already
+does. Not a push notification: a real message in the softphone's own thread.
 
-- **Relay (recommended)** — a small systemd service on the droplet receives
-  Anveo's request and republishes to ntfy properly. Two concrete wins: a
-  message body containing `&` survives intact (Anveo interpolates the text
-  into the query string unescaped, so an unencoded `&` otherwise truncates
-  the message), and your ntfy credentials never get stored in Anveo's portal.
-- **Direct** — Anveo calls ntfy itself; nothing runs on the droplet. Simpler,
-  but the URL you paste into Anveo carries your ntfy token, and the `&` case
-  loses the tail of the message.
+("SMS over SIP" — Anveo delivering the text as a MESSAGE/INVITE directly to
+this box's SIP trunk, skipping the HTTP webhook entirely — was tried first
+and confirmed **not offered** on this DID: the SMS tab only ever showed the
+plain "Forward to URL" option, no SIP-based alternative.)
 
 Then in the Anveo portal: **Phone Numbers → the DID → SMS tab**. The tab has
 exactly one control — a **Forward to URL** checkbox and a text field. Tick the
 box, paste the string the installer printed into the field, and press **SAVE**
 (not RETURN, which discards). Keep the `$[message]$` placeholder **last** in
-that URL — that's what makes the unescaped-`&` case recoverable.
+that URL — Anveo interpolates the message text into the query string
+unescaped, so a body containing `&` otherwise truncates; with the placeholder
+last, everything after it is recoverable verbatim.
 
-The field has no visible length limit, but the generated URLs are long
-(~90 characters in relay mode, ~150+ in direct mode, since that one carries
-the ntfy auth parameter). After saving, reopen the tab and confirm the whole
-string came back intact rather than truncated — if it didn't, relay mode is
-the shorter of the two.
-
-Send a text to the number from another phone; the notification should arrive
-within seconds. `journalctl -u sms-inbound -f` shows sender, recipient and
-message length (never the body — these are one-time passcodes and the journal
-has a wider audience than the notification does).
+Send a text to the number from another phone; it should land in Sipnetic
+within seconds. `journalctl -u sms-inbound -f` shows sender, recipient,
+message length, and the full AMI exchange — never the message body itself,
+since the journal has a wider audience than the message thread does.
 
 ### What about sending?
 
-Not covered, on purpose. Outbound SMS isn't available on Anveo Direct — Anveo
-support directs users to an Anveo **Retail** account for it, which is a
-second account to fund and manage. Any of the free texting apps covers
-sending without involving this box.
+Two things confirmed this way, neither of them a working path yet:
+
+- **Outbound over SIP** — sending a `MESSAGE` toward Anveo's trunk (the
+  mirror image of the inbound webhook) was tried directly: Asterisk placed
+  the request fine, but Anveo's SBC came back `501 Not Implemented`. A real,
+  unambiguous rejection of the method itself — not a config or auth problem,
+  and not something any amount of retrying the request format will get past.
+- **Outbound via Anveo's HTTP API** (`api/v1.asp?action=sms`) — real and
+  documented, but gated behind Anveo support activating SMS-API access for
+  this account; still pending as of this writing (limited support tickets on
+  this account, so this has been a slow back-and-forth rather than a quick
+  toggle).
+
+Until that activation lands, there's no outbound path from this box. Any of
+the free texting apps covers sending in the meantime without involving it.
 
 ### MMS and group texts
 
