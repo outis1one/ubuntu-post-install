@@ -270,23 +270,43 @@ def resolve_recipients(to_raw):
     membership, so this always reflects who's in the group right now, not
     who was in it when the DID was assigned. Empty list = nobody currently
     owns this DID; the caller logs that and gives up rather than guessing
-    where to deliver it."""
+    where to deliver it.
+
+    Every early-return here also prints exactly why, since "no owner
+    found" alone gives no way to tell a path problem from a normalization
+    problem from an actually-unassigned DID without re-triggering a real
+    text. Nothing printed below is more sensitive than what's already
+    visible on the dashboard (config dir path, a DID's own digits, the
+    set of DIDs that exist) -- never the message body."""
     if not ASTERISK_CONFIG_DIR:
+        print("resolve_recipients: SMS_ASTERISK_CONFIG_DIR is not set", flush=True)
         return []
     did = _normalize_did(to_raw)
     if not did:
+        print("resolve_recipients: couldn't normalize to={!r} to a 10-digit DID".format(to_raw), flush=True)
         return []
-    dids_cp = _read_conf(os.path.join(ASTERISK_CONFIG_DIR, "pstn-personal-dids.conf"))
+    dids_path = os.path.join(ASTERISK_CONFIG_DIR, "pstn-personal-dids.conf")
+    if not os.path.isfile(dids_path):
+        print("resolve_recipients: {} does not exist".format(dids_path), flush=True)
+        return []
+    dids_cp = _read_conf(dids_path)
     if not dids_cp.has_section(did):
+        print("resolve_recipients: normalized did={} has no section in {} (known DIDs: {})".format(
+            did, dids_path, dids_cp.sections()), flush=True)
         return []
     owner = dids_cp.get(did, "owner", fallback="").strip()
     if not owner:
+        print("resolve_recipients: did={} section has no owner= set".format(did), flush=True)
         return []
     if owner.startswith("@"):
         groups_cp = _read_conf(os.path.join(ASTERISK_CONFIG_DIR, "pstn-groups.conf"))
         group_name = owner[1:]
         members_raw = groups_cp.get(group_name, "members", fallback="")
-        return [m.strip() for m in members_raw.split(",") if m.strip()]
+        members = [m.strip() for m in members_raw.split(",") if m.strip()]
+        if not members:
+            print("resolve_recipients: did={} owner=@{} but group has no members in pstn-groups.conf".format(
+                did, group_name), flush=True)
+        return members
     return [owner]
 
 
