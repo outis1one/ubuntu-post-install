@@ -142,6 +142,13 @@ install_security-dashboard() {
                 _secdash_write_asn_helper "$APP_DIR"
                 _secdash_write_sudoers "$SVC_USER" "$ASTERISK_EA_CONTAINER"
                 _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER"
+                # systemd caches unit files; a plain restart re-runs the OLD
+                # one. Without this, any Environment= or ReadOnlyPaths line
+                # added since the last FRESH install is written to disk and
+                # then silently ignored — which is exactly how the Extensions
+                # tab ended up reporting "no domain set" and "TURN not
+                # configured" on a box whose .env had both.
+                systemctl daemon-reload
                 systemctl restart security-dashboard 2>/dev/null \
                     && log_success "security-dashboard restarted" \
                     || log_warning "Restart failed — check: systemctl status security-dashboard"
@@ -540,6 +547,8 @@ _secdash_write_sudoers() {
     if [ -n "$_ea_container" ]; then
         _ea_lines="$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/asterisk/pjsip.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec -i $_ea_container tee /etc/easy-asterisk/rooms.conf
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container chown asterisk\:asterisk /etc/asterisk/pjsip.conf
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container chown asterisk\:asterisk /etc/easy-asterisk/rooms.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ res_pjsip.so
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx pjsip\ show\ endpoints
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container /usr/local/bin/easy-asterisk --rebuild-dialplan
@@ -1848,6 +1857,24 @@ def _read_ea_env():
     return values
 
 
+def _ea_env_problem():
+    """Why .env couldn't be read, in words, or "" if it was fine.
+
+    "not configured" is the wrong message when the truth is "this service was
+    never told where the file is" or "permission denied" — both of which
+    happened in practice and both of which look identical from the UI unless
+    the reason is carried through."""
+    if not ASTERISK_EA_ENV:
+        return ("This service doesn't know where Asterisk's .env is "
+                "(ASTERISK_EA_ENV unset). Re-run: sudo ./setup.sh security-dashboard")
+    if not os.path.isfile(ASTERISK_EA_ENV):
+        return "Asterisk's .env not found at %s" % ASTERISK_EA_ENV
+    if not os.access(ASTERISK_EA_ENV, os.R_OK):
+        return ("No permission to read %s. Re-run: sudo ./setup.sh security-dashboard"
+                % ASTERISK_EA_ENV)
+    return ""
+
+
 def ea_connection_defaults():
     """Server/transport guidance for the add form and the per-extension panel.
 
@@ -1858,13 +1885,22 @@ def ea_connection_defaults():
     the phone reports nothing more useful than a timeout."""
     env = _read_ea_env()
     domain = env.get("DOMAIN_NAME", "")
+    problem = _ea_env_problem()
+    turn_server = env.get("TURN_SERVER", "")
+    # A readable .env with an empty TURN_SERVER is its own distinct case: the
+    # install simply never set one (LAN-only with no FQDN), which is not an
+    # error and shouldn't read like one.
+    if not problem and not turn_server:
+        problem = ("TURN_SERVER is empty in %s — set it there and restart Asterisk "
+                   "if this phone needs a relay." % ASTERISK_EA_ENV)
     return {
         "domain": domain,
         "default_conn_type": "fqdn" if domain else "lan",
-        "turn_server": env.get("TURN_SERVER", ""),
+        "turn_server": turn_server,
         "turn_username": env.get("TURN_USERNAME", ""),
         "turn_password": env.get("TURN_PASSWORD", ""),
-        "env_readable": bool(env),
+        "env_readable": not _ea_env_problem(),
+        "env_error": problem,
     }
 
 
@@ -1905,6 +1941,8 @@ def ea_device_details(extension):
     return {
         "extension": extension,
         "name": device.get("name", ""),
+        "mobile": device.get("category") == "mobile",
+        "env_error": conn.get("env_error", ""),
         "password": password,
         "transport": "TLS" if tls else "UDP",
         "port": 5061 if tls else 5060,
@@ -1934,12 +1972,29 @@ def _ea_rooms_host_path():
 def ea_docker_write(container_path, content):
     """Writes content to a file INSIDE the Easy Asterisk container via
     `docker exec -i <container> tee <path>` (root, sudo-gated) — see the
-    module-level comment above for why this isn't a direct host-side write."""
+    module-level comment above for why this isn't a direct host-side write.
+
+    Then hands ownership back to asterisk:asterisk. `tee` runs as root inside
+    the container, so every write silently re-owned the file to root; Asterisk
+    itself runs as `asterisk` and expects to own its config. The vendored
+    admin's own add_device() does this same chown immediately after writing
+    pjsip.conf, and services/asterisk.sh's device migration does it too — this
+    was the one writer in the project that didn't, which is a strong candidate
+    for extensions created here behaving differently from ones created in the
+    vendored admin."""
     ok, _out, err = run_sudo(
         ["docker", "exec", "-i", ASTERISK_EA_CONTAINER, "tee", container_path],
         input_text=content,
     )
-    return ok, ("" if ok else (err or "Write failed"))
+    if not ok:
+        return False, (err or "Write failed")
+    chowned, _o, cerr = run_sudo(
+        ["docker", "exec", ASTERISK_EA_CONTAINER, "chown", "asterisk:asterisk", container_path]
+    )
+    if not chowned:
+        print("WARNING: wrote %s but could not chown it to asterisk:asterisk: %s"
+              % (container_path, cerr), flush=True)
+    return True, ""
 
 
 def ea_reload_pjsip():
@@ -2068,7 +2123,11 @@ def ea_add_device(name, category, extension, conn_type="lan", auto_answer=None):
     else:
         transport = "transport=transport-udp"
         encryption = "media_encryption=no"
-        ice = ""
+        # The vendored admin also turns ICE on for LAN devices whenever a TURN
+        # server or VPN-ICE mode is configured — without it such a device has
+        # no way to use the relay it was given credentials for. Keyed off the
+        # same TURN_SERVER this dashboard already reads for the details panel.
+        ice = "ice_support=yes" if ea_connection_defaults().get("turn_server") else ""
 
     aa_tag = ""
     if auto_answer == "yes":
@@ -2802,6 +2861,16 @@ INDEX_HTML = """<!doctype html>
      they stay out of the way until asked for. */
   .add-advanced { display: none; width: 100%; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
   .add-advanced.open { display: flex; }
+  /* Connection details expand under their own row, so they stay next to the
+     extension being asked about however far down the table it is. */
+  tr.detail-row > td { background: rgba(79,140,255,0.06); padding: 0; }
+  .detail-panel {
+    border-left: 3px solid var(--accent); padding: var(--sp-3) var(--sp-4);
+  }
+  .detail-panel table { font-size: 0.85rem; }
+  .detail-panel th { text-transform: none; letter-spacing: 0; position: static; }
+  .detail-panel td, .detail-panel th { border-bottom: none; padding: 0.2rem 0.6rem 0.2rem 0; }
+  .detail-panel code { background: rgba(0,0,0,0.35); padding: 0.1rem 0.35rem; border-radius: 4px; user-select: all; }
   button.link {
     background: none; border: none; color: var(--accent); font: inherit;
     font-size: 0.85rem; cursor: pointer; padding: 0.2rem 0;
@@ -2951,11 +3020,6 @@ INDEX_HTML = """<!doctype html>
         <div class="row" style="justify-content:flex-end; margin-bottom:var(--sp-2)">
           <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
         </div>
-        <div class="callout" id="ext-details-callout" style="border-color:rgba(79,140,255,0.35); background:rgba(79,140,255,0.07)">
-          <div id="ext-details-text" style="flex:1"></div>
-          <button class="icon" id="ext-details-dismiss" title="Dismiss">&times;</button>
-        </div>
-
         <div class="callout" id="ext-password-callout">
           <div class="grow" id="ext-password-text" style="flex:1"></div>
           <button class="icon" id="ext-password-dismiss" title="Dismiss">&times;</button>
@@ -3306,12 +3370,14 @@ async function initExtensionsTab() {
   // where the choice is rather than quietly switching it.
   const connHint = document.getElementById("ext-add-conn-hint");
   if (connHint) {
-    connHint.textContent = ea.domain
-      ? "Phones register against " + ea.domain + ":5061."
-      : "No DOMAIN_NAME set in Asterisk's .env — TLS will use a self-signed certificate the phone must be told to accept. LAN only (UDP) avoids that on a local network.";
+    connHint.textContent = ea.env_error
+      ? ea.env_error
+      : (ea.domain
+          ? "Phones register against " + ea.domain + ":5061."
+          : "No DOMAIN_NAME set in Asterisk's .env — TLS will use a self-signed certificate the phone must be told to accept. LAN only (UDP) avoids that on a local network.");
   }
   if (ea.installed && ea.env_readable === false) {
-    toast("Can't read Asterisk's .env — connection details will be incomplete. Re-run: sudo ./setup.sh security-dashboard", "err");
+    toast(ea.env_error || "Can't read Asterisk's .env — connection details will be incomplete.", "err");
   }
   document.body.classList.toggle("no-ea", !eaInstalled);
   document.body.classList.toggle("no-pstn", !pstnInstalled);
@@ -3397,6 +3463,7 @@ function renderRoomMemberPicker() {
 
 let extRows = [];
 let extSort = { key: null, dir: 1 };
+let openDetailsExt = null;
 
 // Sort by how much reach the mode grants, not alphabetically — "full" would
 // otherwise land between "internal" and "restricted".
@@ -3458,6 +3525,10 @@ function renderExtensions() {
     if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${extSort.dir === 1 ? "▲" : "▼"}</span>`);
   }
 
+  // Re-rendering the body discards any injected detail row, so the toggle's
+  // idea of what's open has to go with it — otherwise the next click on that
+  // extension's button toggles "closed" against a row that isn't there.
+  openDetailsExt = null;
   tbody.innerHTML = rows.map(e => {
     const status = e.status || "unknown";
     // Rows for an extension the Easy Asterisk container doesn't know about
@@ -3480,7 +3551,7 @@ function renderExtensions() {
       <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${restrictUsesList(e.restrict) ? "" : "disabled"} style="width:16rem" aria-label="Whitelist for extension ${esc(e.ext)}"></td>
       <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
       <td class="actions">
-        <button class="icon ea-only" title="Connection details for ${esc(e.ext)}" onclick="showEaDeviceDetails('${esc(e.ext)}')">&#9432;</button>
+        <button class="icon ea-only" title="Connection details for ${esc(e.ext)}" onclick="toggleEaDeviceDetails('${esc(e.ext)}')">&#9432;</button>
         <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
       </td>
     </tr>`;
@@ -3644,50 +3715,82 @@ document.getElementById("ext-add-advanced-toggle").addEventListener("click", () 
 document.getElementById("ext-password-dismiss").addEventListener("click", () => {
   document.getElementById("ext-password-callout").classList.remove("show");
 });
-document.getElementById("ext-details-dismiss").addEventListener("click", () => {
-  document.getElementById("ext-details-callout").classList.remove("show");
-});
-
 // Everything needed to configure a softphone, in one place. Previously the
 // dashboard could create an extension but never tell you the server, the
 // transport it had actually been written with, or the TURN credentials — so
 // a correctly-created extension and a misconfigured one looked identical.
+// Rendered as an extra table row immediately under the extension it
+// describes, not as a panel at the top of the card. The panel version was
+// genuinely missed on a long list — you clicked a row near the bottom and the
+// answer appeared off-screen above you.
+async function toggleEaDeviceDetails(ext) {
+  if (openDetailsExt === ext) {
+    closeEaDeviceDetails();
+    return;
+  }
+  await showEaDeviceDetails(ext);
+}
+
+function closeEaDeviceDetails() {
+  openDetailsExt = null;
+  document.querySelectorAll("#ext-table tr.detail-row").forEach(r => r.remove());
+}
+
 async function showEaDeviceDetails(ext) {
   const res = await fetch("/api/ea-device-details?ext=" + encodeURIComponent(ext));
   if (!res.ok) { toast("No details for extension " + ext, "err"); return; }
   const d = await res.json();
-  const server = d.server || "(no domain set — use this box's IP)";
+  closeEaDeviceDetails();
+  const anchor = document.querySelector(`#ext-table tr[data-ext="${ext}"]`);
+  if (!anchor) return;
+  openDetailsExt = ext;
+
+  const colspan = anchor.children.length;
+  const server = d.server
+    || "(no domain in Asterisk's .env — use this box's public IP)";
   const turn = d.turn_server
     ? `<tr><th>TURN server</th><td><code>${esc(d.turn_server)}</code></td></tr>
        <tr><th>TURN user</th><td><code>${esc(d.turn_username)}</code></td></tr>
        <tr><th>TURN password</th><td><code>${esc(d.turn_password)}</code></td></tr>`
-    : `<tr><th>TURN</th><td class="empty">not configured in Asterisk's .env</td></tr>`;
-  document.getElementById("ext-details-text").innerHTML = `
-    <b>Extension ${esc(d.extension)} — ${esc(d.name)}</b>
-    <span class="pill ${d.status === "online" ? "online" : "offline"}" style="margin-left:var(--sp-2)">${esc(d.status)}</span>
-    <table style="margin-top:var(--sp-2)">
-      <tr><th style="width:9rem">SIP server</th><td><code>${esc(server)}</code></td></tr>
-      <tr><th>Username</th><td><code>${esc(d.extension)}</code></td></tr>
-      <tr><th>Password</th><td><code>${esc(d.password || "(not found)")}</code></td></tr>
-      <tr><th>Transport</th><td><code>${esc(d.transport)}</code> on port <code>${esc(String(d.port))}</code>${d.encryption && d.encryption !== "no" ? " · SRTP " + esc(d.encryption) : ""}</td></tr>
-      ${turn}
-    </table>
-    <div class="row" style="margin-top:var(--sp-3)">
-      <button class="action" onclick="setEaTransport('${esc(d.extension)}','${d.transport === "TLS" ? "lan" : "fqdn"}')">
-        Switch to ${d.transport === "TLS" ? "LAN (UDP 5060)" : "Remote/FQDN (TLS 5061)"}
-      </button>
-      <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
+    : `<tr><th>TURN</th><td class="empty">${esc(d.env_error || "not set in Asterisk's .env")}</td></tr>`;
+
+  const tr = document.createElement("tr");
+  tr.className = "detail-row";
+  tr.innerHTML = `<td colspan="${colspan}">
+    <div class="detail-panel">
+      <div class="row" style="justify-content:space-between; align-items:flex-start">
+        <b>Extension ${esc(d.extension)} — ${esc(d.name)}</b>
+        <span class="pill ${d.status === "online" ? "online" : "offline"}">${esc(d.status)}</span>
+      </div>
+      <table style="margin-top:var(--sp-2)">
+        <tr><th style="width:10rem">SIP server</th><td><code>${esc(server)}</code></td></tr>
+        <tr><th>Username</th><td><code>${esc(d.extension)}</code></td></tr>
+        <tr><th>Password</th><td><code>${esc(d.password || "(not found)")}</code></td></tr>
+        <tr><th>Transport</th><td><code>${esc(d.transport)}</code> on port <code>${esc(String(d.port))}</code>${d.encryption && d.encryption !== "no" ? " · SRTP " + esc(d.encryption) : ""}</td></tr>
+        <tr><th>Device type</th><td>${d.mobile ? "mobile / cellular (RTP keepalive on)" : "standard"}</td></tr>
+        ${turn}
+      </table>
+      <div class="row" style="margin-top:var(--sp-3)">
+        <button class="action" onclick="setEaTransport('${esc(d.extension)}','${d.transport === "TLS" ? "lan" : "fqdn"}')">
+          Switch to ${d.transport === "TLS" ? "LAN (UDP 5060)" : "Remote/FQDN (TLS 5061)"}
+        </button>
+        <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
+        <button class="action" onclick="closeEaDeviceDetails()">Close</button>
+      </div>
+      ${d.env_error ? `<p class="muted" style="margin:var(--sp-2) 0 0; color:var(--warn)">${esc(d.env_error)}</p>` : ""}
+      <p class="muted" style="margin:var(--sp-2) 0 0">A phone that never registers is most often the transport above: an extension
+      written LAN-only while the phone dials in over TLS from outside. If the Security Log shows nothing at all for it, the traffic
+      isn't reaching Asterisk — check the firewall and the TLS certificate before the extension itself.</p>
     </div>
-    <p class="muted" style="margin:var(--sp-2) 0 0">A phone that never registers is most often this: an extension written
-    LAN-only while the phone dials in over TLS from outside. If the Security Log shows nothing at all for it, the traffic
-    isn't reaching Asterisk — check the firewall and the TLS certificate before the extension itself.</p>`;
-  document.getElementById("ext-details-callout").classList.add("show");
+  </td>`;
+  anchor.insertAdjacentElement("afterend", tr);
+  tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
 async function setEaTransport(ext, connType) {
   const data = await postJSON("/api/ea-devices/transport", {extension: ext, conn_type: connType});
   toast(data.message || (data.ok ? "Transport changed" : "Failed"), data.ok ? "ok" : "err");
-  if (data.ok) { await loadExtensions(); showEaDeviceDetails(ext); }
+  if (data.ok) { await loadExtensions(); await showEaDeviceDetails(ext); }
 }
 
 async function resetEaPassword(ext) {
