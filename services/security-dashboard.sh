@@ -256,7 +256,21 @@ which tab a given extension's settings live on.
   never scrolls sideways on a phone.
   - **Extensions** — add/rename/delete a SIP extension, tag it as a mobile
     device (enables RTP NAT-keepalive tuning); live registered/unregistered
-    status per device. This is a native reimplementation of Easy Asterisk's
+    status per device. The **ⓘ** button on each row opens everything a
+    softphone needs — SIP server, username, password (read back from
+    \`pjsip.conf\`, not regenerated, so re-pairing a handset doesn't mean
+    recreating the extension), transport and port, and the TURN
+    server/credentials from Asterisk's \`.env\`. From there you can also
+    switch an extension between LAN (UDP 5060) and Remote/FQDN (TLS 5061),
+    or reset its password without losing its room membership or PSTN
+    permissions.
+
+    New extensions are created Remote/FQDN (TLS 5061) without asking, with
+    transport and auto-answer behind an **Advanced…** disclosure. That
+    choice is the usual reason a phone which looks correctly configured
+    never registers: an endpoint written \`transport=transport-udp\` does
+    not refuse a TLS registration, it ignores it, so the phone times out
+    and nothing is logged anywhere. This is a native reimplementation of Easy Asterisk's
     own vendored web admin (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s
     device/room management), not a link or an iframe to that separate
     process — one page, one login. Reads \`pjsip.conf\`/\`rooms.conf\`
@@ -431,6 +445,24 @@ _secdash_grant_asterisk_access() {
             chmod 770 "$_config_dir" 2>/dev/null || true
         fi
     fi
+
+    # Asterisk's .env (chmod 600, owned by the real user) holds DOMAIN_NAME and
+    # the TURN server/credentials. The Extensions tab needs them to show what
+    # to type into a softphone — without this the dashboard can create an
+    # extension but can't tell you how to connect it, which is exactly the gap
+    # that made a new extension look broken rather than misconfigured. Read
+    # only, and only this one file. It is not a meaningful escalation: the
+    # dashboard already reads every extension's SIP password out of
+    # pjsip.conf.
+    local _ea_root="${_config_dir%/config/asterisk}"
+    if [ -n "$_ea_root" ] && [ -f "$_ea_root/.env" ]; then
+        _secdash_grant_ancestor_traversal "$_svc_user" "$_ea_root"
+        if [ "$_have_acl" = true ]; then
+            setfacl -m "u:${_svc_user}:r" "$_ea_root/.env" 2>/dev/null \
+                && log_success "Granted the dashboard read access to Asterisk's .env (TURN/domain details)." \
+                || log_warning "Couldn't grant read on $_ea_root/.env — the Extensions tab won't be able to show TURN details."
+        fi
+    fi
 }
 
 # Systemd unit — separate function so "update" mode can refresh it too
@@ -446,6 +478,9 @@ _secdash_write_systemd_unit() {
     local _read_only_paths="" _read_write_paths="/etc/crowdsec/scenarios"
     [ -n "$_log_dir" ] && _read_only_paths="$_log_dir"
     [ -n "$_ea_config_dir" ] && _read_only_paths="$_read_only_paths $_ea_config_dir"
+    # ProtectSystem=strict hides everything not listed, so the .env grant above
+    # is only half the story — the unit has to be told it may read the file too.
+    [ -n "$_config_dir" ] && _read_only_paths="$_read_only_paths ${_config_dir%/config/asterisk}/.env"
     [ -n "$_config_dir" ] && _read_write_paths="$_read_write_paths $_config_dir"
 
     cat > /etc/systemd/system/security-dashboard.service << SDSVC
@@ -462,6 +497,7 @@ Environment=ASTERISK_LOG=${_log_dir:+$_log_dir/full}
 Environment=ASTERISK_CONFIG_DIR=$_config_dir
 Environment=ASTERISK_EA_CONFIG_DIR=$_ea_config_dir
 Environment=ASTERISK_EA_CONTAINER=$_ea_container
+Environment=ASTERISK_EA_ENV=${_config_dir%/config/asterisk}/.env
 ExecStart=/usr/bin/python3 $_app_dir/app.py
 Restart=on-failure
 RestartSec=3
@@ -793,6 +829,7 @@ import json
 import os
 import re
 import subprocess
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8092"))
@@ -1782,6 +1819,99 @@ ASTERISK_EA_CONFIG_DIR = os.environ.get("ASTERISK_EA_CONFIG_DIR", "")
 ASTERISK_EA_CONTAINER = os.environ.get("ASTERISK_EA_CONTAINER", "")
 
 EA_PJSIP_CONTAINER_PATH = "/etc/asterisk/pjsip.conf"
+ASTERISK_EA_ENV = os.environ.get("ASTERISK_EA_ENV", "")
+
+
+def _read_ea_env():
+    """DOMAIN_NAME / TURN_* out of the Asterisk install's .env.
+
+    Everything a softphone needs beyond the extension itself lives here, and
+    it is the single reason the dashboard is granted read on that file (see
+    _secdash_grant_asterisk_access). Missing or unreadable is not an error —
+    the UI just shows what it can and says the rest is unavailable."""
+    values = {}
+    if not ASTERISK_EA_ENV or not os.path.isfile(ASTERISK_EA_ENV):
+        return values
+    try:
+        with open(ASTERISK_EA_ENV, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                values[key.strip()] = val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return values
+
+
+def ea_connection_defaults():
+    """Server/transport guidance for the add form and the per-extension panel.
+
+    A box with DOMAIN_NAME set is reachable from anywhere and its phones
+    should register over TLS on 5061; without one there's only the LAN path.
+    Getting this default wrong is not cosmetic — an endpoint written with
+    transport=transport-udp simply will not answer a TLS registration, and
+    the phone reports nothing more useful than a timeout."""
+    env = _read_ea_env()
+    domain = env.get("DOMAIN_NAME", "")
+    return {
+        "domain": domain,
+        "default_conn_type": "fqdn" if domain else "lan",
+        "turn_server": env.get("TURN_SERVER", ""),
+        "turn_username": env.get("TURN_USERNAME", ""),
+        "turn_password": env.get("TURN_PASSWORD", ""),
+        "env_readable": bool(env),
+    }
+
+
+def ea_device_details(extension):
+    """Everything needed to configure a softphone for one extension.
+
+    Includes the SIP password, read back from pjsip.conf rather than
+    regenerated: a password shown only once at creation is lost the moment
+    the page is closed, which in practice means deleting and recreating the
+    extension just to re-pair a handset. The dashboard already holds this
+    file, so surfacing it behind an explicit click adds no access it didn't
+    have — and it sits behind whatever auth fronts the dashboard."""
+    extension = str(extension).strip()
+    if not EA_EXT_RE.match(extension):
+        return None
+    device = next((d for d in ea_list_devices() if d["extension"] == extension), None)
+    if not device:
+        return None
+
+    password = ""
+    path = _ea_pjsip_host_path()
+    if path and os.path.isfile(path):
+        try:
+            with open(path, errors="replace") as f:
+                in_auth = False
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("["):
+                        in_auth = stripped == "[%s]" % extension
+                        continue
+                    if in_auth and stripped.startswith("password="):
+                        password = stripped.split("=", 1)[1]
+        except OSError:
+            pass
+
+    conn = ea_connection_defaults()
+    tls = device.get("transport") == "tls"
+    return {
+        "extension": extension,
+        "name": device.get("name", ""),
+        "password": password,
+        "transport": "TLS" if tls else "UDP",
+        "port": 5061 if tls else 5060,
+        "encryption": device.get("encryption", "no"),
+        "server": conn["domain"] or "",
+        "turn_server": conn["turn_server"],
+        "turn_username": conn["turn_username"],
+        "turn_password": conn["turn_password"],
+        "status": ea_get_status().get(extension, "unknown"),
+    }
 EA_ROOMS_CONTAINER_PATH = "/etc/easy-asterisk/rooms.conf"
 EA_EXT_RE = re.compile(r"^\d{1,10}$")
 
@@ -1961,6 +2091,13 @@ def ea_add_device(name, category, extension, conn_type="lan", auto_answer=None):
     endpoint_lines = [
         "type=endpoint",
         "context=intercom",
+        # services/asterisk.sh patches the VENDOR's two device-creation paths
+        # to add this, but this function is a third, independent writer — so
+        # without it here, an extension created from this dashboard silently
+        # had no internal SIP messaging while one created from the vendor
+        # admin did. See _asterisk_write_messaging_dialplan for what the
+        # context does.
+        "message_context=sip-messaging",
         transport,
         "disallow=all",
         "allow=opus",
@@ -1998,6 +2135,121 @@ def ea_add_device(name, category, extension, conn_type="lan", auto_answer=None):
         "transport": "tls" if conn_type == "fqdn" else "udp",
         "port": 5061 if conn_type == "fqdn" else 5060,
     }
+
+
+def _ea_edit_device_block(extension, mutate):
+    """Rewrite one device's endpoint stanza in place.
+
+    Block boundary is the same heuristic the vendored admin uses and that
+    ea_delete_device relies on: the "; === Device:" comment starts it and the
+    first blank line ends it. mutate() receives the endpoint body as a list of
+    lines and returns the replacement."""
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Config file not found"
+    with open(path, errors="replace") as f:
+        lines = f.readlines()
+
+    out, body, state, found = [], [], "before", False
+    for line in lines:
+        stripped = line.strip()
+        if state == "before":
+            if stripped == "[%s]" % extension and out and out[-1].strip().startswith("; === Device:"):
+                found = True
+                state = "in"
+                out.append(line)
+                continue
+            out.append(line)
+        elif state == "in":
+            if stripped == "":
+                out.extend(l if l.endswith("\n") else l + "\n" for l in mutate(body))
+                out.append(line)
+                state = "after"
+                continue
+            body.append(stripped)
+        else:
+            out.append(line)
+    if state == "in":                      # block ran to EOF with no blank line
+        out.extend(l if l.endswith("\n") else l + "\n" for l in mutate(body))
+    if not found:
+        return False, "Device not found"
+
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(out))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    return True, "ok"
+
+
+def ea_set_device_transport(extension, conn_type):
+    """Switch an extension between LAN (UDP/5060) and Remote (TLS/5061).
+
+    The single most common reason a phone that looks correctly configured
+    never registers: the endpoint was created LAN-only and the phone is
+    dialling in over TLS from outside. Changing it used to mean deleting and
+    recreating the extension, which also changed its password."""
+    extension = str(extension).strip()
+    if not EA_EXT_RE.match(extension):
+        return False, "Invalid extension"
+    if conn_type not in ("lan", "fqdn"):
+        return False, "Invalid connection type"
+
+    tls = conn_type == "fqdn"
+
+    def mutate(body):
+        kept = [l for l in body
+                if not l.startswith(("transport=", "media_encryption=", "ice_support="))]
+        new = []
+        for line in kept:
+            new.append(line)
+            if line.startswith("context="):
+                new.append("transport=transport-tls" if tls else "transport=transport-udp")
+                new.append("media_encryption=sdes" if tls else "media_encryption=no")
+                if tls:
+                    new.append("ice_support=yes")
+        return new
+
+    ok, err = _ea_edit_device_block(extension, mutate)
+    if not ok:
+        return False, err
+    return True, "Now %s on port %d" % ("TLS" if tls else "UDP", 5061 if tls else 5060)
+
+
+def ea_reset_device_password(extension):
+    """New random SIP password for an existing extension, keeping everything
+    else — the alternative being delete-and-recreate, which loses the
+    extension's category, room membership and PSTN permissions."""
+    extension = str(extension).strip()
+    if not EA_EXT_RE.match(extension):
+        return False, "Invalid extension"
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Config file not found"
+
+    password = _ea_generate_password(16)
+    with open(path, errors="replace") as f:
+        lines = f.readlines()
+
+    out, in_auth, changed = [], False, False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_auth = stripped == "[%s]" % extension
+            out.append(line)
+            continue
+        if in_auth and stripped.startswith("password="):
+            out.append("password=%s\n" % password)
+            changed = True
+            continue
+        out.append(line)
+
+    if not changed:
+        return False, "No auth section found for that extension"
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(out))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    return True, password
 
 
 def ea_delete_device(extension):
@@ -2686,6 +2938,11 @@ INDEX_HTML = """<!doctype html>
         <div class="row" style="justify-content:flex-end; margin-bottom:var(--sp-2)">
           <button class="action ea-only" id="ext-add-toggle">+ Add extension</button>
         </div>
+        <div class="callout" id="ext-details-callout" style="border-color:rgba(79,140,255,0.35); background:rgba(79,140,255,0.07)">
+          <div id="ext-details-text" style="flex:1"></div>
+          <button class="icon" id="ext-details-dismiss" title="Dismiss">&times;</button>
+        </div>
+
         <div class="callout" id="ext-password-callout">
           <div class="grow" id="ext-password-text" style="flex:1"></div>
           <button class="icon" id="ext-password-dismiss" title="Dismiss">&times;</button>
@@ -3019,6 +3276,16 @@ async function initExtensionsTab() {
   ]);
   eaInstalled = !!ea.installed;
   pstnInstalled = !!pstn.installed;
+  // A box with a domain is reachable from anywhere and its phones must use
+  // TLS; defaulting the form to LAN there produces an endpoint that silently
+  // refuses every remote registration.
+  if (ea.default_conn_type) {
+    const sel = document.getElementById("ea-dev-conn");
+    if (sel) sel.value = ea.default_conn_type;
+  }
+  if (ea.installed && ea.env_readable === false) {
+    toast("Can't read Asterisk's .env — connection details will be incomplete. Re-run: sudo ./setup.sh security-dashboard", "err");
+  }
   document.body.classList.toggle("no-ea", !eaInstalled);
   document.body.classList.toggle("no-pstn", !pstnInstalled);
   await refreshExtensionsTab();
@@ -3186,6 +3453,7 @@ function renderExtensions() {
       <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${restrictUsesList(e.restrict) ? "" : "disabled"} style="width:16rem" aria-label="Whitelist for extension ${esc(e.ext)}"></td>
       <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
       <td class="actions">
+        <button class="icon ea-only" title="Connection details for ${esc(e.ext)}" onclick="showEaDeviceDetails('${esc(e.ext)}')">&#9432;</button>
         <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
       </td>
     </tr>`;
@@ -3341,6 +3609,58 @@ document.getElementById("ext-add-cancel").addEventListener("click", () => {
 document.getElementById("ext-password-dismiss").addEventListener("click", () => {
   document.getElementById("ext-password-callout").classList.remove("show");
 });
+document.getElementById("ext-details-dismiss").addEventListener("click", () => {
+  document.getElementById("ext-details-callout").classList.remove("show");
+});
+
+// Everything needed to configure a softphone, in one place. Previously the
+// dashboard could create an extension but never tell you the server, the
+// transport it had actually been written with, or the TURN credentials — so
+// a correctly-created extension and a misconfigured one looked identical.
+async function showEaDeviceDetails(ext) {
+  const res = await fetch("/api/ea-device-details?ext=" + encodeURIComponent(ext));
+  if (!res.ok) { toast("No details for extension " + ext, "err"); return; }
+  const d = await res.json();
+  const server = d.server || "(no domain set — use this box's IP)";
+  const turn = d.turn_server
+    ? `<tr><th>TURN server</th><td><code>${esc(d.turn_server)}</code></td></tr>
+       <tr><th>TURN user</th><td><code>${esc(d.turn_username)}</code></td></tr>
+       <tr><th>TURN password</th><td><code>${esc(d.turn_password)}</code></td></tr>`
+    : `<tr><th>TURN</th><td class="empty">not configured in Asterisk's .env</td></tr>`;
+  document.getElementById("ext-details-text").innerHTML = `
+    <b>Extension ${esc(d.extension)} — ${esc(d.name)}</b>
+    <span class="pill ${d.status === "online" ? "online" : "offline"}" style="margin-left:var(--sp-2)">${esc(d.status)}</span>
+    <table style="margin-top:var(--sp-2)">
+      <tr><th style="width:9rem">SIP server</th><td><code>${esc(server)}</code></td></tr>
+      <tr><th>Username</th><td><code>${esc(d.extension)}</code></td></tr>
+      <tr><th>Password</th><td><code>${esc(d.password || "(not found)")}</code></td></tr>
+      <tr><th>Transport</th><td><code>${esc(d.transport)}</code> on port <code>${esc(String(d.port))}</code>${d.encryption && d.encryption !== "no" ? " · SRTP " + esc(d.encryption) : ""}</td></tr>
+      ${turn}
+    </table>
+    <div class="row" style="margin-top:var(--sp-3)">
+      <button class="action" onclick="setEaTransport('${esc(d.extension)}','${d.transport === "TLS" ? "lan" : "fqdn"}')">
+        Switch to ${d.transport === "TLS" ? "LAN (UDP 5060)" : "Remote/FQDN (TLS 5061)"}
+      </button>
+      <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
+    </div>
+    <p class="muted" style="margin:var(--sp-2) 0 0">A phone that never registers is most often this: an extension written
+    LAN-only while the phone dials in over TLS from outside. If the Security Log shows nothing at all for it, the traffic
+    isn't reaching Asterisk — check the firewall and the TLS certificate before the extension itself.</p>`;
+  document.getElementById("ext-details-callout").classList.add("show");
+}
+
+async function setEaTransport(ext, connType) {
+  const data = await postJSON("/api/ea-devices/transport", {extension: ext, conn_type: connType});
+  toast(data.message || (data.ok ? "Transport changed" : "Failed"), data.ok ? "ok" : "err");
+  if (data.ok) { await loadExtensions(); showEaDeviceDetails(ext); }
+}
+
+async function resetEaPassword(ext) {
+  if (!confirm("Reset the SIP password for extension " + ext + "? The phone will stop registering until you enter the new one.")) return;
+  const data = await postJSON("/api/ea-devices/password", {extension: ext});
+  if (data.ok) { toast("Password reset for " + ext, "ok"); showEaDeviceDetails(ext); }
+  else toast(data.message || "Failed", "err");
+}
 
 document.getElementById("ea-dev-save").addEventListener("click", async () => {
   const name = document.getElementById("ea-dev-name").value.trim();
@@ -3362,6 +3682,10 @@ document.getElementById("ea-dev-save").addEventListener("click", async () => {
     document.getElementById("ea-dev-ext").value = "";
     document.getElementById("ea-dev-mobile").checked = false;
     extAddForm.classList.remove("open");
+    // The password alone isn't enough to configure a phone — open the full
+    // details (server, transport, TURN) immediately rather than making the
+    // user hunt for them.
+    showEaDeviceDetails(data.data.extension);
   } else {
     toast(data.message || "Failed to add extension", "err");
   }
@@ -3805,7 +4129,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/crowdsec-status":
             self._json({"installed": crowdsec_installed()})
         elif self.path == "/api/ea-status":
-            self._json({"installed": ea_installed()})
+            payload = {"installed": ea_installed()}
+            if payload["installed"]:
+                payload.update(ea_connection_defaults())
+                payload.pop("turn_password", None)   # not needed until a row asks
+            self._json(payload)
+        elif self.path.startswith("/api/ea-device-details?"):
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            details = ea_device_details((qs.get("ext") or [""])[0])
+            if details:
+                self._json(details)
+            else:
+                self._json({"error": "not found"}, 404)
         elif self.path == "/api/ea-devices":
             self._json({"devices": ea_list_devices(), "status": ea_get_status()})
         elif self.path == "/api/ea-rooms":
@@ -3866,6 +4201,15 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/ea-devices/rename":
             ok, message = ea_rename_device(payload.get("extension", ""), payload.get("name", ""))
             self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-devices/transport":
+            ok, message = ea_set_device_transport(payload.get("extension", ""), payload.get("conn_type", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-devices/password":
+            ok, result = ea_reset_device_password(payload.get("extension", ""))
+            if ok:
+                self._json({"ok": True, "password": result})
+            else:
+                self._json({"ok": False, "message": result})
         elif self.path == "/api/ea-devices/category":
             ok, message = ea_change_device_category(payload.get("extension", ""), payload.get("category", ""))
             self._json({"ok": ok, "message": message})
