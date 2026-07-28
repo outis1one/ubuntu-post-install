@@ -270,7 +270,10 @@ which tab a given extension's settings live on.
     choice is the usual reason a phone which looks correctly configured
     never registers: an endpoint written \`transport=transport-udp\` does
     not refuse a TLS registration, it ignores it, so the phone times out
-    and nothing is logged anywhere. This is a native reimplementation of Easy Asterisk's
+    and nothing is logged anywhere. With no \`DOMAIN_NAME\` set that TLS
+    certificate can only be self-signed and the phone has to be told to
+    accept it, which the disclosure says where the choice is rather than
+    silently picking UDP for you. This is a native reimplementation of Easy Asterisk's
     own vendored web admin (\`vendor/easy-asterisk/easy-asterisk-v0.10.0.sh\`'s
     device/room management), not a link or an iframe to that separate
     process — one page, one login. Reads \`pjsip.conf\`/\`rooms.conf\`
@@ -2795,6 +2798,16 @@ INDEX_HTML = """<!doctype html>
     background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
   }
   .add-form.open { display: flex; }
+  /* Transport and auto-answer are answers most people never need to change;
+     they stay out of the way until asked for. */
+  .add-advanced { display: none; width: 100%; gap: var(--sp-2); align-items: center; flex-wrap: wrap; }
+  .add-advanced.open { display: flex; }
+  button.link {
+    background: none; border: none; color: var(--accent); font: inherit;
+    font-size: 0.85rem; cursor: pointer; padding: 0.2rem 0;
+    text-decoration: underline dotted; text-underline-offset: 3px;
+  }
+  button.link:hover { color: #7aa9ff; }
 
   /* ── Save bar ─────────────────────────────────────────────────────────── */
   /* One commit point for the whole table, pinned to the bottom of the viewport
@@ -2951,17 +2964,26 @@ INDEX_HTML = """<!doctype html>
         <div class="add-form ea-only" id="ext-add-form">
           <input type="text" id="ea-dev-name" placeholder="Name, e.g. Front Desk" style="width:11rem">
           <input type="text" id="ea-dev-ext" placeholder="Extension, e.g. 202" style="width:9rem">
-          <select id="ea-dev-conn">
-            <option value="lan">LAN (UDP)</option>
-            <option value="fqdn">Remote/FQDN (TLS)</option>
-          </select>
-          <select id="ea-dev-aa">
-            <option value="no">Auto-answer: no</option>
-            <option value="yes">Auto-answer: yes</option>
-          </select>
           <label class="muted" style="white-space:nowrap"><input type="checkbox" id="ea-dev-mobile"> Mobile/cellular device</label>
           <button class="primary" id="ea-dev-save">Add</button>
           <button class="action" id="ext-add-cancel">Cancel</button>
+          <button class="link" id="ext-add-advanced-toggle" type="button">Advanced…</button>
+          <!-- TLS is listed first so it is the selected default before any
+               script runs. A phone registering over TLS against a UDP-only
+               endpoint just times out with nothing logged, which is the
+               single most confusing way for a new extension to fail, so the
+               safe transport is the one you get without choosing. -->
+          <div class="add-advanced" id="ext-add-advanced">
+            <select id="ea-dev-conn">
+              <option value="fqdn">Remote/FQDN (TLS 5061) — default</option>
+              <option value="lan">LAN only (UDP 5060)</option>
+            </select>
+            <select id="ea-dev-aa">
+              <option value="no">Auto-answer: no</option>
+              <option value="yes">Auto-answer: yes</option>
+            </select>
+            <span class="muted" id="ext-add-conn-hint"></span>
+          </div>
         </div>
 
         <details class="help">
@@ -3276,12 +3298,17 @@ async function initExtensionsTab() {
   ]);
   eaInstalled = !!ea.installed;
   pstnInstalled = !!pstn.installed;
-  // A box with a domain is reachable from anywhere and its phones must use
-  // TLS; defaulting the form to LAN there produces an endpoint that silently
-  // refuses every remote registration.
-  if (ea.default_conn_type) {
-    const sel = document.getElementById("ea-dev-conn");
-    if (sel) sel.value = ea.default_conn_type;
+  // The form defaults to TLS in the markup and stays there — no box is worse
+  // off for it, and the failure mode of the other default (a UDP-only
+  // endpoint silently refusing TLS registrations) is far harder to diagnose
+  // than a phone being told to trust a self-signed certificate. Without a
+  // domain configured that certificate can only be self-signed, so say so
+  // where the choice is rather than quietly switching it.
+  const connHint = document.getElementById("ext-add-conn-hint");
+  if (connHint) {
+    connHint.textContent = ea.domain
+      ? "Phones register against " + ea.domain + ":5061."
+      : "No DOMAIN_NAME set in Asterisk's .env — TLS will use a self-signed certificate the phone must be told to accept. LAN only (UDP) avoids that on a local network.";
   }
   if (ea.installed && ea.env_readable === false) {
     toast("Can't read Asterisk's .env — connection details will be incomplete. Re-run: sudo ./setup.sh security-dashboard", "err");
@@ -3605,6 +3632,14 @@ document.getElementById("ext-add-toggle").addEventListener("click", () => {
 });
 document.getElementById("ext-add-cancel").addEventListener("click", () => {
   extAddForm.classList.remove("open");
+  document.getElementById("ext-add-advanced").classList.remove("open");
+  document.getElementById("ext-add-advanced-toggle").textContent = "Advanced…";
+});
+document.getElementById("ext-add-advanced-toggle").addEventListener("click", () => {
+  const adv = document.getElementById("ext-add-advanced");
+  adv.classList.toggle("open");
+  document.getElementById("ext-add-advanced-toggle").textContent =
+    adv.classList.contains("open") ? "Hide advanced" : "Advanced…";
 });
 document.getElementById("ext-password-dismiss").addEventListener("click", () => {
   document.getElementById("ext-password-callout").classList.remove("show");
@@ -3682,6 +3717,8 @@ document.getElementById("ea-dev-save").addEventListener("click", async () => {
     document.getElementById("ea-dev-ext").value = "";
     document.getElementById("ea-dev-mobile").checked = false;
     extAddForm.classList.remove("open");
+    document.getElementById("ext-add-advanced").classList.remove("open");
+    document.getElementById("ext-add-advanced-toggle").textContent = "Advanced…";
     // The password alone isn't enough to configure a phone — open the full
     // details (server, transport, TURN) immediately rather than making the
     // user hunt for them.
