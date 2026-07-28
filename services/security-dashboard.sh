@@ -841,6 +841,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1834,18 +1835,13 @@ EA_PJSIP_CONTAINER_PATH = "/etc/asterisk/pjsip.conf"
 ASTERISK_EA_ENV = os.environ.get("ASTERISK_EA_ENV", "")
 
 
-def _read_ea_env():
-    """DOMAIN_NAME / TURN_* out of the Asterisk install's .env.
-
-    Everything a softphone needs beyond the extension itself lives here, and
-    it is the single reason the dashboard is granted read on that file (see
-    _secdash_grant_asterisk_access). Missing or unreadable is not an error —
-    the UI just shows what it can and says the rest is unavailable."""
+def _parse_env_file(path):
+    """KEY=value pairs out of a shell-style config file, quotes stripped."""
     values = {}
-    if not ASTERISK_EA_ENV or not os.path.isfile(ASTERISK_EA_ENV):
+    if not path or not os.path.isfile(path):
         return values
     try:
-        with open(ASTERISK_EA_ENV, errors="replace") as f:
+        with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1853,25 +1849,71 @@ def _read_ea_env():
                 key, _, val = line.partition("=")
                 values[key.strip()] = val.strip().strip('"').strip("'")
     except OSError:
-        pass
+        return {}
+    return values
+
+
+def _ea_server_config_path():
+    """Easy Asterisk's own runtime config — /etc/easy-asterisk/config inside
+    the container, which is this directory on the host.
+
+    This, not the host .env, is what the vendored web admin reads for domain
+    and TURN details (see get_server_info() in
+    vendor/easy-asterisk/easy-asterisk-v0.10.0.sh), and it's the reason that
+    page shows them correctly. It's also written by the container's own
+    entrypoint, so it reflects what Asterisk is actually running with rather
+    than what .env asked for — and it sits in a directory this dashboard is
+    already granted read access to for rooms.conf, so it needs no extra
+    permissions, no ACL on a 600 file, and no ProtectSystem exception."""
+    return os.path.join(ASTERISK_EA_CONFIG_DIR, "config") if ASTERISK_EA_CONFIG_DIR else ""
+
+
+def _read_ea_env():
+    """Domain/TURN settings, preferring Easy Asterisk's own config over .env.
+
+    Three sources, in order of how much they reflect reality:
+      1. /etc/easy-asterisk/config  — what the running Asterisk was configured with
+      2. the host .env              — what the installer asked for
+      3. `docker exec cat`          — same file as (1), for when host-side
+                                      permissions get in the way anyway
+    Later sources only fill gaps; they never override a value already found."""
+    values = _parse_env_file(_ea_server_config_path())
+    for key, val in _parse_env_file(ASTERISK_EA_ENV).items():
+        values.setdefault(key, val)
+    if not values.get("TURN_SERVER") or not values.get("DOMAIN_NAME"):
+        ok, out, _err = run_sudo(
+            ["docker", "exec", ASTERISK_EA_CONTAINER, "cat", "/etc/easy-asterisk/config"]
+        ) if ASTERISK_EA_CONTAINER else (False, "", "")
+        if ok and out:
+            for line in out.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if val and not values.get(key):
+                    values[key] = val
     return values
 
 
 def _ea_env_problem():
-    """Why .env couldn't be read, in words, or "" if it was fine.
+    """Why domain/TURN couldn't be found, in words, or "" if they were.
 
-    "not configured" is the wrong message when the truth is "this service was
-    never told where the file is" or "permission denied" — both of which
-    happened in practice and both of which look identical from the UI unless
-    the reason is carried through."""
-    if not ASTERISK_EA_ENV:
-        return ("This service doesn't know where Asterisk's .env is "
-                "(ASTERISK_EA_ENV unset). Re-run: sudo ./setup.sh security-dashboard")
-    if not os.path.isfile(ASTERISK_EA_ENV):
-        return "Asterisk's .env not found at %s" % ASTERISK_EA_ENV
-    if not os.access(ASTERISK_EA_ENV, os.R_OK):
-        return ("No permission to read %s. Re-run: sudo ./setup.sh security-dashboard"
-                % ASTERISK_EA_ENV)
+    "not configured" is the wrong message when the truth is "no source was
+    readable" — and it was, in practice, for a reason no one could see from
+    the page."""
+    sources = [p for p in (_ea_server_config_path(), ASTERISK_EA_ENV) if p]
+    if not sources:
+        return ("This service doesn't know where Asterisk's config lives. "
+                "Re-run: sudo ./setup.sh security-dashboard")
+    existing = [p for p in sources if os.path.isfile(p)]
+    if not existing:
+        return "No Asterisk config found at: " + " or ".join(sources)
+    unreadable = [p for p in existing if not os.access(p, os.R_OK)]
+    if len(unreadable) == len(existing):
+        return ("No permission to read " + " or ".join(unreadable) +
+                ". Re-run: sudo ./setup.sh security-dashboard")
     return ""
 
 
@@ -1887,14 +1929,17 @@ def ea_connection_defaults():
     domain = env.get("DOMAIN_NAME", "")
     problem = _ea_env_problem()
     turn_server = env.get("TURN_SERVER", "")
-    # A readable .env with an empty TURN_SERVER is its own distinct case: the
-    # install simply never set one (LAN-only with no FQDN), which is not an
-    # error and shouldn't read like one.
+    # TURN_SERVER may be bare host:port or just a host; the port defaults to
+    # whatever coturn was given.
+    if turn_server and ":" not in turn_server:
+        turn_server = "%s:%s" % (turn_server, env.get("TURN_PORT", "3478"))
     if not problem and not turn_server:
-        problem = ("TURN_SERVER is empty in %s — set it there and restart Asterisk "
-                   "if this phone needs a relay." % ASTERISK_EA_ENV)
+        problem = ("No TURN_SERVER in %s — this install was set up without one, so "
+                   "phones have no relay to fall back on for NAT traversal."
+                   % (_ea_server_config_path() or ASTERISK_EA_ENV))
     return {
         "domain": domain,
+        "server_ip": _host_ip(),
         "default_conn_type": "fqdn" if domain else "lan",
         "turn_server": turn_server,
         "turn_username": env.get("TURN_USERNAME", ""),
@@ -1902,6 +1947,16 @@ def ea_connection_defaults():
         "env_readable": not _ea_env_problem(),
         "env_error": problem,
     }
+
+
+def _host_ip():
+    """This box's own address, for when no domain is configured — the vendored
+    admin shows the same thing via `hostname -I`."""
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout
+        return out.split()[0] if out.split() else ""
+    except Exception:                                  # noqa: BLE001
+        return ""
 
 
 def ea_device_details(extension):
@@ -1947,7 +2002,8 @@ def ea_device_details(extension):
         "transport": "TLS" if tls else "UDP",
         "port": 5061 if tls else 5060,
         "encryption": device.get("encryption", "no"),
-        "server": conn["domain"] or "",
+        "server": conn["domain"] or conn.get("server_ip", ""),
+        "server_is_ip": not conn["domain"],
         "turn_server": conn["turn_server"],
         "turn_username": conn["turn_username"],
         "turn_password": conn["turn_password"],
@@ -2197,6 +2253,66 @@ def ea_add_device(name, category, extension, conn_type="lan", auto_answer=None):
         "transport": "tls" if conn_type == "fqdn" else "udp",
         "port": 5061 if conn_type == "fqdn" else 5060,
     }
+
+
+def ea_device_provisioning(extension):
+    """Every setting needed to configure a softphone, as a plain text file.
+
+    Deliberately not a vendor-specific provisioning format: Sipnetic, Linphone,
+    Zoiper and Groundwire each want a different one, none of which could be
+    verified from here, and a confidently-wrong .xml is worse than a file you
+    can read. This is the same data the panel shows, in a form that survives
+    being emailed to yourself and opened on the phone."""
+    d = ea_device_details(extension)
+    if not d:
+        return None, None
+    host = d["server"] or "<this box's IP>"
+    lines = [
+        "Easy Asterisk — SIP account details",
+        "Extension %s (%s)" % (d["extension"], d["name"] or "unnamed"),
+        "Generated %s" % time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "",
+        "ACCOUNT",
+        "  SIP server / domain : %s" % host,
+        "  Username            : %s" % d["extension"],
+        "  Auth username       : %s" % d["extension"],
+        "  Password            : %s" % (d["password"] or "(not found in pjsip.conf)"),
+        "  Display name        : %s" % (d["name"] or d["extension"]),
+        "",
+        "TRANSPORT",
+        "  Transport           : %s" % d["transport"],
+        "  Port                : %s" % d["port"],
+        "  Media encryption    : %s" % ("SRTP (%s)" % d["encryption"] if d["encryption"] and d["encryption"] != "no" else "none"),
+        "  SIP URI             : sip:%s@%s:%s;transport=%s" % (
+            d["extension"], host, d["port"], d["transport"].lower()),
+        "",
+        "NAT TRAVERSAL (TURN/STUN)",
+    ]
+    if d["turn_server"]:
+        lines += [
+            "  TURN/STUN server    : %s" % d["turn_server"],
+            "  TURN username       : %s" % d["turn_username"],
+            "  TURN password       : %s" % d["turn_password"],
+            "  ICE                 : enable",
+        ]
+    else:
+        lines += ["  Not configured on this install — leave TURN/STUN off."]
+    lines += [
+        "",
+        "NOTES",
+        "  * This file contains a password. Delete it once the phone is set up.",
+    ]
+    if d.get("server_is_ip"):
+        lines.append("  * No domain is configured, so the address above is this box's IP "
+                     "and the TLS certificate is self-signed — the phone must be told to accept it.")
+    if d["transport"] == "UDP":
+        lines.append("  * This extension is UDP-only. A phone configured for TLS on 5061 "
+                     "will not register against it.")
+    if d.get("mobile"):
+        lines.append("  * Tagged as a mobile/cellular device: RTP keepalive is on to hold "
+                     "the NAT binding open.")
+    return "%s-extension-%s.txt" % (
+        re.sub(r"[^A-Za-z0-9._-]", "-", host), d["extension"]), "\n".join(lines) + "\n"
 
 
 def _ea_edit_device_block(extension, mutate):
@@ -3746,8 +3862,10 @@ async function showEaDeviceDetails(ext) {
   openDetailsExt = ext;
 
   const colspan = anchor.children.length;
-  const server = d.server
-    || "(no domain in Asterisk's .env — use this box's public IP)";
+  const server = d.server || "(unknown — no domain or IP found)";
+  const serverNote = d.server_is_ip
+    ? ' <span class="muted">(no domain configured — using this host address; TLS cert is self-signed)</span>'
+    : "";
   const turn = d.turn_server
     ? `<tr><th>TURN server</th><td><code>${esc(d.turn_server)}</code></td></tr>
        <tr><th>TURN user</th><td><code>${esc(d.turn_username)}</code></td></tr>
@@ -3763,7 +3881,8 @@ async function showEaDeviceDetails(ext) {
         <span class="pill ${d.status === "online" ? "online" : "offline"}">${esc(d.status)}</span>
       </div>
       <table style="margin-top:var(--sp-2)">
-        <tr><th style="width:10rem">SIP server</th><td><code>${esc(server)}</code></td></tr>
+        <tr><th style="width:10rem">SIP server</th><td><code>${esc(server)}</code>${serverNote}</td></tr>
+        <tr><th>SIP URI</th><td><code>sip:${esc(d.extension)}@${esc(server)}:${esc(String(d.port))};transport=${esc(d.transport.toLowerCase())}</code></td></tr>
         <tr><th>Username</th><td><code>${esc(d.extension)}</code></td></tr>
         <tr><th>Password</th><td><code>${esc(d.password || "(not found)")}</code></td></tr>
         <tr><th>Transport</th><td><code>${esc(d.transport)}</code> on port <code>${esc(String(d.port))}</code>${d.encryption && d.encryption !== "no" ? " · SRTP " + esc(d.encryption) : ""}</td></tr>
@@ -3775,6 +3894,7 @@ async function showEaDeviceDetails(ext) {
           Switch to ${d.transport === "TLS" ? "LAN (UDP 5060)" : "Remote/FQDN (TLS 5061)"}
         </button>
         <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
+        <a class="action" style="text-decoration:none" href="/api/ea-device-provisioning?ext=${encodeURIComponent(d.extension)}" download>Download settings</a>
         <button class="action" onclick="closeEaDeviceDetails()">Close</button>
       </div>
       ${d.env_error ? `<p class="muted" style="margin:var(--sp-2) 0 0; color:var(--warn)">${esc(d.env_error)}</p>` : ""}
@@ -4274,6 +4394,21 @@ class Handler(BaseHTTPRequestHandler):
                 payload.update(ea_connection_defaults())
                 payload.pop("turn_password", None)   # not needed until a row asks
             self._json(payload)
+        elif self.path.startswith("/api/ea-device-provisioning?"):
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            filename, body = ea_device_provisioning((qs.get("ext") or [""])[0])
+            if not body:
+                self._json({"error": "not found"}, 404)
+            else:
+                raw = body.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="%s"' % filename)
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
         elif self.path.startswith("/api/ea-device-details?"):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
             details = ea_device_details((qs.get("ext") or [""])[0])
