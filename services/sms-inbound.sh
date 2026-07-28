@@ -60,11 +60,8 @@ _sms_detect_container_name() {
 # ── AMI: a scoped manager.conf user, MessageSend only ───────────────────────
 # Localhost-only (bindaddr + permit below) since the relay runs on this same
 # host, not over the network — no firewall port to open for this. "message"
-# is the AMI permission class MessageSend needs; this hasn't been confirmed
-# against a live MessageSend call yet (see the relay's own comment on
-# ami_deliver) — if the very first real delivery attempt gets an AMI
-# permission error in the journal, widen read/write here first before
-# looking anywhere else.
+# as the AMI permission class is confirmed live: MessageSend succeeds with
+# just read/write = message, no wider class needed.
 #
 # Idempotent: creates manager.conf fresh if absent, otherwise ensures
 # enabled=yes and the [smsrelay] section exist without disturbing anything
@@ -333,21 +330,25 @@ def _ami_read_response(sock_file):
 def ami_deliver(from_number, to_exts, body):
     """Logs into AMI once and sends one MessageSend action per recipient.
 
-    "message" as the AMI permission class is confirmed live (login succeeds).
-    Destination (not To) is what actually resolves an outgoing message's
-    endpoint/technology -- confirmed against this box's own
-    `manager show command MessageSend`: To alone is documented as a
-    backward-compatible fallback for the destination, but live testing
-    (bare "pjsip:212", then "pjsip:212@domain", both for To with no
-    Destination) produced zero SIP wire traffic in either case -- `pjsip
-    set logger on` during a real attempt showed Asterisk never even tried
-    reaching the target's registered contact, so that fallback path isn't
-    actually wired up on this Asterisk version regardless of what the docs
-    promise. Destination's documented "endpoint" form -- bare "pjsip:<ext>",
-    no domain -- resolves via the endpoint's own default aor/contact, which
-    is exactly the live, registered contact `pjsip show contacts` already
-    confirmed exists. Every AMI response is still logged in full so the
-    next attempt is self-diagnosing if this isn't the whole fix either.
+    Confirmed working end-to-end live (2026-07-27): a real inbound text
+    delivered through this exact path landed in Sipnetic with a SIP 200 OK.
+    Two things worth keeping straight if this ever needs touching again:
+
+    - "message" as the AMI permission class is enough on its own (login +
+      MessageSend both succeed with just read/write = message).
+    - Use Destination, not To, to resolve the endpoint. `manager show
+      command MessageSend` documents To-alone as a backward-compatible
+      fallback for the destination when Destination is omitted, but live
+      testing that fallback (bare "pjsip:212", then "pjsip:212@domain",
+      both as To with no Destination) produced zero SIP wire traffic
+      either way -- Asterisk never even attempted to reach the target's
+      registered contact. Destination's documented "endpoint" form (bare
+      "pjsip:<ext>", no domain) is what actually resolves via the
+      endpoint's default aor/contact and is what's used below.
+
+    Every AMI response is still logged in full, since a wrong recipient,
+    an unregistered contact, etc. all still need to be diagnosable from
+    the journal alone.
 
     Returns (delivered_count, total_count)."""
     if not AMI_SECRET:
