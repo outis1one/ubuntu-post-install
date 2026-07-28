@@ -2503,11 +2503,17 @@ Dashboard's Extensions tab, live, no restart needed.
 
 ## Receiving SMS on the trunk DID
 
-Not handled by this service — SMS and voice are configured separately at the
-provider, and inbound SMS doesn't touch Asterisk at all. \`sudo ./setup.sh
-sms-inbound\` sets up verification codes arriving as ntfy push notifications;
-see that service's README for the short-code and mobile-DID caveats that
-decide whether codes actually get through.
+Configured separately at the provider (voice and SMS are independent settings
+on an Anveo DID), then handled by \`sudo ./setup.sh sms-inbound\` — which
+reads THIS service's \`pstn-personal-dids.conf\`/\`pstn-groups.conf\` to work
+out which extension or Ring Group owns the destination DID, exactly as the
+inbound-voice ring logic above does, and delivers the text into Asterisk over
+AMI as a SIP MESSAGE. Install this service first; that one depends on these
+files existing.
+
+See that service's README for the short-code and mobile-DID caveats that
+decide whether codes actually get through, and for why outbound SMS isn't a
+path yet.
 
 ## Managing this from a web UI
 

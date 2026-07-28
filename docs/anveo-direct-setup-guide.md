@@ -297,9 +297,10 @@ them.
 
 Android's Messages app reads the telephony SMS provider, which only the
 cellular radio (or whichever app holds the default-SMS-app role) writes to;
-iOS lets nothing write to Messages at all. Codes arrive as ntfy push
-notifications instead — which, for a passcode you're about to read and type,
-is the more useful place anyway.
+iOS lets nothing write to Messages at all. No SIP client can inject into
+either, so texts to this number arrive in **Sipnetic's own message thread**
+(or whichever softphone is registered to the owning extension) and nowhere
+else. That's a platform limit, not something the delivery path chooses.
 
 ## Provider risk and keeping the number
 
