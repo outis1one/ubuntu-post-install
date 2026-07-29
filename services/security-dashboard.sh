@@ -2721,6 +2721,44 @@ def ea_rename_room(extension, new_name):
     return True, "Room renamed"
 
 
+def ea_update_room_settings(extension, room_type, timeout):
+    """Changes an existing room's type (ring/page) and timeout without
+    touching its name, members, or any DID assignment — the one thing
+    creating or renaming a room couldn't already do: change these two
+    fields after the room exists, rather than only at creation time."""
+    path = _ea_rooms_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "Rooms file not found"
+    room_type = (room_type or "").strip()
+    if room_type not in ("ring", "page"):
+        return False, "Type must be 'ring' or 'page'"
+    timeout = str(timeout or "").strip()
+    if not timeout.isdigit() or int(timeout) <= 0:
+        return False, "Timeout must be a positive number of seconds"
+    with open(path) as f:
+        lines = f.readlines()
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            parts = stripped.split("|")
+            if len(parts) >= 5 and parts[0] == extension:
+                parts[3] = timeout
+                parts[4] = room_type
+                new_lines.append("|".join(parts) + "\n")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        return False, "Room not found"
+    ok, err = ea_docker_write(EA_ROOMS_CONTAINER_PATH, "".join(new_lines))
+    if not ok:
+        return False, err
+    ea_rebuild_dialplan()
+    return True, "Room settings updated"
+
+
 def _ea_update_room_members(extension, new_members):
     path = _ea_rooms_host_path()
     if not path or not os.path.isfile(path):
@@ -4038,15 +4076,32 @@ function renderEaRooms() {
       <td>${esc(r.extension)}</td>
       <td>${esc(r.name)}</td>
       <td>${memberChips || '<span class="muted">none</span>'}<br>${addPicker}</td>
-      <td>${esc(r.timeout)}</td>
-      <td>${esc(r.type)}</td>
+      <td><input type="text" class="room-timeout-input" value="${esc(r.timeout)}" style="width:5rem"></td>
+      <td><select class="room-type-select">
+        <option value="ring" ${r.type === "ring" ? "selected" : ""}>Ring</option>
+        <option value="page" ${r.type === "page" ? "selected" : ""}>Page</option>
+      </select></td>
       <td class="pstn-only">${didCell}</td>
       <td class="actions">
+        <button class="action" onclick="saveEaRoomSettings('${esc(r.extension)}', this)">Save</button>
         <button class="action" onclick="renameEaRoom('${esc(r.extension)}')">Rename</button>
         <button class="action danger" onclick="deleteEaRoom('${esc(r.extension)}')">Delete</button>
       </td>
     </tr>`;
   }).join("") || '<tr><td colspan=7 class=empty>No rooms yet.</td></tr>';
+}
+
+async function saveEaRoomSettings(ext, btn) {
+  const row = btn.closest("tr");
+  const type = row.querySelector(".room-type-select").value;
+  const timeout = row.querySelector(".room-timeout-input").value.trim() || "60";
+  const res = await fetch("/api/ea-rooms/settings", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({extension: ext, type, timeout}),
+  });
+  const data = await res.json();
+  toast(data.message || (data.ok ? "Room settings saved" : "Failed"), data.ok ? "ok" : "err");
+  loadEaRooms();
 }
 
 document.querySelectorAll("#ea-room-table th.sortable").forEach(th => {
@@ -4506,6 +4561,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-rooms/rename":
             ok, message = ea_rename_room(payload.get("extension", ""), payload.get("name", ""))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/ea-rooms/settings":
+            ok, message = ea_update_room_settings(
+                payload.get("extension", ""), payload.get("type", ""), payload.get("timeout", "")
+            )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/ea-rooms/members/add":
             ok, message = ea_add_room_member(payload.get("room", ""), payload.get("device", ""))
