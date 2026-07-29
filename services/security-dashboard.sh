@@ -3209,6 +3209,12 @@ INDEX_HTML = """<!doctype html>
       <summary>Ring Groups <span class="count" id="room-count"></span></summary>
       <div class="card-body">
         <p class="muted">Pick extensions, give them a name, and they ring (or page/auto-answer) together as one dialable extension — and can optionally be assigned a personal number below, so an inbound call to that number rings every current member.</p>
+        <details class="help">
+          <summary>Ring vs Page, and mixing auto-answer devices in one group</summary>
+          <p class="muted"><b>Ring</b> dials every member at once — first to answer gets the call, everyone else stops ringing. <b>Page</b> tells Asterisk to signal auto-answer to every member via SIP headers, for devices that honor it, turning the same simultaneous dial into a one-way intercom-style broadcast instead.</p>
+          <p class="muted">You don't need <b>Page</b> just to mix an auto-answering device with normally-ringing phones in the same group, though — auto-answer is really a property of the device's own SIP client configuration, not something Asterisk enforces per member. A plain <b>Ring</b> group already dials everyone simultaneously, so a device configured to auto-answer (e.g. a dedicated intercom/kiosk running <code>baresip</code> in Answer Mode: Auto) picks up instantly, while ordinary phones in the same group just keep ringing until a person answers — no extra setting needed here for that mix.</p>
+          <p class="muted">For a dedicated always-on auto-answer device (a wall-mounted intercom, a paging station), Easy Asterisk — the vendor project this installer builds on — has a built-in <code>baresip</code>-based kiosk client for exactly that. It installs on a separate small Linux machine (an old PC, a Raspberry Pi), not this Asterisk server itself. See <code>docs/kiosk-paging-setup.md</code> in this repo for the full walkthrough.</p>
+        </details>
         <div class="row" style="margin-bottom:var(--sp-2)">
           <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
           <input type="text" id="ea-room-name" placeholder="Name, e.g. Sales" style="width:10rem">
