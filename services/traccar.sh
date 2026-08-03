@@ -196,14 +196,22 @@ install_traccar() {
         echo "  - Deploy a PostgreSQL database container (Traccar no longer ships H2)"
         echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
-        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols)"
+        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps priority on those)"
         echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
 
     mkdir -p "$TRACCAR_DIR"
-    ensure_docker_dir_ownership "$TRACCAR_DIR"
+    # Non-recursive on purpose — a rerun already has a `db/` full of Postgres's
+    # own data files, owned by whatever uid the postgres container runs as
+    # internally, not $ACTUAL_USER. ensure_docker_dir_ownership's chown -R
+    # would reassign all of those to $ACTUAL_USER, and Postgres can't read
+    # its own files anymore afterward ("could not open file
+    # global/pg_filenode.map: Permission denied") — confirmed live on a
+    # rerun. logs/ and data/ get their own chown -R further down instead;
+    # db/ is never touched by this script again once created.
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR" 2>/dev/null || true
     cd "$TRACCAR_DIR" || return 1
 
     # Reuse an existing DB password across reruns instead of generating a new
@@ -287,8 +295,24 @@ ${_CADDY_NET_BLOCK}    healthcheck:
       - ./data:/opt/traccar/data:rw
     ports:
       - "8082:8082"
-      - "5000-5150:5000-5150"
-      - "5000-5150:5000-5150/udp"
+      # 5038 (AMI), 5060 (SIP, tcp+udp), and 5061 (SIP TLS, tcp) are skipped:
+      # they're Asterisk's ports (services/asterisk.sh runs Asterisk with
+      # network_mode: host, so it binds them directly on the host, not
+      # through Docker networking). Publishing the full 5000-5150 range here
+      # would fight Asterisk for those exact host ports on any box running
+      # both services from this repo. Confirmed live: this is what made
+      # "docker network connect caddy_net traccar" and then a plain
+      # `docker compose up -d` both fail with "failed to bind host port
+      # 0.0.0.0:5038/tcp" and then "...5060/tcp: address already in use" on
+      # a box with Asterisk's PSTN trunk already installed. Checked every
+      # other network_mode: host service in this repo (caddy, homeassistant,
+      # kyber-server, lyrion, mattermost, watchyourlan, wolf-pair, wolf) —
+      # none of them land in 5000-5150, so Asterisk is the only conflict.
+      - "5000-5037:5000-5037"
+      - "5039-5059:5039-5059"
+      - "5062-5150:5062-5150"
+      - "5000-5059:5000-5059/udp"
+      - "5061-5150:5061-5150/udp"
 ${_CADDY_NET_BLOCK}
   autoheal:
     image: willfarrell/autoheal:latest
@@ -319,7 +343,9 @@ TRACCAR_ENV
 
     mkdir -p logs data db
 
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
+    # db/ is deliberately excluded — see the comment on the earlier chown.
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR" docker-compose.yml .env
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" logs data
     log_success "Traccar configured at $TRACCAR_DIR"
 
     configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
@@ -336,7 +362,9 @@ Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
   stays open to anyone who reaches this server until you turn it off, so do
   this right away, then go to Settings → Server → Permissions and uncheck
   Registration.
-- Device protocols: ports 5000-5150 (TCP + UDP)
+- Device protocols: ports 5000-5150 (TCP + UDP; 5038/tcp, 5060/tcp+udp, and
+  5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also
+  runs Asterisk from this repo, which gets priority on those ports)
 - App data: \`data/\` and \`logs/\`
 - Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`)
 - All database settings (name, user, password) live in \`.env\` — Traccar
