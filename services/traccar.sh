@@ -193,6 +193,8 @@ install_traccar() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Traccar would:"
         echo "  - Create $TRACCAR_DIR with docker-compose.yml + config/traccar.xml"
+        echo "  - Deploy a PostgreSQL database container (Traccar no longer ships H2)"
+        echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
         echo "  - Expose port 8082 (web) and 5000-5150 (device protocols)"
         echo "  - Default login: admin@admin.com / admin (change immediately!)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
@@ -202,6 +204,17 @@ install_traccar() {
     mkdir -p "$TRACCAR_DIR"
     ensure_docker_dir_ownership "$TRACCAR_DIR"
     cd "$TRACCAR_DIR" || return 1
+
+    # Reuse an existing DB password across reruns instead of generating a new
+    # one — the Postgres volume keeps the original password from its first
+    # init, so overwriting .env with a fresh one would lock Traccar out.
+    local DB_PASS=""
+    if [ -f ".env" ]; then
+        DB_PASS=$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)
+    fi
+    [ -n "$DB_PASS" ] || DB_PASS=$(generate_password 32)
+
+    local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     local _CADDY_NET_BLOCK=""
     if [ -d "$DOCKER_DIR/caddy" ]; then
@@ -224,11 +237,36 @@ networks:
 name: traccar
 
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: traccar-db
+    hostname: traccar-db
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./db:/var/lib/postgresql/data
+${_CADDY_NET_BLOCK}    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER} -d \${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   traccar:
     image: traccar/traccar:latest
     container_name: traccar
     hostname: traccar
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "autoheal=true"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/8082' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     volumes:
       - ./logs:/opt/traccar/logs:rw
       - ./data:/opt/traccar/data:rw
@@ -237,22 +275,43 @@ services:
       - "8082:8082"
       - "5000-5150:5000-5150"
       - "5000-5150:5000-5150/udp"
-${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
+${_CADDY_NET_BLOCK}
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: traccar-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+${_CADDY_NET_SECTION}
 TRACCAR_COMPOSE
 
-    mkdir -p logs data config
+    cat > .env << TRACCAR_ENV
+TZ=$TZ_VAL
+CADDY_NET=$SITE_CADDY_NET
 
-    cat > config/traccar.xml << 'TRACCAR_XML'
+# PostgreSQL — backs Traccar's database (Traccar's docker image no longer
+# bundles the H2 driver, so a real database is required).
+POSTGRES_DB=traccar
+POSTGRES_USER=traccar
+POSTGRES_PASSWORD=$DB_PASS
+TRACCAR_ENV
+    chmod 600 .env
+
+    mkdir -p logs data config db
+
+    cat > config/traccar.xml << TRACCAR_XML
 <?xml version='1.0' encoding='UTF-8'?>
 
 <!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
 
 <properties>
     <entry key='config.default'>./conf/default.xml</entry>
-    <entry key='database.driver'>org.h2.Driver</entry>
-    <entry key='database.url'>jdbc:h2:/opt/traccar/data/database</entry>
-    <entry key='database.user'>sa</entry>
-    <entry key='database.password'></entry>
+    <entry key='database.driver'>org.postgresql.Driver</entry>
+    <entry key='database.url'>jdbc:postgresql://traccar-db:5432/traccar?sslmode=disable</entry>
+    <entry key='database.user'>traccar</entry>
+    <entry key='database.password'>$DB_PASS</entry>
 </properties>
 TRACCAR_XML
 
@@ -272,6 +331,8 @@ Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
 - Device protocols: ports 5000-5150 (TCP + UDP)
 - Config: \`config/traccar.xml\`
 - App data: \`data/\` and \`logs/\`
+- Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`, credentials in \`.env\`)
+- Autoheal: \`traccar-autoheal\` restarts the \`traccar\` container if its healthcheck fails
 
 ## Manage
 \`\`\`bash
