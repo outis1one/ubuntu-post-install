@@ -203,7 +203,15 @@ install_traccar() {
     fi
 
     mkdir -p "$TRACCAR_DIR"
-    ensure_docker_dir_ownership "$TRACCAR_DIR"
+    # Non-recursive on purpose — a rerun already has a `db/` full of Postgres's
+    # own data files, owned by whatever uid the postgres container runs as
+    # internally, not $ACTUAL_USER. ensure_docker_dir_ownership's chown -R
+    # would reassign all of those to $ACTUAL_USER, and Postgres can't read
+    # its own files anymore afterward ("could not open file
+    # global/pg_filenode.map: Permission denied") — confirmed live on a
+    # rerun. logs/ and data/ get their own chown -R further down instead;
+    # db/ is never touched by this script again once created.
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR" 2>/dev/null || true
     cd "$TRACCAR_DIR" || return 1
 
     # Reuse an existing DB password across reruns instead of generating a new
@@ -335,7 +343,9 @@ TRACCAR_ENV
 
     mkdir -p logs data db
 
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
+    # db/ is deliberately excluded — see the comment on the earlier chown.
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR" docker-compose.yml .env
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" logs data
     log_success "Traccar configured at $TRACCAR_DIR"
 
     configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
