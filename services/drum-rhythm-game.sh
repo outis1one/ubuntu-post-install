@@ -191,7 +191,7 @@ install_drum-rhythm-game() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] drum-rhythm-game would:"
         echo "  - Clone $REPO_URL to $DRUM_DIR/html"
-        echo "  - Serve index.html via nginx on port 8096"
+        echo "  - Build the repo's own Dockerfile (nginx, gzip, /healthz) on port 8096"
         echo "  - Offer Authelia SSO protection via Caddy (no built-in auth)"
         return 0
     fi
@@ -236,12 +236,11 @@ name: drum-rhythm-game
 
 services:
   drum-rhythm-game:
-    image: nginx:alpine
+    build:
+      context: ./html
     container_name: drum-rhythm-game
     hostname: drum-rhythm-game
     restart: unless-stopped
-    volumes:
-      - ./html:/usr/share/nginx/html:ro
     ports:
       - "8096:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
@@ -266,9 +265,19 @@ DRUM_ENV
     write_readme "$DRUM_DIR" << 'MD'
 # Drum Rhythm Game
 
-Browser-based drum rhythm game — 124 synthesized orchestra pieces across
-18 genres, 120 drum patterns. Supports keyboard and USB drum controllers.
-No server required; all audio synthesized in-browser via Web Audio API.
+Browser-based drum rhythm game — 18 genres covering 119 synth-orchestra
+songs (nursery rhymes, sea shanties, Christmas, folk, spirituals, world,
+ragtime, classical, video game themes, chiptune originals) plus 120 drum
+beat patterns across 8 genres (rock, metal, jazz, hip hop, funk, latin,
+electronic, country). Supports keyboard, Wii/Xbox/PS Rock Band drums,
+Guitar Hero drums, or any USB gamepad via the in-game Remap Pads button.
+Multiplayer take-turns mode, adjustable speed/volume, and a leaderboard —
+all state lives in browser localStorage. No server required; all audio is
+synthesized in-browser via the Web Audio API.
+
+Built and served from the repo's own `Dockerfile` (nginx + gzip + a
+`/healthz` endpoint) — only `index.html` ends up in the image, so the
+repo's docs/license/dev files never get served.
 
 Source: https://github.com/outis1one/drum-rhythm-game
 
@@ -287,22 +296,22 @@ docker compose logs -f    # logs
 ```bash
 cd ~/docker/drum-rhythm-game
 git -C html pull
-docker compose restart
+docker compose up -d --build
 ```
 MD
 
     local START_DRUM=""
     prompt_yn "Start drum-rhythm-game now? (y/n):" "y" START_DRUM
     if [ "$START_DRUM" = "y" ] || [ "$START_DRUM" = "Y" ]; then
-        docker compose up -d \
+        docker compose up -d --build \
             && log_success "Drum Rhythm Game started — http://localhost:8096" \
             || log_warning "Start failed — check: docker compose logs"
     fi
 
     echo ""
     echo "  URL:         http://localhost:8096"
-    echo "  Controls:    keyboard or USB drum controller"
-    echo "  Update:      git -C $DRUM_DIR/html pull && docker compose -f $DRUM_DIR/docker-compose.yml restart"
+    echo "  Controls:    keyboard, USB Rock Band/Guitar Hero drums, or any USB gamepad (Remap Pads in-game)"
+    echo "  Update:      git -C $DRUM_DIR/html pull && docker compose -f $DRUM_DIR/docker-compose.yml up -d --build"
     echo ""
 }
 
