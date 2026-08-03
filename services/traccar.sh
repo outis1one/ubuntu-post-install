@@ -192,9 +192,12 @@ install_traccar() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Traccar would:"
-        echo "  - Create $TRACCAR_DIR with docker-compose.yml + config/traccar.xml"
+        echo "  - Create $TRACCAR_DIR with docker-compose.yml + .env"
+        echo "  - Deploy a PostgreSQL database container (Traccar no longer ships H2)"
+        echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
+        echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
         echo "  - Expose port 8082 (web) and 5000-5150 (device protocols)"
-        echo "  - Default login: admin@admin.com / admin (change immediately!)"
+        echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
@@ -203,15 +206,33 @@ install_traccar() {
     ensure_docker_dir_ownership "$TRACCAR_DIR"
     cd "$TRACCAR_DIR" || return 1
 
+    # Reuse an existing DB password across reruns instead of generating a new
+    # one — the Postgres volume keeps the original password from its first
+    # init, so overwriting .env with a fresh one would lock Traccar out.
+    local DB_PASS=""
+    if [ -f ".env" ]; then
+        DB_PASS=$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)
+    fi
+    [ -n "$DB_PASS" ] || DB_PASS=$(generate_password 32)
+
+    local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh)
+    # so this matches whatever Caddy setup the site actually has: an explicit
+    # CADDY_MODE from the site config wins, then a local ~/docker/caddy, then
+    # the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a remote
+    # Caddy box can't resolve container names on this host's bridge network
+    # anyway, it reaches Traccar via this host's published 8082 port instead.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     local _CADDY_NET_BLOCK=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
+    local _CADDY_NET_SECTION=""
+    if [ "$_CADDY_MODE" = "local" ]; then
         _CADDY_NET_BLOCK="    networks:
       - caddy_net
 "
-    fi
-
-    local _CADDY_NET_SECTION=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
         _CADDY_NET_SECTION="
 networks:
   caddy_net:
@@ -224,37 +245,79 @@ networks:
 name: traccar
 
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: traccar-db
+    hostname: traccar-db
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./db:/var/lib/postgresql/data
+${_CADDY_NET_BLOCK}    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER} -d \${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   traccar:
     image: traccar/traccar:latest
     container_name: traccar
     hostname: traccar
     restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - "autoheal=true"
+    environment:
+      CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
+      DATABASE_DRIVER: org.postgresql.Driver
+      DATABASE_URL: jdbc:postgresql://traccar-db:5432/\${POSTGRES_DB}?sslmode=disable
+      DATABASE_USER: \${POSTGRES_USER}
+      DATABASE_PASSWORD: \${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/api/health"]
+      interval: 2m
+      timeout: 5s
+      start_period: 1h
+      retries: 3
     volumes:
       - ./logs:/opt/traccar/logs:rw
       - ./data:/opt/traccar/data:rw
-      - ./config/traccar.xml:/opt/traccar/conf/traccar.xml:ro
     ports:
       - "8082:8082"
       - "5000-5150:5000-5150"
       - "5000-5150:5000-5150/udp"
-${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
+${_CADDY_NET_BLOCK}
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: traccar-autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: 60
+      AUTOHEAL_START_PERIOD: 3600
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+${_CADDY_NET_SECTION}
 TRACCAR_COMPOSE
 
-    mkdir -p logs data config
+    cat > .env << TRACCAR_ENV
+TZ=$TZ_VAL
+CADDY_NET=$SITE_CADDY_NET
 
-    cat > config/traccar.xml << 'TRACCAR_XML'
-<?xml version='1.0' encoding='UTF-8'?>
+# PostgreSQL — backs Traccar's database (Traccar's docker image no longer
+# bundles the H2 driver, so a real database is required). Traccar reads
+# these directly (CONFIG_USE_ENVIRONMENT_VARIABLES in docker-compose.yml)
+# instead of a config file, so this is the only place the credentials live.
+POSTGRES_DB=traccar
+POSTGRES_USER=traccar
+POSTGRES_PASSWORD=$DB_PASS
+TRACCAR_ENV
+    chmod 600 .env
 
-<!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
-
-<properties>
-    <entry key='config.default'>./conf/default.xml</entry>
-    <entry key='database.driver'>org.h2.Driver</entry>
-    <entry key='database.url'>jdbc:h2:/opt/traccar/data/database</entry>
-    <entry key='database.user'>sa</entry>
-    <entry key='database.password'></entry>
-</properties>
-TRACCAR_XML
+    mkdir -p logs data db
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR"
     log_success "Traccar configured at $TRACCAR_DIR"
@@ -268,10 +331,19 @@ GPS tracking server. Track phones, vehicles, and assets via the Traccar
 Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
 
 - Web UI: http://localhost:8082
-- Default login: admin@admin.com / admin  (change immediately!)
+- No default login — Traccar ships with no built-in account. Open the web UI
+  and register the first user; it's automatically made admin. Self-registration
+  stays open to anyone who reaches this server until you turn it off, so do
+  this right away, then go to Settings → Server → Permissions and uncheck
+  Registration.
 - Device protocols: ports 5000-5150 (TCP + UDP)
-- Config: \`config/traccar.xml\`
 - App data: \`data/\` and \`logs/\`
+- Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`)
+- All database settings (name, user, password) live in \`.env\` — Traccar
+  reads them directly via env vars, nothing is duplicated in a config file.
+  Change the password there (then recreate both containers) if you need to
+  rotate it.
+- Autoheal: \`traccar-autoheal\` restarts the \`traccar\` container if its healthcheck fails
 
 ## Manage
 \`\`\`bash
@@ -295,7 +367,8 @@ MD
 
     echo ""
     echo "  Access at:  http://localhost:8082"
-    echo "  Default:    admin@admin.com / admin  (change immediately!)"
+    echo "  No default login — register the first account now; it becomes admin."
+    echo "  Then disable further registration: Settings → Server → Permissions."
     echo ""
 }
 

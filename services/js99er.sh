@@ -436,15 +436,21 @@ NGINXCONF
     # ── 4. Standalone docker-compose.yml (per-service folder) ────────────────
     # Only join caddy_net if Caddy is installed — otherwise the network doesn't
     # exist and docker compose up will fail with "network not found".
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a
+    # remote Caddy box can't resolve container names on this host's bridge
+    # network anyway; it reaches this service via the host's published port.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     local _CADDY_NET_BLOCK=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
+    local _CADDY_NET_SECTION=""
+    if [ "$_CADDY_MODE" = "local" ]; then
         _CADDY_NET_BLOCK="    networks:
       - caddy_net
 "
-    fi
-
-    local _CADDY_NET_SECTION=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
         _CADDY_NET_SECTION="
 networks:
   caddy_net:

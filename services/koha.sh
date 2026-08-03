@@ -346,9 +346,18 @@ install_koha() {
     ensure_docker_dir_ownership "$KOHA_DIR"
     cd "$KOHA_DIR" || return 1
 
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a
+    # remote Caddy box can't resolve container names on this host's bridge
+    # network anyway; it reaches Koha via the host's published ports.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     local _CADDY_NET_ENTRY=""
     local _CADDY_NET_SECTION=""
-    if [ -d "$DOCKER_DIR/caddy" ]; then
+    if [ "$_CADDY_MODE" = "local" ]; then
         _CADDY_NET_ENTRY="      - caddy_net
 "
         _CADDY_NET_SECTION="  caddy_net:

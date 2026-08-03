@@ -218,7 +218,15 @@ GPUEOF
 
     # ── Caddy (Open WebUI has built-in auth — no Authelia) ────────────────────
     # The generated compose doesn't join caddy_net, so attach the container by name.
-    if [ -d "$DOCKER_DIR/caddy" ] && [ "$INSTALLER_RAN" = true ]; then
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a
+    # remote Caddy box can't reach this container by name over a bridge network
+    # it isn't on anyway.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+    if [ "$_CADDY_MODE" = "local" ] && [ "$INSTALLER_RAN" = true ]; then
         docker network connect "$SITE_CADDY_NET" open-webui 2>/dev/null || true
     fi
     configure_caddy_for_service "Open WebUI" "open-webui:8080" "ai"

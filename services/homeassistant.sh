@@ -199,6 +199,15 @@ install_homeassistant() {
     ensure_docker_dir_ownership "$HOMEASSISTANT_DIR"
     cd "$HOMEASSISTANT_DIR" || return 1
 
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a
+    # remote Caddy box can't resolve container names on this host's bridge
+    # network anyway; it reaches Home Assistant via the host's published port.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     # Networking mode: bridge (published port) vs host networking.
     echo ""
     echo "  Home Assistant networking mode:"
@@ -218,7 +227,7 @@ install_homeassistant() {
     else
         HA_NET_LINES="    ports:
       - \"8123:8123\""
-        if [ -d "$DOCKER_DIR/caddy" ]; then
+        if [ "$_CADDY_MODE" = "local" ]; then
             HA_CADDY_NET_LINES="    networks:
       - caddy_net"
         else
@@ -228,7 +237,7 @@ install_homeassistant() {
     fi
 
     local _CADDY_NET_SECTION=""
-    if [ "$HA_NETMODE" != "2" ] && [ -d "$DOCKER_DIR/caddy" ]; then
+    if [ "$HA_NETMODE" != "2" ] && [ "$_CADDY_MODE" = "local" ]; then
         _CADDY_NET_SECTION="
 networks:
   caddy_net:
