@@ -197,7 +197,7 @@ install_traccar() {
         echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
         echo "  - Expose port 8082 (web) and 5000-5150 (device protocols)"
-        echo "  - Default login: admin@admin.com / admin (change immediately!)"
+        echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
@@ -331,7 +331,11 @@ GPS tracking server. Track phones, vehicles, and assets via the Traccar
 Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
 
 - Web UI: http://localhost:8082
-- Default login: admin@admin.com / admin  (change immediately!)
+- No default login — Traccar ships with no built-in account. Open the web UI
+  and register the first user; it's automatically made admin. Self-registration
+  stays open to anyone who reaches this server until you turn it off, so do
+  this right away, then go to Settings → Server → Permissions and uncheck
+  Registration.
 - Device protocols: ports 5000-5150 (TCP + UDP)
 - App data: \`data/\` and \`logs/\`
 - Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`)
@@ -363,7 +367,8 @@ MD
 
     echo ""
     echo "  Access at:  http://localhost:8082"
-    echo "  Default:    admin@admin.com / admin  (change immediately!)"
+    echo "  No default login — register the first account now; it becomes admin."
+    echo "  Then disable further registration: Settings → Server → Permissions."
     echo ""
 }
 
