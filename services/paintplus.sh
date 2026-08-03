@@ -127,12 +127,21 @@ install_paintplus() {
     mkdir -p data
     ensure_docker_dir_ownership "$PP_DIR"
 
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var. Only "local" joins caddy_net — a
+    # remote Caddy box can't reach this container by name over a bridge network
+    # it isn't on anyway.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     # ── Caddy network override (cloud mode) ───────────────────────────────────
     # The base compose has no networks, so Caddy (on caddy_net) can't reach the
     # container by name. This override — auto-merged with the default compose —
     # attaches the app to caddy_net. The GPU compose runs with an explicit -f and
     # does NOT merge overrides, so GPU mode is wired with `docker network connect`.
-    if [[ "$PP_MODE" != "2" ]] && [ -d "$DOCKER_DIR/caddy" ]; then
+    if [[ "$PP_MODE" != "2" ]] && [ "$_CADDY_MODE" = "local" ]; then
         cat > docker-compose.override.yml << OVR
 # Added by ubuntu-post-install so Caddy (on caddy_net) can reach this app by name.
 services:
@@ -172,7 +181,7 @@ OVR
 
     # Ensure the running container is on caddy_net (covers GPU mode, where the
     # override file above is not merged by the app's bring-up script).
-    if [ -d "$DOCKER_DIR/caddy" ] && [[ "$START_PP" =~ ^[Yy]$ ]]; then
+    if [ "$_CADDY_MODE" = "local" ] && [[ "$START_PP" =~ ^[Yy]$ ]]; then
         docker network connect "$SITE_CADDY_NET" paintplus 2>/dev/null || true
     fi
 

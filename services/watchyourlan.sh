@@ -161,9 +161,13 @@ WYL_ENV
     log_success "WatchYourLAN configured at $WYL_DIR"
 
     # WatchYourLAN uses network_mode: host, so Caddy container-name routing
-    # can't reach it via caddy_net. Access is directly on host port $GUI_PORT.
-    # If behind Caddy on the same host, configure manually with host IP:PORT.
-    if [ -d "$DOCKER_DIR/caddy" ]; then
+    # can't reach it via caddy_net regardless of where Caddy runs. Access is
+    # directly on host port $GUI_PORT. Mirrors configure_caddy_for_service's
+    # own mode resolution (lib/common.sh) purely to word this note correctly.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+    if [ "$_CADDY_MODE" != "none" ]; then
         echo ""
         log_info "Note: WatchYourLAN uses host networking (needed for ARP scanning)."
         log_info "It cannot join caddy_net. To put it behind Caddy, add this block manually:"
@@ -172,7 +176,11 @@ WYL_ENV
         echo "      reverse_proxy <HOST_IP>:$GUI_PORT"
         echo "  }"
         echo ""
-        echo "  where HOST_IP is this server's IP on the Docker bridge (usually 172.17.0.1)."
+        if [ "$_CADDY_MODE" = "remote" ]; then
+            echo "  where HOST_IP is this server's real network IP (Caddy is on a different box)."
+        else
+            echo "  where HOST_IP is this server's IP on the Docker bridge (usually 172.17.0.1)."
+        fi
     fi
 
     write_readme "$WYL_DIR" << MD

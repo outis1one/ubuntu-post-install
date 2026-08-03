@@ -581,6 +581,52 @@ CBLOCK
     fi
 }
 
+# Remote-Caddy counterpart to _sms_configure_caddy — same site block, but a
+# remote Caddy box can't resolve host.docker.internal (that hostname only
+# works via the extra_hosts entry a LOCAL Caddy container gets) and isn't on
+# this host's Docker bridge at all, so it has to reach the relay over this
+# host's own IP and published port instead. Mirrors the snippet-file pattern
+# configure_caddy_for_service uses for every other service (lib/common.sh).
+_sms_write_caddy_snippet() {
+    local _domain="$1" _port="$2"
+
+    local _this_ip="${CADDY_REMOTE_HOST:-}"
+    [ -z "$_this_ip" ] && _this_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [ -z "$_this_ip" ] && _this_ip="$(hostname -f 2>/dev/null || echo "127.0.0.1")"
+
+    local _snippet_dir="$DOCKER_DIR/caddy-snippets"
+    local _snippet_file="$_snippet_dir/sms-inbound.caddy"
+    mkdir -p "$_snippet_dir"
+
+    cat > "$_snippet_file" << CBLOCK
+
+# Inbound SMS webhook (sms-inbound) — deliberately NOT behind Authelia:
+# the SMS provider calls this unauthenticated. The secret is the token in
+# the request path, checked by the relay itself.
+${_domain} {
+    reverse_proxy ${_this_ip}:${_port}
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+
+    log {
+        output file /var/log/caddy/${_domain}.log
+        format json
+    }
+}
+CBLOCK
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$_snippet_file" 2>/dev/null || true
+
+    log_success "Snippet saved: $_snippet_file"
+    log_info "Copy to your Caddy machine and append to its Caddyfile:"
+    log_info "  scp $_snippet_file caddy-host:~/caddy-snippets/"
+    log_info "  cat ~/caddy-snippets/sms-inbound.caddy >> /path/to/Caddyfile"
+    log_info "  docker restart caddy   # reload API is disabled by default"
+}
+
 _sms_write_readme() {
     local _url="$1" _relay_domain="$2"
     write_readme "$SMS_APP_DIR" << MD
@@ -817,24 +863,36 @@ install_sms-inbound() {
     [[ -n "${SITE_DOMAIN:-}" && "$SITE_DOMAIN" != "example.com" ]] && _default_domain="sms.${SITE_DOMAIN}"
     prompt_text "Public domain for the webhook (A record must point here) [${_default_domain:-required}]:" "$_default_domain" RELAY_DOMAIN
 
+    # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
+    # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
+    # then the legacy CADDY_REMOTE_HOST var.
+    local _CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _CADDY_MODE="local"
+    [ "$_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _CADDY_MODE="remote"
+
     if [[ -z "$RELAY_DOMAIN" ]]; then
         log_warning "No domain entered — the relay is running but nothing can reach it yet."
         log_warning "Re-run this service once DNS is ready, or front it with Caddy by hand."
-    elif [[ -d "$DOCKER_DIR/caddy" ]]; then
+    elif [ "$_CADDY_MODE" = "local" ]; then
         _sms_configure_caddy "$RELAY_DOMAIN" "$RELAY_PORT"
+    elif [ "$_CADDY_MODE" = "remote" ]; then
+        _sms_write_caddy_snippet "$RELAY_DOMAIN" "$RELAY_PORT"
     else
         log_warning "Caddy isn't installed here — proxy https://${RELAY_DOMAIN} to"
         log_warning "127.0.0.1:${RELAY_PORT} yourself, with a real certificate."
     fi
 
     if command -v ufw &>/dev/null; then
-        if [[ -d "$DOCKER_DIR/caddy" ]]; then
+        if [ "$_CADDY_MODE" = "local" ]; then
             # Caddy reaches this over the caddy_net bridge, so the port has
             # no business being open to the internet — but a bare `ufw
             # delete allow` would block Caddy too (see CLAUDE.md).
             ufw delete allow "${RELAY_PORT}/tcp" 2>/dev/null || true
             ufw_allow_from_caddy_net "${RELAY_PORT}"
         else
+            # No local Caddy to hide behind — a remote Caddy box needs to
+            # reach this port over the network, and with no Caddy at all the
+            # provider needs to reach it directly. Either way it stays open.
             ufw allow "${RELAY_PORT}/tcp"
         fi
         ensure_ufw_enabled
