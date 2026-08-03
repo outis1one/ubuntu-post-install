@@ -196,7 +196,7 @@ install_traccar() {
         echo "  - Deploy a PostgreSQL database container (Traccar no longer ships H2)"
         echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
-        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/tcp skipped — Asterisk AMI)"
+        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps priority on those)"
         echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
@@ -287,17 +287,24 @@ ${_CADDY_NET_BLOCK}    healthcheck:
       - ./data:/opt/traccar/data:rw
     ports:
       - "8082:8082"
-      # 5038/tcp is skipped: it's Asterisk's AMI port (services/asterisk.sh
-      # runs Asterisk with network_mode: host, so AMI binds it directly on
-      # the host, not through Docker networking). Publishing the full
-      # 5000-5150 range here would fight Asterisk for that exact host port
-      # on any box running both services from this repo. Confirmed live:
-      # this is what made "docker network connect caddy_net traccar" fail
-      # with "failed to bind host port 0.0.0.0:5038/tcp: address already in
-      # use" on a box with Asterisk's PSTN trunk already installed.
+      # 5038 (AMI), 5060 (SIP, tcp+udp), and 5061 (SIP TLS, tcp) are skipped:
+      # they're Asterisk's ports (services/asterisk.sh runs Asterisk with
+      # network_mode: host, so it binds them directly on the host, not
+      # through Docker networking). Publishing the full 5000-5150 range here
+      # would fight Asterisk for those exact host ports on any box running
+      # both services from this repo. Confirmed live: this is what made
+      # "docker network connect caddy_net traccar" and then a plain
+      # `docker compose up -d` both fail with "failed to bind host port
+      # 0.0.0.0:5038/tcp" and then "...5060/tcp: address already in use" on
+      # a box with Asterisk's PSTN trunk already installed. Checked every
+      # other network_mode: host service in this repo (caddy, homeassistant,
+      # kyber-server, lyrion, mattermost, watchyourlan, wolf-pair, wolf) —
+      # none of them land in 5000-5150, so Asterisk is the only conflict.
       - "5000-5037:5000-5037"
-      - "5039-5150:5039-5150"
-      - "5000-5150:5000-5150/udp"
+      - "5039-5059:5039-5059"
+      - "5062-5150:5062-5150"
+      - "5000-5059:5000-5059/udp"
+      - "5061-5150:5061-5150/udp"
 ${_CADDY_NET_BLOCK}
   autoheal:
     image: willfarrell/autoheal:latest
@@ -345,8 +352,9 @@ Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
   stays open to anyone who reaches this server until you turn it off, so do
   this right away, then go to Settings → Server → Permissions and uncheck
   Registration.
-- Device protocols: ports 5000-5150 (TCP + UDP; 5038/tcp is skipped — reserved
-  for Asterisk's AMI if this box also runs Asterisk from this repo)
+- Device protocols: ports 5000-5150 (TCP + UDP; 5038/tcp, 5060/tcp+udp, and
+  5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also
+  runs Asterisk from this repo, which gets priority on those ports)
 - App data: \`data/\` and \`logs/\`
 - Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`)
 - All database settings (name, user, password) live in \`.env\` — Traccar
