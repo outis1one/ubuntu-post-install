@@ -223,7 +223,17 @@ EOF
     echo "    Paste that path into Kyber's SET GAME FOLDER dialog."
     echo ""
     echo "  Troubleshooting — 'Origin Error: language not entitled':"
-    echo "    See README.md Gaming section for the registry fix."
+    echo "    See $INSTALL_DIR/README.md for the registry fix."
+
+    write_readme "$INSTALL_DIR" << MD
+# Kyber Launcher
+
+Native Linux AppImage client for SWBF2 (2017) community multiplayer.
+
+- Launch: \`kyber\` (terminal) or search "Kyber Launcher" in the app menu
+- AppImage: $APPIMAGE_PATH
+- Update: re-run \`sudo ./setup.sh kyber-launcher\`
+MD
 }
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
@@ -246,6 +256,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
             read -r -p "  $_q " _r
             eval "$_var='${_r:-$_def}'"
+        }
+
+        write_readme() {
+            local _dir="$1"; shift
+            mkdir -p "$_dir"
+            cat > "$_dir/README.md"
         }
 
         ACTUAL_USER="${SUDO_USER:-$USER}"
