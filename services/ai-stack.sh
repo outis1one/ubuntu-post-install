@@ -1,8 +1,8 @@
 #!/bin/bash
 # services/ai-stack.sh — Local AI Stack: a full self-hosted AI environment.
 #
-# Vendored from github.com/outis1one/local-ai into this repo under ./ai-stack and
-# copied to ~/docker/ai-stack at install time (no network clone). Bundles:
+# Vendored from github.com/outis1one/local-ai into this repo under vendor/ai-stack
+# and copied to ~/docker/ai-stack at install time (no network clone). Bundles:
 #   Ollama · Open WebUI · RAG + MCP servers · ChromaDB · SearXNG · Kiwix ·
 #   Gitea · InvokeAI · ComfyUI · Portainer
 #
@@ -26,7 +26,7 @@ install_ai-stack() {
     # Vendored application source lives in this repo at <repo>/ai-stack
     local SELF_DIR SRC_DIR
     SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    SRC_DIR="$(cd "$SELF_DIR/.." && pwd)/ai-stack"
+    SRC_DIR="$(cd "$SELF_DIR/.." && pwd)/vendor/ai-stack"
 
     local AS_DIR="$DOCKER_DIR/ai-stack"
 

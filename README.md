@@ -176,6 +176,9 @@ backup
 setup.sh          dispatcher — wizard, direct install, --list, --dry-run
 lib/common.sh     shared helpers: logging, prompts, site config, OS detection
 services/         one file per service (self-registering)
+vendor/           full app source trees vendored for a service (e.g. ai-stack,
+                  paintplus, easy-asterisk) — copied into place at install time,
+                  no network clone needed
 extras/           non-Docker assets bundled with the repo (e.g. sync_cc.py)
 CLAUDE.md         contributor guide — how to add services, available helpers
 ```

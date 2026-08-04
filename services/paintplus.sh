@@ -2,8 +2,8 @@
 # services/paintplus.sh — PaintPlus: self-hosted AI photo editor. Paint a mask over
 # an object, describe the change, and AI replaces only that region.
 #
-# The full application source is vendored in this repo under ./paintplus and is
-# copied to ~/docker/paintplus/src at install time (no network clone).
+# The full application source is vendored in this repo under vendor/paintplus
+# and is copied to ~/docker/paintplus/src at install time (no network clone).
 # Based on EditmaskwithAI (github.com/outis1one/EditmaskwithAI).
 # Part of the modular post-install system (sourced by setup.sh).
 #
@@ -25,7 +25,7 @@ install_paintplus() {
     # Vendored application source lives in this repo at <repo>/paintplus
     local SELF_DIR SRC_DIR
     SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    SRC_DIR="$(cd "$SELF_DIR/.." && pwd)/paintplus"
+    SRC_DIR="$(cd "$SELF_DIR/.." && pwd)/vendor/paintplus"
 
     local PP_DIR="$DOCKER_DIR/paintplus"
     local APP_DIR="$PP_DIR/src"
