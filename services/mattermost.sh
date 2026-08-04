@@ -379,7 +379,31 @@ Team messaging with voice/video calls. PostgreSQL backend + coturn TURN relay.
 
 ## Access
 - URL: $SITE_URL (or http://localhost:8065)
-- First run: create admin account at the URL above
+- First run: create admin account at the URL above — this account becomes
+  System Admin automatically.
+
+## Teams
+Team Edition (the free edition this installer uses) includes multiple Teams
+natively — separate spaces (their own channels, their own members) on the
+same server, same database, same login. No Enterprise license needed; this
+is the resource-efficient alternative to running a second Mattermost
+instance for a second group.
+
+Create one:
+- Click the **+** at the bottom of the team sidebar (the narrow column on
+  the far left) → **Create a new team**, or
+- System Console → User Management → Teams → **Create Team**
+
+Add people to a team:
+- Team name (top-left) → **Invite People** → share the invite link, or send
+  email invites (requires SMTP — System Console → Environment → SMTP), or
+- System Console → User Management → Teams → the team → **Add Members**
+  (adds existing server accounts directly, no invite flow)
+
+Users can belong to more than one team and switch between them via the team
+sidebar icons. By default any user can create a team — restrict that at
+System Console → User Management → Permissions if you only want admins
+creating them.
 
 ## Voice/Video Calls (Calls plugin)
 Port 8443/udp must be open on your router/firewall.
@@ -413,6 +437,8 @@ MD
     echo ""
     echo "  Access at:  $SITE_URL"
     echo "  First run:  open the URL above and create your admin account."
+    echo "  Teams:      team sidebar '+' → Create a new team (see README.md — no"
+    echo "              Enterprise license needed, Team Edition includes this)."
     echo "  Calls plugin: System Console → Plugins → Calls to configure coturn."
     echo "    TURN URI:    turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp"
     echo "    Auth secret: see COTURN_SECRET in $DIR/.env"
