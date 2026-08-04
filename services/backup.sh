@@ -452,6 +452,40 @@ install_backup() {
     if [ -n "$NTFY_URL" ]; then
         prompt_text "  ntfy access token (blank if public/no auth):" "" NTFY_TOKEN
     fi
+
+    # ── Disaster-recovery spare box (optional) ────────────────────────────────
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  DISASTER-RECOVERY SPARE (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  If you keep a spare box ready to take over on failure (running"
+    echo "  dr_bringup.sh), this can push backup.conf + README.md to it after"
+    echo "  every successful backup, so it's always ready without a manual copy."
+    echo ""
+    echo "  Requires passwordless SSH (key-based) from THIS box to the spare,"
+    echo "  as the account below. Since the backup timer runs as root, that"
+    echo "  usually means a key in /root/.ssh authorized on the spare — set that"
+    echo "  up first if you haven't (ssh-keygen, then ssh-copy-id to the spare)."
+    echo ""
+    local DR_SYNC_HOST="" DR_SYNC_PATH=""
+    prompt_text "  Spare box SSH destination, user@host (blank to skip):" "" DR_SYNC_HOST
+    if [ -n "$DR_SYNC_HOST" ]; then
+        prompt_text "  Path for backup.conf/README on the spare:" "~/docker/backup" DR_SYNC_PATH
+        DR_SYNC_PATH="${DR_SYNC_PATH:-~/docker/backup}"
+
+        # Catch a missing/unauthorized key now, not at 2am during the first
+        # scheduled backup. Non-fatal either way — the setting is saved
+        # regardless, since the key may simply not be set up yet.
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 "$DR_SYNC_HOST" true 2>/dev/null; then
+            log_success "  SSH to $DR_SYNC_HOST works — spare sync will run after each backup."
+        else
+            log_warning "  Couldn't SSH to $DR_SYNC_HOST without a password right now."
+            log_warning "  Spare sync is saved but will fail until this works (as root, since"
+            log_warning "  the backup timer runs as root): ssh-keygen; ssh-copy-id $DR_SYNC_HOST"
+        fi
+    fi
+
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
 
@@ -531,6 +565,14 @@ install_backup() {
         echo "# Leave blank to disable. NTFY_TOKEN is optional (for private topics)."
         printf "NTFY_URL='%s'\n" "${NTFY_URL:-}"
         printf "NTFY_TOKEN='%s'\n" "${NTFY_TOKEN:-}"
+        echo ""
+        echo "# ── Disaster-recovery spare sync ───────────────────────────────────────────"
+        echo "# If set, backup_kopia.sh scp's this backup.conf + README.md to"
+        echo "# DR_SYNC_HOST:DR_SYNC_PATH after every successful backup, so a spare box"
+        echo "# running dr_bringup.sh is always ready with no manual copy step. Requires"
+        echo "# passwordless SSH from this box to the spare (see README.md)."
+        printf "DR_SYNC_HOST='%s'\n" "${DR_SYNC_HOST:-}"
+        printf "DR_SYNC_PATH='%s'\n" "${DR_SYNC_PATH:-~/docker/backup}"
     } > "$CONF_FILE"
     chown root:root "$CONF_FILE" 2>/dev/null || true
     chmod 600 "$CONF_FILE"
@@ -676,6 +718,106 @@ SVCEOF
         AUTORUN="cat /etc/cron.d/${SVC_NAME}"
     fi
 
+    # ── Write README ─────────────────────────────────────────────────────────
+    # Written before the optional first run below so, if DR sync is enabled,
+    # the very first backup already ships an up-to-date README to the spare.
+    local DEST_LIST_MD=""
+    for dn in "${DEST_NAMES_ARR[@]}"; do
+        DEST_LIST_MD+="- **${dn}**: ${DEST_REPOS[$dn]}"$'\n'
+    done
+
+    local DR_SYNC_MD OFFSITE_MD
+    if [ -n "${DR_SYNC_HOST:-}" ]; then
+        DR_SYNC_MD="Configured: after every successful backup, this box copies backup.conf + this README to \`${DR_SYNC_HOST}:${DR_SYNC_PATH:-~/docker/backup}\` over SSH."
+    else
+        DR_SYNC_MD="Not configured. Re-run this installer to set it up, or copy backup.conf to the spare manually whenever it changes."
+    fi
+    if [ "${REMOTE_TYPE:-none}" != "none" ]; then
+        OFFSITE_MD="Configured: every backup also runs \`kopia repository sync-to ${REMOTE_TYPE}\` to mirror the repo off this box."
+    else
+        OFFSITE_MD="Not configured. Set REMOTE_TYPE/REMOTE_ARGS in backup.conf (see the comment above them) to mirror the repo off this box."
+    fi
+
+    write_readme "$DIR" << MD
+# Backup — Kopia
+
+Full recovery for every Docker service under \`$DOCKER_DIR\`: each service's
+entire directory (compose file, \`.env\`, config, data, databases) is
+snapshotted with Kopia — deduplicated, compressed (zstd), and encrypted.
+Databases are captured consistently (container stopped briefly, snapshotted,
+restarted); Minecraft instead gets a live save-all flush, no downtime.
+
+## Destinations
+
+$DEST_LIST_MD
+## Schedule
+
+$SCHED_LABEL — keeps the latest $KEEP_LATEST snapshots (plus 7 daily / 4
+weekly / 3 monthly).
+
+## Commands
+
+\`\`\`bash
+sudo $WORKER                     # back up now
+sudo $WORKER snapshots           # list all snapshots
+sudo $WORKER policy              # show retention policy
+\`\`\`
+
+### Restore — interactive, one service at a time
+
+\`\`\`bash
+sudo $RESTORE
+sudo $RESTORE --list
+\`\`\`
+
+### Disaster recovery — unattended, every service, for a cold spare box
+
+\`\`\`bash
+sudo $DR_BRINGUP                 # restore + start everything
+sudo $DR_BRINGUP --list          # list what's restorable
+sudo $DR_BRINGUP --dry-run       # preview, touch nothing
+sudo $DR_BRINGUP --service NAME  # just one service
+\`\`\`
+
+A single service failing to restore or start does not stop the rest of the
+batch — it's logged and skipped so the run maximizes what actually comes
+back up. The exit code is only non-zero if nothing came up at all.
+
+**On the spare box**, \`dr_bringup.sh\` needs \`backup.conf\` from this
+directory to connect to the repo — see the DR spare sync section below.
+
+## Disaster-recovery spare sync
+
+$DR_SYNC_MD
+
+Requires passwordless SSH (key-based) from this box to the spare — since the
+backup timer runs as root, generate/authorize a key for root:
+\`ssh-keygen\`, then \`ssh-copy-id\` to the spare.
+
+## Offsite mirror
+
+$OFFSITE_MD
+
+## Backup test — stop / restore / compare / restore-back
+
+\`\`\`bash
+sudo $TEST_SCRIPT                # test most recent backup, all services
+sudo $TEST_SCRIPT --list         # list testable services
+sudo $TEST_SCRIPT --service NAME
+\`\`\`
+
+## Files
+
+- \`backup.conf\` — destinations, passwords, retention, DR-sync/offsite settings (chmod 600)
+- \`backup_kopia.sh\` — the worker the systemd timer runs
+- \`restore_kopia.sh\` — interactive restore
+- \`dr_bringup.sh\` — unattended full-stack restore + start
+- \`test_backup_kopia.sh\` / \`test_backup.sh\` — automated restore tests
+
+**Save the passwords in \`backup.conf\` somewhere safe** — without them the
+encrypted repos cannot be restored.
+MD
+
     # ── 12. Optional first run ────────────────────────────────────────────────
     echo ""
     local _now=""
@@ -717,8 +859,15 @@ SVCEOF
     echo "    sudo $DR_BRINGUP              restore + start everything"
     echo "    sudo $DR_BRINGUP --list       list what's restorable"
     echo "    sudo $DR_BRINGUP --dry-run    preview, touch nothing"
-    echo "    Copy backup.conf to the spare box first — it holds the repo path(s)"
-    echo "    and password(s) this needs to connect."
+    if [ -n "${DR_SYNC_HOST:-}" ]; then
+        echo "    backup.conf + README.md sync to $DR_SYNC_HOST after every backup — the"
+        echo "    spare stays ready with no manual copy step."
+    else
+        echo "    Copy backup.conf to the spare box first — it holds the repo path(s)"
+        echo "    and password(s) this needs to connect."
+    fi
+    echo ""
+    echo "  Full docs: $DIR/README.md"
     echo ""
     echo "  Backup test (stop/restore/compare/restore-back):"
     echo "    sudo $TEST_SCRIPT                test most recent backup (all services)"

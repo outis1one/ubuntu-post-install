@@ -68,12 +68,16 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Bounded so a stalled repo connection (offsite mirror host unreachable
+# mid-restore, etc.) can't hang forever and block every service behind it in
+# the batch — 300s is generous for this stack's data sizes; raise it if a
+# service's dataset genuinely needs longer.
 k_for() {
     local dest="$1"; shift
     local cfg_var="DEST_${dest}_CONFIG" pw_var="DEST_${dest}_PASSWORD"
     local cfg="${!cfg_var:-}" pw="${!pw_var:-}"
     [ -n "$cfg" ] || return 1
-    env KOPIA_PASSWORD="$pw" "$KOPIA" --config-file="$cfg" "$@"
+    timeout 300 env KOPIA_PASSWORD="$pw" "$KOPIA" --config-file="$cfg" "$@"
 }
 
 # ── Discover the latest restorable snapshot per service, across every
@@ -172,8 +176,8 @@ for i in "${!SRC_PATH_LIST[@]}"; do
     mkdir -p "$path"
 
     if ! k_for "$dest" restore "$snap" "$path"; then
-        err "  Restore failed for $svc"
-        FAILED_SVCS+=("$svc: restore failed")
+        err "  Restore failed (or timed out) for $svc"
+        FAILED_SVCS+=("$svc: restore failed or timed out")
         continue
     fi
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$path" 2>/dev/null || true
@@ -185,11 +189,15 @@ for i in "${!SRC_PATH_LIST[@]}"; do
             FAILED_SVCS+=("$svc: no compose file")
             continue
         fi
-        if docker compose -f "$compose" up -d 2>/dev/null; then
+        # Bounded so a stuck image pull or a compose file waiting on something
+        # (e.g. an interactive prompt) can't stall the rest of the batch — one
+        # bad service should never cost the others their spot in the 10-minute
+        # budget this script exists for.
+        if timeout 120 docker compose -f "$compose" up -d 2>/dev/null; then
             ok "  Started"
         else
-            err "  docker compose up -d failed for $svc"
-            FAILED_SVCS+=("$svc: compose up failed")
+            err "  docker compose up -d failed (or timed out) for $svc"
+            FAILED_SVCS+=("$svc: compose up failed or timed out")
             continue
         fi
     fi
@@ -218,9 +226,16 @@ if [ "${#UP_SVCS[@]}" -gt 0 ]; then
 fi
 
 if [ "${#FAILED_SVCS[@]}" -gt 0 ]; then
-    echo "  Failed:"
+    echo "  Failed (skipped — did not stop the rest of the batch):"
     for s in "${FAILED_SVCS[@]}"; do echo "    ✗ $s"; done
     echo ""
+fi
+
+# One bad service is a partial success, not a failed run — the whole point of
+# this script is getting as much of the stack back up as possible. Only a
+# fully empty result (nothing came up at all) counts as a failed exit code.
+if [ "$DRY" = false ] && [ "${#UP_SVCS[@]}" -eq 0 ]; then
+    err "Nothing came up."
     exit 1
 fi
 
