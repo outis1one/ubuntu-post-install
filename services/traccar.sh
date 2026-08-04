@@ -198,6 +198,7 @@ install_traccar() {
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
         echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps priority on those)"
         echo "  - No default login — register the first account at the web UI, it becomes admin"
+        echo "  - Offer optional ntfy push notifications (self-hosted anywhere, or ntfy.sh)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
@@ -222,6 +223,55 @@ install_traccar() {
         DB_PASS=$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)
     fi
     [ -n "$DB_PASS" ] || DB_PASS=$(generate_password 32)
+
+    # ── Optional: ntfy push notifications ──────────────────────────────────
+    # Traccar has no native ntfy support, but its "SMS" notification channel
+    # is really just a generic HTTP webhook (sms.http.* config) under the
+    # hood — pointing it at ntfy's JSON publish API instead of a real SMS
+    # gateway is a well-known trick. Reuse whatever was configured last time
+    # so a rerun (e.g. to pick up an unrelated fix) doesn't silently drop it.
+    local _EXISTING_SMS_HTTP_URL="" _EXISTING_NTFY_TOPIC="" _EXISTING_SMS_HTTP_USER=""
+    if [ -f ".env" ]; then
+        _EXISTING_SMS_HTTP_URL=$(grep '^SMS_HTTP_URL=' .env | cut -d= -f2-)
+        _EXISTING_NTFY_TOPIC=$(grep '^# NTFY_TOPIC=' .env | cut -d= -f2-)
+        _EXISTING_SMS_HTTP_USER=$(grep '^SMS_HTTP_USER=' .env | cut -d= -f2-)
+    fi
+
+    echo ""
+    local _ntfy_default_enable="n"
+    [ -n "$_EXISTING_SMS_HTTP_URL" ] && _ntfy_default_enable="y"
+    local ENABLE_NTFY=""
+    prompt_yn "Set up push notifications via ntfy — self-hosted (this box or another server) or public ntfy.sh? (y/n):" "$_ntfy_default_enable" ENABLE_NTFY
+
+    local SMS_HTTP_URL="" NTFY_TOPIC="" SMS_HTTP_USER="" SMS_HTTP_PASSWORD=""
+    if [[ "$ENABLE_NTFY" =~ ^[Yy]$ ]]; then
+        # Suggest this box's own ntfy install if one exists, but never assume
+        # it — the whole point is this can point at any server, anywhere.
+        local _default_ntfy_url="$_EXISTING_SMS_HTTP_URL"
+        if [ -z "$_default_ntfy_url" ] && [ -d "$DOCKER_DIR/ntfy" ]; then
+            if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+                _default_ntfy_url="https://ntfy.${SITE_DOMAIN}"
+            else
+                _default_ntfy_url="http://localhost:8090"
+            fi
+        fi
+        prompt_text "ntfy server URL (self-hosted here, on another server, or https://ntfy.sh) [${_default_ntfy_url:-required}]:" "$_default_ntfy_url" SMS_HTTP_URL
+
+        if [ -z "$SMS_HTTP_URL" ]; then
+            log_warning "No ntfy URL entered — skipping notification setup."
+        else
+            local _default_topic="${_EXISTING_NTFY_TOPIC:-traccar-$(generate_password 8)}"
+            prompt_text "ntfy topic for Traccar alerts [$_default_topic]:" "$_default_topic" NTFY_TOPIC
+
+            local _ntfy_needs_auth="" _default_auth="n"
+            [ -n "$_EXISTING_SMS_HTTP_USER" ] && _default_auth="y"
+            prompt_yn "Does that ntfy topic require a username/password? (y/n):" "$_default_auth" _ntfy_needs_auth
+            if [[ "$_ntfy_needs_auth" =~ ^[Yy]$ ]]; then
+                prompt_text "ntfy username [${_EXISTING_SMS_HTTP_USER:-required}]:" "$_EXISTING_SMS_HTTP_USER" SMS_HTTP_USER
+                prompt_text "ntfy password:" "" SMS_HTTP_PASSWORD
+            fi
+        fi
+    fi
 
     local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
@@ -327,6 +377,31 @@ ${_CADDY_NET_BLOCK}
 ${_CADDY_NET_SECTION}
 TRACCAR_COMPOSE
 
+    # Traccar's env-var config naming (dots→underscore, camelCase→SCREAMING_
+    # SNAKE) already matches these key names exactly, and `traccar`'s
+    # env_file: .env passes them straight through — no docker-compose.yml
+    # changes needed for this at all. NTFY_TOPIC isn't read by anything; it's
+    # a comment purely so a rerun can recall it (see the grep for it above)
+    # and so it's easy to find on disk instead of scrolling back through chat.
+    local _NTFY_ENV_BLOCK=""
+    if [ -n "$SMS_HTTP_URL" ]; then
+        _NTFY_ENV_BLOCK="
+# ntfy push notifications — piggybacks on Traccar's \"SMS\" channel, which is
+# really just a generic HTTP webhook under the hood.
+NOTIFICATOR_TYPES=web,sms
+SMS_HTTP_URL=$SMS_HTTP_URL
+SMS_HTTP_TEMPLATE={\"topic\": \"{phone}\", \"message\": \"{message}\"}
+# NTFY_TOPIC=$NTFY_TOPIC
+# ^ set this as your Traccar user's Phone field (top-right avatar -> Edit),
+# then enable \"SMS\" per event under the notifications bell.
+"
+        if [ -n "$SMS_HTTP_USER" ]; then
+            _NTFY_ENV_BLOCK="${_NTFY_ENV_BLOCK}SMS_HTTP_USER=$SMS_HTTP_USER
+SMS_HTTP_PASSWORD=$SMS_HTTP_PASSWORD
+"
+        fi
+    fi
+
     cat > .env << TRACCAR_ENV
 TZ=$TZ_VAL
 CADDY_NET=$SITE_CADDY_NET
@@ -338,6 +413,7 @@ CADDY_NET=$SITE_CADDY_NET
 POSTGRES_DB=traccar
 POSTGRES_USER=traccar
 POSTGRES_PASSWORD=$DB_PASS
+${_NTFY_ENV_BLOCK}
 TRACCAR_ENV
     chmod 600 .env
 
@@ -349,6 +425,24 @@ TRACCAR_ENV
     log_success "Traccar configured at $TRACCAR_DIR"
 
     configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
+
+    local _NTFY_README_BLOCK=""
+    if [ -n "$SMS_HTTP_URL" ]; then
+        _NTFY_README_BLOCK="
+## Push notifications (ntfy)
+Traccar has no native ntfy support — this uses its \"SMS\" channel as a
+generic HTTP webhook pointed at ntfy's publish API instead of a real SMS
+gateway. Configured in \`.env\`: \`SMS_HTTP_URL\`, \`SMS_HTTP_TEMPLATE\`
+(and \`SMS_HTTP_USER\`/\`SMS_HTTP_PASSWORD\` if that topic needs auth).
+
+- ntfy server: $SMS_HTTP_URL
+- Topic: $NTFY_TOPIC — set this as your Traccar user's Phone field
+  (top-right avatar → Edit)
+- Enable \"SMS\" as a channel for whichever events you want, under the
+  notifications bell — the UI still calls it \"SMS\", that's just the label.
+- Subscribe to the topic in the ntfy app to receive them.
+"
+    fi
 
     write_readme "$TRACCAR_DIR" << MD
 # Traccar
@@ -372,7 +466,7 @@ Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
   Change the password there (then recreate both containers) if you need to
   rotate it.
 - Autoheal: \`traccar-autoheal\` restarts the \`traccar\` container if its healthcheck fails
-
+${_NTFY_README_BLOCK}
 ## Manage
 \`\`\`bash
 cd $TRACCAR_DIR
@@ -397,6 +491,11 @@ MD
     echo "  Access at:  http://localhost:8082"
     echo "  No default login — register the first account now; it becomes admin."
     echo "  Then disable further registration: Settings → Server → Permissions."
+    if [ -n "$SMS_HTTP_URL" ]; then
+        echo ""
+        echo "  ntfy notifications: set your user's Phone field to '$NTFY_TOPIC'"
+        echo "  (top-right avatar → Edit), then enable \"SMS\" per event under the bell."
+    fi
     echo ""
 }
 
