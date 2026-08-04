@@ -405,6 +405,16 @@ sidebar icons. By default any user can create a team — restrict that at
 System Console → User Management → Permissions if you only want admins
 creating them.
 
+By default, Direct Messages ignore team boundaries — anyone on the server
+can DM anyone else regardless of shared team membership. To limit the DM
+picker to teammates only: **System Console → Site Configuration → Users and
+Teams → "Enable users to open Direct Message channels with" → Any member of
+the team** (free in Team Edition, no license needed). This is a UI filter,
+not a hard boundary — it doesn't hide DM channels that already exist, and a
+user in multiple teams can still DM anyone across all of them, not just the
+team currently open. If you need real isolation between groups rather than
+a tidier picker, that means separate Mattermost instances, not this setting.
+
 ## Voice/Video Calls (Calls plugin)
 Port 8443/udp must be open on your router/firewall.
 coturn relay runs on port 3479 (HMAC secret in .env).
