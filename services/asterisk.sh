@@ -232,7 +232,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service asterisk homelab "Easy Asterisk PBX + coturn TURN server (intercom/VoIP; auto-tunes for a DigitalOcean droplet)" 5061
+register_service asterisk homelab "Easy Asterisk PBX (intercom/VoIP; auto-tunes for a DigitalOcean droplet); TURN via the shared coturn service" 5061
 
 # ── Install layout: directory + container names ────────────────────────────
 # Sets ASTERISK_DIR / ASTERISK_CONTAINER / ASTERISK_COTURN / ASTERISK_PROJECT.
@@ -795,9 +795,52 @@ _asterisk_offer_dashboard_and_trunk() {
 # literally (it interpolates them from .env, this script must not). Project
 # and container names are therefore substituted afterwards, same placeholder
 # trick the Caddy volume line already uses below.
+#
+# USE_EMBEDDED_COTURN controls whether this install runs its own dedicated
+# coturn container (legacy shape) or relies on the shared coturn service
+# (services/coturn.sh) instead. This is NOT a free choice at every call site
+# — an install that already has its own embedded coturn must keep getting
+# one on every "update" regeneration of this file, or the next `docker
+# compose up` silently drops the container its own .env TURN_PASSWORD still
+# points at, breaking every already-configured phone with no warning. See
+# the two call sites below for how each decides.
 _asterisk_write_compose() {
-    local PROJECT="$1" CONTAINER="$2" COTURN_CONTAINER="$3"
-    cat > docker-compose.yml << 'EOF'
+    local PROJECT="$1" CONTAINER="$2" COTURN_CONTAINER="$3" USE_EMBEDDED_COTURN="${4:-true}"
+
+    local _COTURN_DEPENDS="    depends_on:
+      coturn:
+        condition: service_started
+"
+    local _COTURN_SERVICE="
+  coturn:
+    image: coturn/coturn:latest
+    container_name: COTURN_CONTAINER_PLACEHOLDER
+    network_mode: host
+    user: root
+    entrypoint: [\"/coturn-entrypoint.sh\"]
+    volumes:
+      - ./docker/coturn-entrypoint.sh:/coturn-entrypoint.sh:ro
+    env_file: .env
+    command:
+      - -n
+      - --listening-port=\${TURN_PORT:-3478}
+      - --listening-ip=0.0.0.0
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=\${TURN_USERNAME:-easyasterisk}:\${TURN_PASSWORD}
+      - --realm=\${DOMAIN_NAME:-localhost}
+      - --min-port=49152
+      - --max-port=49252
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+      - --log-file=stdout
+    restart: unless-stopped
+"
+    [[ "$USE_EMBEDDED_COTURN" != true ]] && _COTURN_DEPENDS="" && _COTURN_SERVICE=""
+
+    cat > docker-compose.yml << EOF
 name: PROJECT_NAME_PLACEHOLDER
 
 services:
@@ -805,10 +848,7 @@ services:
     build: .
     container_name: ASTERISK_CONTAINER_PLACEHOLDER
     network_mode: host
-    depends_on:
-      coturn:
-        condition: service_started
-    volumes:
+${_COTURN_DEPENDS}    volumes:
       - ./config/asterisk:/etc/asterisk
       - ./config/easy-asterisk:/etc/easy-asterisk
       - ./logs:/var/log/asterisk
@@ -824,33 +864,7 @@ CADDY_VOLUME_PLACEHOLDER
       interval: 30s
       timeout: 5s
       retries: 3
-
-  coturn:
-    image: coturn/coturn:latest
-    container_name: COTURN_CONTAINER_PLACEHOLDER
-    network_mode: host
-    user: root
-    entrypoint: ["/coturn-entrypoint.sh"]
-    volumes:
-      - ./docker/coturn-entrypoint.sh:/coturn-entrypoint.sh:ro
-    env_file: .env
-    command:
-      - -n
-      - --listening-port=${TURN_PORT:-3478}
-      - --listening-ip=0.0.0.0
-      - --fingerprint
-      - --lt-cred-mech
-      - --user=${TURN_USERNAME:-easyasterisk}:${TURN_PASSWORD}
-      - --realm=${DOMAIN_NAME:-localhost}
-      - --min-port=49152
-      - --max-port=49252
-      - --no-tls
-      - --no-dtls
-      - --no-cli
-      - --no-multicast-peers
-      - --log-file=stdout
-    restart: unless-stopped
-
+${_COTURN_SERVICE}
 EOF
 
     sed -i "s#PROJECT_NAME_PLACEHOLDER#${PROJECT}#; \
@@ -859,8 +873,10 @@ EOF
 
     # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
     # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
-    # self-signed. No-op if Caddy isn't installed on this box.
-    if [[ -d "$DOCKER_DIR/caddy/data" ]]; then
+    # self-signed. No-op if Caddy isn't installed on this box. Only relevant
+    # to the embedded coturn — the shared coturn service doesn't do TLS/TURNS
+    # at all (see services/coturn.sh's README for that tradeoff).
+    if [[ "$USE_EMBEDDED_COTURN" == true && -d "$DOCKER_DIR/caddy/data" ]]; then
         sed -i "s#CADDY_VOLUME_PLACEHOLDER#      - ${DOCKER_DIR}/caddy/data:/caddy-data:ro#" docker-compose.yml
     else
         sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
@@ -1145,7 +1161,9 @@ _asterisk_configure_do_cloud_firewall() {
 # the two deployment shapes can't document themselves differently by accident.
 _asterisk_write_readme() {
     local EA_DIR="$1" CONTAINER="$2" IS_DO="$3" DOMAIN_NAME="$4" PUBLIC_IP="$5" WEB_ADMIN_PORT_VAL="$6"
+    local USE_EMBEDDED_COTURN="${7:-true}" TURN_USERNAME_VAL="${8:-easyasterisk}" TURN_SERVER_DISPLAY="${9:-}"
     local _host="${DOMAIN_NAME:-${PUBLIC_IP:-<host-ip>}}"
+    [ -z "$TURN_SERVER_DISPLAY" ] && TURN_SERVER_DISPLAY="${_host}:3478"
 
     {
         cat << MD
@@ -1186,9 +1204,13 @@ connecting a phone. The Security Dashboard's Extensions tab
 |-----------------|--------------------------------------|
 | SIP server      | \`${_host}\`                          |
 | SIP port        | 5061 (TLS) / 5060 (UDP)              |
-| TURN server     | \`${_host}:3478\`                     |
-| TURN username   | easyasterisk                         |
+| TURN server     | \`${TURN_SERVER_DISPLAY}\`            |
+| TURN username   | ${TURN_USERNAME_VAL}                 |
 | TURN password   | see \`.env\` → \`TURN_PASSWORD\`         |
+
+$( [[ "$USE_EMBEDDED_COTURN" == true ]] \
+    && echo "This install runs its own dedicated coturn container (the \`coturn:\` service in docker-compose.yml)." \
+    || echo "TURN is served by the box's shared coturn service, not a container in this compose file — see \`~/docker/coturn/README.md\`. Every service on the box that needs TURN (Mattermost Calls, etc.) shares this same relay, each with its own dedicated username." )
 
 Recommended softphones: Linphone, Zoiper, Bria, Grandstream Wave, and
 [Sipnetic](https://www.sipnetic.com/) on Android (free, TLS/SRTP +
@@ -1403,7 +1425,11 @@ install_asterisk() {
         echo "[DRY-RUN]     - offer local OR remote Authelia to protect the web admin"
         echo "[DRY-RUN]     - offer to create a DigitalOcean Cloud Firewall via doctl"
         echo "[DRY-RUN] Would scan for a free web admin port starting at 8081 (avoids e.g. CrowdSec's 8080)"
-        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 3478, 10000-20000, 49152-49252"
+        echo "[DRY-RUN] Would register a TURN user with the shared coturn service (chain-installing it"
+        echo "[DRY-RUN]   if this is the first service on the box that needs one), falling back to"
+        echo "[DRY-RUN]   Asterisk's own dedicated coturn if the shared service is unavailable"
+        echo "[DRY-RUN] Would open UFW ports: 5060, 5061, <web admin port>, 8088, 8089, 10000-20000,"
+        echo "[DRY-RUN]   plus 3478 + 49152-49252 only if falling back to a dedicated coturn"
         echo "[DRY-RUN] Would offer 'update in place' instead of a fresh install if $EA_DIR already exists"
         echo "[DRY-RUN] Would patch vendor device-creation code + extensions.conf generator to route"
         echo "[DRY-RUN]   internal SIP MESSAGE through a dedicated [sip-messaging] dialplan context,"
@@ -1434,13 +1460,24 @@ install_asterisk() {
         prompt_reinstall_mode REINSTALL_MODE
         case "$REINSTALL_MODE" in
             update)
+                # Detect BEFORE regenerating docker-compose.yml below: an
+                # install that already runs its own dedicated coturn (every
+                # install predating the shared coturn service) must keep
+                # getting one on every update, or this rebuild silently
+                # drops the container its own .env TURN_PASSWORD still
+                # points at — every already-configured phone loses TURN with
+                # no warning. Only an install with no embedded coturn block
+                # (new installs made after shared coturn existed) skips it.
+                local _HAD_EMBEDDED_COTURN=false
+                grep -q '^  coturn:' "$EA_DIR/docker-compose.yml" 2>/dev/null && _HAD_EMBEDDED_COTURN=true
+
                 mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
                          "$EA_DIR/logs" "$EA_DIR/spool" "$EA_DIR/lib" "$EA_DIR/exports"
                 ensure_docker_dir_ownership "$EA_DIR"
                 cd "$EA_DIR" || return 1
 
                 _asterisk_refresh_vendor_files
-                _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN"
+                _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$_HAD_EMBEDDED_COTURN"
                 _asterisk_write_logrotate "$EA_DIR"
                 _asterisk_patch_messaging_vendor_files "$EA_DIR"
                 _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
@@ -1559,21 +1596,53 @@ install_asterisk() {
         [[ -n "$VLAN_SUBNETS_VAL" ]] && HAS_VLANS_VAL="y"
     fi
 
-    # ── Secrets ───────────────────────────────────────────────────────────────
-    local TURN_PASSWORD
-    TURN_PASSWORD="$(generate_password 24)"
+    # ── Secrets / TURN ───────────────────────────────────────────────────────
+    # Prefer the shared coturn service (services/coturn.sh) — one TURN server
+    # for every service on the box instead of Asterisk running its own and
+    # fighting other consumers (Mattermost, etc.) over relay ports. Falls
+    # back to Asterisk's own dedicated coturn if the shared service isn't
+    # available (e.g. this file run standalone with no sibling services/*.sh
+    # sourced) or registration fails for any reason — Asterisk should never
+    # end up with no TURN at all just because the shared path had a problem.
+    local USE_EMBEDDED_COTURN=true
+    local TURN_USERNAME TURN_PASSWORD TURN_PORT_VAL TURN_SERVER_VAL
 
-    # A public box always has a usable TURN address (the FQDN if set, else its
-    # public IP). A LAN box with no FQDN has none — coturn is only reachable
-    # over the local network, so clients use the server's LAN address directly.
-    local TURN_SERVER_VAL=""
-    if [[ "$IS_DO" == true ]]; then
-        TURN_SERVER_VAL="${DOMAIN_NAME:-$PUBLIC_IP}:3478"
-    elif [[ -n "$DOMAIN_NAME" ]]; then
-        TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
+    # Only reachable here via an explicit "fresh" choice above — "update"
+    # is handled separately and always preserves whatever coturn shape
+    # already exists, never silently switches it.
+    if [[ -f "$EA_DIR/docker-compose.yml" ]] && grep -q '^  coturn:' "$EA_DIR/docker-compose.yml" 2>/dev/null; then
+        echo ""
+        log_warning "This box's existing Asterisk install has its own dedicated coturn."
+        log_warning "Continuing may switch it to the new shared coturn service — any"
+        log_warning "phone/softphone configured with the OLD TURN username/password will"
+        log_warning "need updating once this completes."
     fi
 
-    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN"
+    ensure_coturn_user "asterisk"
+    if [[ -n "${COTURN_HOST:-}" ]]; then
+        USE_EMBEDDED_COTURN=false
+        TURN_USERNAME="$COTURN_USERNAME"
+        TURN_PASSWORD="$COTURN_PASSWORD"
+        TURN_PORT_VAL="$COTURN_PORT"
+        TURN_SERVER_VAL="${COTURN_HOST}:${COTURN_PORT}"
+        log_success "Using the shared coturn service — TURN username '$COTURN_USERNAME'."
+    else
+        TURN_USERNAME="easyasterisk"
+        TURN_PASSWORD="$(generate_password 24)"
+        TURN_PORT_VAL="3478"
+        # A public box always has a usable TURN address (the FQDN if set, else its
+        # public IP). A LAN box with no FQDN has none — coturn is only reachable
+        # over the local network, so clients use the server's LAN address directly.
+        TURN_SERVER_VAL=""
+        if [[ "$IS_DO" == true ]]; then
+            TURN_SERVER_VAL="${DOMAIN_NAME:-$PUBLIC_IP}:3478"
+        elif [[ -n "$DOMAIN_NAME" ]]; then
+            TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
+        fi
+        log_info "Shared coturn unavailable — Asterisk will run its own dedicated coturn."
+    fi
+
+    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN"
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share
@@ -1612,9 +1681,10 @@ install_asterisk() {
 DOMAIN_NAME=${DOMAIN_NAME}
 
 # ── TURN/STUN ─────────────────────────────────────────────────
-TURN_USERNAME=easyasterisk
+# $( [[ "$USE_EMBEDDED_COTURN" == true ]] && echo "This install runs its own dedicated coturn (see the coturn: service in docker-compose.yml)." || echo "Using the shared coturn service — see ~/docker/coturn/README.md." )
+TURN_USERNAME=${TURN_USERNAME}
 TURN_PASSWORD=${TURN_PASSWORD}
-TURN_PORT=3478
+TURN_PORT=${TURN_PORT_VAL}
 # Empty when there's no publicly resolvable address (LAN-only, no FQDN).
 TURN_SERVER=${TURN_SERVER_VAL}
 
@@ -1679,10 +1749,14 @@ ENV
         fi
         ufw allow 8088/tcp
         ufw allow 8089/tcp
-        ufw allow 3478/udp
-        ufw allow 3478/tcp
         ufw allow 10000:20000/udp
-        ufw allow 49152:49252/udp
+        if [[ "$USE_EMBEDDED_COTURN" == true ]]; then
+            ufw allow 3478/udp
+            ufw allow 3478/tcp
+            ufw allow 49152:49252/udp
+        fi
+        # Shared coturn opens its own ports once, at its own install time
+        # (services/coturn.sh) — nothing to open here when using it.
         ensure_ufw_enabled
         log_success "UFW rules added."
     fi
@@ -1713,7 +1787,8 @@ ENV
     _asterisk_run_presence_step "$EA_DIR" "$CONTAINER"
 
     # ── README ────────────────────────────────────────────────────────────────
-    _asterisk_write_readme "$EA_DIR" "$CONTAINER" "$IS_DO" "$DOMAIN_NAME" "$PUBLIC_IP" "$WEB_ADMIN_PORT_VAL"
+    _asterisk_write_readme "$EA_DIR" "$CONTAINER" "$IS_DO" "$DOMAIN_NAME" "$PUBLIC_IP" "$WEB_ADMIN_PORT_VAL" \
+        "$USE_EMBEDDED_COTURN" "$TURN_USERNAME" "$TURN_SERVER_VAL"
 
     # ── Start ─────────────────────────────────────────────────────────────────
     echo ""

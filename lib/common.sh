@@ -681,3 +681,82 @@ CADDY_BLOCK
     fi
     echo ""
 }
+
+# ── Shared coturn (TURN/STUN) wiring ──────────────────────────────────────────
+# Usage: ensure_coturn_user "<consumer-name>"
+#
+# Installs the shared coturn service (services/coturn.sh) if this is the
+# first service on the box that needs TURN, then registers (or reuses) a
+# dedicated long-term-credential user for the caller — one coturn instance,
+# one relay port range, shared by every consumer instead of each service
+# running its own and fighting over host ports (see services/coturn.sh's
+# header for why that used to be a real, confirmed-live problem).
+#
+# Out-params (not `local` — read them after the call returns), same
+# convention as configure_caddy_for_service's CADDY_SERVICE_* above:
+#   COTURN_HOST      host/IP TURN clients should connect to
+#   COTURN_PORT      coturn's listening port
+#   COTURN_USERNAME  this consumer's long-term-credential username
+#   COTURN_PASSWORD  this consumer's long-term-credential password
+# COTURN_HOST is left empty if coturn couldn't be installed or reached —
+# callers should treat that as "no TURN available" and degrade gracefully,
+# same as checking CADDY_SERVICE_CONFIGURED after configure_caddy_for_service.
+#
+# Credentials are cached per-consumer in coturn's own users/<name>.env so a
+# service re-running its own installer reuses the same one instead of
+# minting a new credential and orphaning the old one (which would silently
+# break already-configured clients still holding it).
+ensure_coturn_user() {
+    local _consumer="$1"
+    COTURN_HOST="" COTURN_PORT="" COTURN_USERNAME="" COTURN_PASSWORD=""
+
+    if [ ! -d "$DOCKER_DIR/coturn" ]; then
+        if declare -F install_coturn >/dev/null 2>&1; then
+            log_info "No shared coturn (TURN/STUN) server yet — setting one up for $_consumer..."
+            install_coturn || { log_warning "coturn setup failed — $_consumer will run without TURN."; return 1; }
+        else
+            log_warning "services/coturn.sh not loaded — $_consumer will run without TURN."
+            log_warning "Run: sudo ./setup.sh coturn"
+            return 1
+        fi
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would register coturn user '$_consumer'"
+        return 0
+    fi
+
+    local _env="$DOCKER_DIR/coturn/.env"
+    [ -f "$_env" ] || { log_warning "coturn installed but $_env missing — cannot register '$_consumer'."; return 1; }
+    local _realm _host _port
+    _realm="$(grep '^COTURN_REALM=' "$_env" | cut -d= -f2-)"
+    _host="$(grep '^COTURN_HOST=' "$_env" | cut -d= -f2-)"
+    _port="$(grep '^COTURN_PORT=' "$_env" | cut -d= -f2-)"; _port="${_port:-3478}"
+
+    local _userdir="$DOCKER_DIR/coturn/users"
+    local _userfile="$_userdir/${_consumer}.env"
+    mkdir -p "$_userdir"
+
+    if [ -f "$_userfile" ]; then
+        local _u _p
+        _u="$(grep '^COTURN_USER=' "$_userfile" | cut -d= -f2-)"
+        _p="$(grep '^COTURN_PASS=' "$_userfile" | cut -d= -f2-)"
+        COTURN_USERNAME="$_u" COTURN_PASSWORD="$_p"
+    else
+        COTURN_USERNAME="$_consumer"
+        COTURN_PASSWORD="$(generate_password 24)"
+        if docker exec coturn turnadmin -a -u "$COTURN_USERNAME" -p "$COTURN_PASSWORD" \
+            -r "$_realm" -b /var/lib/coturn/turndb >/dev/null 2>&1; then
+            { echo "COTURN_USER=$COTURN_USERNAME"; echo "COTURN_PASS=$COTURN_PASSWORD"; } > "$_userfile"
+            chmod 600 "$_userfile"
+            log_success "Registered coturn user '$COTURN_USERNAME' for $_consumer"
+        else
+            log_warning "Could not register a coturn user for $_consumer — is the coturn container running?"
+            COTURN_USERNAME="" COTURN_PASSWORD=""
+            return 1
+        fi
+    fi
+
+    COTURN_HOST="$_host"
+    COTURN_PORT="$_port"
+}

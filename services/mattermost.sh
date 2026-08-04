@@ -208,40 +208,129 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service mattermost utilities "Team messaging with voice/video calls (Mattermost + coturn)" 8065
+register_service mattermost utilities "Team messaging with voice/video calls (Mattermost; TURN via the shared coturn service); supports multiple isolated instances" 8065
 
 install_mattermost() {
     require_docker || return 1
-    log_info "Installing Mattermost + coturn..."
 
+    # ── Instance selection ──────────────────────────────────────────────────
+    # First instance keeps the plain "mattermost" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces the suffixed naming.
     local DIR="$DOCKER_DIR/mattermost"
+    local INSTANCE_SUFFIX="" PROJECT="mattermost"
+    local MM_CONTAINER="mattermost" DB_CONTAINER="mattermost-db"
+    local WEB_PORT="8065" CALLS_UDP_PORT="8443"
+    local COTURN_CONSUMER="mattermost"
+
+    if [ -d "$DIR" ]; then
+        echo ""
+        echo "  Mattermost is already installed at $DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Mattermost instance alongside it (its own"
+        echo "       server, database, and TURN credential — full isolation, not Teams)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'team-b'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/mattermost-$_suffix" ]; then
+                    log_warning "mattermost-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            DIR="$DOCKER_DIR/mattermost-$_suffix"
+            PROJECT="mattermost-$_suffix"
+            MM_CONTAINER="mattermost-$_suffix"
+            DB_CONTAINER="mattermost-$_suffix-db"
+            COTURN_CONSUMER="mattermost-$_suffix"
+
+            # Free-port scan — same pattern services/asterisk.sh uses for its
+            # web admin port. WEB_PORT is also set as Mattermost's own
+            # internal ListenAddress below (not just the host publish side),
+            # so configure_caddy_for_service's single upstream "name:port"
+            # string works unmodified in both local and remote-Caddy mode —
+            # it assumes host-published-port == container-internal-port,
+            # true for every other service in this repo and made true here
+            # too rather than special-casing the shared helper for one caller.
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            while ss -ulnH "sport = :${CALLS_UDP_PORT}" 2>/dev/null | grep -q .; do
+                CALLS_UDP_PORT=$((CALLS_UDP_PORT + 1))
+            done
+            log_info "New instance: $DIR (web port $WEB_PORT, Calls UDP port $CALLS_UDP_PORT)"
+        fi
+    fi
+
+    log_info "Installing Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}..."
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
         echo "[DRY-RUN] Would write .env with DB and Mattermost secrets"
         echo "[DRY-RUN] Would create data/ logs/ config/ plugins/ db/ subdirectories"
-        echo "[DRY-RUN] Would open UFW ports 8443/udp, 3479, 49153:49352/udp"
+        echo "[DRY-RUN] Would register a TURN user with the shared coturn service for '$COTURN_CONSUMER'"
+        echo "[DRY-RUN]   (falling back to a dedicated coturn if the shared service is unavailable)"
+        echo "[DRY-RUN] Would open UFW ports ${WEB_PORT}/tcp, ${CALLS_UDP_PORT}/udp"
         return 0
+    fi
+
+    # ── Existing install (this exact instance)? Offer update-in-place ───────
+    local MODE="fresh"
+    local _HAD_EMBEDDED_COTURN=false
+    if [[ -f "$DIR/docker-compose.yml" && -f "$DIR/.env" ]]; then
+        prompt_reinstall_mode MODE
+        grep -q '^  coturn:' "$DIR/docker-compose.yml" 2>/dev/null && _HAD_EMBEDDED_COTURN=true
+        case "$MODE" in
+            cancel)
+                log_info "Leaving the existing install as-is."
+                return 0
+                ;;
+            fresh)
+                if [ "$_HAD_EMBEDDED_COTURN" = true ]; then
+                    echo ""
+                    log_warning "This install has its own dedicated coturn. Continuing may switch it to"
+                    log_warning "the shared coturn service — the Calls plugin's TURN config in System"
+                    log_warning "Console will need updating to the new credentials afterward (see below)."
+                fi
+                ;;
+        esac
     fi
 
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
     cd "$DIR" || return 1
 
-    local DB_PASS
-    local MM_SECRET
-    DB_PASS=$(generate_password 32)
-    MM_SECRET=$(generate_password 48)
+    # Reuse existing secrets on update — Postgres's volume keeps the password
+    # from its first init, so overwriting .env with a fresh one locks
+    # Mattermost out of its own database. Confirmed this was previously
+    # unconditional (regenerated every single rerun, silently breaking the DB
+    # connection) — fixed here as part of adding proper update detection.
+    local DB_PASS="" MM_SECRET=""
+    if [ "$MODE" = "update" ]; then
+        DB_PASS="$(grep '^POSTGRES_PASSWORD=' .env 2>/dev/null | cut -d= -f2-)"
+        [ "$_HAD_EMBEDDED_COTURN" = true ] && MM_SECRET="$(grep '^COTURN_SECRET=' .env 2>/dev/null | cut -d= -f2-)"
+    fi
+    [ -n "$DB_PASS" ] || DB_PASS=$(generate_password 32)
 
     local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     local UID_VAL GID_VAL
     UID_VAL=$(id -u "$ACTUAL_USER")
     GID_VAL=$(id -g "$ACTUAL_USER")
 
-    # Compute SITE_URL
-    local SITE_URL="http://localhost:8065"
+    # Compute SITE_URL — extra instances default to a distinct subdomain so
+    # they don't collide with the first instance's.
+    local _default_subdomain="mattermost${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
+    local SITE_URL="http://localhost:${WEB_PORT}"
     if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
-        SITE_URL="https://mattermost.${SITE_DOMAIN}"
+        SITE_URL="https://${_default_subdomain}.${SITE_DOMAIN}"
     fi
     local CONFIGURED_SITEURL=""
     prompt_text "Mattermost site URL [$SITE_URL]:" "$SITE_URL" CONFIGURED_SITEURL
@@ -270,45 +359,34 @@ networks:
 "
     fi
 
-    cat > docker-compose.yml << EOF
-name: mattermost
+    # ── TURN: shared coturn preferred, dedicated coturn as fallback ─────────
+    # See services/coturn.sh's header for why one shared TURN server beats
+    # every service (Asterisk, each Mattermost instance, ...) running its
+    # own and fighting over host relay ports.
+    local USE_EMBEDDED_COTURN=true
+    local TURN_HOST_VAL="" TURN_PORT_VAL="" TURN_USERNAME_VAL="" TURN_PASSWORD_VAL=""
 
-services:
-  db:
-    image: postgres:15-alpine
-    container_name: mattermost-db
-    hostname: mattermost-db
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./db:/var/lib/postgresql/data
-${_CADDY_NET_BLOCK}    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER} -d \${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" = true ]; then
+        USE_EMBEDDED_COTURN=true   # preserve exactly — never switch on update
+    else
+        ensure_coturn_user "$COTURN_CONSUMER"
+        if [ -n "${COTURN_HOST:-}" ]; then
+            USE_EMBEDDED_COTURN=false
+            TURN_HOST_VAL="$COTURN_HOST"; TURN_PORT_VAL="$COTURN_PORT"
+            TURN_USERNAME_VAL="$COTURN_USERNAME"; TURN_PASSWORD_VAL="$COTURN_PASSWORD"
+            log_success "Using the shared coturn service — TURN username '$COTURN_USERNAME'."
+        else
+            log_info "Shared coturn unavailable — this instance will run its own dedicated coturn."
+        fi
+    fi
+    [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
 
-  mattermost:
-    image: mattermost/mattermost-team-edition:latest
-    container_name: mattermost
-    hostname: mattermost
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      db:
-        condition: service_healthy
-    volumes:
-      - ./data:/mattermost/data
-      - ./logs:/mattermost/logs
-      - ./config:/mattermost/config
-      - ./plugins:/mattermost/plugins
-    ports:
-      - "8065:8065"
-      - "8443:8443/udp"
-${_CADDY_NET_BLOCK}
+    local _COTURN_SERVICE=""
+    if [ "$USE_EMBEDDED_COTURN" = true ]; then
+        _COTURN_SERVICE="
   coturn:
     image: coturn/coturn:latest
-    container_name: mattermost-coturn
+    container_name: ${MM_CONTAINER}-coturn
     network_mode: host
     user: root
     command:
@@ -327,7 +405,45 @@ ${_CADDY_NET_BLOCK}
       - --no-multicast-peers
       - --log-file=stdout
     restart: unless-stopped
-${_CADDY_NET_SECTION}
+"
+    fi
+
+    cat > docker-compose.yml << EOF
+name: ${PROJECT}
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: ${DB_CONTAINER}
+    hostname: ${DB_CONTAINER}
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./db:/var/lib/postgresql/data
+${_CADDY_NET_BLOCK}    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \${POSTGRES_USER} -d \${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    container_name: ${MM_CONTAINER}
+    hostname: ${MM_CONTAINER}
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data:/mattermost/data
+      - ./logs:/mattermost/logs
+      - ./config:/mattermost/config
+      - ./plugins:/mattermost/plugins
+    ports:
+      - "${WEB_PORT}:${WEB_PORT}"
+      - "${CALLS_UDP_PORT}:8443/udp"
+${_CADDY_NET_BLOCK}${_COTURN_SERVICE}${_CADDY_NET_SECTION}
 EOF
 
     cat > .env << EOF
@@ -341,15 +457,24 @@ POSTGRES_PASSWORD=$DB_PASS
 
 # Mattermost
 MM_SQLSETTINGS_DRIVERNAME=postgres
-MM_SQLSETTINGS_DATASOURCE=postgres://mattermost:${DB_PASS}@mattermost-db:5432/mattermost?sslmode=disable&connect_timeout=10
+MM_SQLSETTINGS_DATASOURCE=postgres://mattermost:${DB_PASS}@${DB_CONTAINER}:5432/mattermost?sslmode=disable&connect_timeout=10
 MM_SERVICESETTINGS_SITEURL=$SITE_URL
+MM_SERVICESETTINGS_LISTENADDRESS=:${WEB_PORT}
 MM_SERVICESETTINGS_ENABLELOCALMODE=true
 MM_FILESETTINGS_DRIVERNAME=local
 MM_PLUGINSETTINGS_ENABLE=true
 
-# coturn HMAC secret for Mattermost Calls plugin
+# ── TURN/STUN (Calls plugin) ─────────────────────────────────
+$( [ "$USE_EMBEDDED_COTURN" = true ] \
+    && echo "# This instance runs its own dedicated coturn (the coturn: service in docker-compose.yml)." \
+    || echo "# Using the shared coturn service — see ~/docker/coturn/README.md." )
+# coturn HMAC secret — only used if this instance runs its own dedicated coturn.
 COTURN_SECRET=$MM_SECRET
 MM_REALM=${SITE_DOMAIN:-localhost}
+TURN_HOST=$TURN_HOST_VAL
+TURN_PORT=$TURN_PORT_VAL
+TURN_USERNAME=$TURN_USERNAME_VAL
+TURN_PASSWORD=$TURN_PASSWORD_VAL
 
 # PUID/PGID for file ownership
 PUID=$UID_VAL
@@ -360,25 +485,59 @@ EOF
     mkdir -p data logs config plugins db
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DIR"
 
-    # Open required firewall ports
+    # ── Firewall ─────────────────────────────────────────────────────────────
     if command -v ufw &>/dev/null; then
-        ufw allow 8443/udp comment "Mattermost Calls RTC"
-        ufw allow 3479/udp; ufw allow 3479/tcp
-        ufw allow 49153:49352/udp comment "Mattermost coturn relay"
+        ufw allow "${WEB_PORT}/tcp" comment "Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
+        ufw allow "${CALLS_UDP_PORT}/udp" comment "Mattermost Calls RTC${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
+        if [ "$USE_EMBEDDED_COTURN" = true ]; then
+            ufw allow 3479/udp; ufw allow 3479/tcp
+            ufw allow 49153:49352/udp comment "Mattermost coturn relay"
+        fi
+        # Shared coturn opens its own ports once, at its own install time.
     fi
 
     echo ""
     log_success "Mattermost configured at $DIR"
 
-    configure_caddy_for_service "Mattermost" "mattermost:8065" "mattermost"
+    configure_caddy_for_service "Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${MM_CONTAINER}:${WEB_PORT}" "$_default_subdomain"
+
+    # Exact ICEServersConfigs JSON to paste into System Console — verified
+    # against the Calls plugin's actual config schema (plugin.json): this
+    # field takes a fixed username/credential pair, which is what a
+    # --lt-cred-mech coturn (shared or dedicated) expects, as opposed to the
+    # "TURN Static Auth Secret" field (HMAC/REST-API mode, which coturn
+    # cannot run at the same time as --lt-cred-mech on one instance).
+    local _ICE_JSON _turn_config_md
+    if [ "$USE_EMBEDDED_COTURN" = true ]; then
+        _ICE_JSON="[{\"urls\":[\"turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\"],\"username\":\"static\",\"credential\":\"see COTURN_SECRET below — this dedicated coturn uses use-auth-secret/HMAC, not a fixed credential\"}]"
+        _turn_config_md="This instance runs its own dedicated coturn (HMAC/REST-API auth):
+- TURN Server URI: \`turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\`
+- System Console → Plugins → Calls → **TURN Static Auth Secret**: value of \`COTURN_SECRET\` in \`.env\`"
+    else
+        _ICE_JSON="[{\"urls\":[\"turn:${TURN_HOST_VAL}:${TURN_PORT_VAL}?transport=udp\"],\"username\":\"${TURN_USERNAME_VAL}\",\"credential\":\"${TURN_PASSWORD_VAL}\"}]"
+        _turn_config_md="This instance uses the shared coturn service (fixed username/credential, not HMAC):
+- System Console → Plugins → Calls → **ICE Servers Configurations** — paste:
+\`\`\`json
+$_ICE_JSON
+\`\`\`
+- Leave **TURN Static Auth Secret** empty — that field is for the OTHER auth
+  mode coturn supports and doesn't apply here."
+    fi
+    [ "${CALLS_UDP_PORT}" != "8443" ] && _turn_config_md="$_turn_config_md
+- System Console → Plugins → Calls → **ICE Host Port Override**: \`${CALLS_UDP_PORT}\` (this instance publishes Calls RTC on a non-default port)"
 
     write_readme "$DIR" << MD
-# Mattermost
+# Mattermost${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
-Team messaging with voice/video calls. PostgreSQL backend + coturn TURN relay.
+Team messaging with voice/video calls. PostgreSQL backend.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+
+This is a separate, fully isolated instance (own server, own database, own
+TURN credential) — not a Team within another instance. See that instance's
+own README for its own access details." )
 
 ## Access
-- URL: $SITE_URL (or http://localhost:8065)
+- URL: $SITE_URL (or http://localhost:${WEB_PORT})
 - First run: create admin account at the URL above — this account becomes
   System Admin automatically.
 
@@ -416,12 +575,9 @@ team currently open. If you need real isolation between groups rather than
 a tidier picker, that means separate Mattermost instances, not this setting.
 
 ## Voice/Video Calls (Calls plugin)
-Port 8443/udp must be open on your router/firewall.
-coturn relay runs on port 3479 (HMAC secret in .env).
+Port ${CALLS_UDP_PORT}/udp must be open on your router/firewall.
 
-Configure in Mattermost: System Console → Plugins → Calls:
-- TURN Server URI: turn:YOUR_DOMAIN_OR_IP:3479?transport=udp
-- TURN Credentials: use static-auth-secret (see .env COTURN_SECRET)
+${_turn_config_md}
 
 ## Manage
 \`\`\`bash
@@ -449,9 +605,7 @@ MD
     echo "  First run:  open the URL above and create your admin account."
     echo "  Teams:      team sidebar '+' → Create a new team (see README.md — no"
     echo "              Enterprise license needed, Team Edition includes this)."
-    echo "  Calls plugin: System Console → Plugins → Calls to configure coturn."
-    echo "    TURN URI:    turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp"
-    echo "    Auth secret: see COTURN_SECRET in $DIR/.env"
+    echo "  Calls plugin TURN config: see README.md (System Console → Plugins → Calls)."
     echo ""
 }
 
