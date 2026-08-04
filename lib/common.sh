@@ -472,6 +472,13 @@ prompt_reinstall_mode() {
 #   # Title
 #   ...
 #   MD
+#
+# If services/<name>.md exists next to the calling services/<name>.sh, its
+# contents are appended automatically. That file is optional and untouched by
+# setup.sh's services/*.sh glob (doesn't register, doesn't run) — it's just a
+# place for install-time-invariant walkthroughs (multi-step UI instructions,
+# third-party linking, etc.) that would otherwise bloat the heredoc above with
+# content that doesn't depend on any variable chosen during install.
 write_readme() {
     local dir="$1"
     if [ "$DRY_RUN" = true ]; then
@@ -481,6 +488,16 @@ write_readme() {
     fi
     mkdir -p "$dir"
     cat > "$dir/README.md"
+
+    local caller_script="${BASH_SOURCE[1]:-}"
+    if [ -n "$caller_script" ]; then
+        local companion_doc="${caller_script%.sh}.md"
+        if [ -f "$companion_doc" ]; then
+            printf '\n' >> "$dir/README.md"
+            cat "$companion_doc" >> "$dir/README.md"
+        fi
+    fi
+
     chown "$ACTUAL_USER:$ACTUAL_USER" "$dir/README.md" 2>/dev/null || true
 }
 

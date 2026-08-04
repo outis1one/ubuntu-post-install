@@ -304,6 +304,18 @@ Writes `$DIR/README.md` (creates the directory if needed). No-ops in DRY_RUN.
 Every Docker service should call this so `~/docker/<name>/README.md` is
 self-documenting on the deployed box.
 
+**Companion doc files.** If `services/<name>.md` exists next to
+`services/<name>.sh`, `write_readme` appends its contents automatically —
+no per-service code needed to opt in, just add the file. It's outside
+`setup.sh`'s `services/*.sh` glob so it never registers or runs on its own;
+it's purely markdown that gets tacked onto the generated README. Use it for
+walkthroughs that don't depend on anything chosen at install time (linking
+steps in a third-party UI, multi-account setup, troubleshooting notes) —
+content like that bloats the heredoc without adding anything install-specific.
+Keep the heredoc for content that *does* depend on install-time values (the
+actual port chosen, generated credentials, etc.); use `services/<name>.md`
+for everything else. See `services/traccar.md` for the reference example.
+
 ## Categories
 
 | Group | Purpose |
