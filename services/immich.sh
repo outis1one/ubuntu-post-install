@@ -286,8 +286,13 @@ install_immich() {
     cd "$IMMICH_DIR" || return 1
 
     # ── Generate DB password ────────────────────────────────────────────────
+    # Reused across reruns if already set — the Postgres volume keeps the
+    # password from its first init, so a fresh random one on every rerun
+    # would lock Immich out of its own database.
     local DB_PASS TZ_VAL
-    DB_PASS=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+    DB_PASS=""
+    [ -f ".env" ] && DB_PASS="$(grep '^DB_PASSWORD=' .env | cut -d= -f2-)"
+    [ -n "$DB_PASS" ] || DB_PASS="$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)"
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # ── Write docker-compose.yml ────────────────────────────────────────────

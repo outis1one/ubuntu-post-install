@@ -190,10 +190,18 @@ install_nextcloud() {
     ensure_docker_dir_ownership "$DIR"
     cd "$DIR" || return 1
 
-    local DB_PASS
-    DB_PASS=$(generate_password 32)
-    local NC_ADMIN_PASS
-    NC_ADMIN_PASS=$(generate_password 16)
+    # Reused across reruns if already set — the MariaDB volume keeps DB_PASS
+    # from its first init (regenerating it would lock Nextcloud out of its
+    # own database), and NEXTCLOUD_ADMIN_USER/PASSWORD are only consulted by
+    # the container on its very first boot to create the admin account —
+    # printing a fresh NC_ADMIN_PASS on every rerun would silently show a
+    # password that was never actually applied to the existing account.
+    local DB_PASS=""
+    [ -f ".env" ] && DB_PASS="$(grep '^MYSQL_PASSWORD=' .env | cut -d= -f2-)"
+    [ -n "$DB_PASS" ] || DB_PASS="$(generate_password 32)"
+    local NC_ADMIN_PASS=""
+    [ -f ".env" ] && NC_ADMIN_PASS="$(grep '^NEXTCLOUD_ADMIN_PASSWORD=' .env | cut -d= -f2-)"
+    [ -n "$NC_ADMIN_PASS" ] || NC_ADMIN_PASS="$(generate_password 16)"
     local TZ_VAL="${SITE_TZ:-UTC}"
 
     # ── Dockerfile ──────────────────────────────────────────────────────────

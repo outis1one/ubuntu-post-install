@@ -170,6 +170,29 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     done
 fi
 
+# ── Keep a spare box's copy of backup.conf + README current ─────────────────
+# Runs after the data itself is backed up (and mirrored, if configured) so a
+# sync never ships config pointing at a repo state that isn't actually there
+# yet. dr_bringup.sh on the spare only needs these two small files — the
+# repo data itself already lives wherever REMOTE_TYPE mirrored it (or is
+# local, if the spare IS that target).
+if [ -n "${DR_SYNC_HOST:-}" ]; then
+    _dr_path="${DR_SYNC_PATH:-~/docker/backup}"
+    log "Syncing backup.conf + README to spare ($DR_SYNC_HOST:$_dr_path)..."
+    _dr_files=("$CONF")
+    [ -f "$HERE/README.md" ] && _dr_files+=("$HERE/README.md")
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "mkdir -p '$_dr_path'" 2>"$_ERR" \
+        && scp -o BatchMode=yes -o ConnectTimeout=10 "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
+        && ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "chmod 600 '$_dr_path/backup.conf'" 2>>"$_ERR"; then
+        log "OK spare sync ($DR_SYNC_HOST)"
+    else
+        _reason="$(categorize_error "$(cat "$_ERR")")"
+        log "WARNING: spare sync failed — $_reason"
+        FAILED_SVCS+=("spare-sync: $_reason")
+        rc=1
+    fi
+fi
+
 DURATION=$(( $(date +%s) - START_TS ))
 DURATION_STR="$((DURATION/60))m $((DURATION%60))s"
 
