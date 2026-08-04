@@ -214,6 +214,7 @@ install_backup() {
     local CONF_FILE="$DIR/backup.conf"
     local WORKER="$DIR/backup_kopia.sh"
     local RESTORE="$DIR/restore_kopia.sh"
+    local DR_BRINGUP="$DIR/dr_bringup.sh"
     local SVC_NAME="post-install-backup"
 
     echo ""
@@ -554,6 +555,21 @@ install_backup() {
         log_warning "Copy it manually: cp extras/restore_kopia.sh $RESTORE"
     fi
 
+    # ── 10b. Install disaster-recovery bring-up script ────────────────────────
+    # Non-interactive counterpart to restore_kopia.sh: restores every service's
+    # latest snapshot and runs `docker compose up -d` with no prompts, meant to
+    # run on a cold spare box during a real outage rather than the primary.
+    local DR_BRINGUP_SRC="${HERE:-}/extras/dr_bringup_kopia.sh"
+    if [ -f "$DR_BRINGUP_SRC" ]; then
+        cp "$DR_BRINGUP_SRC" "$DR_BRINGUP"
+        chmod +x "$DR_BRINGUP"
+        chown root:root "$DR_BRINGUP" 2>/dev/null || true
+        log_success "dr_bringup.sh installed"
+    else
+        log_warning "extras/dr_bringup_kopia.sh not found — DR bring-up script not installed"
+        log_warning "Copy it manually: cp extras/dr_bringup_kopia.sh $DR_BRINGUP"
+    fi
+
     # ── 11. Install test scripts ─────────────────────────────────────────────
     local TEST_SCRIPT="$DIR/test_backup_kopia.sh"
     local TEST_SRC="${HERE:-}/extras/test_backup_kopia.sh"
@@ -693,9 +709,16 @@ SVCEOF
     echo "    sudo $WORKER                     back up now"
     echo "    sudo $WORKER snapshots           list all snapshots"
     echo ""
-    echo "  Restore:"
+    echo "  Restore (interactive, one service at a time):"
     echo "    sudo $RESTORE"
     echo "    sudo $RESTORE --list"
+    echo ""
+    echo "  Disaster recovery (unattended, every service — for a cold spare box):"
+    echo "    sudo $DR_BRINGUP              restore + start everything"
+    echo "    sudo $DR_BRINGUP --list       list what's restorable"
+    echo "    sudo $DR_BRINGUP --dry-run    preview, touch nothing"
+    echo "    Copy backup.conf to the spare box first — it holds the repo path(s)"
+    echo "    and password(s) this needs to connect."
     echo ""
     echo "  Backup test (stop/restore/compare/restore-back):"
     echo "    sudo $TEST_SCRIPT                test most recent backup (all services)"

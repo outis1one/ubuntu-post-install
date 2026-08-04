@@ -73,7 +73,7 @@ a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `drum-rhythm-game`, `js99er`, `kyber-launcher`, `kyber-server`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `kdeconnect`, `silent-send`, `ssh-config`, `sync-cc` |
-| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
+| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency), optional offsite mirror (`kopia repository sync-to`), plus `dr_bringup.sh` — unattended restore-everything-and-start for standing up a cold spare box; `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
 
 Run `./setup.sh --list` to see descriptions.
 
