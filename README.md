@@ -67,13 +67,13 @@ a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 | Group | Services |
 |-------|---------|
 | `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import, optional password-auth lockdown, and SSH Host aliases; optional NetBird overlay network |
-| `homelab` | `caddy`, `crowdsec`, `authelia`, `homeassistant`, `asterisk`, `pstn-trunk`, `sms-inbound`, `security-dashboard`, `sunshine` |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `coturn` (shared TURN/STUN relay — Asterisk, Mattermost Calls, and future WebRTC-capable services all register a dedicated credential against one instance instead of each running its own), `homeassistant`, `asterisk`, `pstn-trunk`, `sms-inbound`, `security-dashboard`, `sunshine` |
 | `utilities` | `actualbudget`, `ai-gpu`, `ai-stack`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `paintplus`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy` |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
 | `gaming` | `drum-rhythm-game`, `js99er`, `kyber-launcher`, `kyber-server`, `minecraft`, `wolf`, `wolf-pair` |
 | `extras` | `kdeconnect`, `silent-send`, `ssh-config`, `sync-cc` |
-| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency); `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
+| `backup` | `backup` — complete recovery: entire `~/docker/<service>/` for every service via Kopia (Minecraft: flush+snap, no downtime; others: stop/snap/start for DB consistency), optional offsite mirror (`kopia repository sync-to`), plus `dr_bringup.sh` — unattended restore-everything-and-start for standing up a cold spare box; `borg-backup` — same coverage via Borg (chunk dedup, SSH remote repos, Borgmatic/Vorta compatible); `gaming-backup` — frequent game-save snapshots (Minecraft world data, emulator saves, Steam — no downtime, run hourly) |
 
 Run `./setup.sh --list` to see descriptions.
 

@@ -197,8 +197,12 @@ install_joplin() {
     ensure_docker_dir_ownership "$JOPLIN_DIR"
     cd "$JOPLIN_DIR" || return 1
 
-    local DB_PASS
-    DB_PASS="$(generate_password 32)"
+    # Reused across reruns if already set — the Postgres volume keeps the
+    # password from its first init, so a fresh random one on every rerun
+    # would lock Joplin out of its own database.
+    local DB_PASS=""
+    [ -f ".env" ] && DB_PASS="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+    [ -n "$DB_PASS" ] || DB_PASS="$(generate_password 32)"
     local BASE_URL="https://joplin.${SITE_DOMAIN}"
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):

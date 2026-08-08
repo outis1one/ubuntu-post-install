@@ -336,10 +336,27 @@ install_koha() {
     fi
 
     # ── Passwords ─────────────────────────────────────────────────────────────
+    # Reused across reruns if already set — the MariaDB volume keeps
+    # DB_PASS/DB_ROOT_PASS from first init, and an already-created Koha admin
+    # account keeps its own KOHA_ADMIN_PASS; regenerating any of these on a
+    # rerun would lock the reinstall out of both the database and
+    # post-setup.sh's REST API login.
     local DB_PASS DB_ROOT_PASS RABBIT_PASS
-    DB_PASS="$(generate_password 24)"
-    DB_ROOT_PASS="$(generate_password 24)"
-    RABBIT_PASS="$(generate_password 24)"
+    local _existing_koha_conf="$KOHA_DIR/config-main.env"
+    if [ -f "$_existing_koha_conf" ]; then
+        DB_PASS="$(grep '^DB_PASS=' "$_existing_koha_conf" | cut -d= -f2-)"
+        DB_ROOT_PASS="$(grep '^DB_ROOT_PASS=' "$_existing_koha_conf" | cut -d= -f2-)"
+        RABBIT_PASS="$(grep '^RABBIT_PASS=' "$_existing_koha_conf" | cut -d= -f2-)"
+        local _existing_admin_pass
+        _existing_admin_pass="$(grep '^KOHA_ADMIN_PASS=' "$_existing_koha_conf" | cut -d= -f2-)"
+        if [ -n "$_existing_admin_pass" ]; then
+            KOHA_ADMIN_PASS="$_existing_admin_pass"
+            log_info "Existing install detected — reusing its DB/admin passwords instead of what was just entered above, so this rebuild doesn't lock out the already-initialized database and admin account."
+        fi
+    fi
+    [ -n "${DB_PASS:-}" ] || DB_PASS="$(generate_password 24)"
+    [ -n "${DB_ROOT_PASS:-}" ] || DB_ROOT_PASS="$(generate_password 24)"
+    [ -n "${RABBIT_PASS:-}" ] || RABBIT_PASS="$(generate_password 24)"
 
     # ── Create directories ────────────────────────────────────────────────────
     mkdir -p "$KOHA_DIR/data"

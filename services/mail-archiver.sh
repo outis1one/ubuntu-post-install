@@ -207,9 +207,18 @@ install_mail-archiver() {
     ensure_docker_dir_ownership "$MA_DIR"
     cd "$MA_DIR" || return 1
 
+    # Reused across reruns if already set — the Postgres volume keeps
+    # DB_PASS from its first init, and an already-created admin account
+    # keeps ADMIN_PASS; regenerating either on a rerun would lock the
+    # reinstall out of the database and the app's own admin login.
     local DB_PASS ADMIN_PASS TZ_VAL
-    DB_PASS=$(generate_password 32)
-    ADMIN_PASS=$(generate_password 24)
+    DB_PASS="" ADMIN_PASS=""
+    if [ -f ".env" ]; then
+        DB_PASS="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
+        ADMIN_PASS="$(grep '^Authentication__Password=' .env | cut -d= -f2-)"
+    fi
+    [ -n "$DB_PASS" ] || DB_PASS="$(generate_password 32)"
+    [ -n "$ADMIN_PASS" ] || ADMIN_PASS="$(generate_password 24)"
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):

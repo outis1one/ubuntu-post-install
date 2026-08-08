@@ -556,3 +556,64 @@ network) needs `host.docker.internal:PORT` in the Caddyfile, not
 so that hostname resolves; `configure_caddy_for_service`'s bare-port upstream
 case already does this for you — don't hand-roll `localhost:PORT` in a
 Caddy site block.
+
+## Shared coturn (TURN/STUN) relay
+
+Any service that needs a TURN server for WebRTC/SIP NAT traversal shares
+**one** coturn instance (`services/coturn.sh`) instead of running its own.
+This exists because it didn't always: `asterisk` and `mattermost` used to
+each embed a dedicated coturn container (`network_mode: host`, each with its
+own relay port range) — confirmed live, their default ranges overlapped by
+~100 UDP ports, so running both on one box meant a coin-flip over which
+service's active call lost its media relay. One shared instance with one
+port range removes the collision instead of just moving it around.
+
+**Use `ensure_coturn_user` (`lib/common.sh`), not your own coturn container:**
+
+```bash
+ensure_coturn_user "my-service"
+if [ -n "$COTURN_HOST" ]; then
+    # Out-params (not `local` — read them after the call returns, same
+    # convention as configure_caddy_for_service's CADDY_SERVICE_*):
+    #   COTURN_HOST COTURN_PORT COTURN_USERNAME COTURN_PASSWORD
+else
+    # coturn unavailable (not installed and services/coturn.sh isn't loaded
+    # to chain-install it — e.g. this file run fully standalone) — degrade
+    # gracefully. Don't block the rest of your install on this.
+fi
+```
+
+`ensure_coturn_user` chain-installs `services/coturn.sh` the first time
+*any* service needs one (guarded with `declare -F install_coturn`, same
+pattern as the asterisk → security-dashboard chaining below), then
+registers a dedicated long-term-credential username/password for your
+consumer name. The credential is cached in
+`~/docker/coturn/users/<consumer>.env`, so calling this again on a rerun
+reuses the same credential instead of minting a new one and silently
+orphaning whatever client already has the old one configured.
+
+**Why long-term credentials (`--lt-cred-mech`), not the REST-API/HMAC mode
+(`--use-auth-secret`) some WebRTC apps default to:** coturn does not support
+running both auth mechanisms on one instance at once — enabling
+`--use-auth-secret` silently overrides `--lt-cred-mech` server-wide, which
+would break every static-credential consumer. `--lt-cred-mech` supports any
+number of named users out of the box, which is the actual shape a
+shared-multi-consumer coturn needs. If the service you're adding only
+exposes an HMAC-secret TURN setting in its own UI (no plain
+username/password option), check its docs for an alternative field first —
+Mattermost's Calls plugin looked HMAC-only at a glance but also accepts a
+fixed username/credential pair via its "ICE Servers Configurations" JSON
+field (see `services/mattermost.sh` for the exact format). Don't fall back
+to a second coturn instance just because the first field you found expects
+a shared secret.
+
+**Migrating an existing service from its own embedded coturn:** don't do it
+silently. An `update` rerun must keep whatever coturn shape a service
+already has — detect the existing embedded container (e.g. `grep -q '^
+coturn:' docker-compose.yml` before regenerating it) and preserve it
+exactly, the same non-destructive rule as every other `update` path in this
+file. Only switch to the shared coturn on an explicit `fresh` reinstall, and
+warn before doing it — the TURN username/password changes, and any
+already-configured client (a SIP phone, a browser session) keeps the old
+credentials until it's reconfigured. See `services/asterisk.sh`'s
+`USE_EMBEDDED_COTURN` handling for the reference pattern.
