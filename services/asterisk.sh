@@ -633,6 +633,12 @@ _asterisk_migrate_existing_devices_message_context() {
 # FROM_EXT ends up empty/wrong and the AST_CONFIG() lookup simply finds no
 # match, which denies by default (same fail-closed behavior as an
 # unlisted extension) rather than silently allowing anything through.
+#
+# Every attempt (delivered or denied) is appended to sip-messages.log
+# (epoch|status|from_ext|to_ext) — same pipe-delimited, no-embedded-delimiter
+# convention pstn-trunk.sh's own pstn-trunk-calls.log uses, for the same
+# reason (no dependency on Asterisk's own CDR modules). Message bodies are
+# never written. The Security Dashboard's Texts table reads this file.
 _asterisk_write_messaging_dialplan() {
     local FILE="$1"
     cat > "$FILE" << 'EOF'
@@ -655,8 +661,10 @@ exten => _X.,1,NoOp(SIP MESSAGE to ${EXTEN})
  same => n,Set(SENDER_OK=${AST_CONFIG(pstn-permissions.conf,${FROM_EXT},messaging)})
  same => n,GotoIf($["${SENDER_OK}" = "yes"]?deliver:deny)
  same => n(deliver),MessageSend(pjsip:${EXTEN},${FROM_URI})
+ same => n,System(printf '%s|deliver|%s|%s\n' "${EPOCH}" "${FROM_EXT}" "${EXTEN}" >> /var/log/asterisk/sip-messages.log)
  same => n,Hangup()
  same => n(deny),NoOp(Denied — extension ${FROM_EXT} is not messaging-enabled)
+ same => n,System(printf '%s|deny|%s|%s\n' "${EPOCH}" "${FROM_EXT}" "${EXTEN}" >> /var/log/asterisk/sip-messages.log)
  same => n,Hangup()
 EOF
 }

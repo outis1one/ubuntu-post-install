@@ -379,6 +379,12 @@ _pstn_write_sms_inbound_dialplan() {
 ;   docker exec <container> asterisk -rx "core set verbose 5"
 ;   (send the text)
 ;   check the console/full log for the "SMS-over-SIP MESSAGE received" line
+;
+; pstn-sms.log (epoch|in|from|to) feeds the Security Dashboard's Texts table
+; — from/to prefer the X-ANVEO-SMS-* headers (the documented mechanism) and
+; fall back to MESSAGE(from)/MESSAGE(to) if a header is empty, same
+; unconfirmed-until-a-real-text caveat as everything else in this context.
+; No message body is ever written to this file.
 [pstn-sms-inbound]
 exten => _X.,1,NoOp(SMS-over-SIP MESSAGE received — dialplan EXTEN=${EXTEN})
  same => n,Set(SMS_HDR_FROM=${PJSIP_HEADER(read,X-ANVEO-SMS-FROM)})
@@ -387,6 +393,9 @@ exten => _X.,1,NoOp(SMS-over-SIP MESSAGE received — dialplan EXTEN=${EXTEN})
  same => n,Set(SMS_MSG_TO=${MESSAGE(to)})
  same => n,Set(SMS_BODY=${MESSAGE(body)})
  same => n,NoOp(DIAGNOSTIC (not yet routed) -- X-ANVEO-SMS-FROM=[${SMS_HDR_FROM}] X-ANVEO-SMS-TO=[${SMS_HDR_TO}] MESSAGE(from)=[${SMS_MSG_FROM}] MESSAGE(to)=[${SMS_MSG_TO}] EXTEN=[${EXTEN}] body=[${SMS_BODY}])
+ same => n,Set(SMS_FROM=${IF($["${SMS_HDR_FROM}"!=""]?${SMS_HDR_FROM}:${SMS_MSG_FROM})})
+ same => n,Set(SMS_TO=${IF($["${SMS_HDR_TO}"!=""]?${SMS_HDR_TO}:${SMS_MSG_TO})})
+ same => n,System(printf '%s|in|%s|%s\n' "${EPOCH}" "${SMS_FROM}" "${SMS_TO}" >> /var/log/asterisk/pstn-sms.log)
  same => n,Hangup()
 EOF
 }

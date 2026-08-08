@@ -1,6 +1,7 @@
 #!/bin/bash
 # services/security-dashboard.sh — Security dashboard: Asterisk failed-connection
-# log + CrowdSec decisions (view/unban/ASN-exempt management), Authelia-protected.
+# log + PSTN call/text history + CrowdSec decisions (view/unban/ASN-exempt
+# management), Authelia-protected.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
@@ -64,7 +65,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service security-dashboard homelab "Security dashboard: Asterisk failed-connections + extension/trunk management + CrowdSec bans (Authelia-protected)" 8092
+register_service security-dashboard homelab "Security dashboard: Asterisk failed-connections + call/text history + extension/trunk management + CrowdSec bans (Authelia-protected)" 8092
 
 install_security-dashboard() {
     local APP_DIR="/opt/security-dashboard"
@@ -102,8 +103,9 @@ install_security-dashboard() {
     echo ""
     echo "┌─────────────────────────────────────────────────────────────────┐"
     echo "│ SECURITY DASHBOARD                                               │"
-    echo "│ Asterisk failed-connection log + one Extensions tab (devices,   │"
-    echo "│ ring groups, PSTN tiers, personal DIDs) + CrowdSec bans,        │"
+    echo "│ Asterisk failed-connection log + call/text history + one        │"
+    echo "│ Extensions tab (devices, ring groups, PSTN tiers, personal      │"
+    echo "│ DIDs) + CrowdSec bans,                                          │"
     echo "│ one page. Runs natively on the host (not Docker) so it can call │"
     echo "│ cscli and read Asterisk's files directly. Authelia-protected.   │"
     echo "└─────────────────────────────────────────────────────────────────┘"
@@ -111,8 +113,8 @@ install_security-dashboard() {
 
     if [ -z "$ASTERISK_EA_DIR" ]; then
         log_warning "No Asterisk install detected."
-        log_warning "The Security Log and Extensions tabs will just be empty — CrowdSec's tab"
-        log_warning "still works fine."
+        log_warning "The Security Log, Calls & Texts, and Extensions tabs will just be empty —"
+        log_warning "CrowdSec's tab still works fine."
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -208,16 +210,17 @@ install_security-dashboard() {
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
 
-Asterisk failed-connection log + CrowdSec ban management, one Authelia-
-protected page. Runs natively on the host (systemd service \`security-dashboard\`),
+Asterisk failed-connection log + call/text history + CrowdSec ban
+management, one Authelia-protected page. Runs natively on the host
+(systemd service \`security-dashboard\`),
 not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
 
-Three tabs: **Security Log**, **Extensions**, **CrowdSec**. The first two are
-always there (they only need Asterisk itself, detected once at install time);
-CrowdSec checks its own live install state on every page load and hides its
-nav button if \`cscli\` isn't found.
+Four tabs: **Security Log**, **Calls & Texts**, **Extensions**, **CrowdSec**.
+The first three are always there (they only need Asterisk itself, detected
+once at install time); CrowdSec checks its own live install state on every
+page load and hides its nav button if \`cscli\` isn't found.
 
 Extensions used to be three separate tabs — *Asterisk Admin*, *Extensions*
 and *PSTN Trunk* — which between them listed the same extensions three times:
@@ -232,6 +235,20 @@ which tab a given extension's settings live on.
 - **Security Log** — parses \`$ASTERISK_LOG_DIR/full\` for SIP auth failures
   (wrong password, unknown extension, etc.) with timestamp/account/remote IP,
   sortable per column (click a header to sort, click again to reverse).
+- **Calls & Texts** — who called/texted whom, not just failed logins.
+  - **PSTN Calls** reads \`logs/pstn-trunk-calls.log\`, appended to directly
+    by \`pstn-trunk.sh\`'s own dialplan (not Asterisk's CDR — see that
+    script's comment on \`_pstn_write_dialplan_include\` for why). Time,
+    direction, from, to, duration. Empty until a PSTN trunk is installed and
+    has logged at least one call.
+  - **Texts** merges two sources, both metadata-only — no message body is
+    ever written to either log: internal SIP \`MESSAGE\`s between extensions
+    (\`logs/sip-messages.log\`, written by \`services/asterisk.sh\`'s
+    \`[sip-messaging]\` context, delivered or denied), and SMS-over-SIP
+    arrivals on the trunk DID (\`logs/pstn-sms.log\`, written by
+    \`pstn-trunk.sh\`'s \`[pstn-sms-inbound]\` context — Anveo-specific, and
+    diagnostic until its field-parsing is confirmed against a real text, see
+    that context's own comment).
 - **Extensions** — one row per extension, merged from \`pjsip.conf\` (which
   always works) and, when the Easy Asterisk container is reachable, its own
   device list. Columns: Ext, Name, then Category/Status/Transport if that
@@ -506,6 +523,7 @@ User=$_svc_user
 Group=$_svc_user
 Environment=DASHBOARD_PORT=$_port
 Environment=ASTERISK_LOG=${_log_dir:+$_log_dir/full}
+Environment=ASTERISK_LOG_DIR=$_log_dir
 Environment=ASTERISK_CONFIG_DIR=$_config_dir
 Environment=ASTERISK_EA_CONFIG_DIR=$_ea_config_dir
 Environment=ASTERISK_EA_CONTAINER=$_ea_container
@@ -873,6 +891,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("DASHBOARD_PORT", "8092"))
 ASTERISK_LOG = os.environ.get("ASTERISK_LOG", "")
+ASTERISK_LOG_DIR = os.environ.get("ASTERISK_LOG_DIR", "")
+# Written directly by the dialplan (pstn-trunk.sh / asterisk.sh's System()
+# calls), not read from Asterisk's own CDR — see those files' comments on
+# pstn-trunk-calls.log for why. All three share ASTERISK_LOG_DIR since
+# they live alongside logs/full in the same ./logs volume mount.
+PSTN_CALLS_LOG = os.path.join(ASTERISK_LOG_DIR, "pstn-trunk-calls.log") if ASTERISK_LOG_DIR else ""
+SIP_MESSAGES_LOG = os.path.join(ASTERISK_LOG_DIR, "sip-messages.log") if ASTERISK_LOG_DIR else ""
+SMS_LOG = os.path.join(ASTERISK_LOG_DIR, "pstn-sms.log") if ASTERISK_LOG_DIR else ""
 ASTERISK_CONFIG_DIR = os.environ.get("ASTERISK_CONFIG_DIR", "")
 ASN_SCENARIO_FILES = [
     "/etc/crowdsec/scenarios/local-asterisk_bf.yaml",
@@ -925,34 +951,31 @@ def _normalize_nanp_number(token):
     return None
 
 
-SECURITY_LOG_TAIL_BYTES = 2 * 1024 * 1024  # comfortably enough for 5000 lines
+LOG_TAIL_BYTES = 2 * 1024 * 1024  # comfortably enough for 5000 lines
 
 
-def parse_security_log(limit=200):
-    """Tail ASTERISK_LOG and return the most recent SecurityEvent lines,
-    newest first, as dicts. Missing file / no lines -> empty list, never an
-    error — this is a convenience view, not load-bearing.
-
-    Reads only a bounded byte window from the END of the file, not the whole
-    thing — this log is Asterisk's unrotated console/security output and can
-    grow to multiple GB. The previous version did f.readlines() (loads the
-    ENTIRE file into memory) before slicing the last 5000 lines, and this
-    tab polls every 30 seconds from the browser. Confirmed live: on a 1GB-RAM
-    droplet with a 1.4GB log file, that ballooned this "stdlib only,
-    deliberately lightweight" process to 677MB RSS / 1.8GB peak swap, which
-    left CrowdSec unable to even start (boot timeout) and contributed
+def _tail_lines(path, max_lines=5000):
+    """Reads only a bounded byte window from the END of a file, not the whole
+    thing, and returns its lines oldest-first within that window. Shared by
+    every log-backed tab (Security Log, PSTN Calls, Texts) — Asterisk's own
+    logs/full is unrotated console output that can grow to multiple GB, and
+    these tabs poll every 30 seconds from the browser. Confirmed live: on a
+    1GB-RAM droplet with a 1.4GB log file, an earlier version that did
+    f.readlines() (loads the ENTIRE file into memory) ballooned this "stdlib
+    only, deliberately lightweight" process to 677MB RSS / 1.8GB peak swap,
+    which left CrowdSec unable to even start (boot timeout) and contributed
     directly to the droplet becoming unresponsive. Bounding this to a fixed
     ~2MB window keeps memory use constant regardless of how large the log
-    file grows.
+    file grows. Missing file -> empty list, never an error — every caller is
+    a convenience view, not load-bearing.
     """
-    if not ASTERISK_LOG or not os.path.isfile(ASTERISK_LOG):
+    if not path or not os.path.isfile(path):
         return []
-    events = []
     try:
-        with open(ASTERISK_LOG, "rb") as f:
+        with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            start = max(0, size - SECURITY_LOG_TAIL_BYTES)
+            start = max(0, size - LOG_TAIL_BYTES)
             f.seek(start)
             data = f.read()
     except OSError:
@@ -961,8 +984,14 @@ def parse_security_log(limit=200):
     lines = text.splitlines()
     if start > 0 and lines:
         lines = lines[1:]  # first line is likely truncated mid-line
-    lines = lines[-5000:]
-    for line in lines:
+    return lines[-max_lines:]
+
+
+def parse_security_log(limit=200):
+    """Return the most recent SecurityEvent lines from ASTERISK_LOG, newest
+    first, as dicts."""
+    events = []
+    for line in _tail_lines(ASTERISK_LOG):
         if "SecurityEvent=" not in line:
             continue
         ts_match = TS_RE.match(line)
@@ -978,6 +1007,84 @@ def parse_security_log(limit=200):
             "reason": fields.get("SecurityEvent", ""),
         })
     events.reverse()
+    return events[:limit]
+
+
+def _fmt_epoch(raw):
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(raw)))
+    except (ValueError, OSError):
+        return raw
+
+
+def parse_pstn_calls(limit=200):
+    """Reads pstn-trunk-calls.log (epoch|direction|who|what|seconds),
+    written directly by pstn-trunk.sh's dialplan — see that file's comment
+    on _pstn_write_dialplan_include for the format and why it isn't
+    Asterisk's own CDR. 'who'/'what' are direction-dependent: an outbound
+    row's who/what are the calling extension / dialed PSTN number, an
+    inbound row's are the caller's number / the DID (or "ring-group") that
+    was called — normalized to plain from/to here so the UI doesn't need to
+    know the difference."""
+    events = []
+    for line in _tail_lines(PSTN_CALLS_LOG):
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        epoch, direction, who, what, seconds = parts
+        events.append({
+            "epoch": epoch,
+            "timestamp": _fmt_epoch(epoch),
+            "direction": direction,
+            "from": who,
+            "to": what,
+            "duration": seconds,
+        })
+    events.reverse()
+    return events[:limit]
+
+
+def parse_texts(limit=200):
+    """Merges internal SIP-messaging deliveries/denials (sip-messages.log,
+    written by services/asterisk.sh's [sip-messaging] context) with
+    SMS-over-SIP arrivals (pstn-sms.log, written by pstn-trunk.sh's
+    [pstn-sms-inbound] context) into one newest-first list. Neither log ever
+    contains message bodies — metadata only (who/when), by design."""
+    events = []
+    for line in _tail_lines(SIP_MESSAGES_LOG):
+        parts = line.split("|")
+        if len(parts) != 4:
+            continue
+        epoch, status, from_ext, to_ext = parts
+        events.append({
+            "epoch": epoch,
+            "timestamp": _fmt_epoch(epoch),
+            "type": "internal",
+            "direction": "internal",
+            "from": from_ext,
+            "to": to_ext,
+            "status": "delivered" if status == "deliver" else "denied",
+        })
+    for line in _tail_lines(SMS_LOG):
+        parts = line.split("|")
+        if len(parts) != 4:
+            continue
+        epoch, direction, from_num, to_num = parts
+        events.append({
+            "epoch": epoch,
+            "timestamp": _fmt_epoch(epoch),
+            "type": "sms",
+            "direction": direction,
+            "from": from_num,
+            "to": to_num,
+            "status": "received" if direction == "in" else "sent",
+        })
+    def _epoch_key(e):
+        try:
+            return int(e["epoch"])
+        except ValueError:
+            return 0
+    events.sort(key=_epoch_key, reverse=True)
     return events[:limit]
 
 
@@ -3162,6 +3269,7 @@ INDEX_HTML = """<!doctype html>
   <h1>Security Dashboard</h1>
   <nav>
     <button class="tab-btn" data-tab="security">Security Log</button>
+    <button class="tab-btn" data-tab="comms">Calls &amp; Texts</button>
     <button class="tab-btn active" data-tab="extensions">Extensions</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
@@ -3178,6 +3286,39 @@ INDEX_HTML = """<!doctype html>
             <th class="sortable" data-sort="account">Account</th>
             <th class="sortable" data-sort="remote">Remote</th>
             <th class="sortable" data-sort="severity">Severity</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="tab-comms" style="display:none">
+    <div class="card">
+      <div class="card-head"><h3>PSTN Calls</h3></div>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Calls placed or received through the PSTN trunk, newest first. Numbers and duration only — no recordings, no call content. Empty until <code>pstn-trunk</code> is installed and has logged at least one call.</p>
+        <div class="table-wrap">
+          <table id="calls-table"><thead><tr>
+            <th class="sortable" data-sort="timestamp">Time</th>
+            <th class="sortable" data-sort="direction">Direction</th>
+            <th class="sortable" data-sort="from">From</th>
+            <th class="sortable" data-sort="to">To</th>
+            <th class="sortable" data-sort="duration">Duration</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Texts</h3></div>
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Internal SIP messages between extensions, and SMS-over-SIP messages arriving on the trunk DID (Anveo-specific, diagnostic until routing is confirmed against real traffic — see PSTN Trunk docs). Metadata only (sender/recipient/time) — message bodies are never logged.</p>
+        <div class="table-wrap">
+          <table id="texts-table"><thead><tr>
+            <th class="sortable" data-sort="timestamp">Time</th>
+            <th class="sortable" data-sort="type">Type</th>
+            <th class="sortable" data-sort="direction">Direction</th>
+            <th class="sortable" data-sort="from">From</th>
+            <th class="sortable" data-sort="to">To</th>
+            <th class="sortable" data-sort="status">Status</th>
           </tr></thead><tbody></tbody></table>
         </div>
       </div>
@@ -3989,7 +4130,7 @@ var QRCode;
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "extensions", "crowdsec"];
+const TABS = ["security", "comms", "extensions", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
@@ -4049,6 +4190,94 @@ async function loadSecurity() {
   const res = await fetch("/api/security-events");
   lastSecurityEvents = await res.json();
   renderSecurity();
+}
+
+// ── Calls & Texts tab ───────────────────────────────────────────────────────
+let lastCalls = [];
+let callsSort = { key: null, dir: 1 };
+
+function renderCalls() {
+  let rows = lastCalls.slice();
+  if (callsSort.key) {
+    rows.sort((a, b) => {
+      const av = (a[callsSort.key] || "").toString().toLowerCase(), bv = (b[callsSort.key] || "").toString().toLowerCase();
+      if (av < bv) return -1 * callsSort.dir;
+      if (av > bv) return 1 * callsSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#calls-table th.sortable .arrow").forEach(a => a.remove());
+  if (callsSort.key) {
+    const th = document.querySelector(`#calls-table th[data-sort="${callsSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${callsSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#calls-table tbody");
+  tbody.innerHTML = rows.map(c => `<tr>
+    <td>${esc(c.timestamp)}</td>
+    <td>${esc(c.direction)}</td>
+    <td>${esc(c.from)}</td>
+    <td>${esc(c.to)}</td>
+    <td>${esc(c.duration)}s</td>
+  </tr>`).join("") || `<tr><td colspan=5 class=muted>No calls found.</td></tr>`;
+}
+
+document.querySelectorAll("#calls-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    callsSort.dir = (callsSort.key === key) ? -callsSort.dir : 1;
+    callsSort.key = key;
+    renderCalls();
+  });
+});
+
+async function loadCalls() {
+  const res = await fetch("/api/pstn-calls");
+  lastCalls = await res.json();
+  renderCalls();
+}
+
+let lastTexts = [];
+let textsSort = { key: null, dir: 1 };
+
+function renderTexts() {
+  let rows = lastTexts.slice();
+  if (textsSort.key) {
+    rows.sort((a, b) => {
+      const av = (a[textsSort.key] || "").toString().toLowerCase(), bv = (b[textsSort.key] || "").toString().toLowerCase();
+      if (av < bv) return -1 * textsSort.dir;
+      if (av > bv) return 1 * textsSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#texts-table th.sortable .arrow").forEach(a => a.remove());
+  if (textsSort.key) {
+    const th = document.querySelector(`#texts-table th[data-sort="${textsSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${textsSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#texts-table tbody");
+  tbody.innerHTML = rows.map(t => `<tr>
+    <td>${esc(t.timestamp)}</td>
+    <td>${esc(t.type)}</td>
+    <td>${esc(t.direction)}</td>
+    <td>${esc(t.from)}</td>
+    <td>${esc(t.to)}</td>
+    <td>${esc(t.status)}</td>
+  </tr>`).join("") || `<tr><td colspan=6 class=muted>No texts found.</td></tr>`;
+}
+
+document.querySelectorAll("#texts-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    textsSort.dir = (textsSort.key === key) ? -textsSort.dir : 1;
+    textsSort.key = key;
+    renderTexts();
+  });
+});
+
+async function loadTexts() {
+  const res = await fetch("/api/comms-texts");
+  lastTexts = await res.json();
+  renderTexts();
 }
 
 let lastDecisions = [];
@@ -5096,11 +5325,15 @@ async function removePersonalDid(did) {
 }
 
 loadSecurity();
+loadCalls();
+loadTexts();
 loadDecisions();
 loadAsnExempt();
 loadCrowdsecStatus();
 initExtensionsTab();
 setInterval(loadSecurity, 30000);
+setInterval(loadCalls, 30000);
+setInterval(loadTexts, 30000);
 setInterval(loadDecisions, 30000);
 </script>
 </body></html>
@@ -5135,6 +5368,10 @@ class Handler(BaseHTTPRequestHandler):
             self._html(html)
         elif self.path == "/api/security-events":
             self._json(parse_security_log())
+        elif self.path == "/api/pstn-calls":
+            self._json(parse_pstn_calls())
+        elif self.path == "/api/comms-texts":
+            self._json(parse_texts())
         elif self.path == "/api/decisions":
             self._json(get_decisions())
         elif self.path == "/api/asn-exempt":
