@@ -140,14 +140,23 @@ again; it just isn't part of the current baseline.
 
 **WordPress — confirmed, 2-4 sites, light traffic, ecommerce-capable.**
 `services/wordpress.sh` (new): multi-site from the start, every site named,
-one shared MariaDB container instead of a dedicated database container per
-site (same resource-sharing idea as `coturn`, scoped to WordPress's own
-sites). Each site gets its own database + user within that shared
-instance — required, not just tidy: WordPress's schema uses generic table
-names (`wp_posts`, `wp_options`, etc.), so two installs sharing one database
-with the same table prefix would collide. wp-cli automates the initial
-install (title, admin account) so there's no per-site browser setup wizard,
-and PHP limits are pre-tuned (256M memory, 64M uploads) for WooCommerce
+each with its own **dedicated** MariaDB container (same pattern as
+`services/nextcloud.sh`) — not a shared instance. Started as a shared-MariaDB
+design (same resource-sharing idea as `coturn`) but switched to dedicated
+per-site after weighing it against backup/restore: Kopia's generic backup
+(`services/backup.sh`) stops a service's container to snapshot it, so a
+shared instance would back up — and would have to be restored — as one unit
+covering every site at once, not one site independently. Dedicated per-site
+costs more RAM (a full MariaDB container each, ~100-150MB, instead of one
+instance amortized across sites) in exchange for real isolation: each
+site's database backs up and restores completely independently. Separate
+databases were always required regardless of which model — WordPress's
+schema uses generic table names (`wp_posts`, `wp_options`, etc.), so two
+installs sharing one database with the same table prefix would collide —
+the shared-vs-dedicated choice was only ever about the container/process,
+never about the data being mixed. wp-cli automates the initial install
+(title, admin account) so there's no per-site browser setup wizard, and PHP
+limits are pre-tuned (256M memory, 64M uploads) for WooCommerce
 specifically since "possible ecommerce" was part of the ask.
 
 **Explicitly out of scope for this box** (wrong fit, not "can't run"):
@@ -182,15 +191,18 @@ specifically since "possible ecommerce" was part of the ask.
 | Traccar (JVM) | ~425MB |
 | NetBird client | ~35MB |
 | ntfy, actualbudget, mealie | ~340MB combined |
-| Shared MariaDB (WordPress, one-time) | ~180MB |
-| WordPress × 4 sites (~120MB each — sized for possible WooCommerce, not a light blog) | ~480MB |
-| **Total** | **~3.38GB** |
+| WordPress × 4 sites (app ~80MB + dedicated MariaDB ~120MB each) | ~800MB |
+| **Total** | **~3.52GB** |
 
-Leaves roughly **~700MB headroom (~17%)** out of 4GB — tighter than the
-25-30% rule of thumb above, but with the swapfile now automatic
-(`ensure_swapfile`, see above) there's real insurance against burst load
-rather than relying on manual setup. At the low end of the site range (2
-instead of 4), headroom improves to roughly ~950MB (~23%). `wg-easy`,
+Leaves roughly **~580MB headroom (~14%)** out of 4GB at 4 sites — tighter
+than the shared-MariaDB design would have been (~700MB), the real cost of
+per-site backup/restore isolation, and tighter than the 25-30% rule of
+thumb above. With the swapfile now automatic (`ensure_swapfile`, see above)
+there's still real insurance against burst load. At the low end of the site
+range (2 instead of 4), it's ~3.12GB used, ~976MB headroom (~24%) — the gap
+between shared and dedicated MariaDB narrows a lot at low site counts,
+since the shared model's one fixed instance cost is amortized across fewer
+sites. `wg-easy`,
 `homebox`, and `audiobookshelf` from earlier in this doc aren't included in
 this specific table — add them back in at ~25MB, ~125MB, and ~200MB
 respectively if/when they're actually deployed alongside this baseline.

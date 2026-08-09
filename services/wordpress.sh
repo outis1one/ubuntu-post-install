@@ -1,17 +1,23 @@
 #!/bin/bash
-# services/wordpress.sh — Self-hosted WordPress sites, multi-site, shared MariaDB.
+# services/wordpress.sh — Self-hosted WordPress sites, multi-site, dedicated MariaDB per site.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
 #   sudo bash wordpress.sh
 # (Docker must already be installed when run standalone)
 #
-# Every WordPress site gets its own directory/containers, but all sites on
-# this box share ONE MariaDB container (chain-installed on first need, same
-# "one shared thing instead of N heavy duplicates" idea as services/coturn.sh
-# — just scoped to WordPress's own sites rather than shared across different
-# services). Each site gets its own database + credentials within that
-# shared instance instead of a dedicated MariaDB container per site.
+# Every WordPress site gets its own directory, its own WordPress container,
+# and its own dedicated MariaDB container (same pattern as services/
+# nextcloud.sh) — deliberately NOT a shared MariaDB instance across sites.
+# A shared instance would mean one site's database backup/restore is
+# entangled with every other site's: Kopia's generic backup (services/
+# backup.sh) stops a service's container to get a consistent snapshot, so a
+# shared instance backs up (and would have to be restored) as one unit
+# covering every site at once, not one site independently. Costs more RAM
+# per site (a full MariaDB container each, ~100-150MB, instead of one
+# instance split across sites) in exchange for real backup/restore
+# isolation — each site's database can be restored to any point in time
+# without touching any other site's current data.
 #
 # E-commerce (WooCommerce) is just a normal WordPress plugin — no separate
 # infrastructure needed. PHP upload/memory limits are tuned upfront so it
@@ -202,91 +208,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wordpress utilities "Self-hosted WordPress sites (multi-site, shared MariaDB) — blogs, business sites, e-commerce via WooCommerce" 8090
-
-# ── Shared MariaDB, chain-installed the first time any site needs it ────────
-# Out-param (not `local`): WP_DB_ROOT_PASS — read after this returns.
-_wordpress_ensure_shared_db() {
-    local DB_DIR="$DOCKER_DIR/wordpress-db"
-    WP_DB_ROOT_PASS=""
-
-    if [ -f "$DB_DIR/.env" ]; then
-        WP_DB_ROOT_PASS="$(grep '^MYSQL_ROOT_PASSWORD=' "$DB_DIR/.env" | cut -d= -f2-)"
-        [ -n "$WP_DB_ROOT_PASS" ] && return 0
-    fi
-
-    log_info "No shared WordPress database yet — setting one up (used by every WordPress site on this box)..."
-    mkdir -p "$DB_DIR/data"
-    ensure_docker_dir_ownership "$DB_DIR"
-
-    WP_DB_ROOT_PASS="$(generate_password 32)"
-
-    # Dedicated network so WordPress site containers can reach the shared DB
-    # without joining caddy_net (that one's for Caddy<->service HTTP traffic).
-    docker network inspect wordpress_net &>/dev/null || docker network create wordpress_net &>/dev/null
-
-    cat > "$DB_DIR/docker-compose.yml" << 'WPDBCOMPOSE'
-name: wordpress-db
-
-services:
-  wordpress-db:
-    image: mariadb:11
-    container_name: wordpress-db
-    hostname: wordpress-db
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./data:/var/lib/mysql
-    networks:
-      - wordpress_net
-
-networks:
-  wordpress_net:
-    external: true
-WPDBCOMPOSE
-
-    cat > "$DB_DIR/.env" << WPDBENV
-# Shared MariaDB for every WordPress site on this box — each site gets its
-# own database + user within this one instance instead of a dedicated
-# MariaDB container per site (same resource-sharing idea as coturn, just
-# scoped to WordPress's own sites). Changing this breaks every site's DB
-# connection until each site's .env is updated to match.
-MYSQL_ROOT_PASSWORD=$WP_DB_ROOT_PASS
-MARIADB_AUTO_UPGRADE=1
-WPDBENV
-    chmod 600 "$DB_DIR/.env"
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DB_DIR"
-
-    ( cd "$DB_DIR" && docker compose up -d ) \
-        && log_success "Shared WordPress database started" \
-        || { log_warning "Failed to start the shared WordPress database — check: cd $DB_DIR && docker compose logs"; return 1; }
-
-    local _tries=0
-    until docker exec wordpress-db mysqladmin ping -uroot -p"$WP_DB_ROOT_PASS" --silent &>/dev/null || [ "$_tries" -ge 30 ]; do
-        sleep 1; _tries=$((_tries + 1))
-    done
-
-    write_readme "$DB_DIR" << WPDBREADME
-# wordpress-db — shared MariaDB for every WordPress site
-
-One MariaDB instance shared by every WordPress site on this box
-(\`services/wordpress.sh\`) — each site gets its own database and user
-within this instance instead of a dedicated MariaDB container per site.
-
-Root credentials: \`.env\` (\`MYSQL_ROOT_PASSWORD\`, chmod 600).
-
-## Manage
-\`\`\`bash
-docker compose up -d
-docker compose down
-docker compose logs -f
-docker exec -it wordpress-db mysql -uroot -p
-\`\`\`
-
-Deleting this stops every WordPress site on the box — check
-\`~/docker/wordpress-*\` for what depends on it before removing.
-WPDBREADME
-}
+register_service wordpress utilities "Self-hosted WordPress sites (multi-site, dedicated MariaDB per site) — blogs, business sites, e-commerce via WooCommerce" 8090
 
 install_wordpress() {
     require_docker || return 1
@@ -302,10 +224,9 @@ install_wordpress() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would prompt for a site name (directory/container naming)"
-        echo "[DRY-RUN] Would ensure the shared wordpress-db MariaDB container exists"
-        echo "[DRY-RUN]   (chain-installed on first WordPress site, reused by every other site)"
-        echo "[DRY-RUN] Would create this site's database + credentials in that shared instance"
         echo "[DRY-RUN] Would create \$DOCKER_DIR/wordpress-<site> with docker-compose.yml + .env"
+        echo "[DRY-RUN]   including a dedicated MariaDB container for this site alone (not shared"
+        echo "[DRY-RUN]   with other sites — independent backup/restore per site)"
         echo "[DRY-RUN] Would tune PHP memory_limit/upload_max_filesize for WooCommerce-readiness"
         echo "[DRY-RUN] Would auto-scan for a free host port for this site"
         echo "[DRY-RUN] Would run wp-cli to install WordPress core non-interactively (site title,"
@@ -352,26 +273,23 @@ install_wordpress() {
         esac
     fi
 
-    # ── Shared MariaDB ────────────────────────────────────────────────────────
-    _wordpress_ensure_shared_db || return 1
-
-    # ── This site's database + credentials within the shared instance ───────
+    # ── This site's dedicated database credentials ───────────────────────────
+    # The mariadb image creates MYSQL_DATABASE/MYSQL_USER itself from these
+    # env vars on first boot — no imperative CREATE DATABASE step needed,
+    # same as services/nextcloud.sh. Reused across reruns (read from the
+    # existing .env if present) so a rerun never locks the site out of its
+    # own already-initialized database.
+    local DB_CONTAINER="${CONTAINER}-db"
+    local WP_NET="${CONTAINER}_net"
     local WP_DB_NAME="wp_${SITE_NAME//-/_}"
     local WP_DB_USER="wp_${SITE_NAME//-/_}"
-    local WP_DB_PASS=""
-    [ -f "$DIR/.env" ] && WP_DB_PASS="$(grep '^WORDPRESS_DB_PASSWORD=' "$DIR/.env" | cut -d= -f2-)"
-    [ -n "$WP_DB_PASS" ] || WP_DB_PASS="$(generate_password 24)"
-
-    if docker exec wordpress-db mysql -uroot -p"$WP_DB_ROOT_PASS" -e \
-        "CREATE DATABASE IF NOT EXISTS \`$WP_DB_NAME\`; \
-         CREATE USER IF NOT EXISTS '$WP_DB_USER'@'%' IDENTIFIED BY '$WP_DB_PASS'; \
-         GRANT ALL PRIVILEGES ON \`$WP_DB_NAME\`.* TO '$WP_DB_USER'@'%'; \
-         FLUSH PRIVILEGES;" &>/dev/null; then
-        log_success "Database '$WP_DB_NAME' ready on the shared MariaDB instance"
-    else
-        log_warning "Could not create the database — is wordpress-db running? Check: docker logs wordpress-db"
-        return 1
+    local WP_DB_PASS="" WP_DB_ROOT_PASS=""
+    if [ -f "$DIR/.env" ]; then
+        WP_DB_PASS="$(grep '^WORDPRESS_DB_PASSWORD=' "$DIR/.env" | cut -d= -f2-)"
+        WP_DB_ROOT_PASS="$(grep '^MYSQL_ROOT_PASSWORD=' "$DIR/.env" | cut -d= -f2-)"
     fi
+    [ -n "$WP_DB_PASS" ] || WP_DB_PASS="$(generate_password 24)"
+    [ -n "$WP_DB_ROOT_PASS" ] || WP_DB_ROOT_PASS="$(generate_password 32)"
 
     echo ""
     local WP_SITE_TITLE="" WP_ADMIN_USER="" WP_ADMIN_EMAIL=""
@@ -388,7 +306,7 @@ install_wordpress() {
         WEB_PORT=$((WEB_PORT + 1))
     done
 
-    mkdir -p "$DIR/html" "$DIR/uploads-ini.d"
+    mkdir -p "$DIR/html" "$DIR/db" "$DIR/uploads-ini.d"
     ensure_docker_dir_ownership "$DIR"
     cd "$DIR" || return 1
 
@@ -433,17 +351,30 @@ services:
     hostname: $CONTAINER
     restart: unless-stopped
     env_file: .env
+    depends_on:
+      - db
     volumes:
       - ./html:/var/www/html
       - ./uploads-ini.d/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
     ports:
       - "${WEB_PORT}:80"
     networks:
-      - wordpress_net
+      - default
 ${_CADDY_NET_LINE}
+  db:
+    image: mariadb:11
+    container_name: $DB_CONTAINER
+    hostname: $DB_CONTAINER
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./db:/var/lib/mysql
+    networks:
+      - default
+
 networks:
-  wordpress_net:
-    external: true
+  default:
+    name: $WP_NET
 ${_CADDY_NET_SECTION}
 WPCOMPOSE
 
@@ -451,7 +382,15 @@ WPCOMPOSE
 TZ=$TZ_VAL
 CADDY_NET=$SITE_CADDY_NET
 
-WORDPRESS_DB_HOST=wordpress-db
+# Dedicated MariaDB for this site alone (not shared with other WordPress
+# sites) — independent backup/restore, at the cost of a full MariaDB
+# container per site instead of one instance split across several.
+MYSQL_ROOT_PASSWORD=$WP_DB_ROOT_PASS
+MYSQL_DATABASE=$WP_DB_NAME
+MYSQL_USER=$WP_DB_USER
+MYSQL_PASSWORD=$WP_DB_PASS
+
+WORDPRESS_DB_HOST=$DB_CONTAINER
 WORDPRESS_DB_NAME=$WP_DB_NAME
 WORDPRESS_DB_USER=$WP_DB_USER
 WORDPRESS_DB_PASSWORD=$WP_DB_PASS
@@ -474,21 +413,27 @@ WPENV
     write_readme "$DIR" << MD
 # WordPress — $SITE_NAME
 
-Self-hosted WordPress site. Database lives on the shared \`wordpress-db\`
-MariaDB instance (\`~/docker/wordpress-db\`) used by every WordPress site on
-this box — not a dedicated database container for this site alone.
+Self-hosted WordPress site with its own **dedicated** MariaDB container
+(\`$DB_CONTAINER\`, in \`db/\` below) — not shared with any other WordPress
+site on this box. Costs more RAM per site than a shared database would, in
+exchange for independent backup/restore: this site's database can be
+restored to any point in time without touching any other site's data, since
+each one is backed up (and would be restored) as its own separate Kopia
+snapshot rather than being entangled with other sites in one shared
+snapshot.
 
 - Web UI: http://localhost:${WEB_PORT}
 - Admin user: \`$WP_ADMIN_USER\`
 - Admin password: see \`WP_ADMIN_PASSWORD\` in \`.env\`
 - Site files: \`html/\`
+- Database files: \`db/\`
 - PHP limits: \`uploads-ini.d/uploads.ini\` (256M memory, 64M uploads —
   raise further here if a specific import still hits a limit)
 
 ## Manage
 \`\`\`bash
 cd $DIR
-docker compose up -d      # start
+docker compose up -d      # start (both wordpress and its db)
 docker compose down       # stop
 docker compose logs -f    # logs
 docker compose pull && docker compose up -d   # update
@@ -498,7 +443,7 @@ docker compose pull && docker compose up -d   # update
 Run any wp-cli command against this site without installing wp-cli on the
 host:
 \`\`\`bash
-docker run --rm --network wordpress_net -v $DIR/html:/var/www/html \\
+docker run --rm --network $WP_NET -v $DIR/html:/var/www/html \\
     --env-file $DIR/.env wordpress:cli wp <command>
 \`\`\`
 
@@ -506,7 +451,7 @@ docker run --rm --network wordpress_net -v $DIR/html:/var/www/html \\
 No separate infrastructure needed — WooCommerce is a normal WordPress
 plugin. Install it from Plugins → Add New in the WP admin, or via wp-cli:
 \`\`\`bash
-docker run --rm --network wordpress_net -v $DIR/html:/var/www/html \\
+docker run --rm --network $WP_NET -v $DIR/html:/var/www/html \\
     --env-file $DIR/.env wordpress:cli wp plugin install woocommerce --activate
 \`\`\`
 The PHP limits above (256M memory, 64M uploads) were already sized with
@@ -514,9 +459,14 @@ WooCommerce's own recommendations in mind, so product/image imports work
 without hitting default-image limits on the first try.
 
 ## Backup
-Back up \`html/\` (site files/plugins/themes/media) and this site's
-database on \`wordpress-db\` (\`docker exec wordpress-db mysqldump -uroot -p
-$WP_DB_NAME > backup.sql\`) — \`.env\` holds the root password.
+\`services/backup.sh\` (Kopia) already covers this directory automatically —
+it stops \`docker compose down\`, snapshots \`$DIR\`, and restarts, generically
+for every \`~/docker/*\` directory with a \`docker-compose.yml\`, so both
+\`html/\` and \`db/\` are captured together on every run with no per-site setup
+needed. For an ad hoc logical dump instead:
+\`\`\`bash
+docker exec $DB_CONTAINER mysqldump -uroot -p"\$(grep MYSQL_ROOT_PASSWORD .env | cut -d= -f2-)" $WP_DB_NAME > backup.sql
+\`\`\`
 MD
 
     local START_WP=""
@@ -531,9 +481,9 @@ MD
                 sleep 1; _tries=$((_tries + 1))
             done
 
-            if docker run --rm --network wordpress_net \
+            if docker run --rm --network "$WP_NET" \
                 -v "$DIR/html:/var/www/html" \
-                -e WORDPRESS_DB_HOST=wordpress-db \
+                -e WORDPRESS_DB_HOST="$DB_CONTAINER" \
                 -e WORDPRESS_DB_NAME="$WP_DB_NAME" \
                 -e WORDPRESS_DB_USER="$WP_DB_USER" \
                 -e WORDPRESS_DB_PASSWORD="$WP_DB_PASS" \
@@ -549,8 +499,8 @@ MD
             else
                 log_warning "wp-cli install didn't complete (WordPress may not have been ready yet, or was"
                 log_warning "already installed). Finish setup in the browser, or retry manually:"
-                log_warning "  docker run --rm --network wordpress_net -v $DIR/html:/var/www/html \\"
-                log_warning "    -e WORDPRESS_DB_HOST=wordpress-db -e WORDPRESS_DB_NAME=$WP_DB_NAME \\"
+                log_warning "  docker run --rm --network $WP_NET -v $DIR/html:/var/www/html \\"
+                log_warning "    -e WORDPRESS_DB_HOST=$DB_CONTAINER -e WORDPRESS_DB_NAME=$WP_DB_NAME \\"
                 log_warning "    -e WORDPRESS_DB_USER=$WP_DB_USER -e WORDPRESS_DB_PASSWORD=$WP_DB_PASS \\"
                 log_warning "    wordpress:cli core install --url=http://localhost:${WEB_PORT} \\"
                 log_warning "    --title=\"$WP_SITE_TITLE\" --admin_user=$WP_ADMIN_USER \\"
