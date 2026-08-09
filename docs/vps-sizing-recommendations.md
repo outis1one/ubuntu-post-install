@@ -133,6 +133,23 @@ a purpose-built one — it lacks LMS's music-specific depth (its lyrics
 fetching, its many audio-focused plugins). Since there's no hardware
 Squeezebox tie-in to preserve, that tradeoff was fine to make.
 
+**Emby subsequently dropped from the near-term plan** — traded off for
+WordPress capacity (below) rather than run alongside it. `services/emby.sh`'s
+music-only mode is still there and ready whenever there's headroom for it
+again; it just isn't part of the current baseline.
+
+**WordPress — confirmed, 2-4 sites, light traffic, ecommerce-capable.**
+`services/wordpress.sh` (new): multi-site from the start, every site named,
+one shared MariaDB container instead of a dedicated database container per
+site (same resource-sharing idea as `coturn`, scoped to WordPress's own
+sites). Each site gets its own database + user within that shared
+instance — required, not just tidy: WordPress's schema uses generic table
+names (`wp_posts`, `wp_options`, etc.), so two installs sharing one database
+with the same table prefix would collide. wp-cli automates the initial
+install (title, admin account) so there's no per-site browser setup wizard,
+and PHP limits are pre-tuned (256M memory, 64M uploads) for WooCommerce
+specifically since "possible ecommerce" was part of the ask.
+
 **Explicitly out of scope for this box** (wrong fit, not "can't run"):
 - Local media servers storing media on the VPS (`jellyfin`, `immich`,
   `lyrion`, and `emby`/`audiobookshelf` *without* the home-library-over-VPN
@@ -152,7 +169,7 @@ Squeezebox tie-in to preserve, that tradeoff was fine to make.
   (CGNAT, no local peer) boxes — a good idea in principle, parked for later
   since NetBird already covers the current need.
 
-## Final RAM budget for the IONOS box (everything above, idle)
+## Final RAM budget for the IONOS box (current baseline, no Emby, idle)
 
 | Service | ~RAM |
 |---|---|
@@ -164,17 +181,22 @@ Squeezebox tie-in to preserve, that tradeoff was fine to make.
 | Mattermost × 2 (app+Postgres each) | ~1200MB |
 | Traccar (JVM) | ~425MB |
 | NetBird client | ~35MB |
-| ntfy, wg-easy, homebox, actualbudget, mealie | ~490MB combined |
-| audiobookshelf | ~200MB |
-| Emby (music-only) | ~300MB |
-| **Total** | **~3.37GB** |
+| ntfy, actualbudget, mealie | ~340MB combined |
+| Shared MariaDB (WordPress, one-time) | ~180MB |
+| WordPress × 4 sites (~120MB each — sized for possible WooCommerce, not a light blog) | ~480MB |
+| **Total** | **~3.38GB** |
 
-Leaves roughly **~600-700MB headroom (~16-18%)** out of 4GB — tighter than
-the 25-30% rule of thumb above, but with the swapfile now automatic
+Leaves roughly **~700MB headroom (~17%)** out of 4GB — tighter than the
+25-30% rule of thumb above, but with the swapfile now automatic
 (`ensure_swapfile`, see above) there's real insurance against burst load
-rather than relying on manual setup. Deploy incrementally and check
-`free -h` / `docker stats` against this table rather than trusting it
-blindly — each line carries real estimate uncertainty, and they're stacked
+rather than relying on manual setup. At the low end of the site range (2
+instead of 4), headroom improves to roughly ~950MB (~23%). `wg-easy`,
+`homebox`, and `audiobookshelf` from earlier in this doc aren't included in
+this specific table — add them back in at ~25MB, ~125MB, and ~200MB
+respectively if/when they're actually deployed alongside this baseline.
+Deploy incrementally and check `free -h` / `docker stats` against this table
+rather than trusting it blindly — each line carries real estimate
+uncertainty, and they're stacked
 close enough to the ceiling that it's worth confirming. If real usage runs
 higher than estimated, the two Mattermost instances (~1.2GB combined) are
 the single biggest lever to reconsider.
