@@ -99,6 +99,10 @@ is_installed() {
         pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] || [ -f "$DOCKER_DIR/asterisk/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
         sms-inbound) [ -f /opt/sms-inbound/settings.env ] ;;
         ssh-config) false ;;   # repeatable management tool, never shows [installed]
+        # Every WordPress site is named from the first one on (no plain
+        # $DOCKER_DIR/wordpress dir the default case below could match) —
+        # [installed] means "at least one site exists", not any specific one.
+        wordpress) compgen -G "$DOCKER_DIR/wordpress-*" >/dev/null 2>&1 ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
