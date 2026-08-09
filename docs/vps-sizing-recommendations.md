@@ -82,9 +82,10 @@ no transcoding/conferencing/heavy-video load in this profile, so CPU has
 large margin and RAM sits around 2.0-2.7GB idle with the core stack alone.
 
 **Utility adds, agreed:**
-- `ntfy`, `wg-easy`, `homebox`, `actualbudget`, `mealie`
+- `ntfy`, `wg-easy`, `homebox`, `mealie`
 
-**Explicitly declined:** `vaultwarden`, `portainer`, `syncthing`
+**Explicitly declined:** `vaultwarden`, `portainer`, `syncthing`, `actualbudget`
+(dropped to make room for WordPress — see below)
 
 **Remote / cross-VLAN access:** NetBird — hosted control plane (not
 self-hosted), client-only, with its embedded SSH server enabled
@@ -138,7 +139,7 @@ WordPress capacity (below) rather than run alongside it. `services/emby.sh`'s
 music-only mode is still there and ready whenever there's headroom for it
 again; it just isn't part of the current baseline.
 
-**WordPress — confirmed, 2-4 sites, light traffic, ecommerce-capable.**
+**WordPress — confirmed, 2 sites (settled), light traffic, ecommerce-capable.**
 `services/wordpress.sh` (new): multi-site from the start, every site named,
 each with its own **dedicated** MariaDB container (same pattern as
 `services/nextcloud.sh`) — not a shared instance. Started as a shared-MariaDB
@@ -178,7 +179,7 @@ specifically since "possible ecommerce" was part of the ask.
   (CGNAT, no local peer) boxes — a good idea in principle, parked for later
   since NetBird already covers the current need.
 
-## Final RAM budget for the IONOS box (current baseline, no Emby, idle)
+## Final RAM budget for the IONOS box (settled baseline, no Emby, no actualbudget, idle)
 
 | Service | ~RAM |
 |---|---|
@@ -190,19 +191,16 @@ specifically since "possible ecommerce" was part of the ask.
 | Mattermost × 2 (app+Postgres each) | ~1200MB |
 | Traccar (JVM) | ~425MB |
 | NetBird client | ~35MB |
-| ntfy, actualbudget, mealie | ~340MB combined |
-| WordPress × 4 sites (app ~80MB + dedicated MariaDB ~120MB each) | ~800MB |
-| **Total** | **~3.52GB** |
+| ntfy, mealie | ~225MB combined |
+| WordPress × 2 sites (app ~80MB + dedicated MariaDB ~120MB each) | ~400MB |
+| **Total** | **~3.00GB** |
 
-Leaves roughly **~580MB headroom (~14%)** out of 4GB at 4 sites — tighter
-than the shared-MariaDB design would have been (~700MB), the real cost of
-per-site backup/restore isolation, and tighter than the 25-30% rule of
-thumb above. With the swapfile now automatic (`ensure_swapfile`, see above)
-there's still real insurance against burst load. At the low end of the site
-range (2 instead of 4), it's ~3.12GB used, ~976MB headroom (~24%) — the gap
-between shared and dedicated MariaDB narrows a lot at low site counts,
-since the shared model's one fixed instance cost is amortized across fewer
-sites. `wg-easy`,
+Leaves roughly **~1.09GB headroom (~27%)** out of 4GB — back into the ideal
+25-30% range, between dropping `actualbudget` (~115MB) and settling on 2
+sites instead of 4 (dedicated-per-site MariaDB's cost scales with site
+count, so this was the single biggest lever). With the swapfile now
+automatic (`ensure_swapfile`, see above) there's real insurance on top of
+that margin, not instead of it. `wg-easy`,
 `homebox`, and `audiobookshelf` from earlier in this doc aren't included in
 this specific table — add them back in at ~25MB, ~125MB, and ~200MB
 respectively if/when they're actually deployed alongside this baseline.
