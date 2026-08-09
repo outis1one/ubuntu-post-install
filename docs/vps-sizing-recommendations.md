@@ -80,10 +80,9 @@ no transcoding/conferencing/heavy-video load in this profile, so CPU has
 large margin and RAM sits around 2.0-2.7GB idle with the core stack alone.
 
 **Utility adds, agreed:**
-- `ntfy`, `wg-easy`, `portainer`, `syncthing`, `homebox`, `actualbudget`,
-  `mealie`
+- `ntfy`, `wg-easy`, `homebox`, `actualbudget`, `mealie`
 
-**Explicitly declined:** `vaultwarden`
+**Explicitly declined:** `vaultwarden`, `portainer`, `syncthing`
 
 **Remote / cross-VLAN access:** NetBird — hosted control plane (not
 self-hosted), client-only, with its embedded SSH server enabled
@@ -106,17 +105,21 @@ VPS with no per-pair config) plus a `sync-ssh-aliases.sh` companion script
 generates `~/.ssh/config` Host aliases) is already built and pushed
 (`claude/vps-capacity-assessment-r57vw3`, commit `4a0ec63`).
 
-**Floated, not yet decided:** running `lyrion` (music) and/or
-`audiobookshelf` on the VPS with HTTPS via Caddy, but pointing them at a
-home-hosted library over a VPN tunnel instead of storing media locally —
-architecturally sound (both services already just bind-mount a host path;
-point it at a network-mounted share instead) and avoids the disk/CPU
-tradeoffs of a local media library, but real bandwidth depends on home
-upload speed, which wasn't checked.
+**Confirmed:** `audiobookshelf` on the VPS with HTTPS via Caddy, but
+pointing it at a home-hosted library over a VPN tunnel (NetBird or wg-easy,
+whichever link reaches that box) instead of storing audiobooks locally —
+`services/audiobookshelf.sh` already just bind-mounts a host path, so this
+means mounting a network share from that tunnel at the mount point instead
+of a local directory. Avoids the disk/CPU tradeoffs of a local media
+library; real bandwidth depends on home upload speed, which wasn't checked.
+
+**Floated, not yet decided:** `lyrion` (music) doing the same
+home-library-over-VPN thing — same pattern as `audiobookshelf` above,
+architecturally sound, just not explicitly confirmed yet.
 
 **Explicitly out of scope for this box** (wrong fit, not "can't run"):
 - Local media servers storing media on the VPS (`emby`, `jellyfin`,
-  `immich`, `audiobookshelf`/`lyrion` *without* the home-library-over-VPN
+  `immich`, and `lyrion`/`audiobookshelf` *without* the home-library-over-VPN
   approach above) — disk-hungry, and transcoding CPU load risks contending
   with active calls.
 - AI stacks (`ai-stack`, `ai-gpu`, `iopaint`, `paintplus`) — need real
