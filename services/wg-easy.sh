@@ -192,7 +192,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy)" 51821
+register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy); peers mesh through this hub automatically, with a script to sync SSH aliases" 51821
 
 install_wg-easy() {
     require_docker || return 1
@@ -204,9 +204,12 @@ install_wg-easy() {
         echo "  - Create $WGEASY_DIR with docker-compose.yml + .env (config/)"
         echo "  - Auto-detect public IP for WG_HOST"
         echo "  - Generate a random web UI password"
+        echo "  - Pin WG_DEFAULT_ADDRESS=10.8.0.x (subnet 10.8.0.0/24)"
         echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
         echo "  - Require router port-forward: UDP 51820 → this server"
         echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "  - Offer to also allow SSH from the VPN subnet (additive, doesn't remove public SSH)"
+        echo "  - Write sync-ssh-aliases.sh — generates ~/.ssh/config aliases for connected peers"
         return 0
     fi
 
@@ -218,6 +221,12 @@ install_wg-easy() {
     local PUBLIC_IP WG_HOST WG_PASSWORD WG_PASSWORD_HASH
     PUBLIC_IP=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null || echo "your-public-ip")
     WG_PASSWORD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+    # Pinned explicitly (rather than left to wg-easy's own internal default)
+    # so this script and the ufw rule below always agree on the subnet, even
+    # if a future wg-easy image changes its own default.
+    local WG_DEFAULT_ADDRESS="10.8.0.x"
+    local WG_SUBNET_CIDR="10.8.0.0/24"
 
     prompt_text "Public IP or hostname for VPN [$PUBLIC_IP]:" "$PUBLIC_IP" WG_HOST
 
@@ -276,6 +285,8 @@ services:
       - WG_HOST=\${WG_HOST}
       - PASSWORD_HASH=${WG_HASH_ESCAPED:-\${WG_PASSWORD}}
       - WG_DEFAULT_DNS=1.1.1.1
+      - WG_DEFAULT_ADDRESS=${WG_DEFAULT_ADDRESS}
+      - WG_ALLOWED_IPS=0.0.0.0/0, ::/0
     volumes:
       - ./config:/etc/wireguard
     ports:
@@ -297,6 +308,108 @@ WGEASY_ENV
 
     configure_caddy_for_service "wg-easy" "wg-easy:51821" "vpn"
 
+    # ── Optional: also allow SSH over this VPN's subnet ─────────────────────
+    # Additive only — never narrows or removes the existing public SSH rule.
+    # WG_ALLOWED_IPS=0.0.0.0/0 above already means every peer routes traffic
+    # for every other peer through this hub by default (confirmed against
+    # wg-easy's own docs/issue tracker: this is what makes client-to-client
+    # routing "just work" with no extra config) — this rule is only about
+    # giving SSH itself a path over that tunnel as an alternative to the
+    # public one, not about enabling the mesh routing itself.
+    if command -v ufw &>/dev/null; then
+        local ADD_SSH_VPN=""
+        prompt_yn "Also allow SSH from this VPN's subnet ($WG_SUBNET_CIDR)? Adds a rule; does NOT remove public SSH access — narrow that yourself once VPN access is confirmed working. (y/n):" "n" ADD_SSH_VPN
+        if [[ "$ADD_SSH_VPN" =~ ^[Yy]$ ]]; then
+            local _ssh_port
+            _ssh_port="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | tail -1 | awk '{print $2}')"
+            _ssh_port="${_ssh_port:-22}"
+            if ufw allow from "$WG_SUBNET_CIDR" to any port "$_ssh_port" proto tcp comment 'SSH via wg-easy VPN' >/dev/null 2>&1; then
+                log_success "SSH reachable from $WG_SUBNET_CIDR (public SSH access is unchanged)"
+                log_info "To require the VPN for SSH, narrow the public rule yourself once VPN access is confirmed:"
+                log_info "  sudo ufw status numbered   # find the public SSH/OpenSSH rule"
+                log_info "  sudo ufw delete <number>   # remove only after confirming VPN SSH works"
+            else
+                log_warning "Failed to add the UFW rule — add manually: ufw allow from $WG_SUBNET_CIDR to any port $_ssh_port proto tcp"
+            fi
+        fi
+    fi
+
+    # ── SSH alias sync script ────────────────────────────────────────────────
+    # Reads connected peers from the live WireGuard interface (`wg show`
+    # inside the container) rather than wg-easy's own internal client
+    # storage — wg-easy's HTTP API is explicitly undocumented/unstable, and
+    # its internal storage format has changed across versions, but `wg show`
+    # is core wireguard-tools and stable regardless of wg-easy's version.
+    # New peers are prompted for a friendly name once (cached in
+    # peer-names.env); reruns only ask about genuinely new peers.
+    cat > sync-ssh-aliases.sh << 'SYNCEOF'
+#!/bin/bash
+# ~/docker/wg-easy/sync-ssh-aliases.sh — generate ~/.ssh/config Host aliases
+# for every connected wg-easy peer, so "ssh <name>" works without memorizing
+# VPN IPs. Safe to re-run any time after adding a client in the web UI.
+#
+#   sudo ./sync-ssh-aliases.sh
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NAMES_FILE="$HERE/peer-names.env"
+ACTUAL_USER="${SUDO_USER:-$USER}"
+ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "$HOME")"
+SSH_CFG="$ACTUAL_HOME/.ssh/config"
+
+touch "$NAMES_FILE"
+
+if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx wg-easy; then
+    echo "wg-easy container isn't running — start it first: docker compose up -d"
+    exit 1
+fi
+
+echo "Reading connected peers from the live WireGuard interface..."
+DUMP="$(docker exec wg-easy wg show wg0 dump 2>/dev/null | tail -n +2)"
+if [ -z "$DUMP" ]; then
+    echo "No peers found — add a client in the wg-easy web UI first, then re-run this."
+    exit 0
+fi
+
+ADDED=0
+while IFS=$'\t' read -r PUBKEY _PSK _ENDPOINT ALLOWED_IPS _REST; do
+    [ -n "$PUBKEY" ] || continue
+    IP="${ALLOWED_IPS%%/*}"
+    [ -n "$IP" ] || continue
+
+    NAME="$(grep "^${PUBKEY}=" "$NAMES_FILE" 2>/dev/null | cut -d= -f2)"
+    if [ -z "$NAME" ]; then
+        echo ""
+        echo "New peer: $IP (public key ${PUBKEY:0:12}...)"
+        read -r -p "  Name for an SSH alias (blank to skip this peer): " NAME
+        [ -n "$NAME" ] || continue
+        echo "${PUBKEY}=${NAME}" >> "$NAMES_FILE"
+    fi
+
+    if [ -f "$SSH_CFG" ] && grep -qiE "^Host[[:space:]]+${NAME}([[:space:]]|\$)" "$SSH_CFG"; then
+        echo "  '$NAME' already in $SSH_CFG (if its IP changed to $IP, edit the entry manually)."
+        continue
+    fi
+
+    mkdir -p "$(dirname "$SSH_CFG")"; touch "$SSH_CFG"
+    chmod 700 "$(dirname "$SSH_CFG")"; chmod 600 "$SSH_CFG"
+    {
+        echo ""
+        echo "Host $NAME"
+        echo "    HostName $IP"
+        echo "    User $ACTUAL_USER"
+    } >> "$SSH_CFG"
+    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$(dirname "$SSH_CFG")" 2>/dev/null || true
+    echo "  Added: ssh $NAME  ->  $ACTUAL_USER@$IP"
+    ADDED=$((ADDED+1))
+done <<< "$DUMP"
+
+chown "$ACTUAL_USER:$ACTUAL_USER" "$NAMES_FILE" 2>/dev/null || true
+echo ""
+echo "Done — $ADDED new alias(es) added. Re-run any time after adding a peer in the wg-easy web UI."
+SYNCEOF
+    chmod +x sync-ssh-aliases.sh
+    chown "$ACTUAL_USER:$ACTUAL_USER" sync-ssh-aliases.sh
+
     write_readme "$WGEASY_DIR" << MD
 # wg-easy
 
@@ -307,6 +420,7 @@ and monitoring connections.
 - VPN:    UDP port 51820 (forward this on your router)
 - Password: stored in \`.env\` (\`WG_PASSWORD\`)
 - VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
+- VPN subnet: \`$WG_SUBNET_CIDR\`
 - Config: \`config/\`
 
 ## Manage
@@ -324,6 +438,30 @@ Forward **UDP port 51820** to this server's LAN IP for external VPN access.
 ## Adding clients
 Open http://localhost:51821, log in with your password, click "+ New Client",
 download or scan the QR code with the WireGuard app.
+
+## Mesh — peers reach each other automatically
+Every client is created with \`WG_ALLOWED_IPS=0.0.0.0/0, ::/0\`, so each peer
+routes traffic for every other peer through this VPS by default — no manual
+per-pair setup needed, any enrolled device can already reach any other
+enrolled device once both are connected. Traffic between two peers takes one
+hop through this VPS (not a direct connection between them); for SSH-sized
+traffic that's irrelevant.
+
+If you later enable wg-easy's **Per-Client Firewall** feature (Admin Panel →
+Interface) or manually narrow a specific client's Allowed IPs, that client
+loses this automatic mesh reachability — add the VPN subnet (\`$WG_SUBNET_CIDR\`)
+back to its Allowed IPs / Firewall Allowed IPs to restore it.
+
+## SSH aliases for connected peers
+Run \`./sync-ssh-aliases.sh\` any time after adding a client in the web UI —
+it reads currently-connected peers straight off the WireGuard interface,
+asks for a friendly name the first time it sees each one, and adds a
+matching \`Host\` entry to \`~/.ssh/config\` so \`ssh <name>\` works without
+memorizing IPs. Name choices are cached in \`peer-names.env\` so reruns only
+ask about genuinely new peers.
+
+## SSH over the VPN
+$( [[ "${ADD_SSH_VPN:-}" =~ ^[Yy]$ ]] && echo "SSH (port 22) is also reachable from \`$WG_SUBNET_CIDR\` in addition to the public internet — that's additive, your existing public SSH access is untouched. To require the VPN for SSH: verify VPN access works, then find and remove the public SSH rule yourself (\`sudo ufw status numbered\`, then \`sudo ufw delete <number>\`) — this is deliberately a manual last step so a misconfigured VPN can't lock you out." || echo "Not enabled for this install. Re-run this installer and answer yes to the SSH-over-VPN prompt, or add it manually: \`sudo ufw allow from $WG_SUBNET_CIDR to any port 22 proto tcp\`." )
 MD
 
     local START_WGEASY=""
