@@ -198,6 +198,9 @@ install_immich() {
         echo "  - Deploy: immich-server, immich-machine-learning, valkey, postgres"
         echo "  - Strategy 1 (unified): all photos in one folder, import-photos.sh helper"
         echo "  - Strategy 2 (external): existing photos indexed read-only, new uploads separate"
+        echo "  - Optionally store thumbnails/encoded-video/new-uploads in S3-compatible"
+        echo "    object storage instead of local disk (native IMMICH_STORAGE_ENGINE=s3 —"
+        echo "    NOT a FUSE mount, those are unreliable for Immich's access pattern)"
         echo "  - Expose port 2283"
         echo "  - Offer a Caddy reverse proxy and to start the stack"
         return 0
@@ -270,18 +273,68 @@ install_immich() {
 
     echo ""
 
+    # ── S3-compatible object storage (thumbnails/encoded-video/new uploads) ──
+    # Native IMMICH_STORAGE_ENGINE=s3 support — talks to the S3 API directly,
+    # NOT a FUSE-mounted bucket pretending to be a filesystem. That distinction
+    # matters: Immich uses symlinks internally (S3 doesn't support them —
+    # ENOSYS errors under FUSE) and does thousands of stat()/read() calls on
+    # startup, which FUSE-over-network handles badly (reported to crash the
+    # mount under latency spikes as small as 100ms). Native S3 mode sidesteps
+    # both problems by never pretending the bucket is a filesystem.
+    #
+    # Independent of the library strategy above — an external library (if
+    # configured) is a separate read-only mount either way and is unaffected
+    # by where Immich's own managed data (thumbs/encoded-video/upload/backups/
+    # profile) lives.
+    echo ""
+    local USE_S3=""
+    prompt_yn "Store Immich-managed data (thumbnails, encoded video, new uploads) in S3-compatible object storage instead of local disk? (y/n):" "n" USE_S3
+
+    local S3_BUCKET="" S3_REGION="" S3_ENDPOINT="" S3_PREFIX=""
+    local S3_ACCESS_KEY_ID="" S3_SECRET_ACCESS_KEY="" S3_FORCE_PATH_STYLE=""
+    if [ "$USE_S3" = "y" ] || [ "$USE_S3" = "Y" ]; then
+        USE_S3=true
+        echo ""
+        echo "  S3-COMPATIBLE OBJECT STORAGE"
+        echo ""
+        prompt_text "  Bucket name:" "" S3_BUCKET
+        prompt_text "  Region (blank if your provider doesn't use one):" "us-east-1" S3_REGION
+        prompt_text "  Endpoint URL (blank = AWS S3; set for IONOS/MinIO/other S3-compatible providers):" "" S3_ENDPOINT
+        prompt_text "  Prefix/folder within the bucket (blank = bucket root):" "" S3_PREFIX
+        prompt_text "  Access key ID:" "" S3_ACCESS_KEY_ID
+        if [ "$UNATTENDED" = true ]; then
+            S3_SECRET_ACCESS_KEY=""
+            log_warning "Unattended mode — secret access key left blank. Set S3_SECRET_ACCESS_KEY in .env before starting."
+        else
+            read -r -sp "  Secret access key: " S3_SECRET_ACCESS_KEY; echo ""
+        fi
+        [ -n "$S3_ENDPOINT" ] && S3_FORCE_PATH_STYLE=true
+        echo ""
+        echo "  S3 mode: thumbnails, encoded video, and new uploads go to $S3_BUCKET."
+        [ -n "$EXTERNAL_LIBRARY" ] && echo "  Existing photos ($EXTERNAL_LIBRARY) stay where they are, read-only, unaffected."
+    else
+        USE_S3=false
+    fi
+
+    echo ""
+
     # ── Create directories ──────────────────────────────────────────────────
     mkdir -p "$IMMICH_DIR"
     ensure_docker_dir_ownership "$IMMICH_DIR"
-    mkdir -p "$UPLOAD_LOCATION"
     [ -n "$EXTERNAL_LIBRARY" ] && mkdir -p "$EXTERNAL_LIBRARY"
 
-    # Immich checks for these subdirs + .immich marker files on startup
-    local subdir
-    for subdir in thumbs upload backups library profile encoded-video; do
-        mkdir -p "$UPLOAD_LOCATION/$subdir"
-        touch "$UPLOAD_LOCATION/$subdir/.immich"
-    done
+    if [ "$USE_S3" = true ]; then
+        log_info "S3 mode — skipping local upload-location directories; Immich manages"
+        log_info "thumbs/upload/backups/library/profile/encoded-video inside the bucket."
+    else
+        mkdir -p "$UPLOAD_LOCATION"
+        # Immich checks for these subdirs + .immich marker files on startup
+        local subdir
+        for subdir in thumbs upload backups library profile encoded-video; do
+            mkdir -p "$UPLOAD_LOCATION/$subdir"
+            touch "$UPLOAD_LOCATION/$subdir/.immich"
+        done
+    fi
 
     cd "$IMMICH_DIR" || return 1
 
@@ -319,8 +372,18 @@ networks:
 "
     fi
 
-    if [ -n "$EXTERNAL_LIBRARY" ]; then
-        cat > docker-compose.yml << IMMICH_COMPOSE
+    # Composable volume lines instead of duplicating the whole compose file
+    # per combination — S3 mode drops the upload-location bind mount entirely
+    # (Immich talks to the bucket over the S3 API, nothing to mount), the
+    # external-library mount is independent and applies either way.
+    local _UPLOAD_VOLUME_LINE="      - \${UPLOAD_LOCATION}:/usr/src/app/upload
+"
+    [ "$USE_S3" = true ] && _UPLOAD_VOLUME_LINE=""
+    local _EXTERNAL_VOLUME_LINE=""
+    [ -n "$EXTERNAL_LIBRARY" ] && _EXTERNAL_VOLUME_LINE="      - \${EXTERNAL_LIBRARY}:/usr/src/app/external:ro
+"
+
+    cat > docker-compose.yml << IMMICH_COMPOSE
 name: immich
 
 services:
@@ -328,9 +391,7 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:\${IMMICH_VERSION:-release}
     volumes:
-      - \${UPLOAD_LOCATION}:/usr/src/app/upload
-      - \${EXTERNAL_LIBRARY}:/usr/src/app/external:ro
-      - /etc/localtime:/etc/localtime:ro
+${_UPLOAD_VOLUME_LINE}${_EXTERNAL_VOLUME_LINE}      - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
     ports:
@@ -376,65 +437,31 @@ volumes:
   model-cache:
 ${_CADDY_NET_SECTION}
 IMMICH_COMPOSE
-    else
-        cat > docker-compose.yml << IMMICH_COMPOSE
-name: immich
-
-services:
-  immich-server:
-    container_name: immich_server
-    image: ghcr.io/immich-app/immich-server:\${IMMICH_VERSION:-release}
-    volumes:
-      - \${UPLOAD_LOCATION}:/usr/src/app/upload
-      - /etc/localtime:/etc/localtime:ro
-    env_file:
-      - .env
-    ports:
-      - 2283:2283
-    depends_on:
-      - redis
-      - database
-    restart: always
-    healthcheck:
-      disable: false
-${_CADDY_NET_BLOCK}
-  immich-machine-learning:
-    container_name: immich_machine_learning
-    image: ghcr.io/immich-app/immich-machine-learning:\${IMMICH_VERSION:-release}
-    volumes:
-      - model-cache:/cache
-    env_file:
-      - .env
-    restart: always
-    healthcheck:
-      disable: false
-
-  redis:
-    container_name: immich_redis
-    image: docker.io/valkey/valkey:9-bookworm
-    healthcheck:
-      test: valkey-cli ping || exit 1
-    restart: always
-
-  database:
-    container_name: immich_postgres
-    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
-    environment:
-      POSTGRES_PASSWORD: \${DB_PASSWORD}
-      POSTGRES_USER: \${DB_USERNAME}
-      POSTGRES_DB: \${DB_DATABASE_NAME}
-      POSTGRES_INITDB_ARGS: '--data-checksums'
-    volumes:
-      - \${DB_DATA_LOCATION}:/var/lib/postgresql/data
-    restart: always
-
-volumes:
-  model-cache:
-${_CADDY_NET_SECTION}
-IMMICH_COMPOSE
-    fi
 
     # ── Write .env ──────────────────────────────────────────────────────────
+    local _UPLOAD_LOCATION_LINE="UPLOAD_LOCATION=$UPLOAD_LOCATION"
+    local _S3_BLOCK=""
+    if [ "$USE_S3" = true ]; then
+        # Do NOT set UPLOAD_LOCATION when using the S3 storage engine — Immich
+        # derives s3://<bucket>/<prefix> itself and the local bind mount is
+        # unused; leaving UPLOAD_LOCATION set alongside S3 vars is the
+        # documented footgun to avoid here.
+        _UPLOAD_LOCATION_LINE="# UPLOAD_LOCATION intentionally unset — S3 mode manages storage in the bucket"
+        _S3_BLOCK="
+# S3-compatible object storage (thumbnails, encoded video, new uploads) —
+# NOT a FUSE mount, this is Immich's native S3 storage engine talking to
+# the bucket directly over the S3 API.
+IMMICH_STORAGE_ENGINE=s3
+S3_BUCKET=$S3_BUCKET
+S3_REGION=$S3_REGION
+S3_ENDPOINT=$S3_ENDPOINT
+S3_PREFIX=$S3_PREFIX
+S3_FORCE_PATH_STYLE=$S3_FORCE_PATH_STYLE
+S3_ACCESS_KEY_ID=$S3_ACCESS_KEY_ID
+S3_SECRET_ACCESS_KEY=$S3_SECRET_ACCESS_KEY
+"
+    fi
+
     if [ "$IMMICH_STRATEGY" = "2" ]; then
         cat > .env << IMMICH_ENV
 # IMMICH CONFIGURATION — External Library Mode
@@ -449,11 +476,11 @@ IMMICH_COMPOSE
 #   Click "Scan" to index your existing photos.
 
 # New uploads from phone/web
-UPLOAD_LOCATION=$UPLOAD_LOCATION
+$_UPLOAD_LOCATION_LINE
 
 # Existing photos (read-only, indexed by Immich)
 EXTERNAL_LIBRARY=$EXTERNAL_LIBRARY
-
+${_S3_BLOCK}
 DB_DATA_LOCATION=./postgres
 IMMICH_VERSION=release
 DB_PASSWORD=$DB_PASS
@@ -471,7 +498,8 @@ IMMICH_ENV
 #
 # To import existing photos run: $IMMICH_DIR/import-photos.sh
 
-UPLOAD_LOCATION=$UPLOAD_LOCATION
+$_UPLOAD_LOCATION_LINE
+${_S3_BLOCK}
 DB_DATA_LOCATION=./postgres
 IMMICH_VERSION=release
 DB_PASSWORD=$DB_PASS
@@ -481,9 +509,10 @@ TZ=$TZ_VAL
 CADDY_NET=$SITE_CADDY_NET
 IMMICH_ENV
     fi
+    chmod 600 .env
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$IMMICH_DIR"
-    chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPLOAD_LOCATION"
+    [ "$USE_S3" != true ] && chown -R "$ACTUAL_USER:$ACTUAL_USER" "$UPLOAD_LOCATION"
     [ -n "$EXTERNAL_LIBRARY" ] && chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EXTERNAL_LIBRARY" 2>/dev/null || true
 
     # ── import-photos.sh (strategy 1 + existing photos only) ───────────────
@@ -773,9 +802,29 @@ Self-hosted photo and video backup — like Google Photos but private.
 Mobile apps (iOS/Android) auto-upload in the background.
 
 - Web UI: http://localhost:2283
-- Photo storage: \`$UPLOAD_LOCATION\`
+- Photo storage: $( [ "$USE_S3" = true ] && echo "S3 bucket \`$S3_BUCKET\` (thumbnails, encoded video, new uploads)" || echo "\`$UPLOAD_LOCATION\`" )
 - App data (postgres, model cache): inside this folder
-- Edit paths in \`.env\`, then \`docker compose up -d\` to apply.
+- Edit paths/credentials in \`.env\`, then \`docker compose up -d\` to apply.
+$( [ "$USE_S3" = true ] && cat << S3MD
+
+## S3 object storage
+Thumbnails, encoded video, and new uploads live in \`$S3_BUCKET\`
+(this is Immich's native \`IMMICH_STORAGE_ENGINE=s3\`, talking to the S3 API
+directly — **not** a FUSE-mounted bucket). Don't try to switch this to a
+\`rclone mount\`/s3fs-style setup instead: Immich uses symlinks internally
+that S3 doesn't support under FUSE (ENOSYS errors), and its startup alone
+does thousands of stat()/read() calls that FUSE-over-network handles badly —
+this has been reported to crash the mount under latency spikes as small as
+100ms. The native S3 engine avoids both problems entirely.
+$( [ -n "$EXTERNAL_LIBRARY" ] && echo "An external library is unaffected by this — it's a separate read-only mount (\`$EXTERNAL_LIBRARY\`) regardless of where Immich's own managed data lives." )
+
+Credentials and bucket config are in \`.env\` (\`S3_*\` vars, \`chmod 600\`).
+Changing them requires recreating the container:
+\`\`\`bash
+docker compose up -d --force-recreate immich-server
+\`\`\`
+S3MD
+)
 
 ## Manage
 \`\`\`bash
