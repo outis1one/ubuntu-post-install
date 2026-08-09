@@ -13,6 +13,7 @@ install_base() {
         echo "[DRY-RUN] Would install Docker CE + Compose plugin"
         echo "[DRY-RUN] Would detect an NVIDIA GPU and offer to install the driver"
         echo "    + NVIDIA Container Toolkit (for GPU-accelerated Docker services)"
+        echo "[DRY-RUN] Would add a swapfile if RAM <= 4096MB and none exists"
         echo "[DRY-RUN] Would install/configure openssh-server"
         echo "[DRY-RUN] Would offer SSH key import from GitHub/Launchpad"
         echo "[DRY-RUN] Would offer to disable SSH password auth"
@@ -37,6 +38,9 @@ install_base() {
 
     # ── Docker ───────────────────────────────────────────────────────────────
     require_docker || log_warning "Docker install failed — will retry after base setup"
+
+    # ── Swapfile — default for every install, not just Asterisk droplets ────
+    ensure_swapfile
 
     # ── NVIDIA GPU (driver + container toolkit) ─────────────────────────────
     _base_setup_nvidia_gpu

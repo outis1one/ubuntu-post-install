@@ -268,6 +268,47 @@ ensure_ufw_enabled() {
     log_success "UFW enabled (SSH on port ${_ssh_port} allowed first, so this won't lock you out)."
 }
 
+# Adds a swapfile on any box with modest RAM and no swap already active —
+# no cloud-provider detection, just the actual condition that matters. Used
+# to be DigitalOcean-droplet-gated logic living only in services/asterisk.sh;
+# generalized here so every install gets the same safety net regardless of
+# which services get chosen or which provider the box is on — a small VPS
+# running several Docker services at once needs this just as much as a
+# single-purpose Asterisk droplet did. Idempotent and safe to call from
+# multiple places in the same run (services/base.sh calls it for every
+# install; services/asterisk.sh also calls it directly so the standalone
+# `sudo bash asterisk.sh` path — no base.sh involved — still gets it): a
+# box that already has swap, or already got it from an earlier call in the
+# same session, just returns immediately.
+ensure_swapfile() {
+    local TOTAL_RAM_MB
+    TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    [[ "$TOTAL_RAM_MB" -gt 0 && "$TOTAL_RAM_MB" -le 4096 ]] || return 0
+    swapon --show | grep -q . && return 0
+    [ "$DRY_RUN" = true ] && { echo "[DRY-RUN] Would add a swapfile (${TOTAL_RAM_MB}MB RAM, no swap detected)"; return 0; }
+
+    local FREE_DISK_MB SWAP_MB=2048
+    FREE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+    if [[ "$FREE_DISK_MB" -le $((SWAP_MB + 2048)) ]]; then
+        log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
+        log_warning "Consider a bigger box, or free up disk before installing."
+        return 0
+    fi
+
+    local ADD_SWAP=""
+    prompt_yn "No swap detected on this ${TOTAL_RAM_MB}MB-RAM box — add a ${SWAP_MB}MB swapfile? (recommended) (y/n):" "y" ADD_SWAP
+    [[ "$ADD_SWAP" =~ ^[Yy]$ ]] || return 0
+
+    fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+    sysctl -w vm.swappiness=10 >/dev/null 2>&1
+    log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
+}
+
 # Scopes a UFW allow rule to just the caddy_net bridge subnet instead of
 # every interface. Needed for any port that only needs to be reachable from
 # a *locally* Caddy-fronted service (via host.docker.internal) — a plain

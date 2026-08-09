@@ -4,12 +4,13 @@
 #
 # One installer for both deployment shapes. It detects a DigitalOcean droplet
 # (via the link-local metadata service, with a y/n fallback if that's blocked)
-# and, in droplet mode, swaps in the public-cloud specifics: a swapfile for
-# low-RAM plans, a public-FQDN-only flow with no LAN/VLAN prompts, a Caddy
-# site block pinned to that one FQDN, an optional remote Authelia, and a
-# DigitalOcean Cloud Firewall via doctl. Everything else — vendor files,
-# compose, messaging dialplan, presence alerts, UFW, log rotation — is
-# identical either way.
+# and, in droplet mode, swaps in the public-cloud specifics: a public-FQDN-only
+# flow with no LAN/VLAN prompts, a Caddy site block pinned to that one FQDN,
+# an optional remote Authelia, and a DigitalOcean Cloud Firewall via doctl.
+# The swapfile (lib/common.sh's ensure_swapfile) is NOT droplet-gated — every
+# box gets that same low-RAM safety net regardless of provider or deployment
+# shape. Everything else — vendor files, compose, messaging dialplan,
+# presence alerts, UFW, log rotation — is identical either way.
 #
 # This used to be two services (services/asterisk-digital-ocean.sh held a
 # near-duplicate copy of the whole file). An existing droplet install at
@@ -90,6 +91,36 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 f) eval "$_var='fresh'" ;;
                 *) eval "$_var='cancel'" ;;
             esac
+        }
+
+        # Standalone-mode copy of lib/common.sh's ensure_swapfile() — kept in
+        # sync by hand, same as every other helper stubbed in this block.
+        ensure_swapfile() {
+            local TOTAL_RAM_MB
+            TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+            [[ "$TOTAL_RAM_MB" -gt 0 && "$TOTAL_RAM_MB" -le 4096 ]] || return 0
+            swapon --show | grep -q . && return 0
+            [ "${DRY_RUN:-false}" = true ] && { echo "[DRY-RUN] Would add a swapfile (${TOTAL_RAM_MB}MB RAM, no swap detected)"; return 0; }
+
+            local FREE_DISK_MB SWAP_MB=2048
+            FREE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
+            if [[ "$FREE_DISK_MB" -le $((SWAP_MB + 2048)) ]]; then
+                log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
+                return 0
+            fi
+
+            local ADD_SWAP=""
+            prompt_yn "No swap detected on this ${TOTAL_RAM_MB}MB-RAM box — add a ${SWAP_MB}MB swapfile? (recommended) (y/n):" "y" ADD_SWAP
+            [[ "$ADD_SWAP" =~ ^[Yy]$ ]] || return 0
+
+            fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null
+            swapon /swapfile
+            grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+            sysctl -w vm.swappiness=10 >/dev/null 2>&1
+            log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
         }
 
         configure_caddy_for_service() {
@@ -272,8 +303,9 @@ _asterisk_resolve_layout() {
 # metadata service isn't always reachable (a container, a firewalled
 # 169.254.0.0/16, a non-DO cloud that still wants the same public-IP
 # treatment), so a miss falls back to asking rather than silently deciding
-# for the user. Droplet mode is what gates the swapfile, the public-FQDN-only
-# flow, and the Cloud Firewall step further down.
+# for the user. Droplet mode is what gates the public-FQDN-only flow and the
+# Cloud Firewall step further down (the swapfile is NOT droplet-gated — see
+# ensure_swapfile in lib/common.sh, called unconditionally further down).
 _asterisk_detect_digitalocean() {
     local _meta="http://169.254.169.254/metadata/v1"
     DROPLET_ID="$(curl -fsS --max-time 2 "$_meta/id" 2>/dev/null || true)"
@@ -284,8 +316,8 @@ _asterisk_detect_digitalocean() {
     if [[ -n "$DROPLET_ID" ]]; then
         [[ -z "$PUBLIC_IP" ]] && PUBLIC_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
         log_success "DigitalOcean droplet detected (id $DROPLET_ID, public IP ${PUBLIC_IP:-unknown})."
-        log_info "Droplet mode adds: swapfile for low-RAM plans, public-FQDN-only setup (no"
-        log_info "LAN/VLAN prompts), a Cloud Firewall via doctl, and a remote-Authelia option."
+        log_info "Droplet mode adds: public-FQDN-only setup (no LAN/VLAN prompts), a Cloud"
+        log_info "Firewall via doctl, and a remote-Authelia option."
         prompt_yn "Set this up as a public droplet? (n = treat it as a home/LAN box) (y/n):" "y" _answer
     else
         log_info "No DigitalOcean metadata service reachable — assuming a home/LAN box."
@@ -883,39 +915,6 @@ EOF
     fi
 }
 
-# ── Shared: swapfile for low-RAM public cloud boxes ────────────────────────
-# DigitalOcean doesn't provision swap by default. Docker + Asterisk + coturn
-# fit in 512MB-1GB at idle with little headroom; a swapfile absorbs spikes
-# (apt/image pulls, log bursts, a few concurrent calls) instead of the
-# kernel OOM-killing a container or the box going unresponsive over SSH.
-_asterisk_offer_swapfile() {
-    local TOTAL_RAM_MB
-    TOTAL_RAM_MB="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
-    [[ "$TOTAL_RAM_MB" -gt 0 && "$TOTAL_RAM_MB" -le 2048 ]] || return 0
-    swapon --show | grep -q . && return 0
-
-    local FREE_DISK_MB SWAP_MB=2048
-    FREE_DISK_MB="$(df -Pm / | awk 'NR==2 {print $4}')"
-    if [[ "$FREE_DISK_MB" -le $((SWAP_MB + 2048)) ]]; then
-        log_warning "Not enough free disk for a safe swapfile (${FREE_DISK_MB}MB free) — skipping."
-        log_warning "Consider a bigger box, or free up disk before installing."
-        return 0
-    fi
-
-    local ADD_SWAP=""
-    prompt_yn "No swap detected on this ${TOTAL_RAM_MB}MB-RAM box — add a ${SWAP_MB}MB swapfile? (y/n):" "y" ADD_SWAP
-    [[ "$ADD_SWAP" =~ ^[Yy]$ ]] || return 0
-
-    fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none
-    chmod 600 /swapfile
-    mkswap /swapfile >/dev/null
-    swapon /swapfile
-    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-    grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null || echo 'vm.swappiness=10' >> /etc/sysctl.conf
-    sysctl -w vm.swappiness=10 >/dev/null 2>&1
-    log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
-}
-
 # ── Droplet-mode Caddy: web admin on the SAME FQDN used for SIP ────────────
 # Deliberately NOT using configure_caddy_for_service in this mode. Caddy only
 # holds a cert for domains it's actively serving, and Asterisk never does ACME
@@ -1316,8 +1315,9 @@ MD
 ## DigitalOcean droplet notes
 
 This install is in public-cloud mode: the installer read the droplet's public
-IP from the metadata service, set up a swapfile, offered a Cloud Firewall, and
-reverse-proxied the web admin on the same FQDN used for SIP.
+IP from the metadata service, offered a Cloud Firewall, and reverse-proxied
+the web admin on the same FQDN used for SIP. (The swapfile below isn't
+droplet-specific — every install on this box gets the same check.)
 
 ### Droplet sizing
 
@@ -1336,10 +1336,13 @@ phones actually are is fine; SIP/RTP care about latency more than raw
 bandwidth.
 
 **Swap:** DigitalOcean doesn't provision swap by default, and Docker +
-Asterisk + coturn leave little headroom at 512MB–1GB RAM. The installer
-detects RAM ≤2GB with no existing swap and offers to add a 2GB swapfile
-(persisted in \`/etc/fstab\`) — it's what makes the \$4/mo plan viable instead
-of risking an OOM kill under load.
+Asterisk + coturn leave little headroom at 512MB–1GB RAM. This isn't
+Asterisk- or droplet-specific — \`base.sh\` (and this installer, for the
+standalone-run case) checks RAM ≤4GB with no existing swap and offers a 2GB
+swapfile (persisted in \`/etc/fstab\`) on every install, since a box running
+several Docker services at once needs the same insurance a single-purpose
+droplet does. It's what makes the \$4/mo plan viable instead of risking an
+OOM kill under load — and it's why nothing above 4GB gets asked at all.
 
 **OS image:** Ubuntu 24.04 LTS (supported through April 2029) is the safe,
 battle-tested choice for Docker + coturn. Ubuntu 26.04 LTS is also available
@@ -1417,9 +1420,9 @@ install_asterisk() {
         echo "[DRY-RUN] Would copy/download vendor files from easy-asterisk, patching Asterisk to"
         echo "[DRY-RUN]   log security events to logs/full (what CrowdSec + the Security Dashboard read)"
         echo "[DRY-RUN] Would rotate logs/full at 100MB via /etc/logrotate.d/asterisk"
+        echo "[DRY-RUN] Would add a swapfile if RAM <= 4096MB and none exists (any deployment shape)"
         echo "[DRY-RUN] Would detect a DigitalOcean droplet via its metadata service (asking either way)"
         echo "[DRY-RUN]   and, in droplet mode, additionally:"
-        echo "[DRY-RUN]     - add a swapfile if RAM <= 2048MB and none exists"
         echo "[DRY-RUN]     - skip the LAN/VLAN prompts and set up one public FQDN for SIP + web admin"
         echo "[DRY-RUN]     - reverse-proxy the web admin on that SAME FQDN (needed for SIP cert sync)"
         echo "[DRY-RUN]     - offer local OR remote Authelia to protect the web admin"
@@ -1525,7 +1528,10 @@ install_asterisk() {
     local IS_DO=false DROPLET_ID="" PUBLIC_IP=""
     _asterisk_detect_digitalocean
 
-    [[ "$IS_DO" == true ]] && _asterisk_offer_swapfile
+    # Not droplet-gated — every box gets the same low-RAM safety net now
+    # (see lib/common.sh's ensure_swapfile). Idempotent: a no-op if base.sh
+    # already added swap earlier in this run, or if swap already exists.
+    ensure_swapfile
 
     mkdir -p "$EA_DIR"
     mkdir -p "$EA_DIR/config/asterisk" "$EA_DIR/config/easy-asterisk" \
