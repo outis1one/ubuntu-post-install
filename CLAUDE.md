@@ -485,6 +485,117 @@ a reason (a stray Enter on a service you're just checking on shouldn't
 trigger anything). `fresh` runs the exact same flow a first-time install
 would, prompts included.
 
+## Multi-instance services
+
+Any service where running two genuinely separate copies is a real use case
+(two Mattermost teams, two WordPress sites, two Traccar fleets, a
+music-only Emby alongside a movies one) should support it — this isn't
+opt-in per service, it's the default shape for anything that stores its
+own data and isn't inherently single-tenant (skip it for things like
+`caddy` or `crowdsec`, where a second instance wouldn't mean anything).
+
+**The pattern** (see `services/mattermost.sh` for the original, and
+`services/audiobookshelf.sh`/`services/emby.sh`/`services/mealie.sh`/
+`services/traccar.sh`/`services/wordpress.sh` for more examples): the first
+instance keeps the plain name/directory/container/ports exactly as they'd
+be without any of this — zero behavior change for anyone with a single
+instance already installed. Only *choosing* to add a second introduces
+suffixed naming. `services/wordpress.sh` is the one exception that requires
+a name from every instance including the first — reasonable for a
+brand-new service with no existing single-instance installs to stay
+compatible with, but not the default choice for an established service.
+
+```bash
+local DIR="$DOCKER_DIR/myservice"
+local INSTANCE_SUFFIX="" CONTAINER="myservice"
+local WEB_PORT="9000"
+
+if [ -d "$DIR" ]; then
+    echo ""
+    echo "  MyService is already installed at $DIR."
+    echo "    1) Manage that install (update / full reinstall / cancel)"
+    echo "    2) Add a NEW, separate MyService instance alongside it (its own"
+    echo "       server and data — full isolation)"
+    echo ""
+    local _TOP_CHOICE=""
+    prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+    if [ "$_TOP_CHOICE" = "2" ]; then
+        local _suffix=""
+        while true; do
+            prompt_text "  Short name for the new instance (letters/numbers/hyphens):" "" _suffix
+            _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+            [ -z "$_suffix" ] && { log_warning "Name can't be empty."; continue; }
+            [ -d "$DOCKER_DIR/myservice-$_suffix" ] && { log_warning "myservice-$_suffix already exists — pick another name."; continue; }
+            break
+        done
+        INSTANCE_SUFFIX="$_suffix"
+        DIR="$DOCKER_DIR/myservice-$_suffix"
+        CONTAINER="myservice-$_suffix"
+        while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+            WEB_PORT=$((WEB_PORT + 1))
+        done
+        log_info "New instance: $DIR (port $WEB_PORT)"
+    fi
+fi
+```
+
+Everything downstream — `container_name`, `hostname`, published ports, the
+Caddy subdomain default passed to `configure_caddy_for_service`, log/prompt
+text, the generated README's title — reads from `$CONTAINER`/`$WEB_PORT`/
+`$INSTANCE_SUFFIX` instead of the literal service name, so it's already
+correct for either the first instance or a named one with no further
+branching.
+
+**Databases: dedicated per instance, not shared.** `services/wordpress.sh`
+started as one shared MariaDB container with a separate database per site
+(same resource-sharing idea as the shared `coturn` below), and was
+deliberately changed away from that. The reason generalizes: Kopia's
+generic backup (`services/backup.sh`) stops a service's *container* to get
+a consistent snapshot, so a shared database instance backs up — and would
+have to be restored — as one unit covering every instance's data at once,
+not one instance independently. A dedicated database container per
+instance costs more RAM (a full container each instead of one instance
+split across several) in exchange for real backup/restore isolation. Data
+is typically isolated either way (separate database + user regardless), so
+the shared-vs-dedicated choice is about the container/process and its
+backup blast radius, not about the data being mixed. Default to dedicated
+per instance; only share if a service's own architecture makes that
+awkward and the resource savings are worth the backup-coupling tradeoff.
+
+**Ports beyond a single one need more than one `ss` scan, but never
+port-by-port for a large range.** A service publishing two or three fixed
+ports (`services/emby.sh`, `services/mattermost.sh`'s web+Calls-UDP ports)
+just runs the same `ss` scan once per port. A service publishing a large
+*range* (`services/traccar.sh`'s ~150-port device-protocol range) can't be
+scanned port-by-port — instead shift the whole range by a fixed offset per
+instance, sized off how many `$DOCKER_DIR/<name>*` directories already
+exist (`find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name '<name>*' -type d
+| wc -l` — the `-mindepth 1` matters, since without it `find` also matches
+`$DOCKER_DIR` itself if its own basename happens to start with the service
+name). Check whether the *first* instance's range carves out exclusions for
+another service's fixed ports (traccar's does, for Asterisk's AMI/SIP
+ports) — a large enough offset on additional instances usually clears those
+same fixed ports automatically, so the exclusions typically don't need to
+be repeated for instance 2+.
+
+**Docker labels used by sidecar tooling need per-instance scoping too, not
+just container names.** `services/traccar.sh`'s `autoheal` sidecar watches
+containers by a Docker label that's visible host-wide, not scoped to a
+compose project — two instances both using the literal `autoheal` label
+would each try to restart the *other* instance's container too. Give the
+label itself a per-instance value (`autoheal-<name>-<suffix>`) and point
+that instance's `autoheal` container at the same value via
+`AUTOHEAL_CONTAINER_LABEL`, the same way container names get suffixed.
+
+**Verify port/count logic by actually running it, not just by reading it.**
+Both real bugs caught while building this pattern into
+`services/traccar.sh` — the `find` matching `$DOCKER_DIR` itself, and the
+port-scan needing a genuinely free-vs-taken state to prove it increments —
+were things code review alone would have missed. Install two instances in
+sequence (a fake `docker`/`ss` shim standing in for a live daemon is fine)
+and confirm the second one's directory, container names, and ports are
+actually distinct before trusting the logic.
+
 ## Chaining into another service from within your own
 
 A service can call another service's `install_<name>()` directly as a

@@ -362,7 +362,7 @@ if [ -n "\$COTURN_HOST" ]; then
     # configure_caddy_for_service's CADDY_SERVICE_* out-params)
 else
     # coturn unavailable — degrade gracefully (no TURN, or prompt to run
-    # `sudo ./setup.sh coturn` first)
+    # \`sudo ./setup.sh coturn\` first)
 fi
 \`\`\`
 MD

@@ -186,16 +186,58 @@ register_service audiobookshelf media "Audiobook & podcast server (Audiobookshel
 install_audiobookshelf() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "audiobookshelf" name/paths/port exactly
+    # as before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local ABS_DIR="$DOCKER_DIR/audiobookshelf"
+    local INSTANCE_SUFFIX="" CONTAINER="audiobookshelf"
+    local WEB_PORT="13378"
     local DEFAULT_AUDIOBOOKS="$ACTUAL_HOME/audiobooks"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Audiobookshelf would:"
-        echo "  - Create $ABS_DIR with docker-compose.yml + .env (config/ metadata/ podcasts/)"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/audiobookshelf(-<name>) with docker-compose.yml + .env"
         echo "  - Mount an audiobooks folder (default $DEFAULT_AUDIOBOOKS) at /audiobooks"
-        echo "  - Expose port 13378"
+        echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
+    fi
+
+    if [ -d "$ABS_DIR" ]; then
+        echo ""
+        echo "  Audiobookshelf is already installed at $ABS_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Audiobookshelf instance alongside it (its own"
+        echo "       server, library, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'kids'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/audiobookshelf-$_suffix" ]; then
+                    log_warning "audiobookshelf-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            ABS_DIR="$DOCKER_DIR/audiobookshelf-$_suffix"
+            CONTAINER="audiobookshelf-$_suffix"
+            DEFAULT_AUDIOBOOKS="$ACTUAL_HOME/audiobooks-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $ABS_DIR (port $WEB_PORT)"
+        fi
     fi
 
     local AUDIOBOOKS_PATH=""
@@ -232,13 +274,13 @@ networks:
     fi
 
     cat > docker-compose.yml << ABS_COMPOSE
-name: audiobookshelf
+name: $CONTAINER
 
 services:
   audiobookshelf:
     image: ghcr.io/advplyr/audiobookshelf:latest
-    container_name: audiobookshelf
-    hostname: audiobookshelf
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - TZ=$TZ_VAL
@@ -248,7 +290,7 @@ services:
       - \${AUDIOBOOKS_PATH}:/audiobooks
       - \${PODCASTS_PATH:-./podcasts}:/podcasts
     ports:
-      - "13378:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 ABS_COMPOSE
 
@@ -260,16 +302,19 @@ ABS_ENV
 
     mkdir -p config metadata podcasts
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$ABS_DIR"
-    log_success "Audiobookshelf configured at $ABS_DIR"
+    log_success "Audiobookshelf${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $ABS_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "AudioBookshelf" "audiobookshelf:80" "audiobooks"
+    configure_caddy_for_service "Audiobookshelf${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:80" "audiobooks${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$ABS_DIR" << MD
-# Audiobookshelf
+# Audiobookshelf${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted audiobook and podcast server with progress sync across devices.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own library, own
+port) — not a shared library with another Audiobookshelf instance.")
 
-- Web UI: http://localhost:13378
+- Web UI: http://localhost:${WEB_PORT}
 - Audiobooks: \`$AUDIOBOOKS_PATH\` → mounted at /audiobooks
 - Podcasts: \`podcasts/\` in this folder → /podcasts (change \`PODCASTS_PATH\` in .env)
 - App data: \`config/\` and \`metadata/\`
@@ -288,13 +333,13 @@ pointing at /audiobooks and /podcasts.
 MD
 
     local START_ABS=""
-    prompt_yn "Start Audiobookshelf now? (y/n):" "y" START_ABS
+    prompt_yn "Start Audiobookshelf${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_ABS
     if [ "$START_ABS" = "y" ] || [ "$START_ABS" = "Y" ]; then
-        docker compose up -d && log_success "Audiobookshelf started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Audiobookshelf${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:13378"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
 }
 

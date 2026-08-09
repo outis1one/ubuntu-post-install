@@ -188,19 +188,85 @@ register_service traccar utilities "GPS tracking server — phones, vehicles, as
 install_traccar() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "traccar" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
+    #
+    # The device-protocol port range is the one thing that can't just be
+    # auto-scanned port-by-port (150+ ports, and the first instance already
+    # carves Asterisk's exact ports out of it) — instead each additional
+    # instance's whole range shifts by 1000 (6000-6150 for the first extra
+    # instance, 7000-7150 for the next, ...), determined by how many
+    # traccar/traccar-* directories already exist. Those shifted ranges never
+    # land on Asterisk's fixed ports (5038/5060/5061), so no exclusions are
+    # needed there the way the first instance needs them.
     local TRACCAR_DIR="$DOCKER_DIR/traccar"
+    local INSTANCE_SUFFIX="" CONTAINER="traccar" DB_CONTAINER="traccar-db"
+    local AUTOHEAL_CONTAINER="traccar-autoheal" AUTOHEAL_LABEL="autoheal"
+    local WEB_PORT="8082"
+    local PROTO_MIN=5000 PROTO_MAX=5150
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Traccar would:"
-        echo "  - Create $TRACCAR_DIR with docker-compose.yml + .env"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/traccar(-<name>) with docker-compose.yml + .env"
         echo "  - Deploy a PostgreSQL database container (Traccar no longer ships H2)"
         echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
-        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps priority on those)"
+        echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps"
+        echo "    priority on those); an additional instance's device-protocol range shifts by 1000 instead"
         echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer optional ntfy push notifications (self-hosted anywhere, or ntfy.sh)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
+    fi
+
+    if [ -d "$TRACCAR_DIR" ]; then
+        echo ""
+        echo "  Traccar is already installed at $TRACCAR_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Traccar instance alongside it (its own"
+        echo "       server, database, and device-protocol port range — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'fleet-b'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/traccar-$_suffix" ]; then
+                    log_warning "traccar-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            TRACCAR_DIR="$DOCKER_DIR/traccar-$_suffix"
+            CONTAINER="traccar-$_suffix"
+            DB_CONTAINER="traccar-$_suffix-db"
+            AUTOHEAL_CONTAINER="traccar-$_suffix-autoheal"
+            AUTOHEAL_LABEL="autoheal-traccar-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+
+            # Count existing traccar/traccar-* dirs (this new one isn't
+            # created yet, so the first extra instance counts exactly 1
+            # existing dir -> offset 1 -> 6000-6150).
+            local _existing_count
+            _existing_count="$(find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name 'traccar*' -type d 2>/dev/null | wc -l)"
+            local _offset=$((_existing_count * 1000))
+            PROTO_MIN=$((5000 + _offset))
+            PROTO_MAX=$((5150 + _offset))
+
+            log_info "New instance: $TRACCAR_DIR (web port $WEB_PORT, device protocols $PROTO_MIN-$PROTO_MAX)"
+        fi
     fi
 
     mkdir -p "$TRACCAR_DIR"
@@ -299,14 +365,48 @@ networks:
 "
     fi
 
+    # First instance keeps the exact existing Asterisk-exclusion port block
+    # (5000-5150 with 5038/5060/5061 carved out). An additional instance's
+    # range is shifted by 1000 per instance (computed above), which never
+    # lands on Asterisk's fixed ports, so it just publishes the plain range
+    # with no exclusions needed.
+    local _PROTO_PORT_BLOCK
+    if [ -z "$INSTANCE_SUFFIX" ]; then
+        _PROTO_PORT_BLOCK="      # 5038 (AMI), 5060 (SIP, tcp+udp), and 5061 (SIP TLS, tcp) are skipped:
+      # they're Asterisk's ports (services/asterisk.sh runs Asterisk with
+      # network_mode: host, so it binds them directly on the host, not
+      # through Docker networking). Publishing the full 5000-5150 range here
+      # would fight Asterisk for those exact host ports on any box running
+      # both services from this repo. Confirmed live: this is what made
+      # \"docker network connect caddy_net traccar\" and then a plain
+      # \`docker compose up -d\` both fail with \"failed to bind host port
+      # 0.0.0.0:5038/tcp\" and then \"...5060/tcp: address already in use\" on
+      # a box with Asterisk's PSTN trunk already installed. Checked every
+      # other network_mode: host service in this repo (caddy, homeassistant,
+      # kyber-server, lyrion, mattermost, watchyourlan, wolf-pair, wolf) —
+      # none of them land in 5000-5150, so Asterisk is the only conflict.
+      - \"5000-5037:5000-5037\"
+      - \"5039-5059:5039-5059\"
+      - \"5062-5150:5062-5150\"
+      - \"5000-5059:5000-5059/udp\"
+      - \"5061-5150:5061-5150/udp\""
+    else
+        _PROTO_PORT_BLOCK="      # Shifted by 1000 from the default 5000-5150 range so this instance
+      # doesn't collide with the first (or any other) Traccar instance on
+      # this box — never lands on Asterisk's fixed ports either, so no
+      # exclusions are needed here the way the first instance needs them.
+      - \"${PROTO_MIN}-${PROTO_MAX}:${PROTO_MIN}-${PROTO_MAX}\"
+      - \"${PROTO_MIN}-${PROTO_MAX}:${PROTO_MIN}-${PROTO_MAX}/udp\""
+    fi
+
     cat > docker-compose.yml << TRACCAR_COMPOSE
-name: traccar
+name: $CONTAINER
 
 services:
   db:
     image: postgres:15-alpine
-    container_name: traccar-db
-    hostname: traccar-db
+    container_name: $DB_CONTAINER
+    hostname: $DB_CONTAINER
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -319,19 +419,19 @@ ${_CADDY_NET_BLOCK}    healthcheck:
 
   traccar:
     image: traccar/traccar:latest
-    container_name: traccar
-    hostname: traccar
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     env_file: .env
     depends_on:
       db:
         condition: service_healthy
     labels:
-      - "autoheal=true"
+      - "${AUTOHEAL_LABEL}=true"
     environment:
       CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
       DATABASE_DRIVER: org.postgresql.Driver
-      DATABASE_URL: jdbc:postgresql://traccar-db:5432/\${POSTGRES_DB}?sslmode=disable
+      DATABASE_URL: jdbc:postgresql://${DB_CONTAINER}:5432/\${POSTGRES_DB}?sslmode=disable
       DATABASE_USER: \${POSTGRES_USER}
       DATABASE_PASSWORD: \${POSTGRES_PASSWORD}
     healthcheck:
@@ -344,32 +444,15 @@ ${_CADDY_NET_BLOCK}    healthcheck:
       - ./logs:/opt/traccar/logs:rw
       - ./data:/opt/traccar/data:rw
     ports:
-      - "8082:8082"
-      # 5038 (AMI), 5060 (SIP, tcp+udp), and 5061 (SIP TLS, tcp) are skipped:
-      # they're Asterisk's ports (services/asterisk.sh runs Asterisk with
-      # network_mode: host, so it binds them directly on the host, not
-      # through Docker networking). Publishing the full 5000-5150 range here
-      # would fight Asterisk for those exact host ports on any box running
-      # both services from this repo. Confirmed live: this is what made
-      # "docker network connect caddy_net traccar" and then a plain
-      # `docker compose up -d` both fail with "failed to bind host port
-      # 0.0.0.0:5038/tcp" and then "...5060/tcp: address already in use" on
-      # a box with Asterisk's PSTN trunk already installed. Checked every
-      # other network_mode: host service in this repo (caddy, homeassistant,
-      # kyber-server, lyrion, mattermost, watchyourlan, wolf-pair, wolf) —
-      # none of them land in 5000-5150, so Asterisk is the only conflict.
-      - "5000-5037:5000-5037"
-      - "5039-5059:5039-5059"
-      - "5062-5150:5062-5150"
-      - "5000-5059:5000-5059/udp"
-      - "5061-5150:5061-5150/udp"
+      - "${WEB_PORT}:8082"
+${_PROTO_PORT_BLOCK}
 ${_CADDY_NET_BLOCK}
   autoheal:
     image: willfarrell/autoheal:latest
-    container_name: traccar-autoheal
+    container_name: $AUTOHEAL_CONTAINER
     restart: unless-stopped
     environment:
-      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_CONTAINER_LABEL: ${AUTOHEAL_LABEL}
       AUTOHEAL_INTERVAL: 60
       AUTOHEAL_START_PERIOD: 3600
     volumes:
@@ -422,9 +505,9 @@ TRACCAR_ENV
     # db/ is deliberately excluded — see the comment on the earlier chown.
     chown "$ACTUAL_USER:$ACTUAL_USER" "$TRACCAR_DIR" docker-compose.yml .env
     chown -R "$ACTUAL_USER:$ACTUAL_USER" logs data
-    log_success "Traccar configured at $TRACCAR_DIR"
+    log_success "Traccar${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $TRACCAR_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Traccar" "traccar:8082" "traccar"
+    configure_caddy_for_service "Traccar${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:8082" "traccar${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     local _NTFY_README_BLOCK=""
     if [ -n "$SMS_HTTP_URL" ]; then
@@ -445,27 +528,29 @@ gateway. Configured in \`.env\`: \`SMS_HTTP_URL\`, \`SMS_HTTP_TEMPLATE\`
     fi
 
     write_readme "$TRACCAR_DIR" << MD
-# Traccar
+# Traccar${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 GPS tracking server. Track phones, vehicles, and assets via the Traccar
 Android/iOS app, OwnTracks, or any of 200+ supported device protocols.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own database, own
+device-protocol port range) — not shared tracking data with another
+Traccar instance.")
 
-- Web UI: http://localhost:8082
+- Web UI: http://localhost:${WEB_PORT}
 - No default login — Traccar ships with no built-in account. Open the web UI
   and register the first user; it's automatically made admin. Self-registration
   stays open to anyone who reaches this server until you turn it off, so do
   this right away, then go to Settings → Server → Permissions and uncheck
   Registration.
-- Device protocols: ports 5000-5150 (TCP + UDP; 5038/tcp, 5060/tcp+udp, and
-  5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also
-  runs Asterisk from this repo, which gets priority on those ports)
+- Device protocols: ports ${PROTO_MIN}-${PROTO_MAX} (TCP + UDP$( [ -z "$INSTANCE_SUFFIX" ] && echo "; 5038/tcp, 5060/tcp+udp, and 5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also runs Asterisk from this repo, which gets priority on those ports"))
 - App data: \`data/\` and \`logs/\`
-- Database: PostgreSQL (\`traccar-db\` container, data in \`db/\`)
+- Database: PostgreSQL (\`$DB_CONTAINER\` container, data in \`db/\`)
 - All database settings (name, user, password) live in \`.env\` — Traccar
   reads them directly via env vars, nothing is duplicated in a config file.
   Change the password there (then recreate both containers) if you need to
   rotate it.
-- Autoheal: \`traccar-autoheal\` restarts the \`traccar\` container if its healthcheck fails
+- Autoheal: \`$AUTOHEAL_CONTAINER\` restarts the \`$CONTAINER\` container if its healthcheck fails (scoped to this instance only via the \`$AUTOHEAL_LABEL\` label — it won't touch any other Traccar instance's container)
 ${_NTFY_README_BLOCK}
 ## Manage
 \`\`\`bash
@@ -477,18 +562,18 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## Mobile apps
-- Traccar Client (Android/iOS): set server to \`http://YOUR-IP:8082\`
+- Traccar Client (Android/iOS): set server to \`http://YOUR-IP:${WEB_PORT}\`
 - OwnTracks (Android/iOS): configure HTTP endpoint to Traccar
 MD
 
     local START_TRACCAR=""
-    prompt_yn "Start Traccar now? (y/n):" "y" START_TRACCAR
+    prompt_yn "Start Traccar${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_TRACCAR
     if [ "$START_TRACCAR" = "y" ] || [ "$START_TRACCAR" = "Y" ]; then
-        docker compose up -d && log_success "Traccar started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Traccar${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:8082"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  No default login — register the first account now; it becomes admin."
     echo "  Then disable further registration: Settings → Server → Permissions."
     if [ -n "$SMS_HTTP_URL" ]; then

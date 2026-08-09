@@ -26,9 +26,11 @@ Rough per-service RAM budget, idle:
 Rules of thumb:
 - Keep at least 25-30% of total RAM free at idle for burst load (image
   pulls, log bursts, concurrent call/session spikes).
-- A swapfile is cheap insurance below ~2GB RAM. `services/asterisk.sh`
-  already automates this for droplet installs ≤2GB — the same logic applies
-  to any small box running more than one service.
+- A swapfile is cheap insurance and is now a **default for every install**,
+  not just Asterisk droplets — `base.sh` calls `lib/common.sh`'s
+  `ensure_swapfile()` unconditionally, which offers a 2GB swapfile any time
+  RAM is ≤4096MB and none exists yet (`services/asterisk.sh` also calls it
+  directly for the standalone-run case, so it's covered either way).
 - Sharing one `coturn` instance (`services/coturn.sh`) instead of letting
   each WebRTC-capable service (Asterisk, Mattermost) embed its own saves a
   container per consumer and — more importantly — avoids relay-port
@@ -43,8 +45,8 @@ meaningful fraction of the box. **Pick one purpose, not a stack:**
 
 - **Option A — Asterisk only.** Asterisk + the shared coturn service fits
   comfortably per this repo's own droplet-sizing notes (`services/asterisk.sh`
-  README section) — a swapfile is added automatically on droplets ≤2GB, and
-  this plan is "fine for a couple of extensions and light personal use."
+  README section) — a swapfile is added automatically (RAM ≤4GB, see above),
+  and this plan is "fine for a couple of extensions and light personal use."
 - **Option B — a lightweight utility box.** Caddy + CrowdSec + NetBird
   (all near-zero RAM) plus at most one or two of the smallest apps (`ntfy`,
   `vaultwarden`, `wg-easy`) — total comfortably under 500MB.
@@ -80,9 +82,10 @@ no transcoding/conferencing/heavy-video load in this profile, so CPU has
 large margin and RAM sits around 2.0-2.7GB idle with the core stack alone.
 
 **Utility adds, agreed:**
-- `ntfy`, `wg-easy`, `homebox`, `actualbudget`, `mealie`
+- `ntfy`, `wg-easy`, `homebox`, `mealie`
 
-**Explicitly declined:** `vaultwarden`, `portainer`, `syncthing`
+**Explicitly declined:** `vaultwarden`, `portainer`, `syncthing`, `actualbudget`
+(dropped to make room for WordPress — see below)
 
 **Remote / cross-VLAN access:** NetBird — hosted control plane (not
 self-hosted), client-only, with its embedded SSH server enabled
@@ -113,15 +116,55 @@ means mounting a network share from that tunnel at the mount point instead
 of a local directory. Avoids the disk/CPU tradeoffs of a local media
 library; real bandwidth depends on home upload speed, which wasn't checked.
 
-**Floated, not yet decided:** `lyrion` (music) doing the same
-home-library-over-VPN thing — same pattern as `audiobookshelf` above,
-architecturally sound, just not explicitly confirmed yet.
+**Music: `emby`, music-only — not `lyrion`.** `lyrion` (LMS/Squeezebox) was
+floated first since it's a purpose-built, well-regarded music server, but
+ruled out for two protocol-level reasons neither Caddy nor Authelia can
+paper over: its own web-UI auth is one shared server-wide password (no
+per-user accounts), and its player protocol (SlimProto, port 3483) is raw
+TCP with no authentication of its own, so Authelia's HTTP-only
+`forward_auth` can't gate it at all. `emby` (already registered in this
+repo, `media` category) solves both — real per-user accounts with
+per-library access restriction, and every client protocol it uses is HTTP,
+so Caddy fronts all of it cleanly. `services/emby.sh` now has a music-only
+mode (prompts for this, defaults the folder to `~/music`, and the generated
+README walks through adding only a Music library plus the
+Dashboard → Users → Access per-user restriction steps in Emby's own setup
+wizard). Tradeoff accepted knowingly: Emby is a generalist media server, not
+a purpose-built one — it lacks LMS's music-specific depth (its lyrics
+fetching, its many audio-focused plugins). Since there's no hardware
+Squeezebox tie-in to preserve, that tradeoff was fine to make.
+
+**Emby subsequently dropped from the near-term plan** — traded off for
+WordPress capacity (below) rather than run alongside it. `services/emby.sh`'s
+music-only mode is still there and ready whenever there's headroom for it
+again; it just isn't part of the current baseline.
+
+**WordPress — confirmed, 2 sites (settled), light traffic, ecommerce-capable.**
+`services/wordpress.sh` (new): multi-site from the start, every site named,
+each with its own **dedicated** MariaDB container (same pattern as
+`services/nextcloud.sh`) — not a shared instance. Started as a shared-MariaDB
+design (same resource-sharing idea as `coturn`) but switched to dedicated
+per-site after weighing it against backup/restore: Kopia's generic backup
+(`services/backup.sh`) stops a service's container to snapshot it, so a
+shared instance would back up — and would have to be restored — as one unit
+covering every site at once, not one site independently. Dedicated per-site
+costs more RAM (a full MariaDB container each, ~100-150MB, instead of one
+instance amortized across sites) in exchange for real isolation: each
+site's database backs up and restores completely independently. Separate
+databases were always required regardless of which model — WordPress's
+schema uses generic table names (`wp_posts`, `wp_options`, etc.), so two
+installs sharing one database with the same table prefix would collide —
+the shared-vs-dedicated choice was only ever about the container/process,
+never about the data being mixed. wp-cli automates the initial install
+(title, admin account) so there's no per-site browser setup wizard, and PHP
+limits are pre-tuned (256M memory, 64M uploads) for WooCommerce
+specifically since "possible ecommerce" was part of the ask.
 
 **Explicitly out of scope for this box** (wrong fit, not "can't run"):
-- Local media servers storing media on the VPS (`emby`, `jellyfin`,
-  `immich`, and `lyrion`/`audiobookshelf` *without* the home-library-over-VPN
-  approach above) — disk-hungry, and transcoding CPU load risks contending
-  with active calls.
+- Local media servers storing media on the VPS (`jellyfin`, `immich`,
+  `lyrion`, and `emby`/`audiobookshelf` *without* the home-library-over-VPN
+  approach used above) — disk-hungry, and transcoding CPU load risks
+  contending with active calls.
 - AI stacks (`ai-stack`, `ai-gpu`, `iopaint`, `paintplus`) — need real
   VRAM/RAM most VPS plans don't have.
 - Gaming (`minecraft`, `wolf`, `wolf-pair`, `sunshine`, `kyber-*`) — CPU/RAM
@@ -135,3 +178,35 @@ architecturally sound, just not explicitly confirmed yet.
 - SSH `ProxyJump`/bastion-hop chaining for reaching genuinely isolated
   (CGNAT, no local peer) boxes — a good idea in principle, parked for later
   since NetBird already covers the current need.
+
+## Final RAM budget for the IONOS box (settled baseline, no Emby, no actualbudget, idle)
+
+| Service | ~RAM |
+|---|---|
+| OS + Docker baseline | ~400MB |
+| Caddy | ~30MB |
+| CrowdSec | ~150MB |
+| coturn (shared) | ~40MB |
+| Asterisk | ~100MB |
+| Mattermost × 2 (app+Postgres each) | ~1200MB |
+| Traccar (JVM) | ~425MB |
+| NetBird client | ~35MB |
+| ntfy, mealie | ~225MB combined |
+| WordPress × 2 sites (app ~80MB + dedicated MariaDB ~120MB each) | ~400MB |
+| **Total** | **~3.00GB** |
+
+Leaves roughly **~1.09GB headroom (~27%)** out of 4GB — back into the ideal
+25-30% range, between dropping `actualbudget` (~115MB) and settling on 2
+sites instead of 4 (dedicated-per-site MariaDB's cost scales with site
+count, so this was the single biggest lever). With the swapfile now
+automatic (`ensure_swapfile`, see above) there's real insurance on top of
+that margin, not instead of it. `wg-easy`,
+`homebox`, and `audiobookshelf` from earlier in this doc aren't included in
+this specific table — add them back in at ~25MB, ~125MB, and ~200MB
+respectively if/when they're actually deployed alongside this baseline.
+Deploy incrementally and check `free -h` / `docker stats` against this table
+rather than trusting it blindly — each line carries real estimate
+uncertainty, and they're stacked
+close enough to the ceiling that it's worth confirming. If real usage runs
+higher than estimated, the two Mattermost instances (~1.2GB combined) are
+the single biggest lever to reconsider.
