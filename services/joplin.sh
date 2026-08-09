@@ -185,12 +185,59 @@ install_joplin() {
     require_docker || return 1
     log_info "Installing Joplin Server..."
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "joplin"/"joplin-db" names/paths/port
+    # exactly as before (zero behavior change for anyone with a single
+    # instance). Only asking to add a second one introduces suffixed naming —
+    # same pattern as services/mattermost.sh and services/wordpress.sh.
+    # Each instance gets its own dedicated Postgres container (not shared) —
+    # see CLAUDE.md's "Multi-instance services" section for why: Kopia's
+    # generic backup stops the container to snapshot it, so a shared DB would
+    # back up/restore every instance's notes as one unit instead of per-instance.
     local JOPLIN_DIR="$DOCKER_DIR/joplin"
+    local INSTANCE_SUFFIX="" CONTAINER="joplin" DB_CONTAINER="joplin-db"
+    local WEB_PORT="22300"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $JOPLIN_DIR"
-        echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create \$DOCKER_DIR/joplin(-<name>)"
+        echo "[DRY-RUN] Would write docker-compose.yml and .env (dedicated Postgres per instance)"
+        echo "[DRY-RUN] Would auto-scan for a free host port if this is an additional instance"
         return 0
+    fi
+
+    if [ -d "$JOPLIN_DIR" ]; then
+        echo ""
+        echo "  Joplin Server is already installed at $JOPLIN_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Joplin Server instance alongside it (its own"
+        echo "       server, database, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'work'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/joplin-$_suffix" ]; then
+                    log_warning "joplin-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            JOPLIN_DIR="$DOCKER_DIR/joplin-$_suffix"
+            CONTAINER="joplin-$_suffix"
+            DB_CONTAINER="joplin-db-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $JOPLIN_DIR (port $WEB_PORT)"
+        fi
     fi
 
     mkdir -p "$JOPLIN_DIR"
@@ -203,7 +250,7 @@ install_joplin() {
     local DB_PASS=""
     [ -f ".env" ] && DB_PASS="$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)"
     [ -n "$DB_PASS" ] || DB_PASS="$(generate_password 32)"
-    local BASE_URL="https://joplin.${SITE_DOMAIN}"
+    local BASE_URL="https://joplin${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN}"
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
     # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
@@ -229,24 +276,24 @@ networks:
     fi
 
     cat > docker-compose.yml << JOPLIN_COMPOSE
-name: joplin
+name: $CONTAINER
 
 services:
   joplin:
     image: joplin/server:latest
-    container_name: joplin
-    hostname: joplin
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     depends_on:
       - joplin-db
     env_file: .env
     ports:
-      - "22300:22300"
+      - "${WEB_PORT}:22300"
 ${_CADDY_NET_BLOCK}
   joplin-db:
     image: postgres:15-alpine
-    container_name: joplin-db
-    hostname: joplin-db
+    container_name: $DB_CONTAINER
+    hostname: $DB_CONTAINER
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -278,19 +325,22 @@ JOPLIN_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$JOPLIN_DIR"
 
     echo ""
-    log_success "Joplin Server configured at $JOPLIN_DIR"
+    log_success "Joplin Server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $JOPLIN_DIR (port $WEB_PORT)"
     log_info "APP_BASE_URL set to: $BASE_URL"
     log_warning "APP_BASE_URL in .env must match the public URL used by Joplin clients."
 
-    configure_caddy_for_service "Joplin" "joplin:22300" "joplin"
+    configure_caddy_for_service "Joplin${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:22300" "joplin${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$JOPLIN_DIR" << MD
-# Joplin Server
+# Joplin Server${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted sync server for the Joplin note-taking app.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own dedicated
+database, own port) — not shared notes with another Joplin instance.")
 
 ## Access
-- URL: http://localhost:22300
+- URL: http://localhost:${WEB_PORT}
 - Default admin: admin@localhost / admin (change immediately after first login!)
 
 ## Important
@@ -319,14 +369,14 @@ docker compose pull && docker compose down && docker compose up -d  # update
 MD
 
     local START_JOPLIN=""
-    prompt_yn "Start Joplin Server now? (y/n):" "y" START_JOPLIN
+    prompt_yn "Start Joplin Server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_JOPLIN
     if [ "$START_JOPLIN" = "y" ] || [ "$START_JOPLIN" = "Y" ]; then
         docker compose up -d 2>/dev/null \
-            && log_success "Joplin Server started" \
+            && log_success "Joplin Server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:22300"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Default login: admin@localhost / admin (change immediately!)"
     echo ""
 }

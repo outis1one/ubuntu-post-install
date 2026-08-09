@@ -192,11 +192,55 @@ register_service ntfy utilities "Self-hosted push notifications (ntfy)" 8090
 install_ntfy() {
     require_docker || return 1
     log_info "Installing ntfy..."
+
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "ntfy" name/paths/port exactly as before
+    # (zero behavior change for anyone with a single instance — including
+    # crowdsec.sh/pstn-trunk.sh, which curl the default port directly). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local NTFY_DIR="$DOCKER_DIR/ntfy"
+    local INSTANCE_SUFFIX="" CONTAINER="ntfy"
+    local WEB_PORT="8090"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $NTFY_DIR"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create $NTFY_DIR(-<name>)"
+        echo "[DRY-RUN] Would auto-scan for a free host port if this is an additional instance"
         return 0
+    fi
+
+    if [ -d "$NTFY_DIR" ]; then
+        echo ""
+        echo "  ntfy is already installed at $NTFY_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate ntfy instance alongside it (its own"
+        echo "       server, topics, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'alerts'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/ntfy-$_suffix" ]; then
+                    log_warning "ntfy-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            NTFY_DIR="$DOCKER_DIR/ntfy-$_suffix"
+            CONTAINER="ntfy-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $NTFY_DIR (port $WEB_PORT)"
+        fi
     fi
 
     mkdir -p "$NTFY_DIR"
@@ -227,13 +271,13 @@ networks:
     fi
 
     cat > docker-compose.yml << NTFY_COMPOSE
-name: ntfy
+name: $CONTAINER
 
 services:
   ntfy:
     image: binwiederhier/ntfy:latest
-    container_name: ntfy
-    hostname: ntfy
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     command: serve
     environment:
@@ -242,7 +286,7 @@ services:
       - ./cache:/var/cache/ntfy
       - ./config:/etc/ntfy
     ports:
-      - "8090:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 NTFY_COMPOSE
 
@@ -258,7 +302,7 @@ NTFY_ENV
     if [ ! -f config/server.yml ]; then
         local NTFY_BASE_URL=""
         if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
-            NTFY_BASE_URL="https://ntfy.${SITE_DOMAIN}"
+            NTFY_BASE_URL="https://ntfy${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN}"
         fi
         cat > config/server.yml << NTFY_CFG
 # ntfy server configuration — https://docs.ntfy.sh/config/
@@ -291,22 +335,25 @@ NTFY_CFG
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$NTFY_DIR"
 
     echo ""
-    log_success "ntfy configured at $NTFY_DIR"
+    log_success "ntfy${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $NTFY_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "ntfy" "ntfy:80" "ntfy"
+    configure_caddy_for_service "ntfy${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:80" "ntfy${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$NTFY_DIR" << MD
-# ntfy
+# ntfy${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted push notification server. Send notifications from scripts to your
 phone or browser.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own topics, own
+port) — not shared topics with another ntfy instance.")
 
 ## Access
-- URL: http://localhost:8090
+- URL: http://localhost:${WEB_PORT}
 
 ## Usage
-- Send a notification: \`curl -d "Hello!" localhost:8090/mytopic\`
-- Subscribe on phone: ntfy app -> Add subscription -> localhost:8090/mytopic
+- Send a notification: \`curl -d "Hello!" localhost:${WEB_PORT}/mytopic\`
+- Subscribe on phone: ntfy app -> Add subscription -> localhost:${WEB_PORT}/mytopic
 
 ## Access model
 \`auth-default-access: read-write\` — anyone who knows a topic name can read
@@ -335,15 +382,15 @@ docker compose logs -f    # logs
 MD
 
     local START_NTFY=""
-    prompt_yn "Start ntfy now? (y/n):" "y" START_NTFY
+    prompt_yn "Start ntfy${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_NTFY
     if [ "$START_NTFY" = "y" ] || [ "$START_NTFY" = "Y" ]; then
-        docker compose up -d 2>/dev/null && log_success "ntfy started" || log_warning "Failed to start"
+        docker compose up -d 2>/dev/null && log_success "ntfy${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start"
     fi
 
-    echo "  Access at:  http://localhost:8090"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
-    echo "  Send notification: curl -d \"Hello!\" localhost:8090/mytopic"
-    echo "  Subscribe on phone: ntfy app → Add subscription → localhost:8090/mytopic"
+    echo "  Send notification: curl -d \"Hello!\" localhost:${WEB_PORT}/mytopic"
+    echo "  Subscribe on phone: ntfy app → Add subscription → localhost:${WEB_PORT}/mytopic"
     echo ""
 }
 

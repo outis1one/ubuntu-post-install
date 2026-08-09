@@ -185,12 +185,54 @@ install_homebox() {
     require_docker || return 1
     log_info "Installing Homebox..."
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "homebox" name/paths/port exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local HB_DIR="$DOCKER_DIR/homebox"
+    local INSTANCE_SUFFIX="" CONTAINER="homebox"
+    local WEB_PORT="7745"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $HB_DIR"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create $HB_DIR(-<name>)"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port if this is an additional instance"
         return 0
+    fi
+
+    if [ -d "$HB_DIR" ]; then
+        echo ""
+        echo "  Homebox is already installed at $HB_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Homebox instance alongside it (its own"
+        echo "       server, inventory, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'garage'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/homebox-$_suffix" ]; then
+                    log_warning "homebox-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            HB_DIR="$DOCKER_DIR/homebox-$_suffix"
+            CONTAINER="homebox-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $HB_DIR (port $WEB_PORT)"
+        fi
     fi
 
     mkdir -p "$HB_DIR/data"
@@ -221,13 +263,13 @@ networks:
     fi
 
     cat > docker-compose.yml << HB_COMPOSE
-name: homebox
+name: $CONTAINER
 
 services:
   homebox:
     image: ghcr.io/sysadminsmedia/homebox:latest
-    container_name: homebox
-    hostname: homebox
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - HBOX_LOG_LEVEL=info
@@ -235,7 +277,7 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "7745:7745"
+      - "${WEB_PORT}:7745"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 HB_COMPOSE
 
@@ -246,18 +288,21 @@ HB_ENV
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HB_DIR"
 
     echo ""
-    log_success "Homebox configured at $HB_DIR"
+    log_success "Homebox${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $HB_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Homebox" "homebox:7745" "homebox"
+    configure_caddy_for_service "Homebox${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:7745" "homebox${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
-    write_readme "$HB_DIR" << 'MD'
-# Homebox
+    write_readme "$HB_DIR" << MD
+# Homebox${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Home inventory and asset management. Track items, locations, labels,
 warranties, and attachments across your household.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own inventory, own
+port) — not shared items with another Homebox instance.")
 
 ## Access
-- URL: http://localhost:7745
+- URL: http://localhost:${WEB_PORT}
 - Register your account on first visit — the first user becomes the admin.
 
 ## Data
@@ -265,27 +310,28 @@ warranties, and attachments across your household.
 
 ## Configuration
 Key environment variables (edit docker-compose.yml to change):
-- `HBOX_LOG_LEVEL` — log verbosity (info, debug, warn, error)
-- `HBOX_WEB_MAX_UPLOAD_SIZE` — max attachment upload size in MB (default: 10)
+- \`HBOX_LOG_LEVEL\` — log verbosity (info, debug, warn, error)
+- \`HBOX_WEB_MAX_UPLOAD_SIZE\` — max attachment upload size in MB (default: 10)
 
 ## Manage
-```bash
+\`\`\`bash
+cd $HB_DIR
 docker compose up -d
 docker compose down
 docker compose logs -f
 docker compose pull && docker compose down && docker compose up -d
-```
+\`\`\`
 MD
 
     local START_HB=""
-    prompt_yn "Start Homebox now? (y/n):" "y" START_HB
+    prompt_yn "Start Homebox${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_HB
     if [ "$START_HB" = "y" ] || [ "$START_HB" = "Y" ]; then
         docker compose up -d 2>/dev/null \
-            && log_success "Homebox started" \
+            && log_success "Homebox${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:7745"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Register your account on first visit."
     echo ""
 }

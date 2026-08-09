@@ -202,14 +202,59 @@ register_service vaultwarden utilities "Bitwarden-compatible password manager (V
 install_vaultwarden() {
     require_docker || return 1
     log_info "Installing Vaultwarden..."
+
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "vaultwarden" name/paths/port exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh. A real use case:
+    # separate personal and family/household vaults with independent admin
+    # tokens, domains, and SMTP.
     local VW_DIR="$DOCKER_DIR/vaultwarden"
+    local INSTANCE_SUFFIX="" CONTAINER="vaultwarden"
+    local WEB_PORT="8888"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $VW_DIR (vaultwarden_data/)"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create $VW_DIR(-<name>) (vaultwarden_data/)"
         echo "[DRY-RUN] Would deploy vaultwarden/server:latest"
         echo "[DRY-RUN] Would generate admin token and prompt for domain"
+        echo "[DRY-RUN] Would auto-scan for a free host port if this is an additional instance"
         echo "[DRY-RUN] Signups disabled by default (enable via admin panel)"
         return 0
+    fi
+
+    if [ -d "$VW_DIR" ]; then
+        echo ""
+        echo "  Vaultwarden is already installed at $VW_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Vaultwarden instance alongside it (its own"
+        echo "       server, vault, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'family'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/vaultwarden-$_suffix" ]; then
+                    log_warning "vaultwarden-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            VW_DIR="$DOCKER_DIR/vaultwarden-$_suffix"
+            CONTAINER="vaultwarden-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $VW_DIR (port $WEB_PORT)"
+        fi
     fi
 
     mkdir -p "$VW_DIR/vaultwarden_data"
@@ -225,7 +270,7 @@ install_vaultwarden() {
     echo "  can connect and password-reset emails link correctly."
     echo ""
     local VW_DOMAIN=""
-    local DEFAULT_DOMAIN="https://vault.${SITE_DOMAIN:-example.com}"
+    local DEFAULT_DOMAIN="https://vault${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN:-example.com}"
     prompt_text "Vaultwarden public URL (e.g. https://vault.example.com):" "$DEFAULT_DOMAIN" VW_DOMAIN
     [ -z "$VW_DOMAIN" ] && VW_DOMAIN="$DEFAULT_DOMAIN"
 
@@ -266,19 +311,19 @@ networks:
     fi
 
     cat > docker-compose.yml << VW_COMPOSE
-name: vaultwarden
+name: $CONTAINER
 
 services:
   vaultwarden:
     image: vaultwarden/server:latest
-    container_name: vaultwarden
-    hostname: vaultwarden
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     env_file: .env
     volumes:
       - ./vaultwarden_data:/data
     ports:
-      - "8888:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 VW_COMPOSE
 
@@ -311,15 +356,18 @@ VW_ENV
 
     chmod 600 .env
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$VW_DIR"
-    log_success "Vaultwarden configured at $VW_DIR"
+    log_success "Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $VW_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Vaultwarden" "vaultwarden:80" "vault"
+    configure_caddy_for_service "Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:80" "vault${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$VW_DIR" << MD
-# Vaultwarden — Bitwarden-compatible password manager
+# Vaultwarden${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX} — Bitwarden-compatible password manager
 
 Lightweight, self-hosted Bitwarden server. Works with all official
 Bitwarden clients: browser extension, desktop app, and mobile app.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own vault, own
+port) — not shared credentials with another Vaultwarden instance.")
 
 ## Setup
 1. Point your Bitwarden client to: $VW_DOMAIN
@@ -353,10 +401,10 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_VW=""
-    prompt_yn "Start Vaultwarden now? (y/n):" "y" START_VW
+    prompt_yn "Start Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_VW
     if [ "$START_VW" = "y" ] || [ "$START_VW" = "Y" ]; then
         docker compose up -d \
-            && log_success "Vaultwarden started" \
+            && log_success "Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
