@@ -56,6 +56,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -149,19 +164,23 @@ install_rustdesk() {
             INSTANCE_SUFFIX="$_suffix"
             RD_DIR="$DOCKER_DIR/rustdesk-$_suffix"
             CONTAINER="rustdesk-$_suffix"
-
-            PORT_OFFSET=10
-            while ss -tlnH "sport = :$((21115 + PORT_OFFSET))" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :$((21116 + PORT_OFFSET))" 2>/dev/null | grep -q . \
-               || ss -ulnH "sport = :$((21116 + PORT_OFFSET))" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :$((21117 + PORT_OFFSET))" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :$((21118 + PORT_OFFSET))" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :$((21119 + PORT_OFFSET))" 2>/dev/null | grep -q .; do
-                PORT_OFFSET=$((PORT_OFFSET + 10))
-            done
-            log_info "New instance: $RD_DIR (ports $((21115 + PORT_OFFSET))-$((21119 + PORT_OFFSET)))"
+            log_info "New instance: $RD_DIR"
         fi
     fi
+
+    # Scan for a free port block unconditionally, shifting the whole 6-port
+    # block together — not just when adding an explicit additional instance.
+    # A plain first install can just as easily collide with an unrelated
+    # service already bound to one of these default ports — see CLAUDE.md's
+    # "Port collision avoidance" section.
+    while port_in_use "$((21115 + PORT_OFFSET))" \
+       || port_in_use "$((21116 + PORT_OFFSET))" \
+       || port_in_use "$((21116 + PORT_OFFSET))" udp \
+       || port_in_use "$((21117 + PORT_OFFSET))" \
+       || port_in_use "$((21118 + PORT_OFFSET))" \
+       || port_in_use "$((21119 + PORT_OFFSET))"; do
+        PORT_OFFSET=$((PORT_OFFSET + 10))
+    done
 
     mkdir -p "$RD_DIR/rustdesk_data"
     ensure_docker_dir_ownership "$RD_DIR"

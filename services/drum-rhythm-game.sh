@@ -42,6 +42,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -187,14 +202,22 @@ install_drum-rhythm-game() {
 
     local DRUM_DIR="$DOCKER_DIR/drum-rhythm-game"
     local REPO_URL="https://github.com/outis1one/drum-rhythm-game.git"
+    local WEB_PORT="8096"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] drum-rhythm-game would:"
         echo "  - Clone $REPO_URL to $DRUM_DIR/html"
         echo "  - Build the repo's own Dockerfile (nginx, gzip, /healthz) on port 8096"
+        echo "    (auto-scanned for a free host port — 8096 is also emby/jellyfin's default)"
         echo "  - Offer Authelia SSO protection via Caddy (no built-in auth)"
         return 0
     fi
+
+    # Scan for a free host port — this default (8096) is also emby's and
+    # jellyfin's default, so a plain install shouldn't silently claim a port
+    # another already-running service holds. See CLAUDE.md's "Port collision
+    # avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$DRUM_DIR"
     ensure_docker_dir_ownership "$DRUM_DIR"
@@ -248,7 +271,7 @@ services:
     hostname: drum-rhythm-game
     restart: unless-stopped
     ports:
-      - "8096:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 DRUM_COMPOSE
 
@@ -268,7 +291,7 @@ DRUM_ENV
     fi
     configure_caddy_for_service "Drum Rhythm Game" "drum-rhythm-game:80" "drums" "$DRUM_EXTRA_BLOCK"
 
-    write_readme "$DRUM_DIR" << 'MD'
+    write_readme "$DRUM_DIR" << MD
 # Drum Rhythm Game
 
 Browser-based drum rhythm game — 18 genres covering 119 synth-orchestra
@@ -281,36 +304,36 @@ Multiplayer take-turns mode, adjustable speed/volume, and a leaderboard —
 all state lives in browser localStorage. No server required; all audio is
 synthesized in-browser via the Web Audio API.
 
-Built and served from the repo's own `Dockerfile` (nginx + gzip + a
-`/healthz` endpoint) — only `index.html` ends up in the image, so the
+Built and served from the repo's own \`Dockerfile\` (nginx + gzip + a
+\`/healthz\` endpoint) — only \`index.html\` ends up in the image, so the
 repo's docs/license/dev files never get served.
 
 Source: https://github.com/outis1one/drum-rhythm-game
 
 ## Access
-- URL: http://localhost:8096
+- URL: http://localhost:${WEB_PORT}
 
 ## Manage
-```bash
+\`\`\`bash
 cd ~/docker/drum-rhythm-game
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
-```
+\`\`\`
 
 ## Update game
-```bash
+\`\`\`bash
 cd ~/docker/drum-rhythm-game
 git -C html pull
 docker compose up -d --build
-```
+\`\`\`
 MD
 
     local START_DRUM=""
     prompt_yn "Start drum-rhythm-game now? (y/n):" "y" START_DRUM
     if [ "$START_DRUM" = "y" ] || [ "$START_DRUM" = "Y" ]; then
         docker compose up -d --build \
-            && log_success "Drum Rhythm Game started — http://localhost:8096" \
+            && log_success "Drum Rhythm Game started — http://localhost:${WEB_PORT}" \
             || log_warning "Start failed — check: docker compose logs"
     fi
 

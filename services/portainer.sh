@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -184,11 +199,21 @@ install_portainer() {
     require_docker || return 1
     log_info "Installing Portainer..."
     local PORTAINER_DIR="$DOCKER_DIR/portainer"
+    local HTTP_PORT="9000" HTTPS_PORT="9443"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $PORTAINER_DIR"
+        echo "[DRY-RUN] Would auto-scan for free host ports (9000/9443 defaults)"
         return 0
     fi
+
+    # Scan for free host ports, moving both together — a plain install
+    # shouldn't silently claim a port another already-running service holds.
+    # See CLAUDE.md's "Port collision avoidance" section.
+    while port_in_use "$HTTP_PORT" || port_in_use "$HTTPS_PORT"; do
+        HTTP_PORT=$((HTTP_PORT + 1))
+        HTTPS_PORT=$((HTTPS_PORT + 1))
+    done
 
     mkdir -p "$PORTAINER_DIR"
     ensure_docker_dir_ownership "$PORTAINER_DIR"
@@ -230,8 +255,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data
     ports:
-      - "9000:9000"
-      - "9443:9443"
+      - "${HTTP_PORT}:9000"
+      - "${HTTPS_PORT}:9443"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 PORTAINER_COMPOSE
 
@@ -239,7 +264,7 @@ PORTAINER_COMPOSE
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$PORTAINER_DIR"
 
     echo ""
-    log_success "Portainer configured at $PORTAINER_DIR"
+    log_success "Portainer configured at $PORTAINER_DIR (HTTP $HTTP_PORT, HTTPS $HTTPS_PORT)"
 
     configure_caddy_for_service "Portainer" "portainer:9000" "portainer"
 
@@ -249,8 +274,8 @@ PORTAINER_COMPOSE
 Web UI for managing Docker — containers, images, volumes, and networks.
 
 ## Access
-- HTTPS: https://localhost:9443
-- HTTP:  http://localhost:9000
+- HTTPS: https://localhost:${HTTPS_PORT}
+- HTTP:  http://localhost:${HTTP_PORT}
 - Create your admin account on first visit.
 
 ## Data
@@ -272,7 +297,7 @@ MD
         docker compose up -d 2>/dev/null && log_success "Portainer started" || log_warning "Failed to start"
     fi
 
-    echo "  Access at:  https://localhost:9443"
+    echo "  Access at:  https://localhost:${HTTPS_PORT}"
     echo "  Create admin account on first visit"
     echo ""
 }

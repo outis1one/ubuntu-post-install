@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -186,12 +201,19 @@ install_calibre-web() {
     log_info "Installing Calibre-Web..."
 
     local CW_DIR="$DOCKER_DIR/calibre-web"
+    local WEB_PORT="8083"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $CW_DIR"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$CW_DIR/config" "$CW_DIR/books"
     ensure_docker_dir_ownership "$CW_DIR"
@@ -238,7 +260,7 @@ services:
       - ./config:/config
       - ./books:/books
     ports:
-      - "8083:8083"
+      - "${WEB_PORT}:8083"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 CW_COMPOSE
 
@@ -253,20 +275,20 @@ CW_ENV
 
     configure_caddy_for_service "Calibre-Web" "calibre-web:8083" "books"
 
-    write_readme "$CW_DIR" << 'MD'
+    write_readme "$CW_DIR" << MD
 # Calibre-Web
 
 Web-based ebook library with metadata editing, reading, and format conversion
 powered by Calibre.
 
 ## First-run setup
-1. Open the UI (http://localhost:8083) and log in with admin / admin123
-2. When prompted for the database location, enter: `/books`
+1. Open the UI (http://localhost:${WEB_PORT}) and log in with admin / admin123
+2. When prompted for the database location, enter: \`/books\`
    (point this at your existing Calibre library or an empty directory)
 3. Change the default password immediately under Admin → Edit User
 
 ## Ebook conversion
-The `DOCKER_MODS=linuxserver/mods:universal-calibre` environment variable
+The \`DOCKER_MODS=linuxserver/mods:universal-calibre\` environment variable
 installs the full Calibre binary inside the container, enabling on-the-fly
 ebook conversion (e.g. EPUB → MOBI/AZW3).
 
@@ -275,15 +297,15 @@ Place your Calibre library (or individual books) in:
   ~/docker/calibre-web/books/
 
 If you already have a Calibre library elsewhere, mount that path instead by
-editing the `./books:/books` volume line in docker-compose.yml.
+editing the \`./books:/books\` volume line in docker-compose.yml.
 
 ## Manage
-```bash
+\`\`\`bash
 docker compose up -d
 docker compose down
 docker compose logs -f
 docker compose pull && docker compose down && docker compose up -d
-```
+\`\`\`
 MD
 
     local START_CW=""

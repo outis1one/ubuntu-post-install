@@ -52,6 +52,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -497,12 +512,15 @@ install_frigate() {
     require_docker || return 1
 
     local FRIGATE_DIR="$DOCKER_DIR/frigate"
+    local WEB_PORT="5000" RTSP_PORT="8554" WEBRTC_PORT="8555"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Frigate would:"
         echo "  - Create $FRIGATE_DIR with docker-compose.yml + .env + config/config.yml"
         echo "  - Auto-enable /dev/dri/renderD128 for GPU-assisted detection if present"
         echo "  - Expose ports 5000 (web), 8554 (RTSP restream), 8555 (WebRTC)"
+        echo "    — all 3 auto-scanned/shifted together if occupied (5000 is also"
+        echo "    changedetection's default)"
         echo "  - If already configured: show existing cameras and offer to keep,"
         echo "    back up + start fresh, add more, or remove some"
         echo "  - Prompt to add cameras interactively (RTSP creds go in .env)"
@@ -510,6 +528,19 @@ install_frigate() {
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
+
+    # Scan for free host ports, moving all 3 together — a plain install
+    # shouldn't silently claim a port another already-running service holds
+    # (changedetection.io also defaults to 5000). See CLAUDE.md's "Port
+    # collision avoidance" section. Internal go2rtc restream URLs elsewhere
+    # in this file (rtsp://127.0.0.1:8554/...) are container-internal
+    # loopback references, unaffected by the host-side port used here.
+    while port_in_use "$WEB_PORT" || port_in_use "$RTSP_PORT" \
+       || port_in_use "$WEBRTC_PORT" || port_in_use "$WEBRTC_PORT" udp; do
+        WEB_PORT=$((WEB_PORT + 1))
+        RTSP_PORT=$((RTSP_PORT + 1))
+        WEBRTC_PORT=$((WEBRTC_PORT + 1))
+    done
 
     mkdir -p "$FRIGATE_DIR"
     ensure_docker_dir_ownership "$FRIGATE_DIR"
@@ -605,10 +636,10 @@ $DEVICE_BLOCK
         tmpfs:
           size: 1000000000
     ports:
-      - "5000:5000"
-      - "8554:8554"
-      - "8555:8555/tcp"
-      - "8555:8555/udp"
+      - "${WEB_PORT}:5000"
+      - "${RTSP_PORT}:8554"
+      - "${WEBRTC_PORT}:8555/tcp"
+      - "${WEBRTC_PORT}:8555/udp"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FRIGATE_COMPOSE
 
@@ -709,9 +740,9 @@ FRIGATE_ENV
 AI-powered network video recorder with real-time object detection for
 security cameras. Detects people, cars, animals, and more.
 
-- Web UI: http://localhost:5000
-- RTSP restream: port 8554
-- WebRTC: port 8555
+- Web UI: http://localhost:${WEB_PORT}
+- RTSP restream: port ${RTSP_PORT}
+- WebRTC: port ${WEBRTC_PORT}
 - Recordings: \`$FRIGATE_MEDIA\`
 - Config: \`config/config.yml\` — cameras configured during install (${#CAM_NAME[@]} total)
 - Credentials: \`.env\` — RTSP user/pass/IP per camera as FRIGATE_* variables
@@ -736,7 +767,7 @@ container startup.
 ## First steps
 1. Review \`config/config.yml\` — adjust detection zones, masks, retention
 2. Start Frigate: \`docker compose up -d\`
-3. Open http://localhost:5000 to view cameras and configure detection zones
+3. Open http://localhost:${WEB_PORT} to view cameras and configure detection zones
 
 ## Hardware acceleration
 - Intel/AMD GPU: uncomment the \`devices: [/dev/dri/renderD128]\` block
@@ -761,7 +792,7 @@ MD
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:5000"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Config:     $FRIGATE_DIR/config/config.yml"
     echo ""
 }

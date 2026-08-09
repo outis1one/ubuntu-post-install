@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -182,14 +197,21 @@ install_archivebox() {
     require_docker || return 1
 
     local AB_DIR="$DOCKER_DIR/archivebox"
+    local WEB_PORT="8000"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] archivebox would:"
         echo "  - Create $AB_DIR with docker-compose.yml"
         echo "  - Initialize ArchiveBox data directory"
-        echo "  - Expose port 8000 (web UI)"
+        echo "  - Expose port 8000 (web UI), auto-scanned for a free host port"
         return 0
     fi
+
+    # Scan for a free host port — this default (8000) isn't unique to
+    # ArchiveBox in this repo, so a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$AB_DIR"
     ensure_docker_dir_ownership "$AB_DIR"
@@ -236,7 +258,7 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "8000:8000"
+      - "${WEB_PORT}:8000"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 ABCOMPOSE
 
@@ -254,47 +276,47 @@ ABENV
 
     configure_caddy_for_service "ArchiveBox" "archivebox:8000" "archive"
 
-    write_readme "$AB_DIR" << 'MD'
+    write_readme "$AB_DIR" << MD
 # ArchiveBox
 
 Self-hosted web archiving — saves full snapshots of web pages (HTML, screenshots,
 PDFs, WARC) like a personal Wayback Machine.
 
-- Web UI: http://localhost:8000
+- Web UI: http://localhost:${WEB_PORT}
 
 ## Manage
-```bash
+\`\`\`bash
 cd ~/docker/archivebox
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
 docker compose pull && docker compose up -d   # update
-```
+\`\`\`
 
 ## Add URLs to archive
-```bash
-# Via web UI — visit http://localhost:8000 and use the Add page
+\`\`\`bash
+# Via web UI — visit http://localhost:${WEB_PORT} and use the Add page
 # Via CLI:
 echo "https://example.com" | docker compose run --rm archivebox add
 docker compose run --rm archivebox add --depth=1 https://example.com
-```
+\`\`\`
 
 ## Create admin user
-```bash
+\`\`\`bash
 docker compose run --rm archivebox manage createsuperuser
-```
+\`\`\`
 MD
 
     local START_AB=""
     prompt_yn "Start ArchiveBox now? (y/n):" "y" START_AB
     if [ "$START_AB" = "y" ] || [ "$START_AB" = "Y" ]; then
         docker compose up -d \
-            && log_success "ArchiveBox started — http://localhost:8000" \
+            && log_success "ArchiveBox started — http://localhost:${WEB_PORT}" \
             || log_warning "Start failed — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Web UI:  http://localhost:8000"
+    echo "  Web UI:  http://localhost:${WEB_PORT}"
     echo "  Add URLs via the web UI or: echo 'URL' | docker compose run --rm archivebox add"
     echo ""
 }

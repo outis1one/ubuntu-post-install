@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -226,13 +241,15 @@ install_filebrowser() {
             INSTANCE_SUFFIX="$_suffix"
             FB_DIR="$DOCKER_DIR/filebrowser-$_suffix"
             CONTAINER="filebrowser-$_suffix"
-
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-            done
-            log_info "New instance: $FB_DIR (port $WEB_PORT)"
+            log_info "New instance: $FB_DIR"
         fi
     fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port — see
+    # CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$FB_DIR/data"
     ensure_docker_dir_ownership "$FB_DIR"

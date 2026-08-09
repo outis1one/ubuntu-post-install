@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -263,16 +278,27 @@ install_lyrion() {
             log_warning "don't collide with the first instance's fixed ports. This instance"
             log_warning "loses zero-config Chromecast/Squeezebox discovery — enter its address"
             log_warning "manually in the Squeezer app / Squeezebox firmware instead."
-
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :${CLI_PORT}" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :${PLAYER_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-                CLI_PORT=$((CLI_PORT + 1))
-                PLAYER_PORT=$((PLAYER_PORT + 1))
-            done
-            log_info "New instance: $LYRION_DIR (web $WEB_PORT, CLI $CLI_PORT, player $PLAYER_PORT)"
+            log_info "New instance: $LYRION_DIR"
         fi
+    fi
+
+    # Port collision avoidance — see CLAUDE.md's "Port collision avoidance"
+    # section. Bridge-mode instances can fully auto-scan (all 3 ports move
+    # together). Host-mode (the first instance) can only auto-adjust
+    # WEB_PORT — HTTP_PORT is a real env var the image honors even under
+    # host networking — CLI_PORT/PLAYER_PORT are hardcoded inside the image
+    # with no override, so a collision there can only be warned about, not
+    # silently fixed.
+    if [ "$USE_HOST_NETWORK" = true ]; then
+        find_free_port WEB_PORT "$WEB_PORT"
+        port_in_use "$CLI_PORT" && log_warning "CLI port $CLI_PORT is already in use by another process — Lyrion's CLI interface won't be reachable until that's resolved (this port isn't configurable in the image)."
+        port_in_use "$PLAYER_PORT" && log_warning "Player port $PLAYER_PORT is already in use by another process — Squeezebox/app connections won't work until that's resolved (this port isn't configurable in the image)."
+    else
+        while port_in_use "$WEB_PORT" || port_in_use "$CLI_PORT" || port_in_use "$PLAYER_PORT"; do
+            WEB_PORT=$((WEB_PORT + 1))
+            CLI_PORT=$((CLI_PORT + 1))
+            PLAYER_PORT=$((PLAYER_PORT + 1))
+        done
     fi
 
     local MUSIC_PATH=""
@@ -287,9 +313,14 @@ install_lyrion() {
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     UID_VAL=$(id -u "$ACTUAL_USER"); GID_VAL=$(id -g "$ACTUAL_USER")
 
+    # Host mode has no ports: remapping — HTTP_PORT is the only thing that
+    # actually controls the bind port, so it must track the scanned WEB_PORT.
+    # Bridge mode keeps the container's internal port fixed at 9000 and lets
+    # the ports: line do the remapping instead.
     local _NETWORK_BLOCK="    network_mode: host
 "
     local _PORTS_BLOCK=""
+    local _HTTP_PORT_INTERNAL="$WEB_PORT"
     if [ "$USE_HOST_NETWORK" != true ]; then
         _NETWORK_BLOCK=""
         _PORTS_BLOCK="    ports:
@@ -297,6 +328,7 @@ install_lyrion() {
       - \"${CLI_PORT}:9090\"
       - \"${PLAYER_PORT}:3483\"
 "
+        _HTTP_PORT_INTERNAL="9000"
     fi
 
     cat > docker-compose.yml << LYRION_COMPOSE
@@ -309,7 +341,7 @@ services:
     hostname: $CONTAINER
     restart: unless-stopped
 ${_NETWORK_BLOCK}${_PORTS_BLOCK}    environment:
-      - HTTP_PORT=9000
+      - HTTP_PORT=$_HTTP_PORT_INTERNAL
       - PUID=$UID_VAL
       - PGID=$GID_VAL
       - TZ=$TZ_VAL

@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -186,12 +201,19 @@ install_n8n() {
     log_info "Installing n8n..."
 
     local N8N_DIR="$DOCKER_DIR/n8n"
+    local WEB_PORT="5678"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $N8N_DIR"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$N8N_DIR/data"
     ensure_docker_dir_ownership "$N8N_DIR"
@@ -230,7 +252,7 @@ services:
     hostname: n8n
     restart: unless-stopped
     ports:
-      - "5678:5678"
+      - "${WEB_PORT}:5678"
     env_file:
       - .env
     environment:
@@ -260,27 +282,27 @@ N8N_ENV
 
     configure_caddy_for_service "n8n" "n8n:5678" "n8n"
 
-    write_readme "$N8N_DIR" << 'MD'
+    write_readme "$N8N_DIR" << MD
 # n8n
 
 Workflow automation platform — connect all your self-hosted services with
 a visual editor. Create webhooks, scheduled jobs, and multi-step automations.
 
 ## Access
-- URL: http://localhost:5678
+- URL: http://localhost:${WEB_PORT}
 - On first run, n8n prompts you to create an owner account.
 
 ## Manage
-```bash
+\`\`\`bash
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
 docker compose pull && docker compose down && docker compose up -d  # update
-```
+\`\`\`
 
 ## Environment
-Edit `.env` to change `WEBHOOK_URL` or `N8N_HOST` after deployment,
-then restart: `docker compose down && docker compose up -d`
+Edit \`.env\` to change \`WEBHOOK_URL\` or \`N8N_HOST\` after deployment,
+then restart: \`docker compose down && docker compose up -d\`
 MD
 
     local START_N8N=""
@@ -291,7 +313,7 @@ MD
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:5678"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Create your owner account on first visit."
     echo ""
 }

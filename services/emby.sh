@@ -49,6 +49,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -246,16 +261,17 @@ install_emby() {
             EMBY_DIR="$DOCKER_DIR/emby-$_suffix"
             CONTAINER="emby-$_suffix"
             DEFAULT_MEDIA="$ACTUAL_HOME/media-$_suffix"
-
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-            done
-            while ss -tlnH "sport = :${HTTPS_PORT}" 2>/dev/null | grep -q .; do
-                HTTPS_PORT=$((HTTPS_PORT + 1))
-            done
-            log_info "New instance: $EMBY_DIR (web port $WEB_PORT, https port $HTTPS_PORT)"
+            log_info "New instance: $EMBY_DIR"
         fi
     fi
+
+    # Scan for free ports unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed these default ports
+    # (e.g. jellyfin also defaults to 8096) — see CLAUDE.md's "Port collision
+    # avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
+    find_free_port HTTPS_PORT "$HTTPS_PORT"
 
     local MUSIC_ONLY=""
     prompt_yn "Set this up as a music-only server (skip movies/TV)? (y/n):" "n" MUSIC_ONLY

@@ -47,6 +47,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -194,14 +209,21 @@ install_iopaint() {
     log_info "Installing IOPaint..."
 
     local IOPAINT_DIR="$DOCKER_DIR/iopaint"
+    local WEB_PORT="8100"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $IOPAINT_DIR"
         echo "[DRY-RUN] Would prompt for model and GPU (CUDA) support"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port"
         echo "[DRY-RUN] Would offer Authelia SSO"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$IOPAINT_DIR"
     ensure_docker_dir_ownership "$IOPAINT_DIR"
@@ -308,7 +330,7 @@ services:
       --port=8080
       --host=0.0.0.0
     ports:
-      - "8100:8080"
+      - "${WEB_PORT}:8080"
     env_file: .env
     volumes:
       - ./models:/root/.cache
@@ -340,7 +362,7 @@ services:
       --port=8080
       --host=0.0.0.0
     ports:
-      - "8100:8080"
+      - "${WEB_PORT}:8080"
     env_file: .env
     volumes:
       - ./models:/root/.cache
@@ -467,6 +489,12 @@ docker compose pull && docker compose down && docker compose up -d
 - input/, output/    — optional file staging
 MD
 
+    # The README above is a quoted (non-interpolating) heredoc — dense with
+    # literal backticks for inline code spans, too risky to convert to an
+    # interpolating heredoc without escaping every one of them. Patch the
+    # port in afterward instead when it was scanned away from the default.
+    [ "$WEB_PORT" != "8100" ] && sed -i "s/localhost:8100/localhost:${WEB_PORT}/g" "$IOPAINT_DIR/README.md"
+
     local START_IO=""
     prompt_yn "Start IOPaint now? (y/n):" "y" START_IO
     if [ "$START_IO" = "y" ] || [ "$START_IO" = "Y" ]; then
@@ -476,7 +504,7 @@ MD
     fi
 
     echo ""
-    echo "  URL:      http://localhost:8100"
+    echo "  URL:      http://localhost:${WEB_PORT}"
     echo "  Model:    $IOPAINT_MODEL"
     echo "  Device:   $DEVICE_VAL"
     echo "  Switch:   edit MODEL= in $IOPAINT_DIR/.env and restart"

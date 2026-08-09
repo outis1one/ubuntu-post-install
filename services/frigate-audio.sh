@@ -62,6 +62,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         generate_password() {
             local _len="${1:-32}"
             tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c "$_len"
@@ -216,6 +231,7 @@ install_frigate-audio() {
     require_docker || return 1
 
     local DIR="$DOCKER_DIR/frigate-audio"
+    local WEB_PORT="8971" DEBUG_PORT="5001" RTSP_PORT="8554" WEBRTC_PORT="8555" MQTT_PORT="1883"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] frigate-audio would:"
@@ -223,8 +239,26 @@ install_frigate-audio() {
         echo "  Prompt for camera RTSP credentials, IPs, MQTT password, ntfy server"
         echo "  Generate docker-compose.yml, frigate config, mosquitto config, .env"
         echo "  Bootstrap the Mosquitto password file"
+        echo "  Ports 8971/5001/8554/8555/1883 auto-scanned/shifted together if occupied"
         return 0
     fi
+
+    # Scan for free host ports, moving all 5 together — a plain install
+    # shouldn't silently claim a port another already-running service holds
+    # (e.g. 1883 is the standard MQTT port and could already be in use by a
+    # Home Assistant add-on or another broker). Container-internal ports and
+    # container-to-container references (mosquitto:1883, 127.0.0.1:5000/8554
+    # inside the frigate container) are unaffected by the host-side ports
+    # scanned here. See CLAUDE.md's "Port collision avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$DEBUG_PORT" \
+       || port_in_use "$RTSP_PORT" || port_in_use "$WEBRTC_PORT" \
+       || port_in_use "$WEBRTC_PORT" udp || port_in_use "$MQTT_PORT"; do
+        WEB_PORT=$((WEB_PORT + 1))
+        DEBUG_PORT=$((DEBUG_PORT + 1))
+        RTSP_PORT=$((RTSP_PORT + 1))
+        WEBRTC_PORT=$((WEBRTC_PORT + 1))
+        MQTT_PORT=$((MQTT_PORT + 1))
+    done
 
     echo ""
     echo "╔═══════════════════════════════════════════════════════════════╗"
@@ -434,11 +468,11 @@ COMPOSEEOF
         tmpfs:
           size: 1000000000
     ports:
-      - "8971:8971"
-      - "5001:5000"
-      - "8554:8554"
-      - "8555:8555/tcp"
-      - "8555:8555/udp"
+      - "${WEB_PORT}:8971"
+      - "${DEBUG_PORT}:5000"
+      - "${RTSP_PORT}:8554"
+      - "${WEBRTC_PORT}:8555/tcp"
+      - "${WEBRTC_PORT}:8555/udp"
 ${_CADDY_NET_BLOCK}    healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:5000/api/version"]
       interval: 10s
@@ -452,7 +486,7 @@ ${_CADDY_NET_BLOCK}    healthcheck:
     image: eclipse-mosquitto:2
     restart: unless-stopped
     ports:
-      - "1883:1883"
+      - "${MQTT_PORT}:1883"
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
@@ -760,7 +794,7 @@ FNEOF
     if [[ ${START_NOW:-n} =~ ^[Yy]$ ]]; then
         log_info "Starting frigate-audio stack..."
         if ( cd "$DIR" && docker compose up -d ); then
-            log_success "Stack started — Frigate UI: http://localhost:8971"
+            log_success "Stack started — Frigate UI: http://localhost:${WEB_PORT}"
         else
             log_warning "Start failed — check: cd $DIR && docker compose logs"
         fi

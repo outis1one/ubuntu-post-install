@@ -542,6 +542,45 @@ write_readme() {
     chown "$ACTUAL_USER:$ACTUAL_USER" "$dir/README.md" 2>/dev/null || true
 }
 
+# ── Host port collision avoidance (shared by every service that publishes a
+# fixed host port) ────────────────────────────────────────────────────────────
+# With 70+ services in this repo, several ship the same default port (e.g.
+# emby and jellyfin both default to 8096; changedetection and frigate both
+# default to 5000). Nothing enforced those defaults were actually free on the
+# host, so whichever service started its container second would fail to bind
+# ("port is already allocated") instead of just landing on the next free port.
+# Confirmed live: installing jellyfin after emby (or vice versa) writes a
+# docker-compose.yml claiming a port the other service's container already
+# holds, and only fails at `docker compose up` time — not at install time.
+#
+# port_in_use PORT [PROTO]  — PROTO defaults to tcp; pass "udp" for UDP-only
+# ports. Returns 0 (true, in use) or 1 (free).
+port_in_use() {
+    local _port="$1" _proto="${2:-tcp}"
+    local _flag="-tlnH"
+    [ "$_proto" = "udp" ] && _flag="-ulnH"
+    ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+}
+
+# find_free_port VARNAME START [PROTO]
+# Scans upward from START for a free host port and writes the result back
+# into VARNAME. Single-port convenience wrapper around port_in_use — every
+# service's install_<name>() should run its default/candidate port through
+# this (or a hand-rolled port_in_use loop for multiple ports that must move
+# together, e.g. a web port + an agent port) before writing docker-compose.yml,
+# not only when adding an explicit additional instance of itself. On a normal
+# single-install host this is a silent no-op (the default port is free, so
+# VARNAME comes back unchanged); it only changes behavior when something else
+# already holds the port, which is exactly the case that used to fail at
+# startup instead of at install time.
+find_free_port() {
+    local _varname="$1" _port="$2" _proto="${3:-tcp}"
+    while port_in_use "$_port" "$_proto"; do
+        _port=$((_port + 1))
+    done
+    eval "$_varname='$_port'"
+}
+
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
 # Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"]
 # UPSTREAM: container:port for caddy_net routing (e.g. "filebrowser:80"),

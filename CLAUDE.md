@@ -596,6 +596,116 @@ sequence (a fake `docker`/`ss` shim standing in for a live daemon is fine)
 and confirm the second one's directory, container names, and ports are
 actually distinct before trusting the logic.
 
+## Port collision avoidance
+
+With 70+ services in this repo, several ship the same default port —
+`emby` and `jellyfin` both default to 8096, `changedetection` and `frigate`
+both default to 5000, `arm` and `nextcloud` both default to 8080. Nothing
+enforced those defaults were actually free on the host: whichever service
+started its container second would fail to bind ("port is already
+allocated") instead of landing on the next free port. Confirmed live:
+installing `jellyfin` after `emby` (or vice versa) writes a
+`docker-compose.yml` claiming a port the other service's container already
+holds, and it only fails at `docker compose up` time — not at install time,
+and not with any warning from the installer itself.
+
+**Every service that publishes a fixed host port must scan for a free one
+before writing `docker-compose.yml` — on every install, not only when
+adding an explicit additional instance of itself.** Two shared helpers in
+`lib/common.sh` do the work:
+
+```bash
+port_in_use PORT [PROTO]        # true if something's already listening; PROTO defaults to tcp, pass "udp" for UDP-only ports
+find_free_port VARNAME START [PROTO]   # scans upward from START, writes the free port back into VARNAME
+```
+
+Single-port services just call `find_free_port`:
+
+```bash
+local WEB_PORT="8080"
+find_free_port WEB_PORT "$WEB_PORT"
+...
+      - "${WEB_PORT}:8080"     # host side scanned; container-internal side stays literal
+```
+
+Services with multiple ports that must move together (a web port + an
+agent/RTSP/MQTT port, etc.) loop over `port_in_use` directly instead, the
+same pattern `services/meshcentral.sh` and `services/unifi.sh` use:
+
+```bash
+while port_in_use "$WEB_PORT" || port_in_use "$AGENT_PORT"; do
+    WEB_PORT=$((WEB_PORT + 1))
+    AGENT_PORT=$((AGENT_PORT + 1))
+done
+```
+
+On a normal single-install host this is a silent no-op — the default port
+is free, so the variable comes back unchanged and nothing about the
+install looks any different. It only changes behavior when something else
+already holds the port, which is exactly the case that used to fail at
+container-startup instead of being handled at install time.
+
+**Standalone-mode stub.** Every service also carries a standalone
+bootstrap fallback (`if [[ -f "$_COMMON" ]]; then source it; else <stubs>
+fi`, for `sudo bash services/<name>.sh` with no sibling files sourced) that
+duplicates the helpers it needs. `port_in_use`/`find_free_port` get the
+same treatment — copy the same two function bodies into that `else` block,
+matching how `log_info`, `prompt_text`, `configure_caddy_for_service`, etc.
+are already duplicated there.
+
+**Only the host side of a `"HOST:CONTAINER"` port mapping changes.** The
+container-internal port is fixed by the application itself and stays a
+literal number; only the host-published side becomes `${WEB_PORT}` (or
+whatever the variable is named). Watch for the same literal number showing
+up elsewhere in the file needing the same treatment: `configure_caddy_for_service`
+calls (container-internal side stays literal; a *bare*-port host-networking
+upstream, like `services/lyrion.sh`'s first instance, does need the
+variable), generated companion scripts (`services/koha.sh`'s
+`post-setup.sh`, `services/rustdesk.sh`'s relay-host messaging), `.env`
+values baked into client-facing config (`services/wg-easy.sh`'s `WG_PORT`
+env — WireGuard bakes the port into every generated peer config's
+`Endpoint =` line, so it must track the *actual* published port, not just
+the host-side compose mapping), and every `echo`/README line that prints
+`http://localhost:<port>`.
+
+**Quoted (`<< 'MD'`) README heredocs don't interpolate — check before
+editing.** A `write_readme ... << MD` (unquoted) heredoc already
+interpolates `${WEB_PORT}` directly. A quoted `<< 'MD'` heredoc doesn't,
+and converting it means escaping *every* backtick used for inline-code
+formatting (`` \`...\` ``) — miss one and bash tries to execute it as a
+command substitution the next time the heredoc is read, the same class of
+bug the coturn.sh backtick incident was (see `services/coturn.sh`'s
+`write_readme` call). For a README with only one or two backticks,
+escaping them is fine. For one with many (`services/iopaint.sh`'s model
+reference table), it's safer to leave the heredoc quoted and patch the
+port into the *written* `README.md` afterward instead:
+```bash
+[ "$WEB_PORT" != "8100" ] && sed -i "s/localhost:8100/localhost:${WEB_PORT}/g" "$IOPAINT_DIR/README.md"
+```
+
+**`network_mode: host` services can only scan what the app itself lets you
+override.** Host networking has no port *remapping* — whatever the app
+binds to on its fixed internal port is what's exposed, so `find_free_port`
+only helps for ports the app takes as configurable env vars.
+`services/lyrion.sh`'s `HTTP_PORT` env is genuinely configurable (LMS
+honors it as the actual bind port under host networking too — see its
+`_HTTP_PORT_INTERNAL` handling, which must track the scanned port rather
+than assuming bridge-mode's fixed `9000`), but its CLI (9090) and player
+(3483) ports are hardcoded in the image with no override — a collision
+there can only be warned about with `port_in_use`, not silently fixed.
+`services/homeassistant.sh` is the same shape: bridge mode (the default)
+scans freely; host mode (opt-in, for LAN device discovery) can only warn.
+
+**Caddy is the one deliberate exception — never auto-scanned.**
+`services/caddy.sh` keeps 80/443 fixed and only warns via `port_in_use` if
+they're already taken. Every other service either points HTTPS clients at
+Caddy implicitly (browsers assume 443) or gets routed through it by
+domain; silently moving Caddy itself to a random port would leave nothing
+listening at the address any client actually tries, which is strictly
+worse than the collision it would be "fixing." If 80/443 are already
+bound, that's a real conflict (another web server on the host) the user
+needs to resolve directly.
+
 ## Chaining into another service from within your own
 
 A service can call another service's `install_<name>()` directly as a

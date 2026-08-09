@@ -49,6 +49,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -198,6 +213,7 @@ install_wg-easy() {
     require_docker || return 1
 
     local WGEASY_DIR="$DOCKER_DIR/wg-easy"
+    local WEB_PORT="51821" VPN_PORT="51820"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] wg-easy would:"
@@ -205,13 +221,23 @@ install_wg-easy() {
         echo "  - Auto-detect public IP for WG_HOST"
         echo "  - Generate a random web UI password"
         echo "  - Pin WG_DEFAULT_ADDRESS=10.8.0.x (subnet 10.8.0.0/24)"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN)"
-        echo "  - Require router port-forward: UDP 51820 → this server"
+        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN), both auto-scanned if occupied"
+        echo "  - Require router port-forward: UDP <VPN port> → this server"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         echo "  - Offer to also allow SSH from the VPN subnet (additive, doesn't remove public SSH)"
         echo "  - Write sync-ssh-aliases.sh — generates ~/.ssh/config aliases for connected peers"
         return 0
     fi
+
+    # Scan for free host ports, moving both together — a plain install
+    # shouldn't silently claim a port another already-running service holds.
+    # Whatever VPN_PORT ends up as is what needs forwarding on the router
+    # (the messaging below reflects the final value, not the 51820 default).
+    # See CLAUDE.md's "Port collision avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$VPN_PORT" udp; do
+        WEB_PORT=$((WEB_PORT + 1))
+        VPN_PORT=$((VPN_PORT + 1))
+    done
 
     mkdir -p "$WGEASY_DIR"
     ensure_docker_dir_ownership "$WGEASY_DIR"
@@ -287,11 +313,12 @@ services:
       - WG_DEFAULT_DNS=1.1.1.1
       - WG_DEFAULT_ADDRESS=${WG_DEFAULT_ADDRESS}
       - WG_ALLOWED_IPS=0.0.0.0/0, ::/0
+      - WG_PORT=${VPN_PORT}
     volumes:
       - ./config:/etc/wireguard
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "${VPN_PORT}:${VPN_PORT}/udp"
+      - "${WEB_PORT}:51821/tcp"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 WGEASY_COMPOSE
 
@@ -416,8 +443,8 @@ SYNCEOF
 WireGuard VPN with a web UI for managing clients, generating QR codes,
 and monitoring connections.
 
-- Web UI: http://localhost:51821
-- VPN:    UDP port 51820 (forward this on your router)
+- Web UI: http://localhost:${WEB_PORT}
+- VPN:    UDP port ${VPN_PORT} (forward this on your router)
 - Password: stored in \`.env\` (\`WG_PASSWORD\`)
 - VPN host: \`$WG_HOST\` (update \`WG_HOST\` in .env if your IP changes)
 - VPN subnet: \`$WG_SUBNET_CIDR\`
@@ -433,10 +460,10 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## Router setup
-Forward **UDP port 51820** to this server's LAN IP for external VPN access.
+Forward **UDP port ${VPN_PORT}** to this server's LAN IP for external VPN access.
 
 ## Adding clients
-Open http://localhost:51821, log in with your password, click "+ New Client",
+Open http://localhost:${WEB_PORT}, log in with your password, click "+ New Client",
 download or scan the QR code with the WireGuard app.
 
 ## Mesh — peers reach each other automatically
@@ -471,11 +498,11 @@ MD
     fi
 
     echo ""
-    echo "  Web UI:   http://localhost:51821"
+    echo "  Web UI:   http://localhost:${WEB_PORT}"
     echo "  Password: $WG_PASSWORD  (saved in .env)"
     [[ -n "$WG_PASSWORD_HASH" ]] && echo "  Auth:     bcrypt hash configured (v14+ compatible)" \
         || echo "  Auth:     WARNING — bcrypt hash generation failed; see README"
-    echo "  Router:   forward UDP 51820 → this server for external VPN access"
+    echo "  Router:   forward UDP ${VPN_PORT} → this server for external VPN access"
     echo ""
 }
 

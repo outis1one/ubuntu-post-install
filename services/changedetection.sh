@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -186,12 +201,20 @@ install_changedetection() {
     log_info "Installing Changedetection.io..."
 
     local CD_DIR="$DOCKER_DIR/changedetection"
+    local WEB_PORT="5000"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $CD_DIR"
         echo "[DRY-RUN] Would write docker-compose.yml and .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port"
         return 0
     fi
+
+    # Scan for a free host port — this default (5000) isn't unique to
+    # Changedetection.io in this repo (frigate also defaults to 5000), so a
+    # plain install shouldn't silently claim a port another already-running
+    # service holds. See CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$CD_DIR/data"
     ensure_docker_dir_ownership "$CD_DIR"
@@ -230,7 +253,7 @@ services:
     hostname: changedetection
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "${WEB_PORT}:5000"
     environment:
       - BASE_URL=\${BASE_URL}
       - PLAYWRIGHT_DRIVER_URL=ws://playwright-chrome:3000
@@ -263,7 +286,7 @@ CD_ENV
 
     configure_caddy_for_service "Changedetection" "changedetection:5000" "changes"
 
-    write_readme "$CD_DIR" << 'MD'
+    write_readme "$CD_DIR" << MD
 # Changedetection.io
 
 Monitor web pages for changes and receive notifications via email, Slack,
@@ -271,20 +294,20 @@ Discord, ntfy, and many other channels. Includes a Playwright/Chrome sidecar
 for JavaScript-heavy pages.
 
 ## Access
-- URL: http://localhost:5000
+- URL: http://localhost:${WEB_PORT}
 - Optional password can be set in Settings → General within the UI.
 
 ## Manage
-```bash
+\`\`\`bash
 docker compose up -d      # start
 docker compose down       # stop
 docker compose logs -f    # logs
 docker compose pull && docker compose down && docker compose up -d  # update
-```
+\`\`\`
 
 ## Environment
-Edit `.env` to change `BASE_URL` (used for notification links),
-then restart: `docker compose down && docker compose up -d`
+Edit \`.env\` to change \`BASE_URL\` (used for notification links),
+then restart: \`docker compose down && docker compose up -d\`
 MD
 
     local START_CD=""
@@ -295,7 +318,7 @@ MD
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:5000"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
 }
 

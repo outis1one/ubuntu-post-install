@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         generate_password() {
             local _len="${1:-32}"
             tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$_len"
@@ -150,19 +165,22 @@ install_unifi() {
             PROJECT="unifi-$_suffix"
             DB_CONTAINER="unifi-db-$_suffix"
             APP_CONTAINER="unifi-app-$_suffix"
-
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q . \
-               || ss -tlnH "sport = :${INFORM_PORT}" 2>/dev/null | grep -q . \
-               || ss -ulnH "sport = :${STUN_PORT}" 2>/dev/null | grep -q . \
-               || ss -ulnH "sport = :${DISCOVERY_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-                INFORM_PORT=$((INFORM_PORT + 1))
-                STUN_PORT=$((STUN_PORT + 1))
-                DISCOVERY_PORT=$((DISCOVERY_PORT + 1))
-            done
-            log_info "New instance: $UNIFI_DIR (web $WEB_PORT, inform $INFORM_PORT, STUN $STUN_PORT, discovery $DISCOVERY_PORT)"
+            log_info "New instance: $UNIFI_DIR"
         fi
     fi
+
+    # Scan for free ports unconditionally, moving all 4 together — not just
+    # when adding an explicit additional instance. A plain first install can
+    # just as easily collide with an unrelated service that already claimed
+    # one of these default ports — see CLAUDE.md's "Port collision
+    # avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$INFORM_PORT" \
+       || port_in_use "$STUN_PORT" udp || port_in_use "$DISCOVERY_PORT" udp; do
+        WEB_PORT=$((WEB_PORT + 1))
+        INFORM_PORT=$((INFORM_PORT + 1))
+        STUN_PORT=$((STUN_PORT + 1))
+        DISCOVERY_PORT=$((DISCOVERY_PORT + 1))
+    done
 
     mkdir -p "$UNIFI_DIR"
     ensure_docker_dir_ownership "$UNIFI_DIR"

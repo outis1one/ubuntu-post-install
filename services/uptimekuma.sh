@@ -44,6 +44,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_yn() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -186,11 +201,18 @@ install_uptimekuma() {
     require_docker || return 1
     log_info "Installing Uptime Kuma..."
     local UPTIME_DIR="$DOCKER_DIR/uptime-kuma"
+    local WEB_PORT="3001"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $UPTIME_DIR"
+        echo "[DRY-RUN] Would auto-scan for a free host port"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$UPTIME_DIR"
     ensure_docker_dir_ownership "$UPTIME_DIR"
@@ -232,7 +254,7 @@ services:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
-      - "3001:3001"
+      - "${WEB_PORT}:3001"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 UPTIME_COMPOSE
 
@@ -249,7 +271,7 @@ Self-hosted uptime/status monitoring dashboard. Monitor websites, servers, and
 Docker containers.
 
 ## Access
-- URL: http://localhost:3001
+- URL: http://localhost:${WEB_PORT}
 - Create your admin account on first visit.
 
 ## Data
@@ -278,7 +300,7 @@ MD
         docker compose up -d 2>/dev/null && log_success "Uptime Kuma started" || log_warning "Failed to start"
     fi
 
-    echo "  Access at:  http://localhost:3001"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
 }
 
