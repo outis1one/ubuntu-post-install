@@ -192,7 +192,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service emby media "Media server — movies, TV, music (Emby)" 8096
+register_service emby media "Media server — movies, TV, music (Emby); supports a music-only setup with per-user library access" 8096
 
 install_emby() {
     require_docker || return 1
@@ -202,6 +202,8 @@ install_emby() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Emby would:"
+        echo "  - Ask whether this is a music-only setup (changes the default folder/guidance only —"
+        echo "    which library types you add still happens in Emby's own web setup wizard)"
         echo "  - Create $EMBY_DIR with docker-compose.yml + .env (config/)"
         echo "  - Mount a media folder (default $DEFAULT_MEDIA) at /media"
         echo "  - Run as UID/GID $(id -u "$ACTUAL_USER")/$(id -g "$ACTUAL_USER")"
@@ -210,8 +212,17 @@ install_emby() {
         return 0
     fi
 
+    local MUSIC_ONLY=""
+    prompt_yn "Set this up as a music-only server (skip movies/TV)? (y/n):" "n" MUSIC_ONLY
+
+    local DEFAULT_FOLDER="$DEFAULT_MEDIA" FOLDER_PROMPT="Path to media folder"
+    if [[ "$MUSIC_ONLY" =~ ^[Yy]$ ]]; then
+        DEFAULT_FOLDER="$ACTUAL_HOME/music"
+        FOLDER_PROMPT="Path to music folder"
+    fi
+
     local MEDIA_PATH=""
-    prompt_text "Path to media folder [$DEFAULT_MEDIA]:" "$DEFAULT_MEDIA" MEDIA_PATH
+    prompt_text "$FOLDER_PROMPT [$DEFAULT_FOLDER]:" "$DEFAULT_FOLDER" MEDIA_PATH
     MEDIA_PATH="${MEDIA_PATH/#\~/$ACTUAL_HOME}"; MEDIA_PATH="${MEDIA_PATH%/}"
 
     mkdir -p "$EMBY_DIR"
@@ -303,6 +314,32 @@ docker compose pull && docker compose up -d   # update
 ## Hardware transcoding
 Uncomment the \`devices: [/dev/dri:/dev/dri]\` block in \`docker-compose.yml\`
 once you've confirmed your Intel/AMD GPU exposes a render node, then restart.
+$( [[ "$MUSIC_ONLY" =~ ^[Yy]$ ]] && cat << MUSICMD
+
+## Music-only setup (per-user library access)
+This mount is meant to hold only your music library — which library types
+you actually add still happens in Emby's own first-run setup wizard, not
+this script (Emby has no compose/env flag for "music-only"; it's a web-UI
+step):
+
+1. Open http://localhost:8096 and complete the setup wizard.
+2. When adding a library, choose type **Music**, point it at \`/media\`,
+   and don't add any Movies/TV/other library types.
+3. **Per-user library access** (the reason to pick Emby over a Squeezebox
+   setup for this role): Dashboard → Users → select a user → **Access** tab
+   → under "Library Access", uncheck "Enable access to all libraries" and
+   pick only the libraries that user should see. Repeat per user. New users
+   default to full access, so revisit this each time you add one.
+4. Casting to Chromecast/other cast targets works out of the box from
+   Emby's own apps — nothing to configure here for that.
+
+Emby is a generalist media server, not a purpose-built music server — for
+an always-on background/kiosk audio zone, a dedicated Squeezebox setup
+(\`lyrion\`, with \`squeezelite\` as the player) is the more solid choice;
+use this Emby instance for browser-based, per-user-restricted access
+instead of as the primary always-on player.
+MUSICMD
+)
 MD
 
     local START_EMBY=""
