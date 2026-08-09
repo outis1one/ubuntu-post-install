@@ -186,15 +186,56 @@ register_service mealie utilities "Recipe manager & meal planner (Mealie)" 9925
 install_mealie() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "mealie" name/paths/port exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local MEALIE_DIR="$DOCKER_DIR/mealie"
+    local INSTANCE_SUFFIX="" CONTAINER="mealie"
+    local WEB_PORT="9925"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Mealie would:"
-        echo "  - Create $MEALIE_DIR with docker-compose.yml (data/)"
-        echo "  - Expose port 9925"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/mealie(-<name>) with docker-compose.yml (data/)"
+        echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Default login: changeme@email.com / MyPassword (change immediately)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
+    fi
+
+    if [ -d "$MEALIE_DIR" ]; then
+        echo ""
+        echo "  Mealie is already installed at $MEALIE_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Mealie instance alongside it (its own"
+        echo "       server, recipes, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'family'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/mealie-$_suffix" ]; then
+                    log_warning "mealie-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            MEALIE_DIR="$DOCKER_DIR/mealie-$_suffix"
+            CONTAINER="mealie-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            log_info "New instance: $MEALIE_DIR (port $WEB_PORT)"
+        fi
     fi
 
     mkdir -p "$MEALIE_DIR"
@@ -207,9 +248,9 @@ install_mealie() {
 
     # BASE_URL must match the public URL Mealie is served on (used for email links,
     # OAuth redirects, and the web app manifest). Default to SITE_DOMAIN if set.
-    local MEALIE_BASE_URL="http://localhost:9925"
+    local MEALIE_BASE_URL="http://localhost:${WEB_PORT}"
     if [ -n "$SITE_DOMAIN" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
-        MEALIE_BASE_URL="https://recipes.${SITE_DOMAIN}"
+        MEALIE_BASE_URL="https://recipes${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN}"
     fi
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
@@ -236,13 +277,13 @@ networks:
     fi
 
     cat > docker-compose.yml << MEALIE_COMPOSE
-name: mealie
+name: $CONTAINER
 
 services:
   mealie:
     image: ghcr.io/mealie-recipes/mealie:latest
-    container_name: mealie
-    hostname: mealie
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     env_file: .env
     environment:
@@ -255,7 +296,7 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "9925:9000"
+      - "${WEB_PORT}:9000"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 MEALIE_COMPOSE
 
@@ -268,17 +309,20 @@ MEALIE_ENV
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MEALIE_DIR"
-    log_success "Mealie configured at $MEALIE_DIR"
+    log_success "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $MEALIE_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Mealie" "mealie:9000" "recipes"
+    configure_caddy_for_service "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:9000" "recipes${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$MEALIE_DIR" << MD
-# Mealie
+# Mealie${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Recipe manager and meal planner — import recipes from any URL, plan meals,
 and generate shopping lists. Optional AI-powered recipe parsing.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own recipes, own
+port) — not shared recipes with another Mealie instance.")
 
-- Web UI: http://localhost:9925
+- Web UI: http://localhost:${WEB_PORT}
 - Default login: changeme@email.com / MyPassword (change immediately!)
 - App data: \`data/\`
 
@@ -296,13 +340,13 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_MEALIE=""
-    prompt_yn "Start Mealie now? (y/n):" "y" START_MEALIE
+    prompt_yn "Start Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_MEALIE
     if [ "$START_MEALIE" = "y" ] || [ "$START_MEALIE" = "Y" ]; then
-        docker compose up -d && log_success "Mealie started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:9925"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Default:    changeme@email.com / MyPassword  (change immediately!)"
     echo ""
 }

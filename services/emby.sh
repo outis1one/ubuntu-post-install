@@ -197,19 +197,64 @@ register_service emby media "Media server — movies, TV, music (Emby); supports
 install_emby() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "emby" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local EMBY_DIR="$DOCKER_DIR/emby"
+    local INSTANCE_SUFFIX="" CONTAINER="emby"
+    local WEB_PORT="8096" HTTPS_PORT="8920"
     local DEFAULT_MEDIA="$ACTUAL_HOME/media"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Emby would:"
+        echo "  - Offer to add a new, separate instance if one already exists"
         echo "  - Ask whether this is a music-only setup (changes the default folder/guidance only —"
         echo "    which library types you add still happens in Emby's own web setup wizard)"
-        echo "  - Create $EMBY_DIR with docker-compose.yml + .env (config/)"
+        echo "  - Create \$DOCKER_DIR/emby(-<name>) with docker-compose.yml + .env (config/)"
         echo "  - Mount a media folder (default $DEFAULT_MEDIA) at /media"
         echo "  - Run as UID/GID $(id -u "$ACTUAL_USER")/$(id -g "$ACTUAL_USER")"
-        echo "  - Expose ports 8096 (web) and 8920 (https)"
+        echo "  - Auto-scan for free host ports if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
+    fi
+
+    if [ -d "$EMBY_DIR" ]; then
+        echo ""
+        echo "  Emby is already installed at $EMBY_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Emby instance alongside it (its own server,"
+        echo "       library, and ports — full isolation, not another Emby library)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'music'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/emby-$_suffix" ]; then
+                    log_warning "emby-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            EMBY_DIR="$DOCKER_DIR/emby-$_suffix"
+            CONTAINER="emby-$_suffix"
+            DEFAULT_MEDIA="$ACTUAL_HOME/media-$_suffix"
+
+            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
+                WEB_PORT=$((WEB_PORT + 1))
+            done
+            while ss -tlnH "sport = :${HTTPS_PORT}" 2>/dev/null | grep -q .; do
+                HTTPS_PORT=$((HTTPS_PORT + 1))
+            done
+            log_info "New instance: $EMBY_DIR (web port $WEB_PORT, https port $HTTPS_PORT)"
+        fi
     fi
 
     local MUSIC_ONLY=""
@@ -257,13 +302,13 @@ networks:
     fi
 
     cat > docker-compose.yml << EMBY_COMPOSE
-name: emby
+name: $CONTAINER
 
 services:
   emby:
     image: emby/embyserver:latest
-    container_name: emby
-    hostname: emby
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - UID=$UID_VAL
@@ -273,8 +318,8 @@ services:
       - ./config:/config
       - \${MEDIA_PATH}:/media
     ports:
-      - "8096:8096"
-      - "8920:8920"
+      - "${WEB_PORT}:8096"
+      - "${HTTPS_PORT}:8920"
     # Uncomment for hardware transcoding (Intel/AMD):
     # devices:
     #   - /dev/dri:/dev/dri
@@ -288,16 +333,19 @@ EMBY_ENV
 
     mkdir -p config
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$EMBY_DIR"
-    log_success "Emby configured at $EMBY_DIR"
+    log_success "Emby${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $EMBY_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Emby" "emby:8096" "emby"
+    configure_caddy_for_service "Emby${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:8096" "emby${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$EMBY_DIR" << MD
-# Emby
+# Emby${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Media server for movies, TV, and music.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own library, own
+ports) — not another library within another Emby instance.")
 
-- Web UI: http://localhost:8096  (HTTPS on 8920)
+- Web UI: http://localhost:${WEB_PORT}  (HTTPS on ${HTTPS_PORT})
 - Media folder: \`$MEDIA_PATH\` → mounted at /media
 - App data: \`config/\` in this folder
 - Edit the media path in \`.env\` (\`MEDIA_PATH=\`), then \`docker compose up -d\`.
@@ -322,7 +370,7 @@ you actually add still happens in Emby's own first-run setup wizard, not
 this script (Emby has no compose/env flag for "music-only"; it's a web-UI
 step):
 
-1. Open http://localhost:8096 and complete the setup wizard.
+1. Open http://localhost:${WEB_PORT} and complete the setup wizard.
 2. When adding a library, choose type **Music**, point it at \`/media\`,
    and don't add any Movies/TV/other library types.
 3. **Per-user library access** (the reason to pick Emby over a Squeezebox
@@ -343,13 +391,13 @@ MUSICMD
 MD
 
     local START_EMBY=""
-    prompt_yn "Start Emby now? (y/n):" "y" START_EMBY
+    prompt_yn "Start Emby${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_EMBY
     if [ "$START_EMBY" = "y" ] || [ "$START_EMBY" = "Y" ]; then
-        docker compose up -d && log_success "Emby started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Emby${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:8096"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
 }
 
