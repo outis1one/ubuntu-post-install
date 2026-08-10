@@ -364,12 +364,25 @@ _vdm_setup_remote_samba() {
 sudo smbpasswd -e '${user}'"
     fi
 
+    # Builds the new config in a scratch file and validates it with
+    # testparm BEFORE it ever touches the live smb.conf — confirmed live:
+    # the previous approach here (sed range-deleting from the [share_name]
+    # header through the next BLANK line) silently deleted straight through
+    # to end of file on a home box whose smb.conf had no blank line
+    # separating sections, taking unrelated shares down with it. Section
+    # removal now stops at the next `[section]` header (or EOF) instead of
+    # a blank line, which is the actual boundary of an INI-style section
+    # regardless of how the file happens to be formatted.
     local remote_cmd
     remote_cmd=$(cat << REMOTECMD
 set -e
 sudo mkdir -p '${remote_path}'
-sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.\$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
-sudo sed -i "/^\\[${share_name}\\]\$/,/^\$/d" /etc/samba/smb.conf
+BACKUP="/etc/samba/smb.conf.backup.\$(date +%Y%m%d-%H%M%S)"
+sudo cp /etc/samba/smb.conf "\$BACKUP"
+sudo awk -v target='[${share_name}]' '
+  /^\\[/ { skip = (\$0 == target) }
+  !skip { print }
+' /etc/samba/smb.conf > /tmp/smb.conf.vdm.new
 {
   echo ""
   echo "[${share_name}]"
@@ -379,7 +392,14 @@ sudo sed -i "/^\\[${share_name}\\]\$/,/^\$/d" /etc/samba/smb.conf
   echo "   guest ok = no"
   echo "   valid users = ${user}"
   echo "   force user = ${user}"
-} | sudo tee -a /etc/samba/smb.conf >/dev/null
+} >> /tmp/smb.conf.vdm.new
+if sudo testparm -s /tmp/smb.conf.vdm.new >/dev/null 2>&1; then
+  sudo cp /tmp/smb.conf.vdm.new /etc/samba/smb.conf
+  rm -f /tmp/smb.conf.vdm.new
+else
+  echo "New smb.conf failed testparm validation — leaving the existing config untouched. Backup at \$BACKUP, rejected draft at /tmp/smb.conf.vdm.new for inspection." >&2
+  exit 1
+fi
 ${pw_cmd}
 sudo systemctl restart smbd
 command -v ufw >/dev/null 2>&1 && sudo ufw allow samba >/dev/null 2>&1 || true
