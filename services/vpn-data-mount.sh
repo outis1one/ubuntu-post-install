@@ -343,6 +343,35 @@ _vdm_find_existing_mount() {
         | head -1
 }
 
+# ── Tear down an existing mount so it can be redone from scratch ──────────
+# Decrypt layer first (it sits on top of the CIFS mount — systemctl stop
+# runs the unit's own ExecStop, which unmounts it) if one exists for this
+# label, then the CIFS mount, its credentials file, and its /etc/fstab
+# tag+entry (backed up first, same as every other /etc/fstab write in this
+# file — a fixed ",+1d" range: the tag line plus exactly the one mount line
+# that always immediately follows it, never an open-ended range to the next
+# blank line or EOF; see the file's own history for why that distinction
+# matters).
+_vdm_remove_mount() {
+    local label="$1" mount_point="$2"
+    local unit="vpn-data-mount-decrypt-${label}.service"
+
+    if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .; then
+        systemctl disable --now "$unit" >/dev/null 2>&1
+        rm -f "/etc/systemd/system/${unit}" "/usr/local/sbin/vpn-data-mount-decrypt-${label}.sh"
+        systemctl daemon-reload
+    fi
+
+    umount "$mount_point" 2>/dev/null || true
+    rmdir "$mount_point" 2>/dev/null || true
+    rm -f "/etc/samba/credentials.vpn-data-mount-${label}"
+
+    local bk="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
+    cp /etc/fstab "$bk"
+    sed -i "/^${_VDM_TAG_PREFIX} ${label} — /,+1d" /etc/fstab
+    log_success "Removed the existing mount for '$label' (fstab backup: $(basename "$bk"))"
+}
+
 # ── Prompt for a password twice, hidden, matching ──────────────────────────
 # Prints the password on success. No log_* calls — same reason as above;
 # uses plain stderr output instead so it's visible without corrupting a
@@ -659,26 +688,41 @@ _vdm_add_mount() {
         echo ""
         log_info "Setting up: [$this_share] -> $this_path"
 
-        # Already mounted from an earlier run? Reconfigure it in place
-        # instead of forcing a new label — this is what "redo it" for an
-        # existing share means: no remount, no fresh /etc/fstab entry, just
-        # revisit the one optional step (the decrypt layer) that's actually
-        # safe to redo without touching an already-working plain mount.
-        local existing existing_label existing_point
+        # Already mounted from an earlier run? Offer to reconfigure in
+        # place or fully redo it, instead of forcing a new label on a share
+        # that already has one.
+        local existing existing_label existing_point default_label="$this_share"
         existing="$(_vdm_find_existing_mount "$HOST" "$this_share")"
         if [ -n "$existing" ]; then
             existing_label="${existing%%|*}"
             existing_point="${existing#*|}"
+            echo ""
             log_info "[$this_share] is already mounted as '$existing_label' at $existing_point."
-            VDM_LAST_MOUNT_POINT="$existing_point"
-            picked_any=true
-            _vdm_setup_decrypt_layer "$HOST" "$SSH_USER" "$existing_label" "$existing_point"
-            continue
+            echo "    1) Set up/redo the gocryptfs decrypt layer for it (leaves the mount itself alone)"
+            echo "    2) Fully redo this mount (new mount point and/or re-enter credentials)"
+            echo "    3) Skip"
+            local EXIST_CHOICE=""
+            prompt_text "  Choice [1/2/3]:" "1" EXIST_CHOICE
+            case "$EXIST_CHOICE" in
+                2)
+                    _vdm_remove_mount "$existing_label" "$existing_point"
+                    default_label="$existing_label"
+                    ;;
+                3)
+                    continue
+                    ;;
+                *)
+                    VDM_LAST_MOUNT_POINT="$existing_point"
+                    picked_any=true
+                    _vdm_setup_decrypt_layer "$HOST" "$SSH_USER" "$existing_label" "$existing_point"
+                    continue
+                    ;;
+            esac
         fi
 
         LABEL=""
         while true; do
-            prompt_text "  Local label for this mount:" "$this_share" LABEL
+            prompt_text "  Local label for this mount:" "$default_label" LABEL
             LABEL="$(echo "$LABEL" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
             if [ -z "$LABEL" ]; then
                 log_warning "Label can't be empty."; continue
