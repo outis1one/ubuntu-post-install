@@ -227,13 +227,72 @@ _vdm_ensure_ssh_trust() {
     done
 }
 
+# ── Detect an existing share exporting this exact path already ────────────
+# Prints the share name (bare, no brackets) if found, nothing otherwise.
+# No log_* calls in here — this runs inside a caller's $(...) capture, and
+# log_info/log_warning/etc. all write to stdout, which would corrupt it.
+_vdm_find_remote_share() {
+    local user="$1" host="$2" remote_path="$3"
+    local awk_prog='
+        /^\[/ { cur = $0; gsub(/[][]/, "", cur) }
+        /^[[:space:]]*path[[:space:]]*=/ {
+            val = $0
+            sub(/^[[:space:]]*path[[:space:]]*=[[:space:]]*/, "", val)
+            gsub(/[[:space:]]+$/, "", val)
+            if (val == target) { print cur; exit }
+        }
+    '
+    sudo -u "$ACTUAL_USER" ssh "${user}@${host}" \
+        "awk -v target='${remote_path}' '${awk_prog}' /etc/samba/smb.conf 2>/dev/null"
+}
+
+# ── Reuse a password this tool already set for the same user+host ─────────
+# A Samba account's password is shared across every share it can access —
+# resetting it for a second mount from the same home box would silently
+# break the first mount's already-saved credentials file. Prints the
+# password if a prior mount from this host used the same Samba username,
+# nothing otherwise. No log_* calls — same reason as above.
+_vdm_find_existing_smb_password() {
+    local host="$1" user="$2" label creds_file found_user found_pass
+    while IFS= read -r label; do
+        [ -z "$label" ] && continue
+        creds_file="/etc/samba/credentials.vpn-data-mount-${label}"
+        [ -f "$creds_file" ] || continue
+        found_user="$(grep '^username=' "$creds_file" | cut -d= -f2-)"
+        [ "$found_user" = "$user" ] || continue
+        found_pass="$(grep '^password=' "$creds_file" | cut -d= -f2-)"
+        [ -n "$found_pass" ] && { printf '%s' "$found_pass"; return 0; }
+    done < <(grep -E "^${_VDM_TAG_PREFIX} [^ ]+ — ${host}:" /etc/fstab 2>/dev/null \
+        | sed -E "s/^${_VDM_TAG_PREFIX} ([^ ]+) .*/\1/")
+    return 1
+}
+
+# ── Prompt for a password twice, hidden, matching ──────────────────────────
+# Prints the password on success. No log_* calls — same reason as above;
+# uses plain stderr output instead so it's visible without corrupting a
+# caller's $(...) capture.
+_vdm_prompt_password() {
+    local prompt="$1" pw1="" pw2=""
+    while true; do
+        echo -n "  ${prompt}: " >&2
+        read -r -s pw1; echo "" >&2
+        echo -n "  Confirm: " >&2
+        read -r -s pw2; echo "" >&2
+        if [ -n "$pw1" ] && [ "$pw1" = "$pw2" ]; then
+            printf '%s' "$pw1"
+            return 0
+        fi
+        echo "  Passwords didn't match or were empty — try again." >&2
+    done
+}
+
 # ── Remote Samba setup, driven entirely over the SSH trust above ──────────
-# Sets SMB_PASS (not local — read by the caller to write the local
-# credentials file), same out-param convention as lib/common.sh's
+# Sets SMB_PASS/SMB_USER/SMB_SHARE_NAME (not local — read by the caller),
+# same out-param convention as lib/common.sh's
 # ensure_coturn_user/configure_caddy_for_service.
 _vdm_setup_remote_samba() {
     local user="$1" host="$2" remote_path="$3" share_name="$4"
-    SMB_PASS=""
+    SMB_PASS="" SMB_USER="$user" SMB_SHARE_NAME="$share_name"
 
     log_info "Checking Samba on the home box..."
     # Every ssh call below runs as $ACTUAL_USER, same reason as _vdm_ssh_works.
@@ -245,22 +304,66 @@ _vdm_setup_remote_samba() {
         log_success "Samba already installed on the home box."
     fi
 
-    SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
+    # Don't blindly overwrite a share that's already exporting this exact
+    # path — the home box may already have this configured by hand.
+    local existing_share
+    existing_share="$(_vdm_find_remote_share "$user" "$host" "$remote_path")"
+    if [ -n "$existing_share" ]; then
+        log_info "Found an existing Samba share '[$existing_share]' already exporting $remote_path on the home box."
+        local REUSE=""
+        prompt_yn "  Use it as-is instead of creating a new one? (y/n):" "y" REUSE
+        if [[ "$REUSE" =~ ^[Yy]$ ]]; then
+            SMB_SHARE_NAME="$existing_share"
+            prompt_text "  Samba username for that share:" "$user" SMB_USER
+            SMB_PASS="$(_vdm_prompt_password "Samba password for '$SMB_USER'")"
+            log_success "Reusing existing share [$SMB_SHARE_NAME] — nothing changed on the home box."
+            return 0
+        fi
+        log_info "Creating a separate new share instead."
+    fi
 
-    log_info "Configuring the share and Samba account on the home box..."
+    # Reuse this account's password if another mount from the same home
+    # box already set one up (see _vdm_find_existing_smb_password), rather
+    # than resetting an account that other saved credentials still depend on.
+    local reset_needed=true
+    SMB_PASS="$(_vdm_find_existing_smb_password "$host" "$user")"
+    if [ -n "$SMB_PASS" ]; then
+        log_info "Reusing the Samba password already set up for '$user' on $host (from another mount) — not resetting it."
+        reset_needed=false
+    elif sudo -u "$ACTUAL_USER" ssh "${user}@${host}" "sudo pdbedit -L 2>/dev/null | grep -q '^${user}:'"; then
+        log_warning "Samba account '$user' already exists on the home box with a password this tool doesn't know."
+        local RESET_PW=""
+        prompt_yn "  Reset it to a newly generated password? (Anything already using the old one — other mounts, manual clients — will need updating.) (y/n):" "n" RESET_PW
+        if [[ "$RESET_PW" =~ ^[Yy]$ ]]; then
+            SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
+        else
+            SMB_PASS="$(_vdm_prompt_password "Existing Samba password for '$user'")"
+            reset_needed=false
+        fi
+    else
+        SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
+    fi
+
+    log_info "Configuring the share on the home box..."
     # Idempotent: drop any prior block for this exact share name, then
     # append a fresh one. Dedicated account (not guest) — see the file
     # header for why, and for the errno-79 connection.
     #
     # The Samba account reuses $user — that Unix account already exists on
     # the home box (it's who we're SSH'd in as), so no extra remote user
-    # needs creating. smbpasswd's password ends up briefly visible in the
-    # home box's own `ps` output for this one remote command's duration
-    # (embedded in the command string, not piped — piping through a `-t`
-    # pty session for a command that may also need an interactive sudo
-    # password gets stdin-ordering-fragile fast). Accepted tradeoff, same
-    # spirit as this whole feature already trusting the VPN's reachability
-    # boundary — see file header.
+    # needs creating. When reset_needed, the new password ends up briefly
+    # visible in the home box's own `ps` output for this one remote
+    # command's duration (embedded in the command string, not piped —
+    # piping through a `-t` pty session for a command that may also need
+    # an interactive sudo password gets stdin-ordering-fragile fast).
+    # Accepted tradeoff, same spirit as this whole feature already trusting
+    # the VPN's reachability boundary — see file header.
+    local pw_cmd=""
+    if [ "$reset_needed" = true ]; then
+        pw_cmd="printf '%s\n%s\n' '${SMB_PASS}' '${SMB_PASS}' | sudo smbpasswd -a -s '${user}'
+sudo smbpasswd -e '${user}'"
+    fi
+
     local remote_cmd
     remote_cmd=$(cat << REMOTECMD
 set -e
@@ -277,14 +380,13 @@ sudo sed -i "/^\\[${share_name}\\]\$/,/^\$/d" /etc/samba/smb.conf
   echo "   valid users = ${user}"
   echo "   force user = ${user}"
 } | sudo tee -a /etc/samba/smb.conf >/dev/null
-printf '%s\n%s\n' '${SMB_PASS}' '${SMB_PASS}' | sudo smbpasswd -a -s '${user}'
-sudo smbpasswd -e '${user}'
+${pw_cmd}
 sudo systemctl restart smbd
 command -v ufw >/dev/null 2>&1 && sudo ufw allow samba >/dev/null 2>&1 || true
 REMOTECMD
 )
     if sudo -u "$ACTUAL_USER" ssh -t "${user}@${host}" "$remote_cmd"; then
-        log_success "Remote share [$share_name] -> $remote_path configured, Samba account '$user' set, smbd restarted."
+        log_success "Remote share [$share_name] -> $remote_path configured, smbd restarted."
     else
         log_error "Remote Samba configuration failed — check the output above."
         return 1
@@ -389,8 +491,10 @@ _vdm_add_mount() {
     fi
     prompt_text "  Local mount point:" "/mnt/${LABEL}" MOUNT_POINT
 
+    # SMB_USER/SMB_SHARE_NAME may differ from SSH_USER/LABEL if an existing
+    # remote share for this exact path was found and reused as-is.
     _vdm_setup_remote_samba "$SSH_USER" "$HOST" "$REMOTE_PATH" "$LABEL" || return 1
-    _vdm_mount_local "$HOST" "$LABEL" "$MOUNT_POINT" "$LABEL" "$SSH_USER" "$SMB_PASS" || return 1
+    _vdm_mount_local "$HOST" "$SMB_SHARE_NAME" "$MOUNT_POINT" "$LABEL" "$SMB_USER" "$SMB_PASS" || return 1
 
     # Read by callers like services/filebrowser.sh/audiobookshelf.sh/emby.sh
     # that chain into this service and want to default their own "which
@@ -413,7 +517,8 @@ install_vpn-data-mount() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would offer to name a raw IP in /etc/hosts for reuse (SSH + this mount)"
         echo "[DRY-RUN] Would test/set up passwordless SSH to a home box over its NetBird IP"
-        echo "[DRY-RUN] Would remotely install Samba + configure a share and a dedicated account there"
+        echo "[DRY-RUN] Would check for an existing Samba share/account first and offer to reuse it, not overwrite it"
+        echo "[DRY-RUN] Otherwise would remotely install Samba + configure a new share and dedicated account"
         echo "[DRY-RUN] Would mount it locally over CIFS (credentials file, not guest) and add it to /etc/fstab"
         echo "[DRY-RUN] Repeatable — can be run again for additional home boxes/shares"
         return 0
