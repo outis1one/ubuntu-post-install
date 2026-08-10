@@ -390,11 +390,10 @@ while true; do
         # terminal can show (tput lines, falling back to a conservative 24
         # for a non-terminal/unknown size) so this can't request a dialog
         # taller than the screen.
-        local _term_lines _list_h _box_h
         _term_lines="$(tput lines 2>/dev/null </dev/tty || echo 24)"
         _list_h=${#SVCS[@]}
         [ "$_list_h" -gt 20 ] && _list_h=20
-        local _term_cap=$((_term_lines - 10))
+        _term_cap=$((_term_lines - 10))
         [ "$_term_cap" -lt 6 ] && _term_cap=6
         [ "$_list_h" -gt "$_term_cap" ] && _list_h="$_term_cap"
         _box_h=$((_list_h + 8))
