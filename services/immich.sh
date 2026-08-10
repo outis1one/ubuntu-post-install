@@ -266,6 +266,28 @@ install_immich() {
             C_DB="immich_postgres_$_suffix"
             DEFAULT_PHOTOS="$ACTUAL_HOME/photos-$_suffix"
             log_info "New instance: $IMMICH_DIR"
+        else
+            # "Manage that install" on THIS instance — the banner above promises
+            # update/fresh/cancel, so actually offer it instead of falling straight
+            # through into the same unconditional-overwrite flow as a new install.
+            if [[ -f "$IMMICH_DIR/docker-compose.yml" ]]; then
+                local MODE=""
+                prompt_reinstall_mode MODE
+                case "$MODE" in
+                    update)
+                        log_info "Refreshing the Immich image only — existing config, port, and Caddy setup are left as-is."
+                        ( cd "$IMMICH_DIR" && docker compose pull && docker compose up -d ) \
+                            && log_success "Immich image refreshed" \
+                            || log_warning "Refresh failed — check: docker compose -f $IMMICH_DIR/docker-compose.yml logs"
+                        return 0
+                        ;;
+                    cancel)
+                        log_info "Leaving the existing install as-is."
+                        return 0
+                        ;;
+                    fresh) ;;  # fall through to the full install flow below
+                esac
+            fi
         fi
     fi
 

@@ -257,6 +257,28 @@ install_jellyfin() {
             log_warning "DLNA/discovery (1900/udp, 7359/udp) are fixed, host-wide ports already"
             log_warning "claimed by the first instance — this instance skips them (web UI and"
             log_warning "app-based streaming are unaffected; DLNA auto-discovery is not)."
+        else
+            # "Manage that install" on THIS instance — the banner above promises
+            # update/fresh/cancel, so actually offer it instead of falling straight
+            # through into the same unconditional-overwrite flow as a new install.
+            if [[ -f "$JELLYFIN_DIR/docker-compose.yml" ]]; then
+                local MODE=""
+                prompt_reinstall_mode MODE
+                case "$MODE" in
+                    update)
+                        log_info "Refreshing the Jellyfin image only — existing config, port, and Caddy setup are left as-is."
+                        ( cd "$JELLYFIN_DIR" && docker compose pull && docker compose up -d ) \
+                            && log_success "Jellyfin image refreshed" \
+                            || log_warning "Refresh failed — check: docker compose -f $JELLYFIN_DIR/docker-compose.yml logs"
+                        return 0
+                        ;;
+                    cancel)
+                        log_info "Leaving the existing install as-is."
+                        return 0
+                        ;;
+                    fresh) ;;  # fall through to the full install flow below
+                esac
+            fi
         fi
     fi
 

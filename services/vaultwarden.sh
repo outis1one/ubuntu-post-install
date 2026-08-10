@@ -265,6 +265,28 @@ install_vaultwarden() {
             VW_DIR="$DOCKER_DIR/vaultwarden-$_suffix"
             CONTAINER="vaultwarden-$_suffix"
             log_info "New instance: $VW_DIR"
+        else
+            # "Manage that install" on THIS instance — the banner above promises
+            # update/fresh/cancel, so actually offer it instead of falling straight
+            # through into the same unconditional-overwrite flow as a new install.
+            if [[ -f "$VW_DIR/docker-compose.yml" ]]; then
+                local MODE=""
+                prompt_reinstall_mode MODE
+                case "$MODE" in
+                    update)
+                        log_info "Refreshing the Vaultwarden image only — existing config, port, and Caddy setup are left as-is."
+                        ( cd "$VW_DIR" && docker compose pull && docker compose up -d ) \
+                            && log_success "Vaultwarden image refreshed" \
+                            || log_warning "Refresh failed — check: docker compose -f $VW_DIR/docker-compose.yml logs"
+                        return 0
+                        ;;
+                    cancel)
+                        log_info "Leaving the existing install as-is."
+                        return 0
+                        ;;
+                    fresh) ;;  # fall through to the full install flow below
+                esac
+            fi
         fi
     fi
 

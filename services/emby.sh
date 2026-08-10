@@ -262,6 +262,28 @@ install_emby() {
             CONTAINER="emby-$_suffix"
             DEFAULT_MEDIA="$ACTUAL_HOME/media-$_suffix"
             log_info "New instance: $EMBY_DIR"
+        else
+            # "Manage that install" on THIS instance — the banner above promises
+            # update/fresh/cancel, so actually offer it instead of falling straight
+            # through into the same unconditional-overwrite flow as a new install.
+            if [[ -f "$EMBY_DIR/docker-compose.yml" ]]; then
+                local MODE=""
+                prompt_reinstall_mode MODE
+                case "$MODE" in
+                    update)
+                        log_info "Refreshing the Emby image only — existing config, port, and Caddy setup are left as-is."
+                        ( cd "$EMBY_DIR" && docker compose pull && docker compose up -d ) \
+                            && log_success "Emby image refreshed" \
+                            || log_warning "Refresh failed — check: docker compose -f $EMBY_DIR/docker-compose.yml logs"
+                        return 0
+                        ;;
+                    cancel)
+                        log_info "Leaving the existing install as-is."
+                        return 0
+                        ;;
+                    fresh) ;;  # fall through to the full install flow below
+                esac
+            fi
         fi
     fi
 
