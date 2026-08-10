@@ -33,6 +33,27 @@ the wizard — the USB can be unplugged once setup starts.
 sudo bash bootstrap.sh --pat ghp_xxxxxxxxxxxxxxxxxxxx
 ```
 Use a fine-grained read-only PAT scoped to just this repo (Contents: Read).
+
+**Cloud provider install-script / user-data field (IONOS, DigitalOcean,
+Hetzner, ...):** these run as root with no terminal attached while the
+image is still being provisioned, so `bootstrap.sh`'s interactive hand-off
+doesn't apply yet. Use `cloud-init.sh` instead — it's a plain cloud-init
+user-data shell script (starts with `#!/bin/bash`, no `#cloud-config` YAML).
+
+IONOS's server-creation screen has a **User Data** box under "Scripts" with
+a **Script Type** choice of *Cloud Config* or *Shell Script* — pick
+**Shell Script**, then either click **Import from file** and select
+`cloud-init.sh`, or paste its contents directly. User-data fields run the
+script's own content; they don't fetch a URL, so paste/import the file
+itself rather than a link to it. (DigitalOcean/Hetzner's plain "User data"
+textbox works the same way — paste the script contents in directly.)
+
+It clones the repo in the background during provisioning and installs a
+one-shot login hook. The provider boots Ubuntu 24.04, this runs unattended,
+and by the time you SSH in the whiptail service menu is already waiting for
+you — same experience as `bootstrap.sh`, just already started. Assumes a
+root login (the default for all three providers above); see the comments in
+`cloud-init.sh` if you've provisioned a separate sudo user instead.
 The PAT is stripped from the stored remote URL after cloning.
 
 ## Usage
