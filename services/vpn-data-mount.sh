@@ -1,25 +1,36 @@
 #!/bin/bash
-# services/vpn-data-mount.sh — mount SMB data from a NetBird-connected home
-# box, with SSH-key bootstrap and remote Samba setup automated over SSH.
+# services/vpn-data-mount.sh — mount existing SMB shares from a
+# NetBird-connected home box, with SSH-key bootstrap automated.
 # Part of the modular post-install system (sourced by setup.sh).
 #
 # Can also be run standalone on any machine:
 #   sudo bash vpn-data-mount.sh
-# (No Docker needed — this only touches SSH, Samba, and /etc/fstab)
+# (No Docker needed — this only touches SSH and /etc/fstab)
 #
 # Unlike most services here, this is repeatable by design: different
 # services can have data on different home boxes, so this asks for a home
 # box IP every time and can be re-run any number of times, once per
-# home-box/share you want mounted. It's the multi-instance pattern from
-# CLAUDE.md generalized from "N instances of one app" to "N independent
-# mounts" — there's no single install directory to gate on, so state lives
-# in /etc/fstab itself (tagged entries), same as tools/mount-network-drive.sh.
+# home-box you want to pull shares from. It's the multi-instance pattern
+# from CLAUDE.md generalized from "N instances of one app" to "N
+# independent mounts" — there's no single install directory to gate on, so
+# state lives in /etc/fstab itself (tagged entries), same as
+# tools/mount-network-drive.sh.
+#
+# Deliberately READ-ONLY on the home box's Samba config — this tool never
+# writes to smb.conf, never installs Samba, never creates or resets a
+# Samba account there. It only (a) bootstraps passwordless SSH if needed,
+# then (b) reads the home box's existing smb.conf over that SSH connection
+# to list whatever shares are already configured there, so you can pick
+# one or more to mount. Set up the actual share(s) on the home box
+# yourself, the normal way (or with tools/mount-network-drive.sh's own
+# guided flow, run there). An earlier version of this tried to fully
+# provision Samba remotely too — reversed per direct request, and it had
+# also caused real damage in practice (a section-removal bug that deleted
+# unrelated shares on a real box) that a read-only tool can't repeat.
 #
 # Assumes the home box is Linux and reachable over a NetBird IP — this repo
 # doesn't set up the home box's side of NetBird (that's a separate machine,
-# possibly not running this repo at all); it only automates the VPS side:
-# SSH trust, then using that SSH access to configure Samba on the home box
-# remotely, then mounting it here.
+# possibly not running this repo at all).
 #
 # SMB chosen over NFS/SSHFS deliberately: NFS is marginally faster for
 # Linux-to-Linux but SMB isn't a "huge" difference for normal use (media,
@@ -29,20 +40,15 @@
 # redundant overhead for no added security, and it's the slowest and least
 # robust (FUSE reconnect quirks) of the three for an always-on mount.
 #
-# Each share gets a dedicated Samba account (same username as the SSH user,
-# since that Unix account already exists on the home box — no extra remote
-# user to create) with its own generated password, stored locally in a
+# Mounts use real Samba credentials (a username/password you provide for
+# an account that already exists on the home box), stored locally in a
 # root-only credentials file, same convention tools/mount-network-drive.sh
-# already uses. An earlier version of this made the share guest-accessible
-# instead, reasoning the VPN itself was enough access control — reversed
-# per direct request (real per-share accounts, not root/guest) and because
-# it incidentally fixes a real bug: plain `guest` CIFS mounts with no
-# explicit `sec=` can hit "mount error(79): Can not access a needed shared
+# already uses — never guest access. A CIFS guest mount with no explicit
+# security mode can hit "mount error(79): Can not access a needed shared
 # library" — a misleadingly-worded cifs-utils message for errno 79
 # (ENOKEY), a known rough edge in the kernel cifs.ko keyring/upcall path
-# for anonymous sessions specifically, not an actual missing library.
-# Credentialed mounts with an explicit sec= take the normal NTLMSSP auth
-# path instead and don't hit it.
+# for anonymous sessions. Credentialed mounts with an explicit sec=ntlmssp
+# take the normal NTLMSSP auth path instead and don't hit it.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -86,7 +92,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service vpn-data-mount homelab "Mount SMB data from a NetBird-connected home box (SSH-automated remote setup)"
+register_service vpn-data-mount homelab "Mount existing SMB shares from a NetBird-connected home box (read-only discovery, SSH-automated key setup)"
 
 # ── fstab tagging — the durable record of what this tool has set up ────────
 # Same philosophy as tools/mount-network-drive.sh: /etc/fstab is the single
@@ -113,7 +119,7 @@ _vdm_list_existing() {
 # the IP" actually needs end to end.
 # Sets RESOLVED_HOST (not local — same out-param convention as elsewhere).
 _vdm_resolve_host() {
-    local input="$1" default_name="$2"
+    local input="$1"
     RESOLVED_HOST="$input"
 
     # Not a raw IP (already a name, whether from /etc/hosts, real DNS, or
@@ -129,14 +135,9 @@ _vdm_resolve_host() {
         return 0
     fi
 
-    # prompt_text always falls back to the given default on blank input
-    # (same convention every other prompt in this repo relies on) — so this
-    # always ends up naming the host to something, never truly "blank" for
-    # "keep using the IP". That's fine: $default_name is already a sensible
-    # suggestion (the mount's own label), so Enter alone gives a reasonable
-    # name rather than requiring the extra step of confirming one.
     local NAME=""
-    prompt_text "  Name for this home box (used instead of the IP from now on):" "$default_name" NAME
+    prompt_text "  Name this home box (blank to keep using the IP):" "" NAME
+    [ -z "$NAME" ] && return 0
     NAME="$(echo "$NAME" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
     [ -z "$NAME" ] && return 0
 
@@ -227,31 +228,49 @@ _vdm_ensure_ssh_trust() {
     done
 }
 
-# ── Detect an existing share exporting this exact path already ────────────
-# Prints the share name (bare, no brackets) if found, nothing otherwise.
-# No log_* calls in here — this runs inside a caller's $(...) capture, and
-# log_info/log_warning/etc. all write to stdout, which would corrupt it.
-_vdm_find_remote_share() {
-    local user="$1" host="$2" remote_path="$3"
-    local awk_prog='
-        /^\[/ { cur = $0; gsub(/[][]/, "", cur) }
-        /^[[:space:]]*path[[:space:]]*=/ {
-            val = $0
-            sub(/^[[:space:]]*path[[:space:]]*=[[:space:]]*/, "", val)
-            gsub(/[[:space:]]+$/, "", val)
-            if (val == target) { print cur; exit }
+# ── Read-only share discovery ───────────────────────────────────────────────
+# Prints "share_name|path" one per line for every real data share found in
+# the home box's smb.conf (skips [global]/[homes]/[printers]/[print$] —
+# not actual browsable directories). Never writes anything, on either
+# side — see the file header. Tries a plain read first (smb.conf is
+# world-readable on a stock Samba install); falls back to a sudo'd read
+# only if that comes back empty, still read-only either way.
+_vdm_list_remote_shares() {
+    local user="$1" host="$2"
+    local conf
+    conf="$(sudo -u "$ACTUAL_USER" ssh "${user}@${host}" 'cat /etc/samba/smb.conf 2>/dev/null')"
+    if [ -z "$conf" ]; then
+        conf="$(sudo -u "$ACTUAL_USER" ssh -t "${user}@${host}" 'sudo cat /etc/samba/smb.conf 2>/dev/null' 2>/dev/null)"
+    fi
+    [ -z "$conf" ] && return 1
+
+    echo "$conf" | awk '
+        function flush() {
+            if (sect != "" && path != "" && sect != "global" && sect != "printers" && sect != "print$" && sect != "homes") {
+                print sect "|" path
+            }
         }
+        /^\[/ {
+            flush()
+            sect = $0
+            gsub(/[][]/, "", sect)
+            path = ""
+            next
+        }
+        /^[[:space:]]*path[[:space:]]*=/ {
+            path = $0
+            sub(/^[[:space:]]*path[[:space:]]*=[[:space:]]*/, "", path)
+            gsub(/[[:space:]]+$/, "", path)
+        }
+        END { flush() }
     '
-    sudo -u "$ACTUAL_USER" ssh "${user}@${host}" \
-        "awk -v target='${remote_path}' '${awk_prog}' /etc/samba/smb.conf 2>/dev/null"
 }
 
-# ── Reuse a password this tool already set for the same user+host ─────────
-# A Samba account's password is shared across every share it can access —
-# resetting it for a second mount from the same home box would silently
-# break the first mount's already-saved credentials file. Prints the
-# password if a prior mount from this host used the same Samba username,
-# nothing otherwise. No log_* calls — same reason as above.
+# ── Reuse a password already entered for the same user+host ───────────────
+# Prints the password if an earlier mount from this host used the same
+# Samba username, nothing otherwise. No log_* calls in here — this runs
+# inside a caller's $(...) capture, and log_info/log_warning/etc. all
+# write to stdout, which would corrupt it.
 _vdm_find_existing_smb_password() {
     local host="$1" user="$2" label creds_file found_user found_pass
     while IFS= read -r label; do
@@ -286,113 +305,6 @@ _vdm_prompt_password() {
     done
 }
 
-# ── Remote Samba setup, driven entirely over the SSH trust above ──────────
-# Sets SMB_PASS/SMB_USER/SMB_SHARE_NAME (not local — read by the caller),
-# same out-param convention as lib/common.sh's
-# ensure_coturn_user/configure_caddy_for_service.
-_vdm_setup_remote_samba() {
-    local user="$1" host="$2" remote_path="$3" share_name="$4"
-    SMB_PASS="" SMB_USER="$user" SMB_SHARE_NAME="$share_name"
-
-    log_info "Checking Samba on the home box..."
-    # Every ssh call below runs as $ACTUAL_USER, same reason as _vdm_ssh_works.
-    if ! sudo -u "$ACTUAL_USER" ssh "${user}@${host}" 'command -v smbd >/dev/null 2>&1'; then
-        log_info "Installing Samba on the home box (may prompt for the sudo password there)..."
-        sudo -u "$ACTUAL_USER" ssh -t "${user}@${host}" 'sudo apt-get update -y && sudo apt-get install -y samba' \
-            || { log_error "Remote Samba install failed."; return 1; }
-    else
-        log_success "Samba already installed on the home box."
-    fi
-
-    # Don't blindly overwrite a share that's already exporting this exact
-    # path — the home box may already have this configured by hand.
-    local existing_share
-    existing_share="$(_vdm_find_remote_share "$user" "$host" "$remote_path")"
-    if [ -n "$existing_share" ]; then
-        log_info "Found an existing Samba share '[$existing_share]' already exporting $remote_path on the home box."
-        local REUSE=""
-        prompt_yn "  Use it as-is instead of creating a new one? (y/n):" "y" REUSE
-        if [[ "$REUSE" =~ ^[Yy]$ ]]; then
-            SMB_SHARE_NAME="$existing_share"
-            prompt_text "  Samba username for that share:" "$user" SMB_USER
-            SMB_PASS="$(_vdm_prompt_password "Samba password for '$SMB_USER'")"
-            log_success "Reusing existing share [$SMB_SHARE_NAME] — nothing changed on the home box."
-            return 0
-        fi
-        log_info "Creating a separate new share instead."
-    fi
-
-    # Reuse this account's password if another mount from the same home
-    # box already set one up (see _vdm_find_existing_smb_password), rather
-    # than resetting an account that other saved credentials still depend on.
-    local reset_needed=true
-    SMB_PASS="$(_vdm_find_existing_smb_password "$host" "$user")"
-    if [ -n "$SMB_PASS" ]; then
-        log_info "Reusing the Samba password already set up for '$user' on $host (from another mount) — not resetting it."
-        reset_needed=false
-    elif sudo -u "$ACTUAL_USER" ssh "${user}@${host}" "sudo pdbedit -L 2>/dev/null | grep -q '^${user}:'"; then
-        log_warning "Samba account '$user' already exists on the home box with a password this tool doesn't know."
-        local RESET_PW=""
-        prompt_yn "  Reset it to a newly generated password? (Anything already using the old one — other mounts, manual clients — will need updating.) (y/n):" "n" RESET_PW
-        if [[ "$RESET_PW" =~ ^[Yy]$ ]]; then
-            SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
-        else
-            SMB_PASS="$(_vdm_prompt_password "Existing Samba password for '$user'")"
-            reset_needed=false
-        fi
-    else
-        SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
-    fi
-
-    log_info "Configuring the share on the home box..."
-    # Idempotent: drop any prior block for this exact share name, then
-    # append a fresh one. Dedicated account (not guest) — see the file
-    # header for why, and for the errno-79 connection.
-    #
-    # The Samba account reuses $user — that Unix account already exists on
-    # the home box (it's who we're SSH'd in as), so no extra remote user
-    # needs creating. When reset_needed, the new password ends up briefly
-    # visible in the home box's own `ps` output for this one remote
-    # command's duration (embedded in the command string, not piped —
-    # piping through a `-t` pty session for a command that may also need
-    # an interactive sudo password gets stdin-ordering-fragile fast).
-    # Accepted tradeoff, same spirit as this whole feature already trusting
-    # the VPN's reachability boundary — see file header.
-    local pw_cmd=""
-    if [ "$reset_needed" = true ]; then
-        pw_cmd="printf '%s\n%s\n' '${SMB_PASS}' '${SMB_PASS}' | sudo smbpasswd -a -s '${user}'
-sudo smbpasswd -e '${user}'"
-    fi
-
-    local remote_cmd
-    remote_cmd=$(cat << REMOTECMD
-set -e
-sudo mkdir -p '${remote_path}'
-sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.\$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
-sudo sed -i "/^\\[${share_name}\\]\$/,/^\$/d" /etc/samba/smb.conf
-{
-  echo ""
-  echo "[${share_name}]"
-  echo "   path = ${remote_path}"
-  echo "   browseable = yes"
-  echo "   read only = no"
-  echo "   guest ok = no"
-  echo "   valid users = ${user}"
-  echo "   force user = ${user}"
-} | sudo tee -a /etc/samba/smb.conf >/dev/null
-${pw_cmd}
-sudo systemctl restart smbd
-command -v ufw >/dev/null 2>&1 && sudo ufw allow samba >/dev/null 2>&1 || true
-REMOTECMD
-)
-    if sudo -u "$ACTUAL_USER" ssh -t "${user}@${host}" "$remote_cmd"; then
-        log_success "Remote share [$share_name] -> $remote_path configured, smbd restarted."
-    else
-        log_error "Remote Samba configuration failed — check the output above."
-        return 1
-    fi
-}
-
 # ── Local mount + fstab ─────────────────────────────────────────────────────
 _vdm_mount_local() {
     local host="$1" share_name="$2" mount_point="$3" label="$4" smb_user="$5" smb_pass="$6"
@@ -401,7 +313,7 @@ _vdm_mount_local() {
 
     mkdir -p "$mount_point"
 
-    # Credentials file, not a guest/inline password — root-only, matching
+    # Credentials file, not guest/inline password — root-only, matching
     # tools/mount-network-drive.sh's existing convention for SMB creds.
     local creds_file="/etc/samba/credentials.vpn-data-mount-${label}"
     mkdir -p /etc/samba
@@ -413,7 +325,6 @@ CREDS
     chown root:root "$creds_file"
 
     # sec=ntlmssp explicitly — see the file header on errno 79/ENOKEY.
-    # Modern default and what a credentialed mount should use anyway.
     local opts="credentials=${creds_file},sec=ntlmssp,uid=$(id -u "$ACTUAL_USER"),gid=$(id -g "$ACTUAL_USER"),iocharset=utf8,nofail,_netdev"
     local share="//${host}/${share_name}"
 
@@ -421,8 +332,9 @@ CREDS
     if mount -t cifs -o "$opts" "$share" "$mount_point"; then
         log_success "Mounted at $mount_point"
     else
-        log_error "Mount failed — check connectivity to $host and the remote share config."
+        log_error "Mount failed for [$share_name] — check the username/password and that the home box's share actually allows this account."
         rmdir "$mount_point" 2>/dev/null || true
+        rm -f "$creds_file"
         return 1
     fi
 
@@ -440,29 +352,32 @@ CREDS
     log_success "Added to /etc/fstab (backup: $(basename "$bk"))"
 }
 
-# ── One mount, start to finish ──────────────────────────────────────────────
+# ── Parse a selection like "1", "1,3", "1-3", "1 3 5" into 1-based indices ──
+# Prints one index per line. Silently drops anything that doesn't look like
+# a number or a range — the caller validates indices against the actual
+# list length.
+_vdm_parse_selection() {
+    local input="$1" token start end i
+    for token in $(echo "$input" | tr ',' ' '); do
+        if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+            for ((i = start; i <= end; i++)); do echo "$i"; done
+        elif [[ "$token" =~ ^[0-9]+$ ]]; then
+            echo "$token"
+        fi
+    done
+}
+
+# ── One home box, one or more shares from it ────────────────────────────────
 _vdm_add_mount() {
     echo ""
-    local LABEL=""
-    while true; do
-        prompt_text "  Short label for this mount (e.g. 'media', 'nas-docs'):" "" LABEL
-        LABEL="$(echo "$LABEL" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
-        if [ -z "$LABEL" ]; then
-            log_warning "Label can't be empty."; continue
-        fi
-        if grep -q "^${_VDM_TAG_PREFIX} ${LABEL} " /etc/fstab 2>/dev/null; then
-            log_warning "Label '$LABEL' is already used — pick another."; continue
-        fi
-        break
-    done
-
     local HOST_INPUT="" HOST="" SSH_USER=""
     prompt_text "  Home box's NetBird IP or an already-named host (check 'netbird status' on that box):" "" HOST_INPUT
     if [ -z "$HOST_INPUT" ]; then
-        log_warning "No host entered — cancelling this mount."
+        log_warning "No host entered — cancelling."
         return 1
     fi
-    _vdm_resolve_host "$HOST_INPUT" "$LABEL"
+    _vdm_resolve_host "$HOST_INPUT"
     HOST="$RESOLVED_HOST"
 
     prompt_text "  SSH username on the home box:" "$ACTUAL_USER" SSH_USER
@@ -472,8 +387,6 @@ _vdm_add_mount() {
     # Pure convenience on top of the /etc/hosts naming above (which is what
     # actually makes the mount itself usable by name) — an SSH Host alias
     # additionally skips typing the username for interactive `ssh` use.
-    # Only offered for a genuinely new name, not every time this mount (or
-    # another one on the same host) is set up.
     if [[ ! "$HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         && declare -F add_ssh_host_alias >/dev/null 2>&1 \
         && declare -F ssh_host_alias_exists >/dev/null 2>&1 \
@@ -483,54 +396,125 @@ _vdm_add_mount() {
         [[ "$ADD_ALIAS" =~ ^[Yy]$ ]] && add_ssh_host_alias "$HOST" "$HOST_INPUT" "$SSH_USER" "22"
     fi
 
-    local REMOTE_PATH="" MOUNT_POINT=""
-    prompt_text "  Path on the home box to share (e.g. /home/${SSH_USER}/media):" "" REMOTE_PATH
-    if [ -z "$REMOTE_PATH" ]; then
-        log_warning "No path entered — cancelling this mount."
+    log_info "Reading Samba shares already configured on $HOST (read-only)..."
+    local shares_raw
+    shares_raw="$(_vdm_list_remote_shares "$SSH_USER" "$HOST")"
+    if [ -z "$shares_raw" ]; then
+        log_warning "No Samba shares found on $HOST (or /etc/samba/smb.conf couldn't be read). Set up a share there first, the normal way, then re-run this."
         return 1
     fi
-    prompt_text "  Local mount point:" "/mnt/${LABEL}" MOUNT_POINT
 
-    # SMB_USER/SMB_SHARE_NAME may differ from SSH_USER/LABEL if an existing
-    # remote share for this exact path was found and reused as-is.
-    _vdm_setup_remote_samba "$SSH_USER" "$HOST" "$REMOTE_PATH" "$LABEL" || return 1
-    _vdm_mount_local "$HOST" "$SMB_SHARE_NAME" "$MOUNT_POINT" "$LABEL" "$SMB_USER" "$SMB_PASS" || return 1
-
-    # Read by callers like services/filebrowser.sh/audiobookshelf.sh/emby.sh
-    # that chain into this service and want to default their own "which
-    # directory" prompt to whatever was just mounted, without needing to
-    # know or guess the path themselves.
-    VDM_LAST_MOUNT_POINT="$MOUNT_POINT"
+    local share_names=() share_paths=()
+    while IFS='|' read -r sname spath; do
+        [ -z "$sname" ] && continue
+        share_names+=("$sname")
+        share_paths+=("$spath")
+    done <<< "$shares_raw"
 
     echo ""
-    log_success "Done: $HOST:$REMOTE_PATH is now mounted at $MOUNT_POINT"
-    echo "  Manage this and other network mounts anytime with:"
-    echo "    sudo bash tools/mount-network-drive.sh"
+    echo "  Samba shares found on $HOST:"
+    local i
+    for i in "${!share_names[@]}"; do
+        printf "    %d) %-20s %s\n" "$((i + 1))" "${share_names[$i]}" "${share_paths[$i]}"
+    done
+    echo ""
+    local SELECTION=""
+    prompt_text "  Which one(s)? e.g. '1' or '1,3' or '1-3' or '1 3 5':" "" SELECTION
+    if [ -z "$SELECTION" ]; then
+        log_warning "Nothing selected — cancelling."
+        return 1
+    fi
+
+    local indices=()
+    while IFS= read -r i; do indices+=("$i"); done < <(_vdm_parse_selection "$SELECTION")
+    if [ "${#indices[@]}" -eq 0 ]; then
+        log_warning "Couldn't parse a selection from '$SELECTION' — cancelling."
+        return 1
+    fi
+
+    # Credentials asked once, reused for every share picked here — the
+    # common case is one personal account with access to several shares.
+    # Re-run this for a share needing a different account.
+    local SMB_USER=""
+    prompt_text "  Samba username to connect with:" "$SSH_USER" SMB_USER
+    local SMB_PASS=""
+    SMB_PASS="$(_vdm_find_existing_smb_password "$HOST" "$SMB_USER")"
+    if [ -n "$SMB_PASS" ]; then
+        log_info "Reusing the Samba password already saved for '$SMB_USER' on $HOST from an earlier mount."
+    else
+        SMB_PASS="$(_vdm_prompt_password "Samba password for '$SMB_USER'")"
+    fi
+
+    local picked_any=false idx arr_i this_share this_path LABEL MOUNT_POINT
+    for idx in "${indices[@]}"; do
+        arr_i=$((idx - 1))
+        if [ "$arr_i" -lt 0 ] || [ "$arr_i" -ge "${#share_names[@]}" ]; then
+            log_warning "$idx isn't one of the listed shares — skipping."
+            continue
+        fi
+        this_share="${share_names[$arr_i]}"
+        this_path="${share_paths[$arr_i]}"
+
+        echo ""
+        log_info "Setting up: [$this_share] -> $this_path"
+
+        LABEL=""
+        while true; do
+            prompt_text "  Local label for this mount:" "$this_share" LABEL
+            LABEL="$(echo "$LABEL" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+            if [ -z "$LABEL" ]; then
+                log_warning "Label can't be empty."; continue
+            fi
+            if grep -q "^${_VDM_TAG_PREFIX} ${LABEL} " /etc/fstab 2>/dev/null; then
+                log_warning "Label '$LABEL' is already used — pick another."; continue
+            fi
+            break
+        done
+
+        MOUNT_POINT=""
+        prompt_text "  Local mount point:" "/mnt/${LABEL}" MOUNT_POINT
+
+        if _vdm_mount_local "$HOST" "$this_share" "$MOUNT_POINT" "$LABEL" "$SMB_USER" "$SMB_PASS"; then
+            # Read by callers like services/filebrowser.sh/audiobookshelf.sh/
+            # emby.sh that chain into this service and want to default
+            # their own "which directory" prompt to whatever was just
+            # mounted. Last one wins if several were picked in this run.
+            VDM_LAST_MOUNT_POINT="$MOUNT_POINT"
+            picked_any=true
+        fi
+    done
+
+    if [ "$picked_any" = true ]; then
+        echo ""
+        log_success "Done."
+        echo "  Manage this and other network mounts anytime with:"
+        echo "    sudo bash tools/mount-network-drive.sh"
+    fi
 }
 
 install_vpn-data-mount() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║  VPN Data Mount — SMB share from a NetBird-connected box  ║"
+    echo "║  VPN Data Mount — mount existing SMB shares from a home   ║"
+    echo "║  box over NetBird (read-only — nothing changes there)     ║"
     echo "╚══════════════════════════════════════════════════════════╝"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would offer to name a raw IP in /etc/hosts for reuse (SSH + this mount)"
         echo "[DRY-RUN] Would test/set up passwordless SSH to a home box over its NetBird IP"
-        echo "[DRY-RUN] Would check for an existing Samba share/account first and offer to reuse it, not overwrite it"
-        echo "[DRY-RUN] Otherwise would remotely install Samba + configure a new share and dedicated account"
-        echo "[DRY-RUN] Would mount it locally over CIFS (credentials file, not guest) and add it to /etc/fstab"
-        echo "[DRY-RUN] Repeatable — can be run again for additional home boxes/shares"
+        echo "[DRY-RUN] Would read-only list the home box's existing Samba shares (never writes there)"
+        echo "[DRY-RUN] Would let you pick one or more by number and mount them locally over CIFS"
+        echo "[DRY-RUN] Would add each to /etc/fstab with a root-only credentials file (not guest)"
+        echo "[DRY-RUN] Repeatable — can be run again for additional home boxes"
         return 0
     fi
 
-    # Every prompt below (home box IP, remote path, ...) has no sane
+    # Every prompt below (home box IP, share selection, ...) has no sane
     # unattended default — unlike most services here, there's no reasonable
     # value to fall back to. Skip outright rather than let prompt_text's
-    # always-blank UNATTENDED behavior spin the label-validation loop below
-    # forever.
+    # always-blank UNATTENDED behavior spin something forever.
     if [ "$UNATTENDED" = true ]; then
-        log_info "Skipping — needs interactive input (home box IP, path, ...). Run 'sudo ./setup.sh vpn-data-mount' without --unattended."
+        log_info "Skipping — needs interactive input (home box IP, share selection, ...). Run 'sudo ./setup.sh vpn-data-mount' without --unattended."
         return 0
     fi
 
@@ -538,13 +522,13 @@ install_vpn-data-mount() {
 
     while true; do
         local ADD=""
-        prompt_yn "Add a VPN data mount now? (y/n):" "y" ADD
+        prompt_yn "Connect to a home box and mount some of its shares now? (y/n):" "y" ADD
         [[ "$ADD" =~ ^[Yy]$ ]] || break
 
         _vdm_add_mount
 
         local AGAIN=""
-        prompt_yn "Add another mount (can be from a different home box)? (y/n):" "n" AGAIN
+        prompt_yn "Connect to another (different) home box? (y/n):" "n" AGAIN
         [[ "$AGAIN" =~ ^[Yy]$ ]] || break
     done
 }
