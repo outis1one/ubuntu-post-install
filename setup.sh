@@ -422,43 +422,35 @@ while true; do
         _box_h=$((_list_h + 8))
         [ "$_box_h" -gt "$((_term_lines - 2))" ] && _box_h=$((_term_lines - 2))
 
+        # whiptail's checklist has exactly one interactive element per row —
+        # the checkbox itself. The "tag" field (what's displayed right after
+        # it) and the "item" field (description) are both just inert display
+        # text; there is no such thing as a separately tabbable/selectable
+        # sub-field within a row. So a fixed-width "installed" (x) and "#"
+        # (instance count) prefix baked into the tag field is the closest
+        # equivalent to real extra columns whiptail can render — it lines up
+        # visually because whiptail pads every row's tag field to the same
+        # width, but it's still one string under the hood. Extracted back
+        # into just the plain service name below before dispatch.
         svc_items=()
         for name in "${SVCS[@]}"; do
-            tag="${SERVICE_DESC[$name]}"
-            svc_tag="$name"
-            # Marker goes at the FRONT, not appended after the description.
-            # whiptail hard-truncates each row to the dialog's fixed width
-            # (78 here) with no ellipsis or other sign it happened —
-            # confirmed live: appending "  [installed]" after a long enough
-            # description (fmd's is 68 chars; +13 for the suffix is 81,
-            # past the width) silently drops the marker off the end, making
-            # an installed service look uninstalled with no visual cue
-            # anything was cut. "[installed]" itself also ate a lot of the
-            # already-tight width just by being 11 characters wide — "[N]"
-            # (install count) says the same thing in 3, and for the
-            # multi-instance services (CLAUDE.md's pattern — a base install
-            # plus any number of "<name>-<suffix>" siblings) it's more
-            # informative than a flat "installed", since N > 1 means several
-            # separate instances exist.
+            _inst_mark=" "
+            _count_str="  "
             _count="$(install_count "$name")"
             if [ "$_count" -gt 0 ]; then
-                tag="[$_count] $tag"
-                # The checkbox's own [ ]/[*] state is reserved for "install
-                # this now", so an already-installed item stays unchecked by
-                # design (checking it would reinstall on <Ok>); prefixing
-                # the name itself with "*" gives a second, harder-to-miss
-                # cue right next to the checkbox, distinct from that
-                # selection state. Stripped back off below before dispatch.
-                svc_tag="*$name"
+                _inst_mark="x"
+                _count_str="$(printf "%-2d" "$_count")"
             fi
-            svc_items+=("$svc_tag" "$tag" "OFF")
+            svc_tag="$(printf "%s %s %s" "$_inst_mark" "$_count_str" "$name")"
+            svc_items+=("$svc_tag" "${SERVICE_DESC[$name]}" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "Space to select, Enter to install. [N] = N instance(s) already installed:" "$_box_h" 78 "$_list_h" \
+            "installed(x) #instances  name                    Space=select to install, Enter=go:" "$_box_h" 78 "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
-        # Undo the display-only "*" prefix before these reach run_service.
-        for i in "${!SELECTED[@]}"; do SELECTED[$i]="${SELECTED[$i]#\*}"; done
+        # Undo the display-only "x N " prefix — name is always the last
+        # whitespace-separated token, since service names never contain spaces.
+        for i in "${!SELECTED[@]}"; do SELECTED[$i]="${SELECTED[$i]##* }"; done
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
