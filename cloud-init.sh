@@ -17,9 +17,10 @@
 # and by the time you SSH in the checklist menu is sitting there waiting —
 # the same experience as running bootstrap.sh by hand, just already started.
 #
-# Usage: paste this file's raw URL into the provider's install-script /
-# user-data field, e.g.
-#   https://raw.githubusercontent.com/outis1one/ubuntu-post-install/main/cloud-init.sh
+# Usage: paste this whole file's contents into the provider's install-script /
+# user-data field (or use an "import from file" option if it has one).
+# User-data fields run the content you give them directly — they don't fetch
+# a URL — so paste the script itself, not a link to it.
 #
 # Assumes the provider logs you in as root (the default for IONOS Cloud
 # Server, DigitalOcean droplets, and Hetzner Cloud server images). If you've
