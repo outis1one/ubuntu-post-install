@@ -352,6 +352,15 @@ FB_CONFIG
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FB_DIR"
 
+    # The image runs as a fixed non-root user (adduser -u 1000 filebrowser in
+    # its Dockerfile, not root and not configurable via PUID/PGID), so the
+    # bind-mounted ./data — where it opens database.sqlite on every start —
+    # must actually be writable by UID 1000, not by $ACTUAL_USER from the
+    # broad chown above. Confirmed live: without this, the container fails
+    # every single start with "could not open database: ... permission
+    # denied" and restarts in a crash loop indefinitely.
+    chown -R 1000:1000 "$FB_DIR/data"
+
     # Deploy fbq-add-source.sh helper
     local _TOOLS_DIR
     _TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../tools" 2>/dev/null && pwd)" || true
