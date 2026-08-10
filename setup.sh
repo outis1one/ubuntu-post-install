@@ -420,9 +420,7 @@ while true; do
         _term_cap=$((_term_lines - 10))
         [ "$_term_cap" -lt 6 ] && _term_cap=6
         [ "$_list_h" -gt "$_term_cap" ] && _list_h="$_term_cap"
-        # +9 instead of +8: the instructional text above the list is now two
-        # lines (column header + the Space/Enter hint) instead of one.
-        _box_h=$((_list_h + 9))
+        _box_h=$((_list_h + 8))
         [ "$_box_h" -gt "$((_term_lines - 2))" ] && _box_h=$((_term_lines - 2))
         # Was a flat 78 regardless of actual terminal size — descriptions
         # got cut off mid-sentence on any terminal wider than that, with no
@@ -433,40 +431,28 @@ while true; do
         [ "$_box_w" -lt 78 ] && _box_w=78
         [ "$_box_w" -gt 160 ] && _box_w=160
 
-        # whiptail's checklist has exactly one interactive element per row —
-        # the checkbox itself, drawn for every row with no way to suppress
-        # it on any single one. There's no such thing as a non-selectable
-        # row inside the list. The instructional text ABOVE the list has no
-        # checkbox at all though (it's not a list item, just a text field),
-        # so that's where the column header lives — genuinely non-selectable
-        # this way, not just harmless-if-selected like a fake row would be.
-        #
-        # The header text ("installed" / "# of installs" / "service") is
-        # wider than the underlying data (an "x"-or-blank mark, a 1-2 digit
-        # count), so it's the DATA fields that were widened to match the
-        # header labels' widths (9 and 13 chars) rather than the other way
-        # around — a narrow data column can't align under a wide label and
-        # stay readable, but a wide data column can absolutely align under
-        # a matching-width label. Verified pixel/character-exact (not
-        # eyeballed) by actually rendering this dialog into a captured pty
-        # and measuring column offsets with pyte; the leading spaces on the
-        # header line and the field widths below are tuned to that
-        # measurement, not guessed.
+        # A real column header (distinct from the checklist's rows) would
+        # need to sit flush against the top of the list box, but whiptail
+        # always renders a blank line between the instructional text and
+        # the list itself — confirmed by actually rendering this dialog
+        # into a captured pty and inspecting the character grid; there's no
+        # parameter that removes that gap. So the header idea is dropped in
+        # favor of keeping "installed"/count directly legible in each row
+        # without one, and just keeping the name close behind the count.
         svc_items=()
         for name in "${SVCS[@]}"; do
             _inst_field="$(printf '%-9s' '')"
-            _count_field="$(printf '%-13s' '')"
+            _count_field="$(printf '%-2s' '')"
             _count="$(install_count "$name")"
             if [ "$_count" -gt 0 ]; then
                 _inst_field="installed"
-                _count_field="$(printf '%-13s' "$_count")"
+                _count_field="$(printf '%-2s' "$_count")"
             fi
-            svc_tag="$(printf "%s  %s  %s" "$_inst_field" "$_count_field" "$name")"
+            svc_tag="$(printf "%s  %s   %s" "$_inst_field" "$_count_field" "$name")"
             svc_items+=("$svc_tag" "${SERVICE_DESC[$name]}" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "     installed  # of installs  service
-Space=select to install, Enter=go:" "$_box_h" "$_box_w" "$_list_h" \
+            "Space to select, Enter to install:" "$_box_h" "$_box_w" "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
         # Undo the display-only "x N " prefix — name is always the last
