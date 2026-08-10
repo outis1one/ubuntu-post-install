@@ -37,6 +37,7 @@ REPO_URL="https://github.com/outis1one/ubuntu-post-install.git"
 DEST="/root/ubuntu-post-install"
 MARKER="/root/.ubuntu-post-install-pending"
 HOOK="/etc/profile.d/99-ubuntu-post-install.sh"
+export DEBIAN_FRONTEND=noninteractive
 
 command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y git; }
 
