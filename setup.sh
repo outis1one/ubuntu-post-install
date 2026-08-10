@@ -383,21 +383,48 @@ while true; do
     mapfile -t SVCS < <(services_in_group "$CHOSEN_CAT")
     SELECTED=()
     if [ "$have_whiptail" = true ]; then
+        # listheight was a flat 14 regardless of category size — utilities
+        # alone has 35+ services, so anything past row 14 only reachable by
+        # scrolling, with no on-screen hint that more rows exist below the
+        # fold. Size it to the category instead, capped to what the actual
+        # terminal can show (tput lines, falling back to a conservative 24
+        # for a non-terminal/unknown size) so this can't request a dialog
+        # taller than the screen.
+        local _term_lines _list_h _box_h
+        _term_lines="$(tput lines 2>/dev/null </dev/tty || echo 24)"
+        _list_h=${#SVCS[@]}
+        [ "$_list_h" -gt 20 ] && _list_h=20
+        local _term_cap=$((_term_lines - 10))
+        [ "$_term_cap" -lt 6 ] && _term_cap=6
+        [ "$_list_h" -gt "$_term_cap" ] && _list_h="$_term_cap"
+        _box_h=$((_list_h + 8))
+        [ "$_box_h" -gt "$((_term_lines - 2))" ] && _box_h=$((_term_lines - 2))
+
         svc_items=()
         for name in "${SVCS[@]}"; do
             tag="${SERVICE_DESC[$name]}"
-            is_installed "$name" && tag="$tag  [installed]"
+            # Marker goes at the FRONT, not appended after the description.
+            # whiptail hard-truncates each row to the dialog's fixed width
+            # (78 here) with no ellipsis or other sign it happened —
+            # confirmed live: appending "  [installed]" after a long enough
+            # description (fmd's is 68 chars; +13 for the suffix is 81,
+            # past the width) silently drops the marker off the end, making
+            # an installed service look uninstalled with no visual cue
+            # anything was cut. A long description can still lose its own
+            # tail this way, but that's harmless — the install status is
+            # what actually matters and now always survives.
+            is_installed "$name" && tag="[installed] $tag"
             svc_items+=("$name" "$tag" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "Space to select, Enter to install. Already-installed are marked:" 22 78 14 \
+            "Space to select, Enter to install. Already-installed are marked:" "$_box_h" 78 "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
-            m=""; is_installed "$name" && m="  [installed]"
-            printf "  %-16s %s%s\n" "$name" "${SERVICE_DESC[$name]}" "$m"
+            m=""; is_installed "$name" && m="[installed] "
+            printf "  %-16s %s%s\n" "$name" "$m" "${SERVICE_DESC[$name]}"
         done
         read -rp "Enter service names to install (space-separated, blank to go back): " -a SELECTED
     fi
