@@ -810,7 +810,20 @@ ensure_coturn_user() {
     if [ ! -d "$DOCKER_DIR/coturn" ]; then
         if declare -F install_coturn >/dev/null 2>&1; then
             log_info "No shared coturn (TURN/STUN) server yet — setting one up for $_consumer..."
-            install_coturn || { log_warning "coturn setup failed — $_consumer will run without TURN."; return 1; }
+            # install_coturn cd's into $DOCKER_DIR/coturn and never cd's back —
+            # the caller (e.g. asterisk.sh, already cd'd into its own install
+            # directory) would otherwise return here with the wrong cwd and go
+            # on to write ITS docker-compose.yml/.env into coturn's directory
+            # instead of its own. Confirmed live: this clobbered coturn's
+            # compose file and left the consumer's own directory without one,
+            # so its later `docker compose up --build` failed with "Dockerfile:
+            # no such file or directory" (no Dockerfile in coturn's directory).
+            local _caller_pwd
+            _caller_pwd="$(pwd)"
+            install_coturn
+            local _coturn_rc=$?
+            cd "$_caller_pwd" || true
+            [ "$_coturn_rc" -ne 0 ] && { log_warning "coturn setup failed — $_consumer will run without TURN."; return 1; }
         else
             log_warning "services/coturn.sh not loaded — $_consumer will run without TURN."
             log_warning "Run: sudo ./setup.sh coturn"
