@@ -210,3 +210,152 @@ uncertainty, and they're stacked
 close enough to the ceiling that it's worth confirming. If real usage runs
 higher than estimated, the two Mattermost instances (~1.2GB combined) are
 the single biggest lever to reconsider.
+
+## Tier 3 — 6 vCores / 8GB RAM / 240GB NVMe
+
+Example: IONOS VPS L+, $21/mo.
+
+## What I was planning for the 6vCPU / 8GB / 240GB box
+
+A much larger multi-instance spread than the Tier 2 box, sized against this
+repo's multi-instance retrofit (`services/*.sh` instance-selection pattern,
+see `CLAUDE.md`'s "Multi-instance services" section) plus its port-collision
+scanning (`CLAUDE.md`'s "Port collision avoidance" section). The instance
+counts below aren't arbitrary — a few of them ran into real limits in the
+codebase as it exists today, not just RAM ceilings.
+
+**Not actually possible as "2x" — singleton-by-design, no multi-instance
+support exists:**
+- `asterisk` — one PBX per box. Fixed SIP port 5060, one AMI, one
+  DigitalOcean-layout detection, one extension plan. A second instance
+  would fight the first over the same SIP/RTP ports; there's no
+  instance-suffix logic to make that not collide.
+- `security-dashboard` — runs natively (not Docker), reads *one* Asterisk's
+  security log and talks to *one* CrowdSec via `cscli`. There's no second
+  log/CrowdSec on the box to point a second copy at.
+- `sms-inbound` — also native, tied to one Asterisk + one pstn-trunk's
+  DID-ownership mapping. Same story as security-dashboard.
+
+All three stay at **1x** on this box regardless of how the rest of the
+stack is sized.
+
+**Dropped from this plan, not attempted:**
+- `changedetection` × 2 — only got the port-collision-scanning pass this
+  session, not the full multi-instance retrofit (no directory-suffix
+  logic), so a second install would collide with the first's
+  `~/docker/changedetection`. It also runs a dedicated Playwright/Chrome
+  sidecar per instance (~300-500MB each) — expensive for what would be a
+  head-to-head with retrofitting it.
+- `magicmirror` × 6 — its existing multi-instance pattern (a different,
+  earlier design than the rest of the repo: upfront instance count, not
+  incremental) is hardcoded to 1-3 instances. Six would need a code change,
+  not just a bigger box, and 6 dashboard instances (~900MB) was a lot of
+  RAM for the value versus the rest of this stack.
+
+**Screen-sharing tool — RustDesk over MeshCentral.** Both `services/rustdesk.sh`
+and `services/meshcentral.sh` have real multi-instance support. RustDesk's
+relay (`hbbs`/`hbbr`) is a lightweight Rust binary that doesn't decode video
+itself — screen-share traffic goes peer-to-peer between clients, the relay
+just proxies — so it costs ~40MB per instance versus MeshCentral's full
+Node.js app per instance (~150-250MB). Chose RustDesk for the RAM headroom;
+MeshCentral remains the pick if agent-based remote management (not just
+screen viewing) matters more than the RAM difference.
+
+**Everything else scales the same way it does on the Tier 2 box** — same
+shared `coturn`, same NetBird base install, same dedicated-per-instance
+database pattern (Traccar's own datastore, Joplin/WordPress's dedicated
+Postgres/MariaDB per instance, per CLAUDE.md's backup-isolation reasoning).
+`traccar` settled at **1x** (not 2x) specifically to buy back RAM — JVM
+apps don't shrink well when duplicated (~425MB is mostly fixed heap
+overhead, not data-proportional), so a second instance was the highest-RAM,
+lowest-value item once Mattermost stayed at 3x.
+
+**Emby** stays music-only-plus-everything (2 instances, one restricted to a
+Music library per CLAUDE.md's per-user-access pattern, one unrestricted) —
+idle RAM only; if the "everything" instance serves remote clients that
+can't direct-play, transcoding adds real CPU plus ~200-400MB per active
+session, not counted in the idle table below.
+
+**No automatic swapfile on this box.** `ensure_swapfile()` only offers one
+when RAM ≤4096MB — an 8GB box doesn't qualify, so unlike every Tier 1/2 box
+in this doc, this one has no swap unless it's added by hand.
+
+## Final RAM budget for the 6vCPU/8GB box (settled baseline, idle)
+
+| Service | Count | ~RAM |
+|---|---|---|
+| OS + Docker baseline (~45-50 containers across all instances) | — | ~500MB |
+| Caddy | — | ~30MB |
+| CrowdSec | — | ~150MB |
+| coturn (shared) | — | ~40MB |
+| NetBird client | — | ~35MB |
+| Asterisk | 1 (singleton) | ~100MB |
+| security-dashboard + sms-inbound | 1 each (singleton) | ~95MB |
+| Mattermost (app+Postgres each) | 3 | ~1800MB |
+| Traccar (JVM) | 1 | ~425MB |
+| ntfy | 2 | ~100MB |
+| Mealie | 2 | ~350MB |
+| WordPress (dedicated MariaDB/site) | 2 sites | ~400MB |
+| Actual Budget | 2 | ~140MB |
+| Audiobookshelf | 2 | ~400MB |
+| Emby (music-only + everything) | 2 | ~450MB idle* |
+| Filebrowser | 2 | ~80MB |
+| FMD | 2 | ~100MB |
+| Homebox | 2 | ~250MB |
+| Joplin (app + dedicated Postgres each) | 2 | ~400MB |
+| RustDesk relay | 2 | ~80MB |
+| Vaultwarden | 2 | ~80MB |
+| **Total** | | **~6.0GB** |
+
+\* idle only — see the Emby note above for active-transcode cost, not
+included here.
+
+Leaves roughly **~2.0GB headroom (~25%)** out of 8GB — right at the bottom
+of the ideal 25-30% range from the sizing rules of thumb above. Swapping
+`rustdesk` for `meshcentral` narrows that to ~1.6GB (~20%) — still
+workable, just tighter. CPU isn't expected to bind here (no
+transcoding/AI/gaming load in this mix per the "How to size" rule of
+thumb above), but 3 concurrent Mattermost calls, active Asterisk calls,
+and a RustDesk/MeshCentral session all at once is the realistic worst
+case worth watching, not the idle numbers in this table. Deploy
+incrementally and check `free -h` / `docker stats` against this table the
+same way as the Tier 2 box — if real usage runs higher than estimated,
+Mattermost (~1.8GB across 3 instances) is again the single biggest lever
+to reconsider.
+
+## IONOS Object Storage pricing
+
+Relevant to `services/immich.sh`'s S3 storage engine (thumbnails, encoded
+video, and new uploads offloaded to object storage instead of local VPS
+disk — see that file's `IMMICH_STORAGE_ENGINE=s3` support) or any other
+service pointed at an S3-compatible bucket instead of a local bind mount.
+Storage cost was already known from IONOS chat support (~$0.50/100GB/month
+checked out); API and transfer costs were the unknowns — pulled from
+IONOS's own published price list (`docs.ionos.com`, IONOS CLOUD Inc.
+price list — USD; the EU entity, IONOS SE, may list EUR-denominated rates
+that differ slightly) rather than the general pricing-comparison sites,
+which had conflicting/stale numbers for the API-cost line.
+
+| Item | Cost |
+|---|---|
+| Storage | $0.00487 / GB / 30 days (~$4.99/TB/month, ~$0.49/100GB/month) |
+| API requests — PUT / COPY / POST / LIST / GET / DELETE | **Free** — no per-request charge on any operation |
+| Inbound transfer (upload to the bucket) | **Free** |
+| Outbound transfer (download from the bucket) — up to 2TB/mo | **Free** |
+| Outbound transfer — next 8TB (2-10TB/mo) | $0.036 / GB |
+| Outbound transfer — next 40TB (10-50TB/mo) | $0.030 / GB |
+| Outbound transfer — next 100TB (50-150TB/mo) | $0.024 / GB |
+| Outbound transfer — over 150TB/mo | $0.018 / GB |
+
+**The outbound-transfer tiers are shared across the whole IONOS contract**,
+not scoped to Object Storage alone — VPS egress and bucket egress draw from
+the same cumulative monthly pool. For a personal Immich-style workload
+(thumbnail/originals fetched by a handful of client devices, not a public
+CDN), 2TB/month of combined egress is a lot of headroom — this is
+effectively storage-cost-only in practice (~$0.49/100GB/month), with API
+calls and typical download volume both landing in the free tier.
+
+Sources:
+- [IONOS Cloud Inc. price list](https://docs.ionos.com/cloud/support/general-information/price-list/ionos-cloud-inc)
+- [IONOS Object Storage — pricing model overview](https://docs.ionos.com/cloud/backup-and-storage/ionos-object-storage/overview/pricing)
+- [IONOS Object Storage product page](https://cloud.ionos.com/storage/object-storage)
