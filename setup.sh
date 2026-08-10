@@ -414,13 +414,23 @@ while true; do
         # for a non-terminal/unknown size) so this can't request a dialog
         # taller than the screen.
         _term_lines="$(tput lines 2>/dev/null </dev/tty || echo 24)"
-        _list_h=${#SVCS[@]}
-        [ "$_list_h" -gt 20 ] && _list_h=20
+        _term_cols="$(tput cols 2>/dev/null </dev/tty || echo 80)"
+        # +1 list row for the fake header row added below.
+        _list_h=$((${#SVCS[@]} + 1))
+        [ "$_list_h" -gt 21 ] && _list_h=21
         _term_cap=$((_term_lines - 10))
         [ "$_term_cap" -lt 6 ] && _term_cap=6
         [ "$_list_h" -gt "$_term_cap" ] && _list_h="$_term_cap"
         _box_h=$((_list_h + 8))
         [ "$_box_h" -gt "$((_term_lines - 2))" ] && _box_h=$((_term_lines - 2))
+        # Was a flat 78 regardless of actual terminal size — descriptions
+        # got cut off mid-sentence on any terminal wider than that, with no
+        # way to read the rest. Scale with the terminal instead, floored at
+        # the old 78 (safe on a plain 80-column default) and capped so a
+        # very wide terminal doesn't get an absurdly wide dialog.
+        _box_w=$((_term_cols - 4))
+        [ "$_box_w" -lt 78 ] && _box_w=78
+        [ "$_box_w" -gt 160 ] && _box_w=160
 
         # whiptail's checklist has exactly one interactive element per row —
         # the checkbox itself. The "tag" field (what's displayed right after
@@ -433,6 +443,13 @@ while true; do
         # width, but it's still one string under the hood. Extracted back
         # into just the plain service name below before dispatch.
         svc_items=()
+        # Fake header row, first in the list, using the exact same field
+        # widths as the real rows below so "x"/"#"/name visually line up as
+        # columns. Its tag's last token ("NAME") is a sentinel filtered back
+        # out after selection — toggling it is harmless either way (nothing
+        # is registered under that name), but this keeps <Ok> silently
+        # correct even if someone does check it out of habit.
+        svc_items+=("$(printf "%s %s %s" "x" "$(printf '%-2s' '#')" "NAME")" "── service ──" "OFF")
         for name in "${SVCS[@]}"; do
             _inst_mark=" "
             _count_str="  "
@@ -445,12 +462,15 @@ while true; do
             svc_items+=("$svc_tag" "${SERVICE_DESC[$name]}" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "installed(x) #instances  name                    Space=select to install, Enter=go:" "$_box_h" 78 "$_list_h" \
+            "Space=select to install, Enter=go. Top row shows the x/# column meaning:" "$_box_h" "$_box_w" "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
         # Undo the display-only "x N " prefix — name is always the last
         # whitespace-separated token, since service names never contain spaces.
         for i in "${!SELECTED[@]}"; do SELECTED[$i]="${SELECTED[$i]##* }"; done
+        _filtered=()
+        for _s in "${SELECTED[@]}"; do [ "$_s" != "NAME" ] && _filtered+=("$_s"); done
+        SELECTED=("${_filtered[@]}")
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
