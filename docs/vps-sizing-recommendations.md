@@ -322,3 +322,40 @@ incrementally and check `free -h` / `docker stats` against this table the
 same way as the Tier 2 box — if real usage runs higher than estimated,
 Mattermost (~1.8GB across 3 instances) is again the single biggest lever
 to reconsider.
+
+## IONOS Object Storage pricing
+
+Relevant to `services/immich.sh`'s S3 storage engine (thumbnails, encoded
+video, and new uploads offloaded to object storage instead of local VPS
+disk — see that file's `IMMICH_STORAGE_ENGINE=s3` support) or any other
+service pointed at an S3-compatible bucket instead of a local bind mount.
+Storage cost was already known from IONOS chat support (~$0.50/100GB/month
+checked out); API and transfer costs were the unknowns — pulled from
+IONOS's own published price list (`docs.ionos.com`, IONOS CLOUD Inc.
+price list — USD; the EU entity, IONOS SE, may list EUR-denominated rates
+that differ slightly) rather than the general pricing-comparison sites,
+which had conflicting/stale numbers for the API-cost line.
+
+| Item | Cost |
+|---|---|
+| Storage | $0.00487 / GB / 30 days (~$4.99/TB/month, ~$0.49/100GB/month) |
+| API requests — PUT / COPY / POST / LIST / GET / DELETE | **Free** — no per-request charge on any operation |
+| Inbound transfer (upload to the bucket) | **Free** |
+| Outbound transfer (download from the bucket) — up to 2TB/mo | **Free** |
+| Outbound transfer — next 8TB (2-10TB/mo) | $0.036 / GB |
+| Outbound transfer — next 40TB (10-50TB/mo) | $0.030 / GB |
+| Outbound transfer — next 100TB (50-150TB/mo) | $0.024 / GB |
+| Outbound transfer — over 150TB/mo | $0.018 / GB |
+
+**The outbound-transfer tiers are shared across the whole IONOS contract**,
+not scoped to Object Storage alone — VPS egress and bucket egress draw from
+the same cumulative monthly pool. For a personal Immich-style workload
+(thumbnail/originals fetched by a handful of client devices, not a public
+CDN), 2TB/month of combined egress is a lot of headroom — this is
+effectively storage-cost-only in practice (~$0.49/100GB/month), with API
+calls and typical download volume both landing in the free tier.
+
+Sources:
+- [IONOS Cloud Inc. price list](https://docs.ionos.com/cloud/support/general-information/price-list/ionos-cloud-inc)
+- [IONOS Object Storage — pricing model overview](https://docs.ionos.com/cloud/backup-and-storage/ionos-object-storage/overview/pricing)
+- [IONOS Object Storage product page](https://cloud.ionos.com/storage/object-storage)
