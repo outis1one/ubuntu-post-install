@@ -121,7 +121,19 @@ CREDS
     local ver_opt=""
     [[ -n "$smb_ver" ]] && ver_opt=",vers=${smb_ver}"
 
-    local opts="uid=${ACTUAL_UID},gid=${ACTUAL_GID},${creds_opt}${ver_opt},iocharset=utf8,nofail,_netdev"
+    local opts="uid=${ACTUAL_UID},gid=${ACTUAL_GID},${creds_opt}${ver_opt},nofail,_netdev"
+
+    # iocharset=utf8 only if the kernel can actually load nls_utf8 — some
+    # kernels (confirmed live: a stock Ubuntu 6.8.0-137-generic VPS) don't
+    # ship that module at all, and mount.cifs fails every such mount with
+    # "mount error(79): Can not access a needed shared library" regardless
+    # of credentials. modprobe on an already-loaded/built-in module is a
+    # harmless no-op, so this check is safe to run unconditionally.
+    if modprobe nls_utf8 >/dev/null 2>&1; then
+        opts="${opts},iocharset=utf8"
+    else
+        warn "This kernel ($(uname -r)) has no nls_utf8 module — mounting without iocharset=utf8. Non-ASCII filenames may not display correctly; try 'sudo apt-get install --reinstall linux-modules-$(uname -r)' to see if it restores the module."
+    fi
 
     _do_mount "cifs" "$share" "$mount_point" "$opts"
 }

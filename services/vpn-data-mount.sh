@@ -51,17 +51,26 @@
 # literal strerror() text for it. Confirmed live: this recurred identically
 # with a real Samba account and a verified, correctly-captured password
 # (see the read()/IFS note above — that was a real bug too, just not this
-# one). Root cause is the `keyutils` package being missing on the client
-# (VPS) side: mount.cifs dlopen()s libkeyutils.so.1 at runtime for the
-# upcall path (idmapping/SPNEGO), and while cifs-utils hard-depends on the
-# libkeyutils1 *library*, the keyutils *package* — which ships
-# /sbin/request-key and the /etc/request-key.d/*.conf handler
-# registrations the kernel's upcall actually invokes — is only a Recommends.
-# Plenty of minimal cloud VPS images (unlike a typical desktop/full-server
-# install) turn off APT's install-recommends, so `apt-get install
-# cifs-utils` alone silently skips it and every mount — guest or fully
-# credentialed — fails the same way. Install `keyutils` explicitly instead
-# of relying on it riding along.
+# one), and again after keyutils was already installed — so it's not that
+# either, at least not on every host. Two independent real causes share
+# this exact errno/message, both fixed defensively below:
+#   1. `keyutils` missing on the client. cifs-utils hard-depends on the
+#      libkeyutils1 *library* but only Recommends the keyutils *package*
+#      (/sbin/request-key + /etc/request-key.d/*.conf, what the kernel's
+#      upcall actually invokes) — minimal cloud images that disable
+#      install-recommends silently skip it.
+#   2. The hardcoded `iocharset=utf8` mount option needs the kernel's
+#      nls_utf8 module. Confirmed live on a stock Ubuntu 6.8.0-137-generic
+#      VPS kernel: `modprobe nls_utf8` → "FATAL: Module nls_utf8 not found"
+#      — not loadable, not built in, just absent from that kernel build.
+#      Every mount asking for that codepage fails with errno 79 regardless
+#      of credentials. `_vdm_mount_local` probes for it with a harmless
+#      `modprobe` and only adds `iocharset=utf8` if it actually loads;
+#      otherwise it warns and mounts without it (kernel falls back to its
+#      build's nls_default — fine for ASCII-heavy filenames, the common
+#      case for a home-data share; non-ASCII filenames may not round-trip
+#      perfectly on a kernel missing this module, which is a kernel
+#      limitation this script can't paper over further).
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -353,8 +362,18 @@ CREDS
     chmod 600 "$creds_file"
     chown root:root "$creds_file"
 
-    # sec=ntlmssp explicitly — see the file header on errno 79/ENOKEY.
-    local opts="credentials=${creds_file},sec=ntlmssp,uid=$(id -u "$ACTUAL_USER"),gid=$(id -g "$ACTUAL_USER"),iocharset=utf8,nofail,_netdev"
+    # sec=ntlmssp explicitly — see the file header on errno 79.
+    local opts="credentials=${creds_file},sec=ntlmssp,uid=$(id -u "$ACTUAL_USER"),gid=$(id -g "$ACTUAL_USER"),nofail,_netdev"
+
+    # iocharset=utf8 only if the kernel can actually load nls_utf8 — see
+    # the file header. modprobe on an already-loaded/built-in module is a
+    # harmless no-op, so this is safe to call unconditionally.
+    if modprobe nls_utf8 >/dev/null 2>&1; then
+        opts="${opts},iocharset=utf8"
+    else
+        log_warning "This kernel ($(uname -r)) has no nls_utf8 module — mounting without iocharset=utf8. Non-ASCII filenames may not display correctly; try 'sudo apt-get install --reinstall linux-modules-$(uname -r)' to see if it restores the module."
+    fi
+
     local share="//${host}/${share_name}"
 
     log_info "Testing mount..."
