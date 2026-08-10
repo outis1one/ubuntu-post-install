@@ -101,6 +101,7 @@ is_installed() {
         pstn-trunk) [ -f "$DOCKER_DIR/asterisk-digital-ocean/config/asterisk/pstn-trunk-pjsip.conf" ] || [ -f "$DOCKER_DIR/asterisk/config/asterisk/pstn-trunk-pjsip.conf" ] ;;
         sms-inbound) [ -f /opt/sms-inbound/settings.env ] ;;
         ssh-config) false ;;   # repeatable management tool, never shows [installed]
+        ssh-key-import) false ;;   # repeatable management tool, never shows [installed]
         # Every WordPress site is named from the first one on (no plain
         # $DOCKER_DIR/wordpress dir the default case below could match) —
         # [installed] means "at least one site exists", not any specific one.
@@ -122,7 +123,7 @@ is_installed() {
 # is_installed() as 0 or 1.
 install_count() {
     case "$1" in
-        base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config)
+        base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config|ssh-key-import)
             is_installed "$1" && echo 1 || echo 0 ;;
         wordpress)
             find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name 'wordpress-*' -type d 2>/dev/null | wc -l ;;

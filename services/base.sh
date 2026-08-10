@@ -144,54 +144,28 @@ _base_setup_nvidia_gpu() {
 }
 
 _base_setup_ssh() {
-    log_info "Configuring SSH server..."
+    # The real logic lives in services/ssh-key-import.sh now — pulled out so
+    # it can be re-run on its own later (another admin's key, a home box
+    # that only needs this one step, ...) instead of only ever running once
+    # as part of this whole required-setup flow. That file keeps its own
+    # register_service call and stays independently selectable; this just
+    # chains into it, same pattern services/asterisk.sh uses for
+    # security-dashboard/pstn-trunk.
+    if declare -F install_ssh-key-import >/dev/null 2>&1; then
+        install_ssh-key-import
+        return
+    fi
 
+    # Standalone `sudo bash base.sh` with no sibling services/*.sh sourced —
+    # degrade to just getting the SSH server itself running, skip the
+    # GitHub/Launchpad import convenience (needs the sibling file's fuller
+    # standalone stubs, not worth duplicating here for this rare a path).
+    log_info "Configuring SSH server..."
     if ! dpkg -l openssh-server &>/dev/null; then
         run_cmd apt-get install -y openssh-server
     fi
     run_cmd systemctl enable --now ssh
-
-    # Import SSH public keys from GitHub and/or Launchpad.
-    local GH_USER="" LP_USER="" _keys_imported=false
-
-    prompt_text "GitHub username to import SSH keys from (blank to skip):" "" GH_USER
-    if [ -n "$GH_USER" ]; then
-        if ssh-import-id "gh:$GH_USER"; then
-            log_success "Imported SSH keys from GitHub: $GH_USER"
-            _keys_imported=true
-        else
-            log_warning "Could not import keys from GitHub: $GH_USER"
-        fi
-    fi
-
-    prompt_text "Launchpad username to import SSH keys from (blank to skip):" "" LP_USER
-    if [ -n "$LP_USER" ]; then
-        if ssh-import-id "lp:$LP_USER"; then
-            log_success "Imported SSH keys from Launchpad: $LP_USER"
-            _keys_imported=true
-        else
-            log_warning "Could not import keys from Launchpad: $LP_USER"
-        fi
-    fi
-
-    # Only offer to disable password auth if at least one key was imported.
-    if [ "$_keys_imported" = true ]; then
-        local DISABLE_PW=""
-        prompt_yn "Disable SSH password authentication (key login only)? (y/n):" "y" DISABLE_PW
-        if [[ "$DISABLE_PW" =~ ^[Yy]$ ]]; then
-            sed -i \
-                -e 's/^#*\s*PasswordAuthentication\s.*/PasswordAuthentication no/' \
-                -e 's/^#*\s*KbdInteractiveAuthentication\s.*/KbdInteractiveAuthentication no/' \
-                /etc/ssh/sshd_config
-            # Ubuntu 22.04+ may also have a drop-in that re-enables password auth.
-            local _dropin="/etc/ssh/sshd_config.d/50-cloud-init.conf"
-            if [ -f "$_dropin" ]; then
-                sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' "$_dropin"
-            fi
-            systemctl restart ssh
-            log_success "SSH password authentication disabled — key login only"
-        fi
-    fi
+    log_info "Run services/ssh-key-import.sh (or the full repo's wizard) to import keys from GitHub/Launchpad."
 }
 
 _base_setup_netbird() {
