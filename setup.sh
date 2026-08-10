@@ -402,6 +402,7 @@ while true; do
         svc_items=()
         for name in "${SVCS[@]}"; do
             tag="${SERVICE_DESC[$name]}"
+            svc_tag="$name"
             # Marker goes at the FRONT, not appended after the description.
             # whiptail hard-truncates each row to the dialog's fixed width
             # (78 here) with no ellipsis or other sign it happened —
@@ -412,13 +413,24 @@ while true; do
             # anything was cut. A long description can still lose its own
             # tail this way, but that's harmless — the install status is
             # what actually matters and now always survives.
-            is_installed "$name" && tag="[installed] $tag"
-            svc_items+=("$name" "$tag" "OFF")
+            # Also prefix the name itself with "*" — the checkbox's own
+            # [ ]/[*] state is reserved for "install this now", so an
+            # already-installed item stays unchecked by design (checking it
+            # would reinstall on <Ok>); this "*" sits right next to the
+            # checkbox as a second, harder-to-miss cue distinct from that
+            # selection state. Stripped back off below before dispatch.
+            if is_installed "$name"; then
+                tag="[installed] $tag"
+                svc_tag="*$name"
+            fi
+            svc_items+=("$svc_tag" "$tag" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "Space to select, Enter to install. Already-installed are marked:" "$_box_h" 78 "$_list_h" \
+            "Space to select, Enter to install. Already-installed are marked with *:" "$_box_h" 78 "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
+        # Undo the display-only "*" prefix before these reach run_service.
+        for i in "${!SELECTED[@]}"; do SELECTED[$i]="${SELECTED[$i]#\*}"; done
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
