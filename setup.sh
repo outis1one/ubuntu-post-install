@@ -440,25 +440,32 @@ while true; do
         # checkbox at all though (it's not a list item, just a text field),
         # so that's where the column header lives — genuinely non-selectable
         # this way, not just harmless-if-selected like a fake row would be.
-        # "installed"/"# of installs" won't character-align with the
-        # 1-2-char "x"/count data below (spelled-out words can't line up
-        # under single-character columns and stay readable) — the leading
-        # spaces here are a best-effort approximation of where those data
-        # columns start, not exact.
+        #
+        # The header text ("installed" / "# of installs" / "service") is
+        # wider than the underlying data (an "x"-or-blank mark, a 1-2 digit
+        # count), so it's the DATA fields that were widened to match the
+        # header labels' widths (9 and 13 chars) rather than the other way
+        # around — a narrow data column can't align under a wide label and
+        # stay readable, but a wide data column can absolutely align under
+        # a matching-width label. Verified pixel/character-exact (not
+        # eyeballed) by actually rendering this dialog into a captured pty
+        # and measuring column offsets with pyte; the leading spaces on the
+        # header line and the field widths below are tuned to that
+        # measurement, not guessed.
         svc_items=()
         for name in "${SVCS[@]}"; do
-            _inst_mark=" "
-            _count_str="  "
+            _inst_field="$(printf '%-9s' '')"
+            _count_field="$(printf '%-13s' '')"
             _count="$(install_count "$name")"
             if [ "$_count" -gt 0 ]; then
-                _inst_mark="x"
-                _count_str="$(printf "%-2d" "$_count")"
+                _inst_field="installed"
+                _count_field="$(printf '%-13s' "$_count")"
             fi
-            svc_tag="$(printf "%s %s %s" "$_inst_mark" "$_count_str" "$name")"
+            svc_tag="$(printf "%s  %s  %s" "$_inst_field" "$_count_field" "$name")"
             svc_items+=("$svc_tag" "${SERVICE_DESC[$name]}" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "    installed  # of installs  service
+            "     installed  # of installs  service
 Space=select to install, Enter=go:" "$_box_h" "$_box_w" "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
