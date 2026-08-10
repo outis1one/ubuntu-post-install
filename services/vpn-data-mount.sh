@@ -29,11 +29,20 @@
 # redundant overhead for no added security, and it's the slowest and least
 # robust (FUSE reconnect quirks) of the three for an always-on mount.
 #
-# The share is guest-accessible (no separate Samba username/password to
-# manage) because the VPN is the actual access control here — only
-# NetBird-connected peers can reach the home box's NetBird IP at all, so a
-# second credential layer on top of that doesn't add real security, just
-# more secrets to lose track of.
+# Each share gets a dedicated Samba account (same username as the SSH user,
+# since that Unix account already exists on the home box — no extra remote
+# user to create) with its own generated password, stored locally in a
+# root-only credentials file, same convention tools/mount-network-drive.sh
+# already uses. An earlier version of this made the share guest-accessible
+# instead, reasoning the VPN itself was enough access control — reversed
+# per direct request (real per-share accounts, not root/guest) and because
+# it incidentally fixes a real bug: plain `guest` CIFS mounts with no
+# explicit `sec=` can hit "mount error(79): Can not access a needed shared
+# library" — a misleadingly-worded cifs-utils message for errno 79
+# (ENOKEY), a known rough edge in the kernel cifs.ko keyring/upcall path
+# for anonymous sessions specifically, not an actual missing library.
+# Credentialed mounts with an explicit sec= take the normal NTLMSSP auth
+# path instead and don't hit it.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -93,6 +102,52 @@ _vdm_list_existing() {
         echo "$entries" | sed "s|^${_VDM_TAG_PREFIX}|  •|"
         echo ""
     fi
+}
+
+# ── Name a raw IP so it can be used everywhere instead of typing it again ──
+# Deliberately /etc/hosts, not ~/.ssh/config: an SSH Host alias only helps
+# the `ssh` command itself resolve a name — mount.cifs (and everything
+# else) never consults ~/.ssh/config at all, so an alias alone wouldn't let
+# the actual CIFS mount address use a name. /etc/hosts is the one mechanism
+# that makes a name resolve for both, which is what "use a name instead of
+# the IP" actually needs end to end.
+# Sets RESOLVED_HOST (not local — same out-param convention as elsewhere).
+_vdm_resolve_host() {
+    local input="$1" default_name="$2"
+    RESOLVED_HOST="$input"
+
+    # Not a raw IP (already a name, whether from /etc/hosts, real DNS, or
+    # just typed that way) — nothing to do.
+    [[ "$input" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+
+    # Already named from an earlier vpn-data-mount run against this same IP?
+    local existing
+    existing="$(awk -v ip="$input" '$1==ip && /# vpn-data-mount/ {print $2; exit}' /etc/hosts 2>/dev/null)"
+    if [ -n "$existing" ]; then
+        log_info "Already named '$existing' in /etc/hosts from an earlier mount — using that."
+        RESOLVED_HOST="$existing"
+        return 0
+    fi
+
+    # prompt_text always falls back to the given default on blank input
+    # (same convention every other prompt in this repo relies on) — so this
+    # always ends up naming the host to something, never truly "blank" for
+    # "keep using the IP". That's fine: $default_name is already a sensible
+    # suggestion (the mount's own label), so Enter alone gives a reasonable
+    # name rather than requiring the extra step of confirming one.
+    local NAME=""
+    prompt_text "  Name for this home box (used instead of the IP from now on):" "$default_name" NAME
+    NAME="$(echo "$NAME" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+    [ -z "$NAME" ] && return 0
+
+    if grep -qE "^\S+[[:space:]]+${NAME}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+        log_warning "'$NAME' is already used for a different address in /etc/hosts — keeping the IP instead."
+        return 0
+    fi
+
+    echo "${input}    ${NAME}    # vpn-data-mount" >> /etc/hosts
+    log_success "Added to /etc/hosts: $NAME -> $input (works for SSH, this mount, and anything else on this box)"
+    RESOLVED_HOST="$NAME"
 }
 
 # ── SSH trust: test first, only bootstrap if actually needed ──────────────
@@ -173,8 +228,12 @@ _vdm_ensure_ssh_trust() {
 }
 
 # ── Remote Samba setup, driven entirely over the SSH trust above ──────────
+# Sets SMB_PASS (not local — read by the caller to write the local
+# credentials file), same out-param convention as lib/common.sh's
+# ensure_coturn_user/configure_caddy_for_service.
 _vdm_setup_remote_samba() {
     local user="$1" host="$2" remote_path="$3" share_name="$4"
+    SMB_PASS=""
 
     log_info "Checking Samba on the home box..."
     # Every ssh call below runs as $ACTUAL_USER, same reason as _vdm_ssh_works.
@@ -186,9 +245,22 @@ _vdm_setup_remote_samba() {
         log_success "Samba already installed on the home box."
     fi
 
-    log_info "Configuring the share on the home box..."
+    SMB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)"
+
+    log_info "Configuring the share and Samba account on the home box..."
     # Idempotent: drop any prior block for this exact share name, then
-    # append a fresh one. Guest-accessible — see the file header for why.
+    # append a fresh one. Dedicated account (not guest) — see the file
+    # header for why, and for the errno-79 connection.
+    #
+    # The Samba account reuses $user — that Unix account already exists on
+    # the home box (it's who we're SSH'd in as), so no extra remote user
+    # needs creating. smbpasswd's password ends up briefly visible in the
+    # home box's own `ps` output for this one remote command's duration
+    # (embedded in the command string, not piped — piping through a `-t`
+    # pty session for a command that may also need an interactive sudo
+    # password gets stdin-ordering-fragile fast). Accepted tradeoff, same
+    # spirit as this whole feature already trusting the VPN's reachability
+    # boundary — see file header.
     local remote_cmd
     remote_cmd=$(cat << REMOTECMD
 set -e
@@ -201,15 +273,18 @@ sudo sed -i "/^\\[${share_name}\\]\$/,/^\$/d" /etc/samba/smb.conf
   echo "   path = ${remote_path}"
   echo "   browseable = yes"
   echo "   read only = no"
-  echo "   guest ok = yes"
-  echo "   force user = \$(whoami)"
+  echo "   guest ok = no"
+  echo "   valid users = ${user}"
+  echo "   force user = ${user}"
 } | sudo tee -a /etc/samba/smb.conf >/dev/null
+printf '%s\n%s\n' '${SMB_PASS}' '${SMB_PASS}' | sudo smbpasswd -a -s '${user}'
+sudo smbpasswd -e '${user}'
 sudo systemctl restart smbd
 command -v ufw >/dev/null 2>&1 && sudo ufw allow samba >/dev/null 2>&1 || true
 REMOTECMD
 )
     if sudo -u "$ACTUAL_USER" ssh -t "${user}@${host}" "$remote_cmd"; then
-        log_success "Remote share [$share_name] -> $remote_path configured and smbd restarted."
+        log_success "Remote share [$share_name] -> $remote_path configured, Samba account '$user' set, smbd restarted."
     else
         log_error "Remote Samba configuration failed — check the output above."
         return 1
@@ -218,13 +293,26 @@ REMOTECMD
 
 # ── Local mount + fstab ─────────────────────────────────────────────────────
 _vdm_mount_local() {
-    local host="$1" share_name="$2" mount_point="$3" label="$4"
+    local host="$1" share_name="$2" mount_point="$3" label="$4" smb_user="$5" smb_pass="$6"
 
     command -v mount.cifs >/dev/null 2>&1 || apt-get install -y cifs-utils -qq
 
     mkdir -p "$mount_point"
 
-    local opts="guest,uid=$(id -u "$ACTUAL_USER"),gid=$(id -g "$ACTUAL_USER"),iocharset=utf8,nofail,_netdev"
+    # Credentials file, not a guest/inline password — root-only, matching
+    # tools/mount-network-drive.sh's existing convention for SMB creds.
+    local creds_file="/etc/samba/credentials.vpn-data-mount-${label}"
+    mkdir -p /etc/samba
+    cat > "$creds_file" << CREDS
+username=${smb_user}
+password=${smb_pass}
+CREDS
+    chmod 600 "$creds_file"
+    chown root:root "$creds_file"
+
+    # sec=ntlmssp explicitly — see the file header on errno 79/ENOKEY.
+    # Modern default and what a credentialed mount should use anyway.
+    local opts="credentials=${creds_file},sec=ntlmssp,uid=$(id -u "$ACTUAL_USER"),gid=$(id -g "$ACTUAL_USER"),iocharset=utf8,nofail,_netdev"
     local share="//${host}/${share_name}"
 
     log_info "Testing mount..."
@@ -266,15 +354,32 @@ _vdm_add_mount() {
         break
     done
 
-    local HOST="" SSH_USER=""
-    prompt_text "  Home box's NetBird IP (or hostname — check 'netbird status' on that box):" "" HOST
-    if [ -z "$HOST" ]; then
+    local HOST_INPUT="" HOST="" SSH_USER=""
+    prompt_text "  Home box's NetBird IP or an already-named host (check 'netbird status' on that box):" "" HOST_INPUT
+    if [ -z "$HOST_INPUT" ]; then
         log_warning "No host entered — cancelling this mount."
         return 1
     fi
+    _vdm_resolve_host "$HOST_INPUT" "$LABEL"
+    HOST="$RESOLVED_HOST"
+
     prompt_text "  SSH username on the home box:" "$ACTUAL_USER" SSH_USER
 
     _vdm_ensure_ssh_trust "$SSH_USER" "$HOST" || return 1
+
+    # Pure convenience on top of the /etc/hosts naming above (which is what
+    # actually makes the mount itself usable by name) — an SSH Host alias
+    # additionally skips typing the username for interactive `ssh` use.
+    # Only offered for a genuinely new name, not every time this mount (or
+    # another one on the same host) is set up.
+    if [[ ! "$HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        && declare -F add_ssh_host_alias >/dev/null 2>&1 \
+        && declare -F ssh_host_alias_exists >/dev/null 2>&1 \
+        && ! ssh_host_alias_exists "$HOST"; then
+        local ADD_ALIAS=""
+        prompt_yn "  Also add '$HOST' as an SSH alias (ssh $HOST, no username needed)? (y/n):" "y" ADD_ALIAS
+        [[ "$ADD_ALIAS" =~ ^[Yy]$ ]] && add_ssh_host_alias "$HOST" "$HOST_INPUT" "$SSH_USER" "22"
+    fi
 
     local REMOTE_PATH="" MOUNT_POINT=""
     prompt_text "  Path on the home box to share (e.g. /home/${SSH_USER}/media):" "" REMOTE_PATH
@@ -285,7 +390,13 @@ _vdm_add_mount() {
     prompt_text "  Local mount point:" "/mnt/${LABEL}" MOUNT_POINT
 
     _vdm_setup_remote_samba "$SSH_USER" "$HOST" "$REMOTE_PATH" "$LABEL" || return 1
-    _vdm_mount_local "$HOST" "$LABEL" "$MOUNT_POINT" "$LABEL" || return 1
+    _vdm_mount_local "$HOST" "$LABEL" "$MOUNT_POINT" "$LABEL" "$SSH_USER" "$SMB_PASS" || return 1
+
+    # Read by callers like services/filebrowser.sh/audiobookshelf.sh/emby.sh
+    # that chain into this service and want to default their own "which
+    # directory" prompt to whatever was just mounted, without needing to
+    # know or guess the path themselves.
+    VDM_LAST_MOUNT_POINT="$MOUNT_POINT"
 
     echo ""
     log_success "Done: $HOST:$REMOTE_PATH is now mounted at $MOUNT_POINT"
@@ -300,9 +411,10 @@ install_vpn-data-mount() {
     echo "╚══════════════════════════════════════════════════════════╝"
 
     if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would offer to name a raw IP in /etc/hosts for reuse (SSH + this mount)"
         echo "[DRY-RUN] Would test/set up passwordless SSH to a home box over its NetBird IP"
-        echo "[DRY-RUN] Would remotely install+configure Samba there for a chosen path"
-        echo "[DRY-RUN] Would mount it locally over CIFS and add it to /etc/fstab"
+        echo "[DRY-RUN] Would remotely install Samba + configure a share and a dedicated account there"
+        echo "[DRY-RUN] Would mount it locally over CIFS (credentials file, not guest) and add it to /etc/fstab"
         echo "[DRY-RUN] Repeatable — can be run again for additional home boxes/shares"
         return 0
     fi

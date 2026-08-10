@@ -316,10 +316,15 @@ install_wordpress() {
     [ -n "$WP_ADMIN_PASS" ] || WP_ADMIN_PASS="$(generate_password 16)"
 
     # ── Free host port (multiple sites can't all bind the same one) ─────────
+    # Was checking `docker ps -a` port lists — only catches ports Docker
+    # itself currently has bound, not ports held by non-Docker processes or
+    # anything else on the host. Confirmed live: this let a fresh site pick
+    # an already-occupied port ("address already in use" at container
+    # start). find_free_port checks actual OS-level listening sockets via
+    # ss, the same convention every other service here follows — see
+    # CLAUDE.md's "Port collision avoidance" section.
     local WEB_PORT=8090
-    while docker ps -a --format '{{.Ports}}' 2>/dev/null | grep -q ":${WEB_PORT}->"; do
-        WEB_PORT=$((WEB_PORT + 1))
-    done
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$DIR/html" "$DIR/db" "$DIR/uploads-ini.d"
     ensure_docker_dir_ownership "$DIR"

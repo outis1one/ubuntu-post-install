@@ -277,8 +277,20 @@ install_filebrowser() {
     ensure_docker_dir_ownership "$FB_DIR"
     cd "$FB_DIR" || return 1
 
-    local FB_PATH=""
-    prompt_text "Primary files directory to browse [default: $ACTUAL_HOME]:" "$ACTUAL_HOME" FB_PATH
+    # Reset before the chain call, not after — VDM_LAST_MOUNT_POINT is a
+    # plain global set by services/vpn-data-mount.sh, so without this an
+    # unrelated earlier vpn-data-mount run in the same setup.sh session
+    # would silently leak its mount point in here as the default even if
+    # the user declines below or this chain never runs at all.
+    unset VDM_LAST_MOUNT_POINT
+    if declare -F install_vpn-data-mount >/dev/null 2>&1; then
+        local USE_VPN_DATA=""
+        prompt_yn "Is the data you want to browse on a VPN-connected home box that isn't mounted yet? (y/n):" "n" USE_VPN_DATA
+        [[ "$USE_VPN_DATA" =~ ^[Yy]$ ]] && install_vpn-data-mount
+    fi
+
+    local FB_PATH="" _default_fb_path="${VDM_LAST_MOUNT_POINT:-$ACTUAL_HOME}"
+    prompt_text "Primary files directory to browse [default: $_default_fb_path]:" "$_default_fb_path" FB_PATH
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
     # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
