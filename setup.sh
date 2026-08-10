@@ -105,6 +105,9 @@ is_installed() {
         # $DOCKER_DIR/wordpress dir the default case below could match) —
         # [installed] means "at least one site exists", not any specific one.
         wordpress) compgen -G "$DOCKER_DIR/wordpress-*" >/dev/null 2>&1 ;;
+        # Not a Docker service — state lives in tagged /etc/fstab entries
+        # (services/vpn-data-mount.sh's own convention), not $DOCKER_DIR.
+        vpn-data-mount) grep -q '^# vpn-data-mount:' /etc/fstab 2>/dev/null ;;
         *) [ -e "$DOCKER_DIR/$1" ] ;;
     esac
 }
@@ -114,14 +117,17 @@ is_installed() {
 # CLAUDE.md (a base install plus any number of "<name>-<suffix>" siblings,
 # e.g. mattermost + mattermost-team-b). Only the default case knows that
 # naming convention; the specially-cased services above aren't part of the
-# multi-instance pattern (wordpress is the one exception and already counts
-# sites directly), so for those this just mirrors is_installed() as 0 or 1.
+# multi-instance pattern (wordpress and vpn-data-mount are the exceptions
+# and already count sites/mounts directly), so for those this just mirrors
+# is_installed() as 0 or 1.
 install_count() {
     case "$1" in
         base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config)
             is_installed "$1" && echo 1 || echo 0 ;;
         wordpress)
             find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name 'wordpress-*' -type d 2>/dev/null | wc -l ;;
+        vpn-data-mount)
+            grep -c '^# vpn-data-mount:' /etc/fstab 2>/dev/null || echo 0 ;;
         *)
             local c=0
             [ -e "$DOCKER_DIR/$1" ] && c=1

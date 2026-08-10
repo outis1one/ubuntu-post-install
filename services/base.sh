@@ -18,6 +18,7 @@ install_base() {
         echo "[DRY-RUN] Would offer SSH key import from GitHub/Launchpad"
         echo "[DRY-RUN] Would offer to disable SSH password auth"
         echo "[DRY-RUN] Would offer NetBird install with --allow-server-ssh"
+        echo "[DRY-RUN] Would offer to mount SMB data from a NetBird-connected home box (if NetBird is present)"
         echo "[DRY-RUN] Would offer Caddy reverse proxy install (full repo only)"
         echo "[DRY-RUN] Would offer CrowdSec intrusion prevention install (full repo only)"
         echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
@@ -26,10 +27,14 @@ install_base() {
 
     run_cmd apt-get update -y
 
-    # Core utilities present on every install.
+    # Core utilities present on every install. cifs-utils here (not lazily
+    # installed on first use, the way tools/mount-network-drive.sh and
+    # vpn-data-mount.sh's own local-mount step would otherwise do it) so SMB
+    # mounts work immediately whenever they're set up later, same reasoning
+    # as Docker/Compose being unconditional here instead of on-demand.
     run_cmd apt-get install -y \
         net-tools ncdu git curl wget htop btop tree zip unzip \
-        ca-certificates gnupg jq rsync ssh-import-id \
+        ca-certificates gnupg jq rsync ssh-import-id cifs-utils \
         || log_warning "Some essential packages failed to install"
 
     # glow — terminal markdown reader (charmbracelet). Not in Ubuntu repos,
@@ -50,6 +55,14 @@ install_base() {
 
     # ── NetBird ──────────────────────────────────────────────────────────────
     _base_setup_netbird
+
+    # ── VPN-connected data mount ────────────────────────────────────────────
+    # Only offered if NetBird is actually present (installed just now, or
+    # already there from a prior run) — chained here rather than folded into
+    # _base_setup_netbird itself since it's independently repeatable (see
+    # services/vpn-data-mount.sh's own header) and users may want to run it
+    # again later for another home box without re-touching NetBird at all.
+    _base_setup_vpn_mount
 
     # ── Caddy + CrowdSec ──────────────────────────────────────────────────────
     # Not this script's own install — just an early, recommended nudge toward
@@ -212,6 +225,19 @@ _base_setup_netbird() {
     else
         log_info "Run when ready: netbird up${_up_args:+ $_up_args}"
     fi
+}
+
+_base_setup_vpn_mount() {
+    command -v netbird >/dev/null 2>&1 || return 0
+    # Only available when the full repo is sourced (setup.sh loads every
+    # services/*.sh up front) — a standalone copy of base.sh doesn't have
+    # install_vpn-data-mount, so skip silently rather than error.
+    declare -F install_vpn-data-mount >/dev/null 2>&1 || return 0
+
+    local SETUP_MOUNT=""
+    prompt_yn "Mount data from a NetBird-connected home box now? (y/n):" "n" SETUP_MOUNT
+    [[ "$SETUP_MOUNT" =~ ^[Yy]$ ]] || return 0
+    install_vpn-data-mount
 }
 
 _base_setup_caddy() {
