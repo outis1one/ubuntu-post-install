@@ -415,13 +415,14 @@ while true; do
         # taller than the screen.
         _term_lines="$(tput lines 2>/dev/null </dev/tty || echo 24)"
         _term_cols="$(tput cols 2>/dev/null </dev/tty || echo 80)"
-        # +1 list row for the fake header row added below.
-        _list_h=$((${#SVCS[@]} + 1))
-        [ "$_list_h" -gt 21 ] && _list_h=21
+        _list_h=${#SVCS[@]}
+        [ "$_list_h" -gt 20 ] && _list_h=20
         _term_cap=$((_term_lines - 10))
         [ "$_term_cap" -lt 6 ] && _term_cap=6
         [ "$_list_h" -gt "$_term_cap" ] && _list_h="$_term_cap"
-        _box_h=$((_list_h + 8))
+        # +9 instead of +8: the instructional text above the list is now two
+        # lines (column header + the Space/Enter hint) instead of one.
+        _box_h=$((_list_h + 9))
         [ "$_box_h" -gt "$((_term_lines - 2))" ] && _box_h=$((_term_lines - 2))
         # Was a flat 78 regardless of actual terminal size — descriptions
         # got cut off mid-sentence on any terminal wider than that, with no
@@ -433,23 +434,18 @@ while true; do
         [ "$_box_w" -gt 160 ] && _box_w=160
 
         # whiptail's checklist has exactly one interactive element per row —
-        # the checkbox itself. The "tag" field (what's displayed right after
-        # it) and the "item" field (description) are both just inert display
-        # text; there is no such thing as a separately tabbable/selectable
-        # sub-field within a row. So a fixed-width "installed" (x) and "#"
-        # (instance count) prefix baked into the tag field is the closest
-        # equivalent to real extra columns whiptail can render — it lines up
-        # visually because whiptail pads every row's tag field to the same
-        # width, but it's still one string under the hood. Extracted back
-        # into just the plain service name below before dispatch.
+        # the checkbox itself, drawn for every row with no way to suppress
+        # it on any single one. There's no such thing as a non-selectable
+        # row inside the list. The instructional text ABOVE the list has no
+        # checkbox at all though (it's not a list item, just a text field),
+        # so that's where the column header lives — genuinely non-selectable
+        # this way, not just harmless-if-selected like a fake row would be.
+        # "installed"/"# of installs" won't character-align with the
+        # 1-2-char "x"/count data below (spelled-out words can't line up
+        # under single-character columns and stay readable) — the leading
+        # spaces here are a best-effort approximation of where those data
+        # columns start, not exact.
         svc_items=()
-        # Fake header row, first in the list, using the exact same field
-        # widths as the real rows below so "x"/"#"/name visually line up as
-        # columns. Its tag's last token ("NAME") is a sentinel filtered back
-        # out after selection — toggling it is harmless either way (nothing
-        # is registered under that name), but this keeps <Ok> silently
-        # correct even if someone does check it out of habit.
-        svc_items+=("$(printf "%s %s %s" "x" "$(printf '%-2s' '#')" "NAME")" "── service ──" "OFF")
         for name in "${SVCS[@]}"; do
             _inst_mark=" "
             _count_str="  "
@@ -462,15 +458,13 @@ while true; do
             svc_items+=("$svc_tag" "${SERVICE_DESC[$name]}" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "Space=select to install, Enter=go. Top row shows the x/# column meaning:" "$_box_h" "$_box_w" "$_list_h" \
+            "    installed  # of installs  service
+Space=select to install, Enter=go:" "$_box_h" "$_box_w" "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
         # Undo the display-only "x N " prefix — name is always the last
         # whitespace-separated token, since service names never contain spaces.
         for i in "${!SELECTED[@]}"; do SELECTED[$i]="${SELECTED[$i]##* }"; done
-        _filtered=()
-        for _s in "${SELECTED[@]}"; do [ "$_s" != "NAME" ] && _filtered+=("$_s"); done
-        SELECTED=("${_filtered[@]}")
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
