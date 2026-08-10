@@ -299,6 +299,34 @@ docker compose pull && docker compose up -d   # update
 docker compose down         # stop
 ```
 
+## SSH key import (GitHub/Launchpad) and disabling password login
+
+Imports your public keys from GitHub and/or Launchpad (Canonical/Ubuntu's
+own code-hosting platform) into `~/.ssh/authorized_keys` via
+[`ssh-import-id`](https://manpages.ubuntu.com/manpages/noble/man1/ssh-import-id.1.html),
+so you can log in with a key instead of a password — then optionally locks
+password auth off entirely once at least one key is confirmed imported.
+
+Only your **public** key is ever involved — the same information already
+visible on `github.com/<user>.keys`, fetched over HTTPS. No private key
+material leaves wherever it was generated, and importing a key does **not**
+give this box any ability to authenticate *outward* as you (e.g. it still
+can't clone your private repos) — it only grants *inbound* login to
+whoever holds the matching private key.
+
+Two ways to run it:
+
+- **During `base` install** — runs automatically as part of the required
+  setup on a fresh box, right after the SSH server itself is configured
+- **Any time** — `sudo ./setup.sh ssh-key-import` runs just this step on
+  its own: import more keys later (a new admin, a different box), or set
+  it up on a box that only needs this and nothing else `base` does — e.g.
+  the home box side of [`vpn-data-mount`](#services)
+
+Password authentication is only offered to be disabled if at least one key
+import actually succeeded in that run — never blindly, so you can't get
+locked out by declining every import prompt.
+
 ## SSH Host aliases
 
 `~/.ssh/config` lets you `ssh <alias>` instead of typing `ssh user@1.2.3.4`
