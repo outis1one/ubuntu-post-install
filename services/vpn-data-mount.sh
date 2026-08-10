@@ -332,6 +332,17 @@ _vdm_find_existing_smb_password() {
     return 1
 }
 
+# ── Already mounted? Find its label+mount point instead of re-prompting ───
+# Prints "label|mount_point" if this exact host+share is already tagged in
+# /etc/fstab, nothing otherwise. No log_* calls — same $(...) capture
+# reason as _vdm_find_existing_smb_password above.
+_vdm_find_existing_mount() {
+    local host="$1" share_name="$2"
+    grep -E "^${_VDM_TAG_PREFIX} [^ ]+ — ${host}:${share_name} -> " /etc/fstab 2>/dev/null \
+        | sed -E "s/^${_VDM_TAG_PREFIX} ([^ ]+) — [^ ]+ -> (.*)\$/\1|\2/" \
+        | head -1
+}
+
 # ── Prompt for a password twice, hidden, matching ──────────────────────────
 # Prints the password on success. No log_* calls — same reason as above;
 # uses plain stderr output instead so it's visible without corrupting a
@@ -647,6 +658,23 @@ _vdm_add_mount() {
 
         echo ""
         log_info "Setting up: [$this_share] -> $this_path"
+
+        # Already mounted from an earlier run? Reconfigure it in place
+        # instead of forcing a new label — this is what "redo it" for an
+        # existing share means: no remount, no fresh /etc/fstab entry, just
+        # revisit the one optional step (the decrypt layer) that's actually
+        # safe to redo without touching an already-working plain mount.
+        local existing existing_label existing_point
+        existing="$(_vdm_find_existing_mount "$HOST" "$this_share")"
+        if [ -n "$existing" ]; then
+            existing_label="${existing%%|*}"
+            existing_point="${existing#*|}"
+            log_info "[$this_share] is already mounted as '$existing_label' at $existing_point."
+            VDM_LAST_MOUNT_POINT="$existing_point"
+            picked_any=true
+            _vdm_setup_decrypt_layer "$HOST" "$SSH_USER" "$existing_label" "$existing_point"
+            continue
+        fi
 
         LABEL=""
         while true; do
