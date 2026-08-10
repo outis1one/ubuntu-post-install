@@ -293,11 +293,23 @@ _vdm_find_existing_smb_password() {
 _vdm_prompt_password() {
     local prompt="$1" pw1="" pw2=""
     while true; do
+        # IFS= matters here, not just -s/-r: plain `read -r pw1` (no IFS=)
+        # silently strips leading/trailing whitespace even into a single
+        # variable — confirmed live, a password with a leading/trailing
+        # space (copy-pasted from a password manager, a stray keystroke)
+        # got quietly trimmed on the way in, so the credentials file ended
+        # up holding a DIFFERENT password than the one actually set on the
+        # Samba account. That surfaces as a cryptic mount failure, not an
+        # obvious "wrong password" — nothing here could tell the two apart.
         echo -n "  ${prompt}: " >&2
-        read -r -s pw1; echo "" >&2
+        IFS= read -r -s pw1; echo "" >&2
         echo -n "  Confirm: " >&2
-        read -r -s pw2; echo "" >&2
+        IFS= read -r -s pw2; echo "" >&2
         if [ -n "$pw1" ] && [ "$pw1" = "$pw2" ]; then
+            # Length only, never the password itself — lets you catch a
+            # silently-stripped character (or a typo) yourself before the
+            # mount attempt fails with an unhelpful error.
+            echo "  Captured (${#pw1} characters)." >&2
             printf '%s' "$pw1"
             return 0
         fi
