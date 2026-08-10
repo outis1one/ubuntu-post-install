@@ -6,6 +6,7 @@
 #                                   category menu you loop through
 #   sudo ./setup.sh <service> ...   install one or more services directly
 #   ./setup.sh --list               list available services (grouped)
+#   ./setup.sh --status             list services with install status (no whiptail)
 #   ./setup.sh --version            print version
 #
 # Flags:
@@ -33,13 +34,14 @@ declare -A SERVICE_PRIORITY=( [caddy]=1 [crowdsec]=2 [authelia]=3 )
 declare -A SERVICE_ALIAS=( [asterisk-digital-ocean]=asterisk )
 
 # ── Parse flags / collect service names ──────────────────────────────────────
-DRY_RUN=false; UNATTENDED=false; DO_LIST=false
+DRY_RUN=false; UNATTENDED=false; DO_LIST=false; DO_STATUS=false
 REQUESTED=()
 for arg in "$@"; do
     case "$arg" in
         --dry-run)    DRY_RUN=true ;;
         --unattended) UNATTENDED=true ;;
         --list|-l)    DO_LIST=true ;;
+        --status)     DO_STATUS=true ;;
         --version|-V) cat "$HERE/VERSION" 2>/dev/null || echo "unknown"; exit 0 ;;
         -h|--help)    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
@@ -130,6 +132,25 @@ list_services() {
     echo ""
 }
 
+# Plain-text version of the whiptail checklist's [installed] marker — same
+# is_installed() calls, no whiptail involved. Exists so "is X actually
+# installed" can be answered by reading terminal output directly instead of
+# a checklist screen, where a narrow/resized terminal can truncate or wrap
+# the "[installed]" suffix off-screen without it being obvious that's what
+# happened.
+print_status() {
+    local g name marker
+    while IFS= read -r g; do
+        echo ""; echo "── ${g^^} ──"
+        while IFS= read -r name; do
+            marker="not installed"
+            is_installed "$name" && marker="INSTALLED"
+            printf "  %-20s %-12s %s\n" "$name" "$marker" "${SERVICE_DESC[$name]}"
+        done < <(services_in_group "$g")
+    done < <(groups_present)
+    echo ""
+}
+
 # ── Site defaults wizard ──────────────────────────────────────────────────────
 # Prompts for timezone, base domain, and Caddy network name; saves to .config.
 # Run directly:  sudo ./setup.sh configure
@@ -205,6 +226,9 @@ run_site_configure() {
 
 # ── --list ───────────────────────────────────────────────────────────────────
 if [ "$DO_LIST" = true ]; then list_services; exit 0; fi
+
+# ── --status ─────────────────────────────────────────────────────────────────
+if [ "$DO_STATUS" = true ]; then print_status; exit 0; fi
 
 # ── configure: show/update site-wide defaults ────────────────────────────────
 if [ "${REQUESTED[*]:-}" = "configure" ]; then
