@@ -71,6 +71,22 @@
 #      case for a home-data share; non-ASCII filenames may not round-trip
 #      perfectly on a kernel missing this module, which is a kernel
 #      limitation this script can't paper over further).
+#
+# Optional: a gocryptfs decrypt layer on top of the plain CIFS mount, for
+# when "available to the VPS" and "opaque to the VPS's operator/anyone with
+# disk access to it" both matter. Set up the encrypted store on the home
+# box first with tools/gocryptfs-setup-home.sh (that tool's header explains
+# the actual threat model this buys you and, just as importantly, doesn't).
+# The short version: the home box encrypts before anything ever crosses
+# SMB, so the VPS's CIFS mount only ever holds ciphertext; this script's
+# decrypt layer then fetches the passphrase fresh over the same SSH trust
+# already used for share discovery — piped straight into gocryptfs, never
+# written to this VPS's own disk — and mounts a decrypted view alongside
+# the raw ciphertext mount. Whatever's actively reading through that
+# decrypted view still sees plaintext live, same as any mount anywhere;
+# nothing changes that. What changes is everything else: a snapshot,
+# backup, or disk-level look at this VPS while the passphrase isn't
+# actively loaded shows only ciphertext.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -128,6 +144,14 @@ _vdm_list_existing() {
         echo ""
         log_info "Already-configured VPN data mounts:"
         echo "$entries" | sed "s|^${_VDM_TAG_PREFIX}|  •|"
+        echo ""
+    fi
+
+    local units
+    units="$(systemctl list-unit-files 'vpn-data-mount-decrypt-*.service' --no-legend 2>/dev/null | awk '{print $1}')"
+    if [ -n "$units" ]; then
+        log_info "Decrypt layers configured:"
+        echo "$units" | sed 's/^/  • /'
         echo ""
     fi
 }
@@ -400,6 +424,124 @@ CREDS
     log_success "Added to /etc/fstab (backup: $(basename "$bk"))"
 }
 
+# ── Optional gocryptfs decrypt layer on top of an already-mounted share ────
+# See the file header for the threat model. Fully opt-in, per-share, off by
+# default — a plain unencrypted share works exactly as before.
+_vdm_ensure_gocryptfs() {
+    command -v gocryptfs >/dev/null 2>&1 || apt-get install -y gocryptfs -qq
+
+    # -allow_other needs this uncommented for a non-root mount; harmless
+    # (and unnecessary, since we always mount as root below) otherwise —
+    # cheap to guarantee rather than leave as a silent gotcha if that ever
+    # changes.
+    local conf="/etc/fuse.conf"
+    [ -f "$conf" ] || touch "$conf"
+    if grep -q '^#user_allow_other' "$conf"; then
+        sed -i 's/^#user_allow_other/user_allow_other/' "$conf"
+    elif ! grep -q '^user_allow_other' "$conf"; then
+        echo "user_allow_other" >> "$conf"
+    fi
+}
+
+# Generates /etc/systemd/system/vpn-data-mount-decrypt-<label>.service so the
+# decrypt layer comes back after a reboot the same way the fstab CIFS mount
+# does. RequiresMountsFor sequences it after that mount (whether it's an
+# fstab-generated mount unit or comes up some other way) instead of racing
+# it. The passphrase fetch happens fresh on every start — nothing from it
+# persists in the unit file itself or anywhere else on this disk.
+_vdm_write_decrypt_unit() {
+    local host="$1" ssh_user="$2" label="$3" passfile="$4" cifs_mount_point="$5" decrypted_point="$6"
+    local wrapper="/usr/local/sbin/vpn-data-mount-decrypt-${label}.sh"
+    local unit="/etc/systemd/system/vpn-data-mount-decrypt-${label}.service"
+
+    # A wrapper script, not one long quoted ExecStart= one-liner — a single
+    # ExecStart string embedding an SSH-piped-to-gocryptfs pipeline needs
+    # two independent layers of quoting (systemd's own ExecStart= word
+    # splitting, then bash -c's), which is exactly the kind of thing that
+    # looks right and silently breaks on the one path/host with a space or
+    # an unusual character in it. A plain script just uses normal bash
+    # quoting once.
+    cat > "$wrapper" << WRAPPER
+#!/bin/bash
+set -e
+sudo -u "${ACTUAL_USER}" ssh -o BatchMode=yes -o ConnectTimeout=10 "${ssh_user}@${host}" "cat '${passfile}'" \\
+    | gocryptfs -passfile /dev/stdin -allow_other "${cifs_mount_point}" "${decrypted_point}"
+WRAPPER
+    chmod 700 "$wrapper"
+    chown root:root "$wrapper"
+
+    cat > "$unit" << UNIT
+[Unit]
+Description=vpn-data-mount gocryptfs decrypt layer: ${label}
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=${cifs_mount_point}
+
+[Service]
+Type=forking
+ExecStart=${wrapper}
+ExecStop=/bin/fusermount -u ${decrypted_point}
+Restart=on-failure
+RestartSec=15
+User=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    systemctl daemon-reload
+    if systemctl enable --now "vpn-data-mount-decrypt-${label}.service" >/dev/null 2>&1; then
+        log_success "Decrypt layer will remount automatically on boot (systemd unit: vpn-data-mount-decrypt-${label})"
+    else
+        log_warning "Couldn't enable the boot-time systemd unit — you'll need to re-run the decrypt step manually after a reboot."
+    fi
+}
+
+_vdm_setup_decrypt_layer() {
+    local host="$1" ssh_user="$2" label="$3" cifs_mount_point="$4"
+
+    echo ""
+    local WANT=""
+    prompt_yn "  Is [$label] a gocryptfs-encrypted share (set up on the home box with tools/gocryptfs-setup-home.sh)? Layer decryption on top? (y/n):" "n" WANT
+    [[ "$WANT" =~ ^[Yy]$ ]] || return 0
+
+    _vdm_ensure_gocryptfs
+
+    local passfile=""
+    prompt_text "  Path to the passphrase file on the home box (printed at the end of gocryptfs-setup-home.sh):" "" passfile
+    if [ -z "$passfile" ]; then
+        log_warning "No path given — skipping the decrypt layer for [$label]."
+        return 0
+    fi
+
+    if ! sudo -u "$ACTUAL_USER" ssh -o BatchMode=yes -o ConnectTimeout=5 "${ssh_user}@${host}" "test -f '$passfile'" 2>/dev/null; then
+        log_warning "Can't see $passfile on ${ssh_user}@${host} — skipping the decrypt layer for [$label]. Run tools/gocryptfs-setup-home.sh there first, or check the path."
+        return 0
+    fi
+
+    local decrypted_point=""
+    prompt_text "  Local mount point for the decrypted view:" "${cifs_mount_point}-decrypted" decrypted_point
+    mkdir -p "$decrypted_point"
+
+    if mountpoint -q "$decrypted_point" 2>/dev/null; then
+        log_info "$decrypted_point is already mounted — leaving it as-is, just (re)writing the boot-time unit."
+    else
+        if ! sudo -u "$ACTUAL_USER" ssh -o BatchMode=yes "${ssh_user}@${host}" "cat '$passfile'" \
+            | gocryptfs -passfile /dev/stdin -allow_other "$cifs_mount_point" "$decrypted_point"; then
+            log_error "gocryptfs mount failed for [$label] — check the passphrase file on the home box and that $cifs_mount_point actually holds a gocryptfs store (gocryptfs.conf present at its root)."
+            rmdir "$decrypted_point" 2>/dev/null || true
+            return 1
+        fi
+        log_success "Decrypted view mounted at $decrypted_point"
+    fi
+
+    _vdm_write_decrypt_unit "$host" "$ssh_user" "$label" "$passfile" "$cifs_mount_point" "$decrypted_point"
+
+    # Point chained callers (filebrowser.sh etc.) at the decrypted view
+    # instead of the raw ciphertext mount, same out-param as elsewhere.
+    VDM_LAST_MOUNT_POINT="$decrypted_point"
+}
+
 # ── Parse a selection like "1", "1,3", "1-3", "1 3 5" into 1-based indices ──
 # Prints one index per line. Silently drops anything that doesn't look like
 # a number or a range — the caller validates indices against the actual
@@ -527,8 +669,11 @@ _vdm_add_mount() {
             # emby.sh that chain into this service and want to default
             # their own "which directory" prompt to whatever was just
             # mounted. Last one wins if several were picked in this run.
+            # _vdm_setup_decrypt_layer overwrites this with the decrypted
+            # view's path instead, if one gets set up for this share.
             VDM_LAST_MOUNT_POINT="$MOUNT_POINT"
             picked_any=true
+            _vdm_setup_decrypt_layer "$HOST" "$SSH_USER" "$LABEL" "$MOUNT_POINT"
         fi
     done
 
@@ -553,6 +698,7 @@ install_vpn-data-mount() {
         echo "[DRY-RUN] Would read-only list the home box's existing Samba shares (never writes there)"
         echo "[DRY-RUN] Would let you pick one or more by number and mount them locally over CIFS"
         echo "[DRY-RUN] Would add each to /etc/fstab with a root-only credentials file (not guest)"
+        echo "[DRY-RUN] Would offer a gocryptfs decrypt layer per share (opt-in, requires the home box already set up via tools/gocryptfs-setup-home.sh)"
         echo "[DRY-RUN] Repeatable — can be run again for additional home boxes"
         return 0
     fi
