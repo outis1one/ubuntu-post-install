@@ -8,7 +8,18 @@
 #
 # Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- FINDMYDEVICE ----).
 # Own ~/docker/fmd/ with a standalone docker-compose.yml + .env.
-# Mobile app: "FindMyDevice" on F-Droid — not the Play Store version.
+# Mobile app: "FMD" (by Nulide) on F-Droid — not the Google Find My Device app.
+#
+# Image: registry.gitlab.com/fmd-foss/fmd-server (GitLab's own registry, no
+# Docker Hub image exists). The project has moved twice — originally
+# nulide/findmydevice on Docker Hub, then gitlab.com/Nulide/findmydeviceserver,
+# now gitlab.com/fmd-foss/fmd-server — and was rewritten from Node.js to
+# Go+React along the way. Confirmed live: the old nulide/findmydevice image
+# no longer exists at all ("pull access denied"), so this service never
+# actually started on any box that installed it before this fix. The old
+# single shared FMD_ADMIN_PASSWORD model is gone too — the current server
+# uses per-user self-registration gated by an optional FMD_REGISTRATIONTOKEN,
+# and stores its database at /var/lib/fmd-server/db, not /fmd/data.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 # Detected when the script is executed directly rather than sourced by setup.sh.
@@ -224,7 +235,7 @@ install_fmd() {
         echo "[DRY-RUN] FindMyDevice would:"
         echo "  - Offer to add a new, separate instance if one already exists"
         echo "  - Create \$DOCKER_DIR/fmd(-<name>) with docker-compose.yml + .env (data/)"
-        echo "  - Generate a random admin password"
+        echo "  - Generate a random registration token"
         echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
@@ -256,6 +267,28 @@ install_fmd() {
             FMD_DIR="$DOCKER_DIR/fmd-$_suffix"
             CONTAINER="fmd-$_suffix"
             log_info "New instance: $FMD_DIR"
+        else
+            # "Manage that install" on THIS instance — the banner above promises
+            # update/fresh/cancel, so actually offer it instead of falling straight
+            # through into the same unconditional-overwrite flow as a new install.
+            if [[ -f "$FMD_DIR/docker-compose.yml" ]]; then
+                local MODE=""
+                prompt_reinstall_mode MODE
+                case "$MODE" in
+                    update)
+                        log_info "Refreshing the FindMyDevice image only — token, port, and Caddy config are left as-is."
+                        ( cd "$FMD_DIR" && docker compose pull && docker compose up -d ) \
+                            && log_success "FindMyDevice image refreshed" \
+                            || log_warning "Refresh failed — check: docker compose -f $FMD_DIR/docker-compose.yml logs"
+                        return 0
+                        ;;
+                    cancel)
+                        log_info "Leaving the existing install as-is."
+                        return 0
+                        ;;
+                    fresh) ;;  # fall through to the full install flow below
+                esac
+            fi
         fi
     fi
 
@@ -269,8 +302,8 @@ install_fmd() {
     ensure_docker_dir_ownership "$FMD_DIR"
     cd "$FMD_DIR" || return 1
 
-    local FMD_PASS
-    FMD_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    local FMD_TOKEN
+    FMD_TOKEN=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
     # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
@@ -300,21 +333,21 @@ name: $CONTAINER
 
 services:
   fmd:
-    image: nulide/findmydevice
+    image: registry.gitlab.com/fmd-foss/fmd-server:0
     container_name: $CONTAINER
     hostname: $CONTAINER
     restart: unless-stopped
     environment:
-      - FMD_ADMIN_PASSWORD=\${FMD_ADMIN_PASSWORD}
+      - FMD_REGISTRATIONTOKEN=\${FMD_REGISTRATIONTOKEN}
     volumes:
-      - ./data:/fmd/data
+      - ./data:/var/lib/fmd-server/db
     ports:
       - "${WEB_PORT}:8080"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FMD_COMPOSE
 
     cat > .env << FMD_ENV
-FMD_ADMIN_PASSWORD=$FMD_PASS
+FMD_REGISTRATIONTOKEN=$FMD_TOKEN
 CADDY_NET=$SITE_CADDY_NET
 FMD_ENV
 
@@ -334,8 +367,11 @@ This is a separate, fully isolated instance (own server, own password, own
 port) — not shared devices with another FindMyDevice instance.")
 
 - Web UI: http://localhost:${WEB_PORT}
-- Admin password: stored in \`.env\` (\`FMD_ADMIN_PASSWORD\`)
-- App data: \`data/\`
+- Registration token: stored in \`.env\` (\`FMD_REGISTRATIONTOKEN\`) — the FMD
+  app must supply this when creating an account on this server, so a
+  stranger who finds the URL can't just self-register. Leave the \`.env\`
+  value blank and restart if you'd rather allow open registration.
+- App data: \`data/\` (mounted at the container's own db path)
 
 ## Manage
 \`\`\`bash
@@ -347,9 +383,11 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## Mobile app
-Install **FindMyDevice** from **F-Droid** (not the Play Store version):
-1. Open the app → Settings → Server URL → \`http://YOUR-SERVER-IP:${WEB_PORT}\`
-2. Enter your admin password from \`.env\`
+Install **FMD** from **F-Droid** (search "Find My Device", by Nulide — not
+the Google "Find My Device" app):
+1. Open the app → create/register an account → Server URL →
+   \`http://YOUR-SERVER-IP:${WEB_PORT}\`
+2. Enter the registration token from \`.env\` when prompted
 3. Grant location and accessibility permissions
 MD
 
@@ -360,9 +398,9 @@ MD
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:${WEB_PORT}"
-    echo "  Password:   $FMD_PASS  (saved in .env)"
-    echo "  Mobile app: FindMyDevice on F-Droid"
+    echo "  Access at:          http://localhost:${WEB_PORT}"
+    echo "  Registration token: $FMD_TOKEN  (saved in .env)"
+    echo "  Mobile app:         FMD (by Nulide) on F-Droid"
     echo ""
 }
 
