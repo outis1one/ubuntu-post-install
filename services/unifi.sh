@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         generate_password() {
             local _len="${1:-32}"
             tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$_len"
@@ -98,15 +113,74 @@ register_service unifi utilities "Ubiquiti network controller (UniFi)" 8443
 install_unifi() {
     require_docker || return 1
     log_info "Installing UniFi Network Application..."
+
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "unifi-db"/"unifi-app" names/paths/ports
+    # exactly as before (zero behavior change for anyone with a single
+    # instance). Only asking to add a second one introduces suffixed naming —
+    # same pattern as services/mattermost.sh and services/wordpress.sh.
+    # Each instance gets its own dedicated MongoDB container (not shared) —
+    # see CLAUDE.md's "Multi-instance services" section for why: Kopia's
+    # generic backup stops the container to snapshot it, so a shared DB would
+    # back up/restore every instance's site data as one unit instead of
+    # per-instance. All 4 published ports move together per instance.
     local UNIFI_DIR="$DOCKER_DIR/unifi"
+    local INSTANCE_SUFFIX="" PROJECT="unifi" DB_CONTAINER="unifi-db" APP_CONTAINER="unifi-app"
+    local WEB_PORT="8443" INFORM_PORT="8080" STUN_PORT="3478" DISCOVERY_PORT="10001"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $UNIFI_DIR (mongo_db_data/, unifi_data/)"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create \$DOCKER_DIR/unifi(-<name>) (mongo_db_data/, unifi_data/)"
         echo "[DRY-RUN] Would deploy mongo:4 + linuxserver/unifi-network-application:latest"
         echo "[DRY-RUN] Ports: 8443 (HTTPS web UI), 8080 (device inform), 3478/udp (STUN), 10001/udp (discovery)"
+        echo "[DRY-RUN]   — all 4 auto-scanned/shifted together for additional instances"
         echo "[DRY-RUN] Would generate MongoDB credentials"
         return 0
     fi
+
+    if [ -d "$UNIFI_DIR" ]; then
+        echo ""
+        echo "  UniFi is already installed at $UNIFI_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate UniFi controller instance alongside it (its own"
+        echo "       database, sites, and ports — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'guest-site'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/unifi-$_suffix" ]; then
+                    log_warning "unifi-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            UNIFI_DIR="$DOCKER_DIR/unifi-$_suffix"
+            PROJECT="unifi-$_suffix"
+            DB_CONTAINER="unifi-db-$_suffix"
+            APP_CONTAINER="unifi-app-$_suffix"
+            log_info "New instance: $UNIFI_DIR"
+        fi
+    fi
+
+    # Scan for free ports unconditionally, moving all 4 together — not just
+    # when adding an explicit additional instance. A plain first install can
+    # just as easily collide with an unrelated service that already claimed
+    # one of these default ports — see CLAUDE.md's "Port collision
+    # avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$INFORM_PORT" \
+       || port_in_use "$STUN_PORT" udp || port_in_use "$DISCOVERY_PORT" udp; do
+        WEB_PORT=$((WEB_PORT + 1))
+        INFORM_PORT=$((INFORM_PORT + 1))
+        STUN_PORT=$((STUN_PORT + 1))
+        DISCOVERY_PORT=$((DISCOVERY_PORT + 1))
+    done
 
     mkdir -p "$UNIFI_DIR"
     ensure_docker_dir_ownership "$UNIFI_DIR"
@@ -143,13 +217,13 @@ networks:
 
     # Unquoted heredoc; ${...} used for caddy_net vars; all Docker Compose vars escaped with \$
     cat > docker-compose.yml << UNIFI_COMPOSE
-name: unifi
+name: $PROJECT
 
 services:
   unifi-db:
     image: mongo:4
-    container_name: unifi-db
-    hostname: unifi-db
+    container_name: $DB_CONTAINER
+    hostname: $DB_CONTAINER
     restart: unless-stopped
     env_file: .env
     volumes:
@@ -162,8 +236,8 @@ services:
 
   unifi-app:
     image: lscr.io/linuxserver/unifi-network-application:latest
-    container_name: unifi-app
-    hostname: unifi-app
+    container_name: $APP_CONTAINER
+    hostname: $APP_CONTAINER
     restart: unless-stopped
     env_file: .env
     depends_on:
@@ -171,10 +245,10 @@ services:
     volumes:
       - ./unifi_data:/config
     ports:
-      - "8443:8443"
-      - "8080:8080"
-      - "3478:3478/udp"
-      - "10001:10001/udp"
+      - "${WEB_PORT}:8443"
+      - "${INFORM_PORT}:8080"
+      - "${STUN_PORT}:3478/udp"
+      - "${DISCOVERY_PORT}:10001/udp"
       # Optional — uncomment as needed:
       # - "1900:1900/udp"   # L2 discovery (may conflict with UPnP)
       # - "8843:8843"       # guest portal HTTPS
@@ -216,7 +290,7 @@ UNIFI_ENV
     mkdir -p mongo_db_data unifi_data
     ensure_docker_dir_ownership "$UNIFI_DIR"
 
-    log_success "UniFi configured at $UNIFI_DIR"
+    log_success "UniFi${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $UNIFI_DIR (web port $WEB_PORT)"
 
     # ── Optional Caddy reverse proxy (HTTPS backend requires tls_insecure_skip_verify) ──
     local _caddy_mode="none"
@@ -232,15 +306,18 @@ UNIFI_ENV
         fi
         echo ""
         local CADDY_UNIFI=""
-        prompt_yn "Configure Caddy reverse proxy for UniFi? (y/n):" "n" CADDY_UNIFI
+        prompt_yn "Configure Caddy reverse proxy for UniFi${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}? (y/n):" "n" CADDY_UNIFI
         if [ "$CADDY_UNIFI" = "y" ] || [ "$CADDY_UNIFI" = "Y" ]; then
             local UNIFI_DOMAIN=""
-            local _def_domain="unifi.${SITE_DOMAIN:-example.com}"
+            local _def_domain="unifi${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN:-example.com}"
             prompt_text "UniFi domain [${_def_domain}]:" "$_def_domain" UNIFI_DOMAIN
             if [ -n "$UNIFI_DOMAIN" ]; then
-                # UniFi uses HTTPS internally — upstream must use https:// + skip verify
-                local _upstream="https://unifi-app:8443"
-                [ "$_caddy_mode" = "remote" ] && _upstream="https://${CADDY_REMOTE_HOST}:8443"
+                # UniFi uses HTTPS internally — upstream must use https:// + skip verify.
+                # Local mode reaches the container over Docker networking (internal port
+                # never changes); remote mode reaches this host's published port, which
+                # is WEB_PORT (auto-scanned for additional instances).
+                local _upstream="https://${APP_CONTAINER}:8443"
+                [ "$_caddy_mode" = "remote" ] && _upstream="https://${CADDY_REMOTE_HOST}:${WEB_PORT}"
 
                 local _site_block
                 _site_block="$(cat << CBLOCK
@@ -277,7 +354,7 @@ CBLOCK
                         || log_warning "Caddy reload failed — check: docker logs caddy"
                 else
                     local _snippet_dir="$DOCKER_DIR/caddy-snippets"
-                    local _snippet_file="$_snippet_dir/unifi.caddy"
+                    local _snippet_file="$_snippet_dir/unifi${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.caddy"
                     mkdir -p "$_snippet_dir"
                     printf '%s\n' "$_site_block" > "$_snippet_file"
                     chown "$ACTUAL_USER:$ACTUAL_USER" "$_snippet_file" 2>/dev/null || true
@@ -290,25 +367,29 @@ CBLOCK
     fi
 
     write_readme "$UNIFI_DIR" << MD
-# UniFi Network Application
+# UniFi Network Application${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Ubiquiti network controller. Manages UniFi APs, switches, and gateways.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own dedicated database, own
+sites/devices, own ports) — not shared adoption with another UniFi instance.
+Devices can only be adopted by one controller at a time.")
 
 ## Access
-- Web UI: **https://localhost:8443** (HTTPS, self-signed cert — accept the warning)
+- Web UI: **https://localhost:${WEB_PORT}** (HTTPS, self-signed cert — accept the warning)
 - First run: complete the setup wizard and adopt your devices.
 
 ## Device adoption
-Make sure devices can reach **http://<server-ip>:8080/inform** as the inform URL.
+Make sure devices can reach **http://<server-ip>:${INFORM_PORT}/inform** as the inform URL.
 In the controller: Settings → System → Application Configuration → Override inform host.
 
 ## Ports
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 8443 | TCP | HTTPS web UI |
-| 8080 | TCP | Device inform / HTTP redirect |
-| 3478 | UDP | STUN |
-| 10001 | UDP | AP discovery |
+| ${WEB_PORT} | TCP | HTTPS web UI |
+| ${INFORM_PORT} | TCP | Device inform / HTTP redirect |
+| ${STUN_PORT} | UDP | STUN |
+| ${DISCOVERY_PORT} | UDP | AP discovery |
 
 ## Manage
 \`\`\`bash
@@ -327,15 +408,15 @@ docker compose pull && docker compose up -d   # update (wait for DB first)
 MD
 
     local START_UNIFI=""
-    prompt_yn "Start UniFi now? (y/n):" "y" START_UNIFI
+    prompt_yn "Start UniFi${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_UNIFI
     if [ "$START_UNIFI" = "y" ] || [ "$START_UNIFI" = "Y" ]; then
         docker compose up -d \
-            && log_success "UniFi started (first startup takes ~60 s while DB initializes)" \
+            && log_success "UniFi${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started (first startup takes ~60 s while DB initializes)" \
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Web UI:  https://localhost:8443  (accept the self-signed cert warning)"
+    echo "  Web UI:  https://localhost:${WEB_PORT}  (accept the self-signed cert warning)"
     echo "  MongoDB credentials saved to: $UNIFI_DIR/.env"
     echo ""
 }

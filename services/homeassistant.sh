@@ -44,6 +44,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -189,9 +204,13 @@ install_homeassistant() {
     require_docker || return 1
     log_info "Installing Home Assistant..."
     local HOMEASSISTANT_DIR="$DOCKER_DIR/homeassistant"
+    local WEB_PORT="8123"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $HOMEASSISTANT_DIR"
+        echo "[DRY-RUN] Bridge mode would auto-scan for a free host port; host mode"
+        echo "[DRY-RUN] can only warn on a collision (Home Assistant's own port isn't"
+        echo "[DRY-RUN] configurable, and host networking has no remapping)"
         return 0
     fi
 
@@ -224,16 +243,25 @@ install_homeassistant() {
         HA_NET_LINES="    network_mode: host"
         HA_CADDY_NET_LINES=""
         echo "  → Host networking selected (best device discovery)."
+        # Host mode has no port remapping and Home Assistant's own port isn't
+        # configurable via env var — a collision here can only be warned
+        # about, not silently fixed. See CLAUDE.md's "Port collision
+        # avoidance" section.
+        port_in_use "$WEB_PORT" && log_warning "Port $WEB_PORT is already in use by another process — Home Assistant won't be reachable until that's resolved (this port isn't configurable with host networking)."
     else
+        # Bridge mode can freely remap — scan for a free host port so a
+        # plain install doesn't silently claim a port another
+        # already-running service holds.
+        find_free_port WEB_PORT "$WEB_PORT"
         HA_NET_LINES="    ports:
-      - \"8123:8123\""
+      - \"${WEB_PORT}:8123\""
         if [ "$_CADDY_MODE" = "local" ]; then
             HA_CADDY_NET_LINES="    networks:
       - caddy_net"
         else
             HA_CADDY_NET_LINES=""
         fi
-        echo "  → Bridge networking selected (port 8123 published)."
+        echo "  → Bridge networking selected (port $WEB_PORT published)."
     fi
 
     local _CADDY_NET_SECTION=""
@@ -292,7 +320,7 @@ HA_CONFIG
     log_success "Home Assistant configured at $HOMEASSISTANT_DIR"
 
     if [ "$HA_NETMODE" = "2" ]; then
-        configure_caddy_for_service "Home Assistant" "8123" "home"
+        configure_caddy_for_service "Home Assistant" "$WEB_PORT" "home"
     else
         configure_caddy_for_service "Home Assistant" "homeassistant:8123" "home"
     fi
@@ -303,7 +331,7 @@ HA_CONFIG
 Home automation hub. Built-in auth — no Authelia needed.
 
 ## Access
-- URL: http://localhost:8123
+- URL: http://localhost:${WEB_PORT}
 - First run: create your admin account through the onboarding wizard
 
 ## Manage
@@ -322,7 +350,7 @@ MD
         docker compose up -d 2>/dev/null && log_success "Home Assistant started" || log_warning "Failed to start"
     fi
 
-    echo "  Access at:  http://localhost:8123"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  First run:  open the URL and create your admin account (onboarding)."
     echo "  Note:       first startup can take a minute while HA initializes."
     echo ""

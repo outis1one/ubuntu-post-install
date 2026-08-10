@@ -52,6 +52,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -231,6 +246,22 @@ install_caddy() {
             echo "  Skipping Caddy installation"
             return 0
         fi
+    fi
+
+    # Unlike every other service, Caddy's ports (80/443) are NOT auto-scanned
+    # or shifted on a collision — see CLAUDE.md's "Port collision avoidance"
+    # section. Every other service in this repo either points HTTPS clients
+    # at Caddy implicitly (browsers assume 443) or gets its own reverse-proxy
+    # domain through it; silently moving Caddy to a random port would leave
+    # nothing at the address clients actually try, which is strictly worse
+    # than the collision itself. If 80/443 are already taken, that's a real
+    # conflict (another web server already bound to those ports) the user
+    # needs to resolve directly — warn loudly instead of masking it.
+    if port_in_use 80 || port_in_use 443; then
+        log_warning "Port 80 and/or 443 is already in use by another process."
+        log_warning "Caddy needs both to serve HTTPS — find what's using them"
+        log_warning "(sudo ss -tlnp 'sport = :80' / ':443') and stop it, or Caddy"
+        log_warning "will fail to start. Continuing anyway — this is not auto-fixed."
     fi
 
     mkdir -p "$CADDY_DIR/data" "$CADDY_DIR/config"

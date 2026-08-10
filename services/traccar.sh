@@ -47,6 +47,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_yn() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -252,10 +267,6 @@ install_traccar() {
             AUTOHEAL_CONTAINER="traccar-$_suffix-autoheal"
             AUTOHEAL_LABEL="autoheal-traccar-$_suffix"
 
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-            done
-
             # Count existing traccar/traccar-* dirs (this new one isn't
             # created yet, so the first extra instance counts exactly 1
             # existing dir -> offset 1 -> 6000-6150).
@@ -265,9 +276,17 @@ install_traccar() {
             PROTO_MIN=$((5000 + _offset))
             PROTO_MAX=$((5150 + _offset))
 
-            log_info "New instance: $TRACCAR_DIR (web port $WEB_PORT, device protocols $PROTO_MIN-$PROTO_MAX)"
+            log_info "New instance: $TRACCAR_DIR (device protocols $PROTO_MIN-$PROTO_MAX)"
         fi
     fi
+
+    # Scan for a free web port unconditionally — not just when adding an
+    # explicit additional instance. A plain first install can just as easily
+    # collide with an unrelated service that already claimed this default
+    # port — see CLAUDE.md's "Port collision avoidance" section. The
+    # PROTO_MIN/PROTO_MAX device-protocol range above is a different,
+    # directory-count-based mechanism (not an ss scan) and is unaffected.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$TRACCAR_DIR"
     # Non-recursive on purpose — a rerun already has a `db/` full of Postgres's

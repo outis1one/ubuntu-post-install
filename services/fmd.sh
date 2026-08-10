@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -196,16 +211,59 @@ register_service fmd utilities "Android device tracking — alternative to Googl
 install_fmd() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "fmd" name/paths/port exactly as before
+    # (zero behavior change for anyone with a single instance). Only asking to
+    # add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local FMD_DIR="$DOCKER_DIR/fmd"
+    local INSTANCE_SUFFIX="" CONTAINER="fmd"
+    local WEB_PORT="8084"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] FindMyDevice would:"
-        echo "  - Create $FMD_DIR with docker-compose.yml + .env (data/)"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/fmd(-<name>) with docker-compose.yml + .env (data/)"
         echo "  - Generate a random admin password"
-        echo "  - Expose port 8084"
+        echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
+
+    if [ -d "$FMD_DIR" ]; then
+        echo ""
+        echo "  FindMyDevice is already installed at $FMD_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate FindMyDevice instance alongside it (its own"
+        echo "       server, password, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'kids'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/fmd-$_suffix" ]; then
+                    log_warning "fmd-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            FMD_DIR="$DOCKER_DIR/fmd-$_suffix"
+            CONTAINER="fmd-$_suffix"
+            log_info "New instance: $FMD_DIR"
+        fi
+    fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port — see
+    # CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$FMD_DIR"
     ensure_docker_dir_ownership "$FMD_DIR"
@@ -238,20 +296,20 @@ networks:
     fi
 
     cat > docker-compose.yml << FMD_COMPOSE
-name: fmd
+name: $CONTAINER
 
 services:
   fmd:
     image: nulide/findmydevice
-    container_name: fmd
-    hostname: fmd
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - FMD_ADMIN_PASSWORD=\${FMD_ADMIN_PASSWORD}
     volumes:
       - ./data:/fmd/data
     ports:
-      - "8084:8080"
+      - "${WEB_PORT}:8080"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FMD_COMPOSE
 
@@ -262,17 +320,20 @@ FMD_ENV
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FMD_DIR"
-    log_success "FindMyDevice configured at $FMD_DIR"
+    log_success "FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $FMD_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "FindMyDevice" "fmd:8080" "fmd"
+    configure_caddy_for_service "FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:8080" "fmd${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$FMD_DIR" << MD
-# FindMyDevice (FMD)
+# FindMyDevice (FMD)${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted Android device tracking — locate, lock, or wipe your device
 from the web UI. Alternative to Google's Find My Device.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own password, own
+port) — not shared devices with another FindMyDevice instance.")
 
-- Web UI: http://localhost:8084
+- Web UI: http://localhost:${WEB_PORT}
 - Admin password: stored in \`.env\` (\`FMD_ADMIN_PASSWORD\`)
 - App data: \`data/\`
 
@@ -287,19 +348,19 @@ docker compose pull && docker compose up -d   # update
 
 ## Mobile app
 Install **FindMyDevice** from **F-Droid** (not the Play Store version):
-1. Open the app → Settings → Server URL → \`http://YOUR-SERVER-IP:8084\`
+1. Open the app → Settings → Server URL → \`http://YOUR-SERVER-IP:${WEB_PORT}\`
 2. Enter your admin password from \`.env\`
 3. Grant location and accessibility permissions
 MD
 
     local START_FMD=""
-    prompt_yn "Start FindMyDevice now? (y/n):" "y" START_FMD
+    prompt_yn "Start FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_FMD
     if [ "$START_FMD" = "y" ] || [ "$START_FMD" = "Y" ]; then
-        docker compose up -d && log_success "FindMyDevice started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:8084"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Password:   $FMD_PASS  (saved in .env)"
     echo "  Mobile app: FindMyDevice on F-Droid"
     echo ""

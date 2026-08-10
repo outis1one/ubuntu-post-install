@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -196,17 +211,94 @@ register_service lyrion media "Music streaming server — Squeezebox, Chromecast
 install_lyrion() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "lyrion" name/paths/ports and
+    # network_mode: host exactly as before (zero behavior change for anyone
+    # with a single instance) — host networking is what makes Chromecast and
+    # Squeezebox UDP broadcast/multicast discovery work without manual setup.
+    #
+    # A second instance CANNOT also use network_mode: host — both would bind
+    # the same fixed host ports (9000/9090/3483) and collide outright, and
+    # Docker only allows one container on host networking to own a given port.
+    # So additional instances switch to bridge networking with auto-scanned,
+    # per-instance ports instead. The tradeoff: bridge mode means this
+    # instance loses the zero-config broadcast/multicast auto-discovery that
+    # host networking provides — Chromecasts and Squeezebox hardware won't
+    # find it automatically. Players still work, just not auto-discovered:
+    # point the Squeezer app / Squeezebox firmware at this server's address
+    # and port manually instead of relying on discovery.
     local LYRION_DIR="$DOCKER_DIR/lyrion"
+    local INSTANCE_SUFFIX="" CONTAINER="lyrion"
+    local USE_HOST_NETWORK=true
+    local WEB_PORT="9000" CLI_PORT="9090" PLAYER_PORT="3483"
     local DEFAULT_MUSIC="$ACTUAL_HOME/music"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Lyrion Music Server would:"
-        echo "  - Create $LYRION_DIR with docker-compose.yml + .env (config/ playlists/)"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/lyrion(-<name>) with docker-compose.yml + .env (config/ playlists/)"
         echo "  - Mount a music folder (default $DEFAULT_MUSIC) read-only at /music"
-        echo "  - Run with network_mode: host (required for Chromecast/Squeezebox UDP discovery)"
-        echo "  - Expose port 9000 (web), 9090 (CLI), 3483 (players)"
+        echo "  - First instance: network_mode: host (Chromecast/Squeezebox UDP discovery)"
+        echo "    ports 9000 (web), 9090 (CLI), 3483 (players)"
+        echo "  - Additional instances: bridge networking with auto-scanned ports —"
+        echo "    loses zero-config discovery; players need the server address entered manually"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
+    fi
+
+    if [ -d "$LYRION_DIR" ]; then
+        echo ""
+        echo "  Lyrion is already installed at $LYRION_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Lyrion instance alongside it (its own"
+        echo "       server, library, and ports — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'kids'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/lyrion-$_suffix" ]; then
+                    log_warning "lyrion-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            LYRION_DIR="$DOCKER_DIR/lyrion-$_suffix"
+            CONTAINER="lyrion-$_suffix"
+            DEFAULT_MUSIC="$ACTUAL_HOME/music-$_suffix"
+            USE_HOST_NETWORK=false
+
+            log_warning "Additional Lyrion instances use bridge networking (not host) so they"
+            log_warning "don't collide with the first instance's fixed ports. This instance"
+            log_warning "loses zero-config Chromecast/Squeezebox discovery — enter its address"
+            log_warning "manually in the Squeezer app / Squeezebox firmware instead."
+            log_info "New instance: $LYRION_DIR"
+        fi
+    fi
+
+    # Port collision avoidance — see CLAUDE.md's "Port collision avoidance"
+    # section. Bridge-mode instances can fully auto-scan (all 3 ports move
+    # together). Host-mode (the first instance) can only auto-adjust
+    # WEB_PORT — HTTP_PORT is a real env var the image honors even under
+    # host networking — CLI_PORT/PLAYER_PORT are hardcoded inside the image
+    # with no override, so a collision there can only be warned about, not
+    # silently fixed.
+    if [ "$USE_HOST_NETWORK" = true ]; then
+        find_free_port WEB_PORT "$WEB_PORT"
+        port_in_use "$CLI_PORT" && log_warning "CLI port $CLI_PORT is already in use by another process — Lyrion's CLI interface won't be reachable until that's resolved (this port isn't configurable in the image)."
+        port_in_use "$PLAYER_PORT" && log_warning "Player port $PLAYER_PORT is already in use by another process — Squeezebox/app connections won't work until that's resolved (this port isn't configurable in the image)."
+    else
+        while port_in_use "$WEB_PORT" || port_in_use "$CLI_PORT" || port_in_use "$PLAYER_PORT"; do
+            WEB_PORT=$((WEB_PORT + 1))
+            CLI_PORT=$((CLI_PORT + 1))
+            PLAYER_PORT=$((PLAYER_PORT + 1))
+        done
     fi
 
     local MUSIC_PATH=""
@@ -221,18 +313,35 @@ install_lyrion() {
     TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
     UID_VAL=$(id -u "$ACTUAL_USER"); GID_VAL=$(id -g "$ACTUAL_USER")
 
+    # Host mode has no ports: remapping — HTTP_PORT is the only thing that
+    # actually controls the bind port, so it must track the scanned WEB_PORT.
+    # Bridge mode keeps the container's internal port fixed at 9000 and lets
+    # the ports: line do the remapping instead.
+    local _NETWORK_BLOCK="    network_mode: host
+"
+    local _PORTS_BLOCK=""
+    local _HTTP_PORT_INTERNAL="$WEB_PORT"
+    if [ "$USE_HOST_NETWORK" != true ]; then
+        _NETWORK_BLOCK=""
+        _PORTS_BLOCK="    ports:
+      - \"${WEB_PORT}:9000\"
+      - \"${CLI_PORT}:9090\"
+      - \"${PLAYER_PORT}:3483\"
+"
+        _HTTP_PORT_INTERNAL="9000"
+    fi
+
     cat > docker-compose.yml << LYRION_COMPOSE
-name: lyrion
+name: $CONTAINER
 
 services:
   lyrion:
     image: lmscommunity/lyrionmusicserver:stable
-    container_name: lyrion
-    hostname: lyrion
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
-    network_mode: host
-    environment:
-      - HTTP_PORT=9000
+${_NETWORK_BLOCK}${_PORTS_BLOCK}    environment:
+      - HTTP_PORT=$_HTTP_PORT_INTERNAL
       - PUID=$UID_VAL
       - PGID=$GID_VAL
       - TZ=$TZ_VAL
@@ -251,19 +360,26 @@ LYRION_ENV
 
     mkdir -p config playlists
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$LYRION_DIR"
-    log_success "Lyrion Music Server configured at $LYRION_DIR"
+    log_success "Lyrion Music Server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $LYRION_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Lyrion" "9000" "lyrion"
+    configure_caddy_for_service "Lyrion${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${WEB_PORT}" "lyrion${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$LYRION_DIR" << MD
-# Lyrion Music Server
+# Lyrion Music Server${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Stream music to Squeezebox devices, the Squeezer Android/iOS app, and Chromecast.
 Formerly known as Logitech Media Server (LMS).
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own library, own
+ports) — not a shared library with another Lyrion instance. It runs on
+**bridge networking**, not host networking, so it does NOT get zero-config
+Chromecast/Squeezebox discovery — enter this server's address and port
+manually in the Squeezer app or Squeezebox firmware instead of relying on
+auto-discovery.")
 
-- Web UI: http://localhost:9000
-- Player port: 3483 (Squeezeboxes / apps)
-- CLI port: 9090
+- Web UI: http://localhost:${WEB_PORT}
+- Player port: ${PLAYER_PORT} (Squeezeboxes / apps)
+- CLI port: ${CLI_PORT}
 - Music folder (read-only): \`$MUSIC_PATH\` → mounted at /music
 - App data: \`config/\` and \`playlists/\`
 
@@ -277,21 +393,26 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## Notes
-- Uses \`network_mode: host\` so UDP discovery for Chromecast and Squeezebox devices
-  works without manual port mapping.
+$( [ "$USE_HOST_NETWORK" = true ] && echo "- Uses \`network_mode: host\` so UDP discovery for Chromecast and Squeezebox devices
+  works without manual port mapping." || echo "- Uses bridge networking (auto-scanned ports) since the first instance already
+  owns the fixed host-networking ports. Discovery is manual for this instance." )
 - Change the music path in \`.env\` (\`MUSIC_PATH=\`), then \`docker compose up -d\`.
 - Add music libraries in the web UI under Settings → Music Library.
 MD
 
     local START_LMS=""
-    prompt_yn "Start Lyrion Music Server now? (y/n):" "y" START_LMS
+    prompt_yn "Start Lyrion Music Server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_LMS
     if [ "$START_LMS" = "y" ] || [ "$START_LMS" = "Y" ]; then
-        docker compose up -d && log_success "Lyrion started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Lyrion${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:9000"
-    echo "  Note: uses host networking for Chromecast/Squeezebox UDP discovery"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
+    if [ "$USE_HOST_NETWORK" = true ]; then
+        echo "  Note: uses host networking for Chromecast/Squeezebox UDP discovery"
+    else
+        echo "  Note: uses bridge networking — no auto-discovery, configure players manually"
+    fi
     echo ""
 }
 

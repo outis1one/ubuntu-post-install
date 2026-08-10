@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -196,16 +211,64 @@ register_service meshcentral utilities "Self-hosted remote device management ser
 install_meshcentral() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "meshcentral" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh. Two ports (web + agent)
+    # move together so they stay easy to reason about instance-to-instance.
     local MC_DIR="$DOCKER_DIR/meshcentral"
+    local INSTANCE_SUFFIX="" CONTAINER="meshcentral"
+    local WEB_PORT="4430" AGENT_PORT="4433"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] MeshCentral would:"
-        echo "  - Create $MC_DIR with docker-compose.yml + .env (data/ files/ backups/)"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/meshcentral(-<name>) with docker-compose.yml + .env (data/ files/ backups/)"
         echo "  - Prompt for hostname (domain or IP for agent connections)"
-        echo "  - Expose port 4430 (HTTPS web) and 4433 (agent)"
+        echo "  - Expose port 4430 (HTTPS web) and 4433 (agent), auto-scanned for additional instances"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
+
+    if [ -d "$MC_DIR" ]; then
+        echo ""
+        echo "  MeshCentral is already installed at $MC_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate MeshCentral instance alongside it (its own"
+        echo "       server, devices, and ports — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'clients'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/meshcentral-$_suffix" ]; then
+                    log_warning "meshcentral-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            MC_DIR="$DOCKER_DIR/meshcentral-$_suffix"
+            CONTAINER="meshcentral-$_suffix"
+            log_info "New instance: $MC_DIR"
+        fi
+    fi
+
+    # Scan for free ports unconditionally, moving both together — not just
+    # when adding an explicit additional instance. A plain first install can
+    # just as easily collide with an unrelated service that already claimed
+    # one of these default ports — see CLAUDE.md's "Port collision
+    # avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$AGENT_PORT"; do
+        WEB_PORT=$((WEB_PORT + 1))
+        AGENT_PORT=$((AGENT_PORT + 1))
+    done
 
     local MC_HOSTNAME=""
     prompt_text "MeshCentral hostname (domain or IP) [localhost]:" "localhost" MC_HOSTNAME
@@ -239,13 +302,13 @@ networks:
     fi
 
     cat > docker-compose.yml << MC_COMPOSE
-name: meshcentral
+name: $CONTAINER
 
 services:
   meshcentral:
     image: ghcr.io/ylianst/meshcentral:latest
-    container_name: meshcentral
-    hostname: meshcentral
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - NODE_ENV=production
@@ -260,8 +323,8 @@ services:
       - ./files:/opt/meshcentral/meshcentral-files
       - ./backups:/opt/meshcentral/meshcentral-backups
     ports:
-      - "4430:443"
-      - "4433:4433"
+      - "${WEB_PORT}:443"
+      - "${AGENT_PORT}:4433"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 MC_COMPOSE
 
@@ -274,18 +337,21 @@ MC_ENV
 
     mkdir -p data files backups
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$MC_DIR"
-    log_success "MeshCentral configured at $MC_DIR"
+    log_success "MeshCentral${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $MC_DIR (web port $WEB_PORT, agent port $AGENT_PORT)"
 
-    configure_caddy_for_service "MeshCentral" "meshcentral:443" "mesh"
+    configure_caddy_for_service "MeshCentral${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:443" "mesh${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$MC_DIR" << MD
-# MeshCentral
+# MeshCentral${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted remote device management — remotely access, manage, and monitor
 all your computers from a single web interface. Install agents on each device.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own devices, own
+ports) — not shared devices with another MeshCentral instance.")
 
-- Web UI: https://localhost:4430  (self-signed cert on first launch)
-- Agent listener: port 4433 (devices connect here — forward this port if remote)
+- Web UI: https://localhost:${WEB_PORT}  (self-signed cert on first launch)
+- Agent listener: port ${AGENT_PORT} (devices connect here — forward this port if remote)
 - Hostname: \`$MC_HOSTNAME\` (update \`MC_HOSTNAME\` in .env if it changes)
 - App data: \`data/\`, \`files/\`, \`backups/\`
 
@@ -299,14 +365,14 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## First launch
-1. Open https://localhost:4430 (accept the self-signed cert warning)
+1. Open https://localhost:${WEB_PORT} (accept the self-signed cert warning)
 2. Create your admin account
 3. Go to "My Devices" → "+ Add Device" → download the agent for each OS
 4. Install the agent on every computer you want to manage
 
 ## Remote access
 For devices outside your LAN to connect:
-- Forward **TCP port 4433** on your router to this server
+- Forward **TCP port ${AGENT_PORT}** on your router to this server
 - Set \`MC_HOSTNAME\` in \`.env\` to your public domain/IP, then restart
 
 ## Docs
@@ -314,13 +380,13 @@ https://meshcentral.com/docs/
 MD
 
     local START_MC=""
-    prompt_yn "Start MeshCentral now? (y/n):" "y" START_MC
+    prompt_yn "Start MeshCentral${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_MC
     if [ "$START_MC" = "y" ] || [ "$START_MC" = "Y" ]; then
-        docker compose up -d && log_success "MeshCentral started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "MeshCentral${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  https://localhost:4430  (accept self-signed cert)"
+    echo "  Access at:  https://localhost:${WEB_PORT}  (accept self-signed cert)"
     echo "  First visit: create your admin account"
     echo ""
 }

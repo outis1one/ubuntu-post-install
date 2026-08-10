@@ -43,6 +43,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -188,18 +203,69 @@ register_service jellyfin media "Free media server — movies, TV, music (Jellyf
 install_jellyfin() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "jellyfin" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh (and services/emby.sh,
+    # the same idea for a sibling media server).
     local JELLYFIN_DIR="$DOCKER_DIR/jellyfin"
+    local INSTANCE_SUFFIX="" CONTAINER="jellyfin"
+    local WEB_PORT="8096"
     local DEFAULT_MEDIA="$ACTUAL_HOME/media"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Jellyfin would:"
-        echo "  - Create $JELLYFIN_DIR with docker-compose.yml + .env (config/ cache/)"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/jellyfin(-<name>) with docker-compose.yml + .env (config/ cache/)"
         echo "  - Mount a media folder (default $DEFAULT_MEDIA) read-only at /media"
         echo "  - Auto-enable VAAPI hw transcoding if /dev/dri/renderD128 exists"
-        echo "  - Expose port 8096 (+ DLNA 1900/udp, discovery 7359/udp)"
+        echo "  - Expose port 8096, auto-scanned for additional instances"
+        echo "  - First instance only: DLNA 1900/udp + discovery 7359/udp (host-wide;"
+        echo "    additional instances skip these to avoid a fixed-port conflict)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
+
+    if [ -d "$JELLYFIN_DIR" ]; then
+        echo ""
+        echo "  Jellyfin is already installed at $JELLYFIN_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Jellyfin instance alongside it (its own"
+        echo "       server, library, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'kids'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/jellyfin-$_suffix" ]; then
+                    log_warning "jellyfin-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            JELLYFIN_DIR="$DOCKER_DIR/jellyfin-$_suffix"
+            CONTAINER="jellyfin-$_suffix"
+            DEFAULT_MEDIA="$ACTUAL_HOME/media-$_suffix"
+            log_info "New instance: $JELLYFIN_DIR"
+            log_warning "DLNA/discovery (1900/udp, 7359/udp) are fixed, host-wide ports already"
+            log_warning "claimed by the first instance — this instance skips them (web UI and"
+            log_warning "app-based streaming are unaffected; DLNA auto-discovery is not)."
+        fi
+    fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port (e.g.
+    # emby also defaults to 8096) — see CLAUDE.md's "Port collision avoidance"
+    # section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     local MEDIA_PATH=""
     prompt_text "Path to media folder [$DEFAULT_MEDIA]:" "$DEFAULT_MEDIA" MEDIA_PATH
@@ -248,14 +314,25 @@ networks:
 "
     fi
 
+    # DLNA (1900/udp) and discovery (7359/udp) are fixed, host-wide UDP ports —
+    # only the first instance publishes them to avoid a bind conflict with an
+    # existing instance. Additional instances still work for the web UI and
+    # every app-based client; only DLNA/network auto-discovery is instance-1-only.
+    local _DISCOVERY_PORTS=""
+    if [ -z "$INSTANCE_SUFFIX" ]; then
+        _DISCOVERY_PORTS='      - "1900:1900/udp"
+      - "7359:7359/udp"
+'
+    fi
+
     cat > docker-compose.yml << JELLYFIN_COMPOSE
-name: jellyfin
+name: $CONTAINER
 
 services:
   jellyfin:
     image: jellyfin/jellyfin:latest
-    container_name: jellyfin
-    hostname: jellyfin
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - TZ=$TZ_VAL
@@ -265,10 +342,8 @@ $HWACCEL_BLOCK
       - ./cache:/cache
       - \${MEDIA_PATH}:/media:ro
     ports:
-      - "8096:8096"
-      - "1900:1900/udp"
-      - "7359:7359/udp"
-${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
+      - "${WEB_PORT}:8096"
+${_DISCOVERY_PORTS}${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 JELLYFIN_COMPOSE
 
     cat > .env << JELLYFIN_ENV
@@ -278,16 +353,22 @@ JELLYFIN_ENV
 
     mkdir -p config cache
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$JELLYFIN_DIR"
-    log_success "Jellyfin configured at $JELLYFIN_DIR"
+    log_success "Jellyfin${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $JELLYFIN_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Jellyfin" "jellyfin:8096" "jellyfin"
+    configure_caddy_for_service "Jellyfin${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:8096" "jellyfin${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$JELLYFIN_DIR" << MD
-# Jellyfin
+# Jellyfin${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Free media server (movies, TV, music) — a no-paywall alternative to Emby.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own library, own
+port) — not a shared library with another Jellyfin instance. DLNA and
+network auto-discovery are only published for the first instance (fixed,
+host-wide ports); this instance still works for the web UI and every
+app-based client.")
 
-- Web UI: http://localhost:8096
+- Web UI: http://localhost:${WEB_PORT}
 - Media folder (read-only): \`$MEDIA_PATH\` → mounted at /media
 - App data: \`config/\` and \`cache/\` in this folder
 - Edit the media path in \`.env\` (\`MEDIA_PATH=\`), then \`docker compose up -d\`.
@@ -309,13 +390,13 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_JF=""
-    prompt_yn "Start Jellyfin now? (y/n):" "y" START_JF
+    prompt_yn "Start Jellyfin${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_JF
     if [ "$START_JF" = "y" ] || [ "$START_JF" = "Y" ]; then
-        docker compose up -d && log_success "Jellyfin started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Jellyfin${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:8096"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo ""
 }
 

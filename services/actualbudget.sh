@@ -41,6 +41,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -186,15 +201,59 @@ register_service actualbudget utilities "Open-source personal finance & budgetin
 install_actualbudget() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "actualbudget" name/paths/port exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local AB_DIR="$DOCKER_DIR/actualbudget"
+    local INSTANCE_SUFFIX="" CONTAINER="actualbudget"
+    local WEB_PORT="5006"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Actual Budget would:"
-        echo "  - Create $AB_DIR with docker-compose.yml (data/)"
-        echo "  - Expose port 5006"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/actualbudget(-<name>) with docker-compose.yml (data/)"
+        echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
+
+    if [ -d "$AB_DIR" ]; then
+        echo ""
+        echo "  Actual Budget is already installed at $AB_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Actual Budget instance alongside it (its own"
+        echo "       server, budget file, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'family'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/actualbudget-$_suffix" ]; then
+                    log_warning "actualbudget-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            AB_DIR="$DOCKER_DIR/actualbudget-$_suffix"
+            CONTAINER="actualbudget-$_suffix"
+            log_info "New instance: $AB_DIR"
+        fi
+    fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port (e.g.
+    # emby and jellyfin both default to 8096) — see CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$AB_DIR/data"
     ensure_docker_dir_ownership "$AB_DIR"
@@ -226,15 +285,15 @@ networks:
     fi
 
     cat > docker-compose.yml << AB_COMPOSE
-name: actualbudget
+name: $CONTAINER
 
 services:
   actualbudget:
     image: actualbudget/actual-server:latest
-    container_name: actualbudget
+    container_name: $CONTAINER
     restart: unless-stopped
     ports:
-      - "5006:5006"
+      - "${WEB_PORT}:5006"
     volumes:
       - ./data:/data
     env_file:
@@ -248,17 +307,20 @@ CADDY_NET=$SITE_CADDY_NET
 AB_ENV
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$AB_DIR"
-    log_success "Actual Budget configured at $AB_DIR"
+    log_success "Actual Budget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $AB_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "ActualBudget" "actualbudget:5006" "budget"
+    configure_caddy_for_service "ActualBudget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:5006" "budget${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$AB_DIR" << MD
-# Actual Budget
+# Actual Budget${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Open-source personal finance and budgeting tool. Supports bank sync via
 SimpleFIN (requires a SimpleFIN account at simplefin.org).
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own budget file,
+own port) — not shared data with another Actual Budget instance.")
 
-- Web UI: http://localhost:5006
+- Web UI: http://localhost:${WEB_PORT}
 - App data: \`data/\`
 
 ## Manage
@@ -276,13 +338,13 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_AB=""
-    prompt_yn "Start Actual Budget now? (y/n):" "y" START_AB
+    prompt_yn "Start Actual Budget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_AB
     if [ "$START_AB" = "y" ] || [ "$START_AB" = "Y" ]; then
-        docker compose up -d && log_success "Actual Budget started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Actual Budget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:5006"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Bank sync:  simplefin.org (optional, paid)"
     echo ""
 }

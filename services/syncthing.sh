@@ -41,6 +41,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -157,12 +172,27 @@ install_syncthing() {
     log_info "Installing Syncthing..."
 
     local DIR="$DOCKER_DIR/syncthing"
+    local WEB_PORT="8384" SYNC_PORT="22000" DISCOVERY_PORT="21027"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml and .env"
         echo "[DRY-RUN] Would expose web UI on 8384, sync protocol on 22000 (tcp+udp), discovery on 21027/udp"
+        echo "[DRY-RUN] All 3 auto-scanned/shifted together if occupied"
         return 0
     fi
+
+    # Scan for free host ports, moving all 3 together — a plain install
+    # shouldn't silently claim a port another already-running service holds.
+    # Note: DISCOVERY_PORT (LAN broadcast) only works for zero-config local
+    # discovery at its standard number — shifting it away from 21027 means
+    # peers must be added manually by device ID instead of relying on
+    # auto-discovery. See CLAUDE.md's "Port collision avoidance" section.
+    while port_in_use "$WEB_PORT" || port_in_use "$SYNC_PORT" \
+       || port_in_use "$SYNC_PORT" udp || port_in_use "$DISCOVERY_PORT" udp; do
+        WEB_PORT=$((WEB_PORT + 1))
+        SYNC_PORT=$((SYNC_PORT + 1))
+        DISCOVERY_PORT=$((DISCOVERY_PORT + 1))
+    done
 
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
@@ -209,10 +239,10 @@ services:
       - PGID=\${PGID:-$PGID}
       - TZ=\${SITE_TZ:-UTC}
     ports:
-      - "8384:8384"
-      - "22000:22000/tcp"
-      - "22000:22000/udp"
-      - "21027:21027/udp"
+      - "${WEB_PORT}:8384"
+      - "${SYNC_PORT}:22000/tcp"
+      - "${SYNC_PORT}:22000/udp"
+      - "${DISCOVERY_PORT}:21027/udp"
     volumes:
       - ./config:/var/syncthing/config
       - ./data:/var/syncthing
@@ -237,15 +267,20 @@ ENV
 Continuous, decentralised file synchronisation between devices.
 
 ## Access
-- Web UI: http://localhost:8384
+- Web UI: http://localhost:${WEB_PORT}
 - First run: go to **Settings → GUI** and set a username and password.
+$( [ "$DISCOVERY_PORT" != "21027" ] && echo "
+**Note:** the default ports were already in use, so this instance's ports
+were shifted — see below. Local LAN auto-discovery only works at the
+standard 21027/udp; with a shifted discovery port, add other devices
+manually by device ID instead of relying on auto-discovery." )
 
 ## Firewall ports (for LAN sync)
 Open these on the host firewall so other Syncthing devices can reach this node:
 \`\`\`
-sudo ufw allow 22000/tcp comment "Syncthing sync protocol"
-sudo ufw allow 22000/udp comment "Syncthing sync protocol (QUIC)"
-sudo ufw allow 21027/udp comment "Syncthing local discovery"
+sudo ufw allow ${SYNC_PORT}/tcp comment "Syncthing sync protocol"
+sudo ufw allow ${SYNC_PORT}/udp comment "Syncthing sync protocol (QUIC)"
+sudo ufw allow ${DISCOVERY_PORT}/udp comment "Syncthing local discovery"
 \`\`\`
 
 ## Manage
@@ -266,7 +301,7 @@ MD
             || log_warning "Start failed — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:8384"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  First run:  set a username and password in Settings → GUI"
     echo ""
 }

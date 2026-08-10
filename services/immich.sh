@@ -44,6 +44,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -189,22 +204,76 @@ register_service immich media "Self-hosted photo & video backup — like Google 
 install_immich() {
     require_docker || return 1
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "immich" name/paths/port and
+    # immich_server/immich_machine_learning/immich_redis/immich_postgres
+    # container names exactly as before (zero behavior change for anyone with
+    # a single instance). Only asking to add a second one introduces suffixed
+    # naming — same pattern as services/mattermost.sh and services/wordpress.sh.
+    # Each instance gets its own dedicated Postgres (already the case — one
+    # per compose project) and its own model-cache volume (scoped by the
+    # per-instance Compose project name), so instances are fully isolated for
+    # backup/restore too, per CLAUDE.md's "Multi-instance services" section.
     local IMMICH_DIR="$DOCKER_DIR/immich"
+    local INSTANCE_SUFFIX="" PROJECT="immich"
+    local C_SERVER="immich_server" C_ML="immich_machine_learning" C_REDIS="immich_redis" C_DB="immich_postgres"
+    local WEB_PORT="2283"
     local DEFAULT_PHOTOS="$ACTUAL_HOME/photos"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Immich would:"
-        echo "  - Create $IMMICH_DIR with docker-compose.yml + .env"
-        echo "  - Deploy: immich-server, immich-machine-learning, valkey, postgres"
+        echo "  - Offer to add a new, separate instance if one already exists"
+        echo "  - Create \$DOCKER_DIR/immich(-<name>) with docker-compose.yml + .env"
+        echo "  - Deploy: immich-server, immich-machine-learning, valkey, postgres (dedicated per instance)"
         echo "  - Strategy 1 (unified): all photos in one folder, import-photos.sh helper"
         echo "  - Strategy 2 (external): existing photos indexed read-only, new uploads separate"
         echo "  - Optionally store thumbnails/encoded-video/new-uploads in S3-compatible"
         echo "    object storage instead of local disk (native IMMICH_STORAGE_ENGINE=s3 —"
         echo "    NOT a FUSE mount, those are unreliable for Immich's access pattern)"
-        echo "  - Expose port 2283"
+        echo "  - Expose port 2283, auto-scanned for additional instances"
         echo "  - Offer a Caddy reverse proxy and to start the stack"
         return 0
     fi
+
+    if [ -d "$IMMICH_DIR" ]; then
+        echo ""
+        echo "  Immich is already installed at $IMMICH_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate Immich instance alongside it (its own"
+        echo "       server, database, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'kids'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/immich-$_suffix" ]; then
+                    log_warning "immich-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            IMMICH_DIR="$DOCKER_DIR/immich-$_suffix"
+            PROJECT="immich-$_suffix"
+            C_SERVER="immich_server_$_suffix"
+            C_ML="immich_ml_$_suffix"
+            C_REDIS="immich_redis_$_suffix"
+            C_DB="immich_postgres_$_suffix"
+            DEFAULT_PHOTOS="$ACTUAL_HOME/photos-$_suffix"
+            log_info "New instance: $IMMICH_DIR"
+        fi
+    fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port — see
+    # CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     # ── Photo library setup ─────────────────────────────────────────────────
     echo ""
@@ -384,18 +453,18 @@ networks:
 "
 
     cat > docker-compose.yml << IMMICH_COMPOSE
-name: immich
+name: $PROJECT
 
 services:
   immich-server:
-    container_name: immich_server
+    container_name: $C_SERVER
     image: ghcr.io/immich-app/immich-server:\${IMMICH_VERSION:-release}
     volumes:
 ${_UPLOAD_VOLUME_LINE}${_EXTERNAL_VOLUME_LINE}      - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
     ports:
-      - 2283:2283
+      - ${WEB_PORT}:2283
     depends_on:
       - redis
       - database
@@ -404,7 +473,7 @@ ${_UPLOAD_VOLUME_LINE}${_EXTERNAL_VOLUME_LINE}      - /etc/localtime:/etc/localt
       disable: false
 ${_CADDY_NET_BLOCK}
   immich-machine-learning:
-    container_name: immich_machine_learning
+    container_name: $C_ML
     image: ghcr.io/immich-app/immich-machine-learning:\${IMMICH_VERSION:-release}
     volumes:
       - model-cache:/cache
@@ -415,14 +484,14 @@ ${_CADDY_NET_BLOCK}
       disable: false
 
   redis:
-    container_name: immich_redis
+    container_name: $C_REDIS
     image: docker.io/valkey/valkey:9-bookworm
     healthcheck:
       test: valkey-cli ping || exit 1
     restart: always
 
   database:
-    container_name: immich_postgres
+    container_name: $C_DB
     image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0
     environment:
       POSTGRES_PASSWORD: \${DB_PASSWORD}
@@ -541,7 +610,7 @@ IMMICH_ENV
 IMPORT_HEAD
 
         cat >> "$IMMICH_DIR/import-photos.sh" << IMPORT_VARS
-IMMICH_URL="http://localhost:2283"
+IMMICH_URL="http://localhost:${WEB_PORT}"
 SOURCE_DIR="$EXISTING_PHOTOS_SOURCE"
 IMMICH_DIR="$IMMICH_DIR"
 IMPORT_VARS
@@ -791,17 +860,20 @@ IMPORT_BODY
         log_success "Import helper written: $IMMICH_DIR/import-photos.sh"
     fi
 
-    log_success "Immich configured at $IMMICH_DIR"
+    log_success "Immich${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $IMMICH_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "Immich" "immich-server:2283" "immich"
+    configure_caddy_for_service "Immich${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${C_SERVER}:2283" "immich${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$IMMICH_DIR" << MD
-# Immich
+# Immich${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Self-hosted photo and video backup — like Google Photos but private.
 Mobile apps (iOS/Android) auto-upload in the background.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own dedicated
+database, own port) — not shared photos with another Immich instance.")
 
-- Web UI: http://localhost:2283
+- Web UI: http://localhost:${WEB_PORT}
 - Photo storage: $( [ "$USE_S3" = true ] && echo "S3 bucket \`$S3_BUCKET\` (thumbnails, encoded video, new uploads)" || echo "\`$UPLOAD_LOCATION\`" )
 - App data (postgres, model cache): inside this folder
 - Edit paths/credentials in \`.env\`, then \`docker compose up -d\` to apply.
@@ -836,8 +908,8 @@ docker compose pull && docker compose up -d   # update
 \`\`\`
 
 ## First launch
-1. Open http://localhost:2283 and create your admin account.
-2. Install the Immich mobile app and point it at \`http://<server-ip>:2283\`.
+1. Open http://localhost:${WEB_PORT} and create your admin account.
+2. Install the Immich mobile app and point it at \`http://<server-ip>:${WEB_PORT}\`.
 3. (External library mode) Go to Admin → External Libraries → Create Library,
    set import path to \`/usr/src/app/external\`, and click Scan.
 
@@ -855,13 +927,13 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_IMMICH=""
-    prompt_yn "Start Immich now? (y/n):" "y" START_IMMICH
+    prompt_yn "Start Immich${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_IMMICH
     if [ "$START_IMMICH" = "y" ] || [ "$START_IMMICH" = "Y" ]; then
-        docker compose up -d && log_success "Immich started" || log_warning "Failed to start — check: docker compose logs"
+        docker compose up -d && log_success "Immich${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" || log_warning "Failed to start — check: docker compose logs"
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:2283"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  First launch: create your admin account in the web UI."
     echo ""
 }

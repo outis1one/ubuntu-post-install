@@ -47,6 +47,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -196,13 +211,20 @@ install_gatus() {
     require_docker || return 1
     log_info "Installing Gatus..."
     local GATUS_DIR="$DOCKER_DIR/gatus"
+    local WEB_PORT="8086"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $GATUS_DIR (gatus_config/, gatus_data/)"
         echo "[DRY-RUN] Would deploy twinproduction/gatus:latest"
-        echo "[DRY-RUN] Port 8086 published, config at gatus_config/config.yaml"
+        echo "[DRY-RUN] Port 8086 published (auto-scanned for a free host port),"
+        echo "[DRY-RUN] config at gatus_config/config.yaml"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$GATUS_DIR/gatus_config" "$GATUS_DIR/gatus_data"
     ensure_docker_dir_ownership "$GATUS_DIR"
@@ -244,7 +266,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "8086:8080"
+      - "${WEB_PORT}:8080"
     volumes:
       - ./gatus_config:/config
       - ./gatus_data:/data
@@ -324,7 +346,7 @@ GATUS_CFG
 Clean, self-hosted status page. Polls HTTP, TCP, DNS, and ICMP endpoints.
 
 ## Access
-- URL: http://localhost:8086
+- URL: http://localhost:${WEB_PORT}
 
 ## Configuration
 Edit \`gatus_config/config.yaml\` — changes are **hot-reloaded** without restarting.
@@ -355,7 +377,7 @@ MD
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:8086"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Config:     $GATUS_DIR/gatus_config/config.yaml (hot-reloaded)"
     echo ""
 }

@@ -38,6 +38,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
             [[ "${UNATTENDED:-false}" == "true" ]] && { eval "$_var='$_def'"; return; }
@@ -184,13 +199,57 @@ install_filebrowser() {
     require_docker || return 1
     log_info "Installing FileBrowser Quantum..."
 
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "filebrowser" name/paths/port exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh.
     local FB_DIR="$DOCKER_DIR/filebrowser"
+    local INSTANCE_SUFFIX="" CONTAINER="filebrowser"
+    local WEB_PORT="8085"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $FB_DIR"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create $FB_DIR(-<name>)"
         echo "[DRY-RUN] Would write docker-compose.yml and data/config.yaml"
+        echo "[DRY-RUN] Would auto-scan for a free host port if this is an additional instance"
         return 0
     fi
+
+    if [ -d "$FB_DIR" ]; then
+        echo ""
+        echo "  FileBrowser is already installed at $FB_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate FileBrowser instance alongside it (its own"
+        echo "       server, config, and port — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'shared'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/filebrowser-$_suffix" ]; then
+                    log_warning "filebrowser-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            FB_DIR="$DOCKER_DIR/filebrowser-$_suffix"
+            CONTAINER="filebrowser-$_suffix"
+            log_info "New instance: $FB_DIR"
+        fi
+    fi
+
+    # Scan for a free port unconditionally — not just when adding an explicit
+    # additional instance. A plain first install can just as easily collide
+    # with an unrelated service that already claimed this default port — see
+    # CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$FB_DIR/data"
     ensure_docker_dir_ownership "$FB_DIR"
@@ -223,13 +282,13 @@ networks:
     fi
 
     cat > docker-compose.yml << FB_COMPOSE
-name: filebrowser
+name: $CONTAINER
 
 services:
   filebrowser:
     image: gtstef/filebrowser:stable
-    container_name: filebrowser
-    hostname: filebrowser
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     environment:
       - TZ=${SITE_TZ:-UTC}
@@ -237,7 +296,7 @@ services:
       - ./data:/home/filebrowser/data
       - ${FB_PATH}:/files
     ports:
-      - "8085:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 FB_COMPOSE
 
@@ -282,18 +341,21 @@ FB_CONFIG
     fi
 
     echo ""
-    log_success "FileBrowser Quantum configured at $FB_DIR"
+    log_success "FileBrowser Quantum${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $FB_DIR (port $WEB_PORT)"
 
-    configure_caddy_for_service "FileBrowser" "filebrowser:80" "files"
+    configure_caddy_for_service "FileBrowser${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:80" "files${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
     write_readme "$FB_DIR" << MD
-# FileBrowser Quantum
+# FileBrowser Quantum${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
 
 Web-based file manager with multi-source support, office preview, and
 per-user access control.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own config, own
+port) — not shared sources with another FileBrowser instance.")
 
 ## Access
-- URL: http://localhost:8085
+- URL: http://localhost:${WEB_PORT}
 - Default login: admin / admin (change immediately!)
 
 ## Adding sources (extra directories)
@@ -320,14 +382,14 @@ docker compose pull && docker compose down && docker compose up -d  # update
 MD
 
     local START_FB=""
-    prompt_yn "Start FileBrowser Quantum now? (y/n):" "y" START_FB
+    prompt_yn "Start FileBrowser Quantum${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_FB
     if [ "$START_FB" = "y" ] || [ "$START_FB" = "Y" ]; then
         docker compose up -d 2>/dev/null \
-            && log_success "FileBrowser Quantum started" \
+            && log_success "FileBrowser Quantum${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
     fi
 
-    echo "  Access at:  http://localhost:8085"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Default login: admin / admin (change immediately!)"
     echo ""
 }

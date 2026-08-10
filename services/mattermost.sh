@@ -44,6 +44,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -251,24 +266,23 @@ install_mattermost() {
             MM_CONTAINER="mattermost-$_suffix"
             DB_CONTAINER="mattermost-$_suffix-db"
             COTURN_CONSUMER="mattermost-$_suffix"
-
-            # Free-port scan — same pattern services/asterisk.sh uses for its
-            # web admin port. WEB_PORT is also set as Mattermost's own
-            # internal ListenAddress below (not just the host publish side),
-            # so configure_caddy_for_service's single upstream "name:port"
-            # string works unmodified in both local and remote-Caddy mode —
-            # it assumes host-published-port == container-internal-port,
-            # true for every other service in this repo and made true here
-            # too rather than special-casing the shared helper for one caller.
-            while ss -tlnH "sport = :${WEB_PORT}" 2>/dev/null | grep -q .; do
-                WEB_PORT=$((WEB_PORT + 1))
-            done
-            while ss -ulnH "sport = :${CALLS_UDP_PORT}" 2>/dev/null | grep -q .; do
-                CALLS_UDP_PORT=$((CALLS_UDP_PORT + 1))
-            done
-            log_info "New instance: $DIR (web port $WEB_PORT, Calls UDP port $CALLS_UDP_PORT)"
+            log_info "New instance: $DIR"
         fi
     fi
+
+    # Free-port scan — runs unconditionally, not just when adding an explicit
+    # additional instance, so a plain first install also can't collide with
+    # an unrelated service that already claimed these default ports. Same
+    # pattern services/asterisk.sh uses for its web admin port. WEB_PORT is
+    # also set as Mattermost's own internal ListenAddress below (not just the
+    # host publish side), so configure_caddy_for_service's single upstream
+    # "name:port" string works unmodified in both local and remote-Caddy mode —
+    # it assumes host-published-port == container-internal-port, true for
+    # every other service in this repo and made true here too rather than
+    # special-casing the shared helper for one caller. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
+    find_free_port CALLS_UDP_PORT "$CALLS_UDP_PORT" udp
 
     log_info "Installing Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}..."
 

@@ -44,6 +44,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         generate_password() {
             local _len="${1:-32}"
             tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$_len"
@@ -226,11 +241,18 @@ install_onlyoffice() {
 
     log_info "Installing OnlyOffice Document Server..."
     local DIR="$DOCKER_DIR/onlyoffice"
+    local WEB_PORT="8082"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml, .env"
+        echo "[DRY-RUN] Would auto-scan for a free host port (8082 default)"
         return 0
     fi
+
+    # Scan for a free host port — a plain install shouldn't silently claim a
+    # port another already-running service holds. See CLAUDE.md's "Port
+    # collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$DIR"
     ensure_docker_dir_ownership "$DIR"
@@ -281,7 +303,7 @@ services:
       - ./data:/var/www/onlyoffice/Data
       - ./fonts:/usr/share/fonts/truetype/custom
     ports:
-      - "8082:80"
+      - "${WEB_PORT}:80"
 ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
 OOCOMPOSE
 
@@ -333,7 +355,7 @@ Self-hosted document editing server, integrated with Nextcloud and FileBrowser Q
 
 ## Access
 
-- URL: https://office.${SITE_DOMAIN:-example.com}  (or http://localhost:8082)
+- URL: https://office.${SITE_DOMAIN:-example.com}  (or http://localhost:${WEB_PORT})
 - The document server itself has no user-facing login page — it is accessed
   through Nextcloud or FileBrowser Quantum.
 
@@ -381,7 +403,7 @@ OOREAD
 
     echo ""
     echo "  OnlyOffice Document Server"
-    echo "  Access URL:   http://localhost:8082"
+    echo "  Access URL:   http://localhost:${WEB_PORT}"
     echo "  JWT secret:   $JWT_SECRET"
     echo "  Config dir:   $DIR"
     echo ""

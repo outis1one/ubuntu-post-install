@@ -48,6 +48,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -198,6 +213,7 @@ install_arm() {
 
     local ARM_DIR="$DOCKER_DIR/arm"
     local DEFAULT_OUTPUT="$ACTUAL_HOME/ripped"
+    local WEB_PORT="8080"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] A.R.M. would:"
@@ -205,7 +221,7 @@ install_arm() {
         echo "  - Detect optical drives (/dev/sr*) — defaults to /dev/sr0"
         echo "  - Create ripped output dirs (movies/ music/) under $DEFAULT_OUTPUT"
         echo "  - Run as UID/GID $(id -u "$ACTUAL_USER")/$(id -g "$ACTUAL_USER") with privileged: true"
-        echo "  - Expose port 8080"
+        echo "  - Expose port 8080 (auto-scanned for a free host port)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         return 0
     fi
@@ -224,6 +240,12 @@ install_arm() {
         echo "  No optical drives detected. Defaulting to /dev/sr0 — add more later."
         OPTICAL_DRIVES="/dev/sr0"
     fi
+
+    # Scan for a free host port — this default (8080) isn't unique to A.R.M.
+    # in this repo (nextcloud also defaults to 8080), so a plain install
+    # shouldn't silently claim a port another already-running service holds.
+    # See CLAUDE.md's "Port collision avoidance" section.
+    find_free_port WEB_PORT "$WEB_PORT"
 
     mkdir -p "$ARM_DIR"
     ensure_docker_dir_ownership "$ARM_DIR"
@@ -275,7 +297,7 @@ services:
       - \${ARM_OUTPUT}/movies:/home/arm/media/completed
       - \${ARM_OUTPUT}/music:/home/arm/music
     ports:
-      - "8080:8080"
+      - "${WEB_PORT}:8080"
     devices:
       - /dev/sr0:/dev/sr0
       # Add more optical drives as needed:
@@ -303,7 +325,7 @@ ARM_ENV
 Auto-rips DVDs, Blu-rays, and CDs when you insert them — identifies the disc,
 fetches metadata, and transcodes to a usable format.
 
-- Web UI: http://localhost:8080 (complete setup on first visit)
+- Web UI: http://localhost:${WEB_PORT} (complete setup on first visit)
 - Ripped output: \`$ARM_OUTPUT\` → movies and music subdirs
 - App data: \`config/\` and \`logs/\`
 
@@ -338,7 +360,7 @@ MD
     fi
 
     echo ""
-    echo "  Access at:  http://localhost:8080"
+    echo "  Access at:  http://localhost:${WEB_PORT}"
     echo "  Complete setup in browser on first visit."
     echo ""
 }

@@ -56,6 +56,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             chown -R "$ACTUAL_USER:$ACTUAL_USER" "$@" 2>/dev/null || true
         }
 
+        port_in_use() {
+            local _port="$1" _proto="${2:-tcp}"
+            local _flag="-tlnH"
+            [ "$_proto" = "udp" ] && _flag="-ulnH"
+            ss "$_flag" "sport = :${_port}" 2>/dev/null | grep -q .
+        }
+
+        find_free_port() {
+            local _varname="$1" _port="$2" _proto="${3:-tcp}"
+            while port_in_use "$_port" "$_proto"; do
+                _port=$((_port + 1))
+            done
+            eval "$_varname='$_port'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -100,21 +115,80 @@ register_service rustdesk utilities "Self-hosted remote desktop relay (RustDesk)
 install_rustdesk() {
     require_docker || return 1
     log_info "Installing RustDesk server..."
+
+    # ── Instance selection ───────────────────────────────────────────────────
+    # First instance keeps the plain "rustdesk" name/paths/ports exactly as
+    # before (zero behavior change for anyone with a single instance). Only
+    # asking to add a second one introduces suffixed naming — same pattern as
+    # services/mattermost.sh and services/wordpress.sh. The 6 ports
+    # (21115-21119 TCP + 21116 UDP) are fixed *inside* the container — the
+    # image doesn't expose an env var to change them — so an additional
+    # instance shifts the whole host-side block by a fixed offset instead of
+    # scanning port-by-port, the same approach services/traccar.sh uses for
+    # its device-protocol range.
     local RD_DIR="$DOCKER_DIR/rustdesk"
+    local INSTANCE_SUFFIX="" CONTAINER="rustdesk"
+    local PORT_OFFSET=0
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would create $RD_DIR (rustdesk_data/)"
+        echo "[DRY-RUN] Would offer to add a new, separate instance if one already exists"
+        echo "[DRY-RUN] Would create \$DOCKER_DIR/rustdesk(-<name>) (rustdesk_data/)"
         echo "[DRY-RUN] Would deploy rustdesk/rustdesk-server-s6:latest"
-        echo "[DRY-RUN] Ports: 21115-21119 TCP, 21116 UDP"
+        echo "[DRY-RUN] Ports: 21115-21119 TCP, 21116 UDP — whole block shifted for additional instances"
         echo "[DRY-RUN] Would prompt for server FQDN/IP (RELAY env var)"
         return 0
     fi
+
+    if [ -d "$RD_DIR" ]; then
+        echo ""
+        echo "  RustDesk is already installed at $RD_DIR."
+        echo "    1) Manage that install (update / full reinstall / cancel)"
+        echo "    2) Add a NEW, separate RustDesk relay instance alongside it (its own"
+        echo "       server and ports — full isolation)"
+        echo ""
+        local _TOP_CHOICE=""
+        prompt_text "  Choice [1/2]:" "1" _TOP_CHOICE
+        if [ "$_TOP_CHOICE" = "2" ]; then
+            local _suffix=""
+            while true; do
+                prompt_text "  Short name for the new instance (letters/numbers/hyphens, e.g. 'work'):" "" _suffix
+                _suffix="$(echo "$_suffix" | tr -cs 'a-zA-Z0-9-' '-' | sed 's/^-*//;s/-*$//')"
+                if [ -z "$_suffix" ]; then
+                    log_warning "Name can't be empty."; continue
+                fi
+                if [ -d "$DOCKER_DIR/rustdesk-$_suffix" ]; then
+                    log_warning "rustdesk-$_suffix already exists — pick another name."; continue
+                fi
+                break
+            done
+            INSTANCE_SUFFIX="$_suffix"
+            RD_DIR="$DOCKER_DIR/rustdesk-$_suffix"
+            CONTAINER="rustdesk-$_suffix"
+            log_info "New instance: $RD_DIR"
+        fi
+    fi
+
+    # Scan for a free port block unconditionally, shifting the whole 6-port
+    # block together — not just when adding an explicit additional instance.
+    # A plain first install can just as easily collide with an unrelated
+    # service already bound to one of these default ports — see CLAUDE.md's
+    # "Port collision avoidance" section.
+    while port_in_use "$((21115 + PORT_OFFSET))" \
+       || port_in_use "$((21116 + PORT_OFFSET))" \
+       || port_in_use "$((21116 + PORT_OFFSET))" udp \
+       || port_in_use "$((21117 + PORT_OFFSET))" \
+       || port_in_use "$((21118 + PORT_OFFSET))" \
+       || port_in_use "$((21119 + PORT_OFFSET))"; do
+        PORT_OFFSET=$((PORT_OFFSET + 10))
+    done
 
     mkdir -p "$RD_DIR/rustdesk_data"
     ensure_docker_dir_ownership "$RD_DIR"
     cd "$RD_DIR" || return 1
 
     local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
+    local P_NAT=$((21115 + PORT_OFFSET)) P_ID=$((21116 + PORT_OFFSET)) \
+          P_RELAY=$((21117 + PORT_OFFSET)) P_WS=$((21118 + PORT_OFFSET)) P_WSS=$((21119 + PORT_OFFSET))
 
     echo ""
     echo "  RustDesk needs to know its own public hostname or IP."
@@ -134,23 +208,23 @@ install_rustdesk() {
     prompt_yn "Require encrypted connections only? (recommended) (y/n):" "y" _enc
     [ "$_enc" = "n" ] || [ "$_enc" = "N" ] && ENCRYPTED_ONLY="0"
 
-    cat > docker-compose.yml << 'RD_COMPOSE'
-name: rustdesk
+    cat > docker-compose.yml << RD_COMPOSE
+name: $CONTAINER
 
 services:
   rustdesk:
     image: rustdesk/rustdesk-server-s6:latest
-    container_name: rustdesk
-    hostname: rustdesk
+    container_name: $CONTAINER
+    hostname: $CONTAINER
     restart: unless-stopped
     env_file: .env
     ports:
-      - "21115:21115"
-      - "21116:21116"
-      - "21116:21116/udp"
-      - "21117:21117"
-      - "21118:21118"
-      - "21119:21119"
+      - "${P_NAT}:21115"
+      - "${P_ID}:21116"
+      - "${P_ID}:21116/udp"
+      - "${P_RELAY}:21117"
+      - "${P_WS}:21118"
+      - "${P_WSS}:21119"
     volumes:
       - ./rustdesk_data:/data
 RD_COMPOSE
@@ -161,8 +235,8 @@ TZ=$TZ_VAL
 
 # ── RustDesk server ───────────────────────────────────────────────────────────
 # RELAY: public FQDN or IP that clients use to reach the relay daemon (HBBR).
-# Include the port if it's non-standard: hostname:21117
-RELAY=$RELAY_HOST:21117
+# Include the port if it's non-standard: hostname:$P_RELAY
+RELAY=$RELAY_HOST:$P_RELAY
 
 # ENCRYPTED_ONLY: 1 = only clients with the matching public key can connect.
 # After first startup, copy the key from ./rustdesk_data/id_ed25519.pub to
@@ -177,13 +251,16 @@ RD_ENV
 
     chmod 600 .env
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$RD_DIR"
-    log_success "RustDesk configured at $RD_DIR"
+    log_success "RustDesk${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $RD_DIR (ports $P_NAT-$P_WSS)"
 
     write_readme "$RD_DIR" << MD
-# RustDesk — self-hosted remote desktop relay
+# RustDesk${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX} — self-hosted remote desktop relay
 
 Open-source TeamViewer alternative. This is the server-side relay/rendezvous
 daemon. Clients use the RustDesk desktop/mobile app to connect.
+$( [ -n "$INSTANCE_SUFFIX" ] && echo "
+This is a separate, fully isolated instance (own server, own key, own port
+block) — not shared clients with another RustDesk instance.")
 
 ## After starting: get the public key
 
@@ -193,8 +270,8 @@ cat $RD_DIR/rustdesk_data/id_ed25519.pub
 
 Paste this key into each client:
 **Settings → Network → ID/Relay Server**
-- ID Server:    $RELAY_HOST
-- Relay Server: $RELAY_HOST
+- ID Server:    $RELAY_HOST:$P_ID
+- Relay Server: $RELAY_HOST:$P_RELAY
 - Key:          <paste id_ed25519.pub contents>
 
 ## Firewall / router rules required
@@ -202,11 +279,11 @@ Paste this key into each client:
 Open these ports to this server's IP:
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 21115 | TCP | NAT type test |
-| 21116 | TCP+UDP | ID register / hole-punching |
-| 21117 | TCP | Relay traffic |
-| 21118 | TCP | WebSocket |
-| 21119 | TCP | WebSocket HTTPS |
+| $P_NAT | TCP | NAT type test |
+| $P_ID | TCP+UDP | ID register / hole-punching |
+| $P_RELAY | TCP | Relay traffic |
+| $P_WS | TCP | WebSocket |
+| $P_WSS | TCP | WebSocket HTTPS |
 
 ## Cross-VLAN setup
 Use the server's FQDN (not LAN IP) in RELAY so clients on any VLAN
@@ -224,10 +301,10 @@ docker compose pull && docker compose up -d   # update
 MD
 
     local START_RD=""
-    prompt_yn "Start RustDesk server now? (y/n):" "y" START_RD
+    prompt_yn "Start RustDesk server${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_RD
     if [ "$START_RD" = "y" ] || [ "$START_RD" = "Y" ]; then
         docker compose up -d \
-            && log_success "RustDesk started" \
+            && log_success "RustDesk${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
         echo ""
         echo "  After startup, get the public key:"
@@ -237,7 +314,7 @@ MD
 
     echo ""
     echo "  Relay host: $RELAY_HOST"
-    echo "  Ports 21115-21119 must be open in your firewall/router."
+    echo "  Ports $P_NAT-$P_WSS must be open in your firewall/router."
     echo ""
 }
 
