@@ -304,6 +304,19 @@ install_emby() {
         FOLDER_PROMPT="Path to music folder"
     fi
 
+    # Reset before the chain call, not after — VDM_LAST_MOUNT_POINT is a
+    # plain global set by services/vpn-data-mount.sh, so without this an
+    # unrelated earlier vpn-data-mount run in the same setup.sh session
+    # would silently leak its mount point in here as the default even if
+    # the user declines below or this chain never runs at all.
+    unset VDM_LAST_MOUNT_POINT
+    if declare -F install_vpn-data-mount >/dev/null 2>&1; then
+        local USE_VPN_DATA=""
+        prompt_yn "Is your media on a VPN-connected home box that isn't mounted yet? (y/n):" "n" USE_VPN_DATA
+        [[ "$USE_VPN_DATA" =~ ^[Yy]$ ]] && install_vpn-data-mount
+    fi
+    [ -n "${VDM_LAST_MOUNT_POINT:-}" ] && DEFAULT_FOLDER="$VDM_LAST_MOUNT_POINT"
+
     local MEDIA_PATH=""
     prompt_text "$FOLDER_PROMPT [$DEFAULT_FOLDER]:" "$DEFAULT_FOLDER" MEDIA_PATH
     MEDIA_PATH="${MEDIA_PATH/#\~/$ACTUAL_HOME}"; MEDIA_PATH="${MEDIA_PATH%/}"
