@@ -27,14 +27,19 @@ install_base() {
 
     run_cmd apt-get update -y
 
-    # Core utilities present on every install. cifs-utils here (not lazily
-    # installed on first use, the way tools/mount-network-drive.sh and
+    # Core utilities present on every install. cifs-utils/keyutils here (not
+    # lazily installed on first use, the way tools/mount-network-drive.sh and
     # vpn-data-mount.sh's own local-mount step would otherwise do it) so SMB
     # mounts work immediately whenever they're set up later, same reasoning
     # as Docker/Compose being unconditional here instead of on-demand.
+    # keyutils explicitly, not left to cifs-utils' Recommends — some minimal
+    # cloud VPS images disable install-recommends, and without keyutils'
+    # /etc/request-key.d handlers every mount.cifs call (guest or fully
+    # credentialed) fails with "mount error(79): Can not access a needed
+    # shared library" regardless of the password being correct.
     run_cmd apt-get install -y \
         net-tools ncdu git curl wget htop btop tree zip unzip \
-        ca-certificates gnupg jq rsync ssh-import-id cifs-utils \
+        ca-certificates gnupg jq rsync ssh-import-id cifs-utils keyutils \
         || log_warning "Some essential packages failed to install"
 
     # glow — terminal markdown reader (charmbracelet). Not in Ubuntu repos,
