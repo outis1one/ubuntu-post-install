@@ -335,9 +335,6 @@ install_mattermost() {
     [ -n "$DB_PASS" ] || DB_PASS=$(generate_password 32)
 
     local TZ_VAL="${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}"
-    local UID_VAL GID_VAL
-    UID_VAL=$(id -u "$ACTUAL_USER")
-    GID_VAL=$(id -g "$ACTUAL_USER")
 
     # Compute SITE_URL — extra instances default to a distinct subdomain so
     # they don't collide with the first instance's.
@@ -489,15 +486,22 @@ TURN_HOST=$TURN_HOST_VAL
 TURN_PORT=$TURN_PORT_VAL
 TURN_USERNAME=$TURN_USERNAME_VAL
 TURN_PASSWORD=$TURN_PASSWORD_VAL
-
-# PUID/PGID for file ownership
-PUID=$UID_VAL
-PGID=$GID_VAL
 EOF
     chmod 600 .env
 
     mkdir -p data logs config plugins db
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DIR"
+    # mattermost/mattermost-team-edition's image runs as a fixed UID/GID
+    # 2000 baked in at build time — unlike some other images in this repo,
+    # it does NOT read PUID/PGID env vars (that's a LinuxServer.io s6-overlay
+    # convention this image doesn't use; a previous version of this file set
+    # them anyway, which did nothing). Confirmed live: leaving ./data,
+    # ./logs, ./config, ./plugins owned by ACTUAL_USER instead of 2000:2000
+    # makes the container fail on its very first start with "could not
+    # create config file: open /mattermost/config/config.json: permission
+    # denied" and crash-loop — db (postgres:15-alpine) isn't affected, its
+    # entrypoint fixes ownership itself on startup when it needs to.
+    chown -R 2000:2000 data logs config plugins
 
     # ── Firewall ─────────────────────────────────────────────────────────────
     if command -v ufw &>/dev/null; then

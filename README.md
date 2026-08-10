@@ -167,7 +167,7 @@ a ready-to-copy Caddy config snippet to `~/docker/caddy-snippets/`.
 | Group | Services |
 |-------|---------|
 | `base` | `net-tools`, `ncdu`, `git`, `curl`, `wget`, `htop`, `tree`, `zip`/`unzip`, `ca-certificates`, `gnupg`, `jq`, `rsync`; `glow` (terminal markdown reader, Charm apt repo); Docker CE + Compose plugin; `openssh-server` with GitHub/Launchpad SSH key import, optional password-auth lockdown, and SSH Host aliases; optional NetBird overlay network |
-| `homelab` | `caddy`, `crowdsec`, `authelia`, `coturn` (shared TURN/STUN relay — Asterisk, Mattermost Calls, and future WebRTC-capable services all register a dedicated credential against one instance instead of each running its own), `homeassistant`, `asterisk`, `pstn-trunk`, `sms-inbound`, `security-dashboard`, `sunshine`, `vpn-data-mount` (mount existing SMB shares from a NetBird-connected home box — SSH trust bootstrap, then read-only discovery of shares already configured there; never writes to the home box's Samba config; repeatable, pick from any number of a home box's shares in one pass) |
+| `homelab` | `caddy`, `crowdsec`, `authelia`, `coturn` (shared TURN/STUN relay — Asterisk, Mattermost Calls, and future WebRTC-capable services all register a dedicated credential against one instance instead of each running its own), `homeassistant`, `asterisk`, `pstn-trunk`, `sms-inbound`, `security-dashboard`, `sunshine`, `vpn-data-mount` (mount existing SMB shares from a NetBird-connected home box — SSH trust bootstrap, then read-only discovery of shares already configured there; never writes to the home box's Samba config; repeatable, pick from any number of a home box's shares in one pass; optional per-share [gocryptfs decrypt layer](#client-side-encryption-for-vpn-data-mount) so the VPS only ever handles ciphertext) |
 | `utilities` | `actualbudget`, `ai-gpu`, `ai-stack`, `archivebox`, `changedetection`, `ddclient`, `filebrowser`, `fmd`, `gatus`, `homebox`, `iopaint`, `joplin`, `koha`, `magicmirror`, `mail-archiver`, `mattermost`, `mealie`, `meshcentral`, `n8n`, `nextcloud`, `ntfy`, `onlyoffice`, `paintplus`, `portainer`, `rustdesk`, `stirling-pdf`, `syncthing`, `traccar`, `unifi`, `uptimekuma`, `vaultwarden`, `watchyourlan`, `watchtower`, `wg-easy`, `wordpress` (multi-site, dedicated MariaDB per site — blogs, business sites, e-commerce via WooCommerce) |
 | `media` | `arm`, `audiobookshelf`, `calibre-web`, `emby`, `immich`, `jellyfin`, `lyrion` |
 | `cameras` | `frigate`, `frigate-audio`, `frigate-notify`, `sky-cam` |
@@ -326,6 +326,38 @@ Two ways to run it:
 Password authentication is only offered to be disabled if at least one key
 import actually succeeded in that run — never blindly, so you can't get
 locked out by declining every import prompt.
+
+## Client-side encryption for vpn-data-mount
+
+A plain SMB mount over the VPN protects the data in transit, but the VPS
+itself — its disk, page cache, and anyone with access to the machine (the
+host, an attacker who compromises it, a compelled disclosure) — sees
+plaintext while it's mounted. `vpn-data-mount`'s optional decrypt layer
+closes most of that gap by encrypting on the home box, before anything
+ever crosses the network:
+
+1. On the home box, run `sudo bash tools/gocryptfs-setup-home.sh`. It
+   creates an encrypted directory (a "cipherdir") and a passphrase file,
+   and prints the exact next step. Point your existing Samba share's
+   `path =` at the cipherdir itself — this tool never touches smb.conf,
+   same read-only stance `vpn-data-mount` itself takes on the VPS side.
+2. On the VPS, `sudo ./setup.sh vpn-data-mount` as usual. After it mounts
+   the share over CIFS, it asks whether to layer gocryptfs decryption on
+   top — say yes and give it the passphrase file's path. It fetches that
+   file fresh over the same SSH trust already set up for share discovery,
+   pipes it straight into `gocryptfs`, and never writes it to the VPS's
+   own disk. A systemd unit keeps the decrypted view coming back on boot,
+   fetching the passphrase again each time rather than caching it.
+
+What this changes: a disk image, backup, or provider-side look at the VPS
+while the passphrase isn't actively loaded shows only ciphertext. What it
+doesn't change: anything actually reading through the decrypted mount
+while it's live still sees plaintext, same as any data in active use
+anywhere — that part isn't a software problem this (or any) tool can
+solve out from under the machine actually using the data.
+
+Skip this entirely if it's not worth the added moving part — `vpn-data-mount`
+works exactly the same without it, plain CIFS, nothing to opt into.
 
 ## SSH Host aliases
 
