@@ -109,6 +109,28 @@ is_installed() {
     esac
 }
 
+# How many instances of a service are installed — most services here are
+# single-instance, but several support the multi-instance pattern from
+# CLAUDE.md (a base install plus any number of "<name>-<suffix>" siblings,
+# e.g. mattermost + mattermost-team-b). Only the default case knows that
+# naming convention; the specially-cased services above aren't part of the
+# multi-instance pattern (wordpress is the one exception and already counts
+# sites directly), so for those this just mirrors is_installed() as 0 or 1.
+install_count() {
+    case "$1" in
+        base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config)
+            is_installed "$1" && echo 1 || echo 0 ;;
+        wordpress)
+            find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name 'wordpress-*' -type d 2>/dev/null | wc -l ;;
+        *)
+            local c=0
+            [ -e "$DOCKER_DIR/$1" ] && c=1
+            c=$((c + $(find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name "$1-*" -type d 2>/dev/null | wc -l)))
+            echo "$c"
+            ;;
+    esac
+}
+
 run_service() {
     local name="$1"
     if [ -n "${SERVICE_ALIAS[$name]:-}" ]; then
@@ -139,13 +161,14 @@ list_services() {
 # the "[installed]" suffix off-screen without it being obvious that's what
 # happened.
 print_status() {
-    local g name marker
+    local g name marker count
     while IFS= read -r g; do
         echo ""; echo "── ${g^^} ──"
         while IFS= read -r name; do
+            count="$(install_count "$name")"
             marker="not installed"
-            is_installed "$name" && marker="INSTALLED"
-            printf "  %-20s %-12s %s\n" "$name" "$marker" "${SERVICE_DESC[$name]}"
+            [ "$count" -gt 0 ] && marker="INSTALLED (x$count)"
+            printf "  %-20s %-16s %s\n" "$name" "$marker" "${SERVICE_DESC[$name]}"
         done < <(services_in_group "$g")
     done < <(groups_present)
     echo ""
@@ -410,23 +433,28 @@ while true; do
             # description (fmd's is 68 chars; +13 for the suffix is 81,
             # past the width) silently drops the marker off the end, making
             # an installed service look uninstalled with no visual cue
-            # anything was cut. A long description can still lose its own
-            # tail this way, but that's harmless — the install status is
-            # what actually matters and now always survives.
-            # Also prefix the name itself with "*" — the checkbox's own
-            # [ ]/[*] state is reserved for "install this now", so an
-            # already-installed item stays unchecked by design (checking it
-            # would reinstall on <Ok>); this "*" sits right next to the
-            # checkbox as a second, harder-to-miss cue distinct from that
-            # selection state. Stripped back off below before dispatch.
-            if is_installed "$name"; then
-                tag="[installed] $tag"
+            # anything was cut. "[installed]" itself also ate a lot of the
+            # already-tight width just by being 11 characters wide — "[N]"
+            # (install count) says the same thing in 3, and for the
+            # multi-instance services (CLAUDE.md's pattern — a base install
+            # plus any number of "<name>-<suffix>" siblings) it's more
+            # informative than a flat "installed", since N > 1 means several
+            # separate instances exist.
+            _count="$(install_count "$name")"
+            if [ "$_count" -gt 0 ]; then
+                tag="[$_count] $tag"
+                # The checkbox's own [ ]/[*] state is reserved for "install
+                # this now", so an already-installed item stays unchecked by
+                # design (checking it would reinstall on <Ok>); prefixing
+                # the name itself with "*" gives a second, harder-to-miss
+                # cue right next to the checkbox, distinct from that
+                # selection state. Stripped back off below before dispatch.
                 svc_tag="*$name"
             fi
             svc_items+=("$svc_tag" "$tag" "OFF")
         done
         CHOICE=$(whiptail --title "${CHOSEN_CAT^^}" --checklist \
-            "Space to select, Enter to install. Already-installed are marked with *:" "$_box_h" 78 "$_list_h" \
+            "Space to select, Enter to install. [N] = N instance(s) already installed:" "$_box_h" 78 "$_list_h" \
             "${svc_items[@]}" 3>&1 1>&2 2>&3 </dev/tty) || continue
         eval "SELECTED=($CHOICE)"
         # Undo the display-only "*" prefix before these reach run_service.
@@ -434,7 +462,8 @@ while true; do
     else
         echo ""; echo "${CHOSEN_CAT^^}:"
         for name in "${SVCS[@]}"; do
-            m=""; is_installed "$name" && m="[installed] "
+            m=""; _count="$(install_count "$name")"
+            [ "$_count" -gt 0 ] && m="[$_count] "
             printf "  %-16s %s%s\n" "$name" "$m" "${SERVICE_DESC[$name]}"
         done
         read -rp "Enter service names to install (space-separated, blank to go back): " -a SELECTED
