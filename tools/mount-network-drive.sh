@@ -29,7 +29,14 @@ ACTUAL_GID="$(id -g "$ACTUAL_USER")"
 ensure_packages() {
     local pkgs=()
     case "$1" in
-        smb) command -v mount.cifs &>/dev/null || pkgs+=(cifs-utils) ;;
+        smb)
+            command -v mount.cifs &>/dev/null || pkgs+=(cifs-utils)
+            # keyutils explicitly, not left to cifs-utils' Recommends — on
+            # images with install-recommends disabled, missing keyutils
+            # makes every mount.cifs call fail with "mount error(79): Can
+            # not access a needed shared library" regardless of credentials.
+            dpkg -s keyutils &>/dev/null || pkgs+=(keyutils)
+            ;;
         nfs) command -v mount.nfs  &>/dev/null || pkgs+=(nfs-common)  ;;
     esac
     if [[ ${#pkgs[@]} -gt 0 ]]; then

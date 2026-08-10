@@ -43,12 +43,25 @@
 # Mounts use real Samba credentials (a username/password you provide for
 # an account that already exists on the home box), stored locally in a
 # root-only credentials file, same convention tools/mount-network-drive.sh
-# already uses — never guest access. A CIFS guest mount with no explicit
-# security mode can hit "mount error(79): Can not access a needed shared
-# library" — a misleadingly-worded cifs-utils message for errno 79
-# (ENOKEY), a known rough edge in the kernel cifs.ko keyring/upcall path
-# for anonymous sessions. Credentialed mounts with an explicit sec=ntlmssp
-# take the normal NTLMSSP auth path instead and don't hit it.
+# already uses — never guest access.
+#
+# "mount error(79): Can not access a needed shared library" is NOT a
+# credentials problem, guest-vs-authenticated problem, or a mislabeled
+# ENOKEY — errno 79 is literally ELIBACC, and mount.cifs prints glibc's
+# literal strerror() text for it. Confirmed live: this recurred identically
+# with a real Samba account and a verified, correctly-captured password
+# (see the read()/IFS note above — that was a real bug too, just not this
+# one). Root cause is the `keyutils` package being missing on the client
+# (VPS) side: mount.cifs dlopen()s libkeyutils.so.1 at runtime for the
+# upcall path (idmapping/SPNEGO), and while cifs-utils hard-depends on the
+# libkeyutils1 *library*, the keyutils *package* — which ships
+# /sbin/request-key and the /etc/request-key.d/*.conf handler
+# registrations the kernel's upcall actually invokes — is only a Recommends.
+# Plenty of minimal cloud VPS images (unlike a typical desktop/full-server
+# install) turn off APT's install-recommends, so `apt-get install
+# cifs-utils` alone silently skips it and every mount — guest or fully
+# credentialed — fails the same way. Install `keyutils` explicitly instead
+# of relying on it riding along.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -322,6 +335,10 @@ _vdm_mount_local() {
     local host="$1" share_name="$2" mount_point="$3" label="$4" smb_user="$5" smb_pass="$6"
 
     command -v mount.cifs >/dev/null 2>&1 || apt-get install -y cifs-utils -qq
+    # Explicit, not left to cifs-utils' Recommends — see file header on
+    # errno 79/ELIBACC. dpkg -s (not command -v: keyutils ships no binary
+    # this script calls directly, just the request-key handler files).
+    dpkg -s keyutils >/dev/null 2>&1 || apt-get install -y keyutils -qq
 
     mkdir -p "$mount_point"
 
