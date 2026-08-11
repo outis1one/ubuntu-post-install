@@ -277,6 +277,17 @@ install_fmd() {
                 case "$MODE" in
                     update)
                         log_info "Refreshing the FindMyDevice image only — token, port, and Caddy config are left as-is."
+                        # fmd-server's image runs as a fixed, non-configurable
+                        # UID:GID 1000:1000 (confirmed against its own
+                        # Dockerfile — not something PUID/PGID or similar can
+                        # override). The bind-mounted ./data dir needs that
+                        # exact numeric ownership regardless of what host user
+                        # actually owns it; re-assert it on every update too,
+                        # not just at install time, so a box whose data/ was
+                        # ever chowned to something else (e.g. $ACTUAL_USER
+                        # not being UID 1000) self-heals instead of staying
+                        # stuck crash-looping on "permission denied" forever.
+                        [ -d "$FMD_DIR/data" ] && chown -R 1000:1000 "$FMD_DIR/data"
                         ( cd "$FMD_DIR" && docker compose pull && docker compose up -d ) \
                             && log_success "FindMyDevice image refreshed" \
                             || log_warning "Refresh failed — check: docker compose -f $FMD_DIR/docker-compose.yml logs"
@@ -353,6 +364,16 @@ FMD_ENV
 
     mkdir -p data
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FMD_DIR"
+    # fmd-server's image runs as a fixed, non-configurable UID:GID 1000:1000
+    # (confirmed against its own Dockerfile: `useradd --uid 1000 fmd-server`,
+    # baked in, not something an env var can override) — the bind mount at
+    # ./data:/var/lib/fmd-server/db needs that exact numeric ownership on the
+    # host side regardless of $ACTUAL_USER's actual UID, or the container
+    # crash-loops on "permission denied" trying to create its sqlite db.
+    # Confirmed live. Must run AFTER the chown above, not before, since that
+    # one is recursive over the whole directory and would otherwise
+    # overwrite this.
+    chown -R 1000:1000 "$FMD_DIR/data"
     log_success "FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $FMD_DIR (port $WEB_PORT)"
 
     configure_caddy_for_service "FindMyDevice${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:8080" "fmd${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
