@@ -244,6 +244,33 @@ ensure_caddy_network() {
         && log_info "Created Docker network ${_net} (needed by Caddy-fronted services)"
 }
 
+# Installs yq v4 (Go binary release, not the Python click-based yq some
+# distros package under the same name) if not already present. Shared by
+# any service that needs to patch YAML config robustly instead of
+# hand-rolling sed/awk text surgery — originally lived only in
+# services/onlyoffice.sh (FileBrowser config patching); promoted here once
+# services/gatus.sh needed the same thing (endpoint sync from Caddyfile),
+# so both use one implementation instead of two copies drifting apart.
+ensure_yq() {
+    # Not just `command -v yq` — confirmed live, a box can already have
+    # `yq` on PATH that's actually kislyuk/yq (the Python jq-wrapper apt
+    # packages under the same name on Debian/Ubuntu), which silently
+    # errors on mikefarah's `e '.path' file` syntax every caller here
+    # uses ("argument files: can't open '.path'"). Check the version
+    # string actually identifies as mikefarah's before trusting it.
+    yq --version 2>/dev/null | grep -q mikefarah && return 0
+    log_info "Installing yq..."
+    local _arch; _arch=$(uname -m)
+    local _binary="yq_linux_amd64"
+    [[ "$_arch" == "aarch64" || "$_arch" == "arm64" ]] && _binary="yq_linux_arm64"
+    # /usr/local/bin precedes /usr/bin on Ubuntu's default PATH, so this
+    # correctly shadows a wrong /usr/bin/yq without needing to touch or
+    # remove it (something else on the box may depend on the real one).
+    curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/${_binary}" \
+        -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq \
+        && log_success "yq installed" || log_warning "yq install failed"
+}
+
 # Enables UFW if it isn't already active. Call this AFTER the caller has
 # already added its own `ufw allow` rules for whatever it needs — this only
 # flips UFW from inactive to active, it doesn't add rules for the calling
