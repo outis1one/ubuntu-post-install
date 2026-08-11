@@ -191,17 +191,8 @@ fi
 
 register_service onlyoffice utilities "Self-hosted OnlyOffice Document Server (Nextcloud/FileBrowser)" 8082
 
-# ── Helper: install yq v4 if absent ──────────────────────────────────────────
-_ensure_yq() {
-    command -v yq &>/dev/null && return 0
-    log_info "Installing yq (required for FileBrowser config patching)..."
-    local _arch; _arch=$(uname -m)
-    local _binary="yq_linux_amd64"
-    [[ "$_arch" == "aarch64" || "$_arch" == "arm64" ]] && _binary="yq_linux_arm64"
-    curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/${_binary}" \
-        -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq \
-        && log_success "yq installed" || log_warning "yq install failed — FileBrowser wiring skipped"
-}
+# yq install helper moved to lib/common.sh (ensure_yq) — shared with
+# services/gatus.sh now that it needs the same thing.
 
 # ── Helper: wire OnlyOffice into Nextcloud (idempotent) ───────────────────────
 _wire_nextcloud() {
@@ -228,7 +219,7 @@ _wire_nextcloud() {
 _wire_filebrowser() {
     local _fbq_config="$DOCKER_DIR/filebrowser/config.yaml"
     [[ -f "$_fbq_config" ]] || { log_info "FileBrowser config not found — skipping"; return 0; }
-    command -v yq &>/dev/null || { log_info "yq not found — skipping FileBrowser wiring"; return 0; }
+    yq --version 2>/dev/null | grep -q mikefarah || { log_info "yq unavailable or incompatible — skipping FileBrowser wiring"; return 0; }
     log_info "Wiring OnlyOffice into FileBrowser Quantum..."
     yq e '.officeServer = "http://onlyoffice:80/"' -i "$_fbq_config" \
         && log_success "FileBrowser officeServer set" || log_warning "Could not patch FileBrowser config"
@@ -237,7 +228,7 @@ _wire_filebrowser() {
 
 install_onlyoffice() {
     require_docker || return 1
-    _ensure_yq
+    declare -F ensure_yq >/dev/null 2>&1 && ensure_yq
 
     log_info "Installing OnlyOffice Document Server..."
     local DIR="$DOCKER_DIR/onlyoffice"
