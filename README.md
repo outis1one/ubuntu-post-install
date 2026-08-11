@@ -141,10 +141,24 @@ echo "cloud-init.sh: repo cloned to $DEST — the setup wizard will launch on fi
 sudo ./setup.sh                        # interactive wizard
 sudo ./setup.sh caddy immich           # install specific services
 sudo ./setup.sh configure              # set site defaults (timezone, domain, Caddy network)
+sudo ./setup.sh filebrowser --remove   # remove a service (or: sudo ./setup.sh filebrowser remove)
 ./setup.sh --list                      # list all services grouped by category
 sudo ./setup.sh --dry-run immich       # preview without making changes
 sudo ./setup.sh --unattended base      # non-interactive, use defaults
 ```
+
+### Tab completion
+
+```bash
+echo "source $(pwd)/tools/setup-completion.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+Then `./setup.sh mat<TAB>` completes to `./setup.sh mattermost` — same for
+flags (`--li<TAB>` → `--list`). Works with a leading `sudo` too. The service
+list is read fresh from `services/*.sh` on every completion, not a
+hardcoded list baked into the script — a service added since you last
+pulled shows up immediately, no re-running anything.
 
 ## What the wizard does
 
