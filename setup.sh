@@ -267,6 +267,27 @@ if [ "$DO_LIST" = true ]; then list_services; exit 0; fi
 # ── --status ─────────────────────────────────────────────────────────────────
 if [ "$DO_STATUS" = true ]; then print_status; exit 0; fi
 
+# ── Tab completion + backup pruning: always on, regardless of which branch ──
+# below actually runs (configure, --remove, direct install, or the guided
+# flow). Both used to only be wired up from inside install_base() — meaning
+# a box that never explicitly ran `sudo ./setup.sh base` first (e.g. went
+# straight to `sudo ./setup.sh beszel-agent`, the direct-install path, which
+# exits before the guided flow's own `run_service base` call ever runs)
+# never got either. Both are idempotent and no-prompt by design (see their
+# own comments in services/base.sh), so running them unconditionally here on
+# every invocation is safe. Skipped under --dry-run (would otherwise write
+# real files during what's supposed to be a preview) and never reached by
+# --list/--status above, which stay read-only and deliberately don't require
+# root.
+if [ "$DRY_RUN" = true ]; then
+    echo "[DRY-RUN] Would add setup.sh tab completion to ~/.bashrc (if not already there)"
+    echo "[DRY-RUN] Would set up daily pruning of old *.backup.* config files (systemd timer, if not already there)"
+else
+    require_root
+    declare -F _base_setup_tab_completion >/dev/null 2>&1 && _base_setup_tab_completion
+    declare -F _base_setup_backup_pruning >/dev/null 2>&1 && _base_setup_backup_pruning
+fi
+
 # ── configure: show/update site-wide defaults ────────────────────────────────
 if [ "${REQUESTED[*]:-}" = "configure" ]; then
     require_root
