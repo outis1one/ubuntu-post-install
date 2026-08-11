@@ -134,6 +134,50 @@ fi
 
 register_service beszel utilities "Lightweight server + Docker monitoring (Beszel) — CPU/RAM/disk/network, auto-discovers running containers" 8090
 
+# Self-heals an ALREADY-INSTALLED agent's docker-compose.yml with the
+# systemd/dbus/sensor mounts and apparmor:unconfined — both added to the
+# fresh-install template after plenty of boxes already existed, and
+# "update" mode otherwise never touches docker-compose.yml at all (a plain
+# pull+restart), so those boxes would stay missing both fixes forever
+# without this. Anchors on `network_mode: host` and the docker.sock mount
+# line — both unique to the beszel-agent service and present in either
+# compose shape (combined hub+agent, or agent-only), so one function
+# safely covers both install_beszel()'s and install_beszel-agent()'s
+# update paths. Each of the two fixes is checked and applied independently
+# (idempotent either way), so a box that already picked up one but not the
+# other — e.g. updated between the two commits that added them — still
+# gets exactly the one it's missing, not a duplicate of the one it has.
+_beszel_patch_agent_compose() {
+    local compose_file="$1"
+    [ -f "$compose_file" ] || return 0
+
+    if ! grep -q 'apparmor:unconfined' "$compose_file"; then
+        awk '
+            { print }
+            /^    network_mode: host$/ && !done {
+                print "    security_opt:"
+                print "      - apparmor:unconfined"
+                done=1
+            }
+        ' "$compose_file" > "$compose_file.tmp" && mv "$compose_file.tmp" "$compose_file"
+        log_success "Added security_opt: apparmor:unconfined to $compose_file"
+    fi
+
+    if ! grep -q '/var/run/dbus/system_bus_socket' "$compose_file"; then
+        awk '
+            { print }
+            /^      - \/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro$/ && !done {
+                print "      - /var/run/systemd/private:/var/run/systemd/private:ro"
+                print "      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro"
+                print "      - /sys/class/hwmon:/sys/class/hwmon:ro"
+                print "      - /sys/class/thermal:/sys/class/thermal:ro"
+                done=1
+            }
+        ' "$compose_file" > "$compose_file.tmp" && mv "$compose_file.tmp" "$compose_file"
+        log_success "Added systemd/dbus/sensor mounts to $compose_file"
+    fi
+}
+
 # Pulls a NAME's value out of a pasted blob regardless of which shape it
 # arrives in — Beszel's own "copy for docker compose" button (the most
 # prominent option next to the key/token fields, confirmed live to be
@@ -232,6 +276,7 @@ install_beszel() {
         case "$MODE" in
             update)
                 log_info "Refreshing images only — existing config, port, and Caddy setup are left as-is."
+                _beszel_patch_agent_compose "$DIR/docker-compose.yml"
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Beszel images refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
@@ -483,6 +528,7 @@ install_beszel-agent() {
         case "$MODE" in
             update)
                 log_info "Refreshing the image only — existing hub URL/key/token are left as-is."
+                _beszel_patch_agent_compose "$DIR/docker-compose.yml"
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Beszel agent image refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
