@@ -149,6 +149,10 @@ sudo ./setup.sh --unattended base      # non-interactive, use defaults
 
 ### Tab completion
 
+Set up automatically by `base` (checks `~/.bashrc` first, so a rerun never
+adds it twice) — open a new shell, or `source ~/.bashrc`, and it's active.
+To add it manually on a box that installed `base` before this existed:
+
 ```bash
 echo "source $(pwd)/tools/setup-completion.bash" >> ~/.bashrc
 source ~/.bashrc
@@ -312,6 +316,30 @@ docker compose logs -f      # logs
 docker compose pull && docker compose up -d   # update
 docker compose down         # stop
 ```
+
+## Old config backup pruning
+
+Every service in this repo backs up a live config before overwriting it —
+`Caddyfile.backup.<timestamp>`, `/etc/fstab.backup.<timestamp>`, and so on —
+but nothing cleans those up afterward, so they build up on any box
+reconfigured regularly. `base` sets up a daily systemd timer
+(`prune-old-backups`), automatically and without asking (the same way it
+sets up [tab completion](#tab-completion) — low-stakes enough not to need
+a prompt, and idempotent either way), that removes anything older than 30
+days, always keeping at least the single newest backup per file regardless
+of age — a box left alone for months never ends up with zero backups for
+something.
+
+```bash
+sudo bash tools/prune-old-backups.sh [KEEP_DAYS]   # run by hand, default 30
+systemctl status prune-old-backups.timer           # check the schedule
+sudo systemctl disable --now prune-old-backups.timer   # turn it off
+```
+
+Caddy's own access logs (`/var/log/caddy/*.log`) are handled separately —
+`caddy` sets up `logrotate` for those directly (14 days, `copytruncate` so
+neither the running container nor CrowdSec's log tailing has to notice a
+rotation happened).
 
 ## SSH key import (GitHub/Launchpad) and disabling password login
 

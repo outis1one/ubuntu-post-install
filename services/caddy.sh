@@ -233,6 +233,7 @@ install_caddy() {
         echo "[DRY-RUN] Would write a starter $CADDY_DIR/Caddyfile (if none exists)"
         echo "[DRY-RUN] Would write $CADDY_DIR/README.md"
         echo "[DRY-RUN] Would open 80/tcp, 443/tcp, 443/udp in UFW (Docker's own iptables rules let this traffic through either way, but ufw status should actually reflect it)"
+        echo "[DRY-RUN] Would configure logrotate for /var/log/caddy/*.log (14 days, copytruncate)"
         echo "[DRY-RUN] Would optionally start Caddy (docker compose up -d)"
         return 0
     fi
@@ -384,6 +385,29 @@ CADDYFILE
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR"
     echo "  ✓ Caddy configured at $CADDY_DIR"
+
+    # Every site's access log (one JSON file per domain, per the "log {}"
+    # block configure_caddy_for_service writes) grows forever otherwise —
+    # nothing in this repo ever rotated them. copytruncate, not the usual
+    # rename+recreate rotation: the log directory is bind-mounted into the
+    # running Caddy container (still holding the file open) and read live
+    # by CrowdSec, so truncating in place avoids both "Caddy keeps writing
+    # to the old, now-unlinked file" and "CrowdSec's tail loses the file"
+    # — neither has to detect or react to a rotation at all this way.
+    if [ -d /etc/logrotate.d ]; then
+        cat > /etc/logrotate.d/caddy << 'LOGROTATE'
+/var/log/caddy/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE
+        echo "  ✓ Access log rotation configured (/var/log/caddy/*.log, 14 days, copytruncate)"
+    fi
 
     # Every other service in this repo opens its own UFW rule; this file
     # never did — Docker manipulates iptables directly for published

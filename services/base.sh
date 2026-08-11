@@ -22,6 +22,8 @@ install_base() {
         echo "[DRY-RUN] Would offer Caddy reverse proxy install (full repo only)"
         echo "[DRY-RUN] Would offer CrowdSec intrusion prevention install (full repo only)"
         echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
+        echo "[DRY-RUN] Would add setup.sh tab completion to ~/.bashrc (if not already there)"
+        echo "[DRY-RUN] Would set up daily pruning of old *.backup.* config files (systemd timer, if not already there)"
         return 0
     fi
 
@@ -82,6 +84,80 @@ install_base() {
 
     # ── SSH Host aliases ─────────────────────────────────────────────────────
     _base_setup_ssh_aliases
+
+    # ── setup.sh tab completion ─────────────────────────────────────────────
+    _base_setup_tab_completion
+
+    # ── Old config-backup pruning ────────────────────────────────────────────
+    _base_setup_backup_pruning
+}
+
+# Wires tools/setup-completion.bash into ACTUAL_USER's shell automatically —
+# no reason to make everyone find and run this by hand when base already
+# touches ~/.bashrc for other things. Idempotent (checked by grep before
+# appending), so reruns don't pile up duplicate source lines.
+_base_setup_tab_completion() {
+    local comp_script="$HERE/tools/setup-completion.bash"
+    [ -f "$comp_script" ] || return 0
+
+    local bashrc="$ACTUAL_HOME/.bashrc"
+    [ -f "$bashrc" ] || return 0
+    grep -qF "$comp_script" "$bashrc" 2>/dev/null && return 0
+
+    # No DRY_RUN check here — install_base()'s own top-level one (above)
+    # already returns before this helper is ever called in that mode,
+    # unlike install_glow()'s check further down, which is independently
+    # invokable (sudo ./setup.sh glow --dry-run) and genuinely reachable.
+    {
+        echo ""
+        echo "# ubuntu-post-install: setup.sh tab completion"
+        echo "source $comp_script"
+    } >> "$bashrc"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$bashrc" 2>/dev/null || true
+    log_success "setup.sh tab completion added to $bashrc (takes effect in new shells, or: source $bashrc)"
+}
+
+# Every service in this repo backs up a live config before overwriting it
+# (Caddyfile, /etc/fstab, ...) but none of them ever clean those up
+# afterward — see tools/prune-old-backups.sh's own header for the full
+# reasoning. Sets up a daily systemd timer that prunes anything older than
+# 30 days, always keeping at least the single newest backup per file
+# regardless of age. No prompt — same reasoning as _base_setup_tab_completion
+# right above: idempotent, and the safety net (only ever touches disposable
+# *.backup.* files, never the newest one for anything) makes this low-stakes
+# enough not to ask about, the same way that one doesn't.
+_base_setup_backup_pruning() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl list-unit-files prune-old-backups.timer --no-legend 2>/dev/null | grep -q . && return 0
+
+    local prune_script="$HERE/tools/prune-old-backups.sh"
+    [ -f "$prune_script" ] || return 0
+
+    cat > /etc/systemd/system/prune-old-backups.service << UNIT
+[Unit]
+Description=Prune old *.backup.* config backups (Caddyfile, fstab, etc)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash ${prune_script} 30
+UNIT
+    cat > /etc/systemd/system/prune-old-backups.timer << 'UNIT'
+[Unit]
+Description=Daily backup pruning
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload
+    if systemctl enable --now prune-old-backups.timer >/dev/null 2>&1; then
+        log_success "Old config backups will be pruned daily, keeping 30 days (systemd timer: prune-old-backups)"
+    else
+        log_warning "Couldn't enable the pruning timer — run $prune_script manually to prune old backups."
+    fi
 }
 
 _base_setup_nvidia_gpu() {
