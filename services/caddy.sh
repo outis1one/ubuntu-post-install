@@ -232,6 +232,7 @@ install_caddy() {
         echo "[DRY-RUN] Would write $CADDY_DIR/docker-compose.yml (ports 80/443 + HTTP/3)"
         echo "[DRY-RUN] Would write a starter $CADDY_DIR/Caddyfile (if none exists)"
         echo "[DRY-RUN] Would write $CADDY_DIR/README.md"
+        echo "[DRY-RUN] Would open 80/tcp, 443/tcp, 443/udp in UFW (Docker's own iptables rules let this traffic through either way, but ufw status should actually reflect it)"
         echo "[DRY-RUN] Would optionally start Caddy (docker compose up -d)"
         return 0
     fi
@@ -383,6 +384,24 @@ CADDYFILE
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$CADDY_DIR"
     echo "  ✓ Caddy configured at $CADDY_DIR"
+
+    # Every other service in this repo opens its own UFW rule; this file
+    # never did — Docker manipulates iptables directly for published
+    # container ports (the ports: mapping above), which bypasses UFW's own
+    # filtering entirely for 80/tcp, 443/tcp, and 443/udp regardless of
+    # what `ufw status` shows. Confirmed live: sites were reachable over
+    # HTTPS with zero matching UFW rule for either port. That's not a
+    # meaningful protection gap on its own — 80/443 are supposed to be open
+    # to everyone, that's the whole point of a reverse proxy — but it means
+    # `ufw status` actively misrepresents this box's real exposure on its
+    # two most externally-facing ports, which is confusing and worth fixing
+    # even though nothing was actually unprotected as a result.
+    if command -v ufw &>/dev/null; then
+        ufw allow 80/tcp comment "Caddy HTTP" >/dev/null 2>&1
+        ufw allow 443/tcp comment "Caddy HTTPS" >/dev/null 2>&1
+        ufw allow 443/udp comment "Caddy HTTP/3" >/dev/null 2>&1
+        declare -F ensure_ufw_enabled >/dev/null 2>&1 && ensure_ufw_enabled
+    fi
 
     write_readme "$CADDY_DIR" << 'CADDY_README'
 # Caddy — reverse proxy + automatic HTTPS
