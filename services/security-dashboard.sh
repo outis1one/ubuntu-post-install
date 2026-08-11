@@ -220,6 +220,17 @@ install_security-dashboard() {
     # _secdash_configure_caddy so "update" mode can also offer to reconfigure
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
+    #
+    # Remove any existing block first — this "fresh" path re-runs on a box
+    # that already has one (a "Full install" over an existing dashboard, not
+    # just a first-time install), and without this it doesn't replace the
+    # old block, it appends a second one for the same domain. Caddy serves
+    # whichever block comes first in the file, so the stale block (old
+    # Authelia address, old Basic Auth, etc.) kept winning even after
+    # answering these prompts with new values. The update/reconfigure path
+    # below already does this (line ~173); a fresh install needs the same
+    # removal, not just the same write. No-ops if nothing is deployed yet.
+    _secdash_remove_caddy_block "$DASHBOARD_PORT"
     _secdash_configure_caddy "$DASHBOARD_PORT"
     _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT"
 
