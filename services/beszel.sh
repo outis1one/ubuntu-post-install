@@ -134,6 +134,50 @@ fi
 
 register_service beszel utilities "Lightweight server + Docker monitoring (Beszel) — CPU/RAM/disk/network, auto-discovers running containers" 8090
 
+# Self-heals an ALREADY-INSTALLED agent's docker-compose.yml with the
+# systemd/dbus/sensor mounts and apparmor:unconfined — both added to the
+# fresh-install template after plenty of boxes already existed, and
+# "update" mode otherwise never touches docker-compose.yml at all (a plain
+# pull+restart), so those boxes would stay missing both fixes forever
+# without this. Anchors on `network_mode: host` and the docker.sock mount
+# line — both unique to the beszel-agent service and present in either
+# compose shape (combined hub+agent, or agent-only), so one function
+# safely covers both install_beszel()'s and install_beszel-agent()'s
+# update paths. Each of the two fixes is checked and applied independently
+# (idempotent either way), so a box that already picked up one but not the
+# other — e.g. updated between the two commits that added them — still
+# gets exactly the one it's missing, not a duplicate of the one it has.
+_beszel_patch_agent_compose() {
+    local compose_file="$1"
+    [ -f "$compose_file" ] || return 0
+
+    if ! grep -q 'apparmor:unconfined' "$compose_file"; then
+        awk '
+            { print }
+            /^    network_mode: host$/ && !done {
+                print "    security_opt:"
+                print "      - apparmor:unconfined"
+                done=1
+            }
+        ' "$compose_file" > "$compose_file.tmp" && mv "$compose_file.tmp" "$compose_file"
+        log_success "Added security_opt: apparmor:unconfined to $compose_file"
+    fi
+
+    if ! grep -q '/var/run/dbus/system_bus_socket' "$compose_file"; then
+        awk '
+            { print }
+            /^      - \/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro$/ && !done {
+                print "      - /var/run/systemd/private:/var/run/systemd/private:ro"
+                print "      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro"
+                print "      - /sys/class/hwmon:/sys/class/hwmon:ro"
+                print "      - /sys/class/thermal:/sys/class/thermal:ro"
+                done=1
+            }
+        ' "$compose_file" > "$compose_file.tmp" && mv "$compose_file.tmp" "$compose_file"
+        log_success "Added systemd/dbus/sensor mounts to $compose_file"
+    fi
+}
+
 # Pulls a NAME's value out of a pasted blob regardless of which shape it
 # arrives in — Beszel's own "copy for docker compose" button (the most
 # prominent option next to the key/token fields, confirmed live to be
@@ -220,6 +264,7 @@ install_beszel() {
         echo "[DRY-RUN] Port 8090 published for the hub (auto-scanned for a free host port)"
         echo "[DRY-RUN] Agent connects to the hub over a shared unix socket, not a TCP port"
         echo "[DRY-RUN] Would mount host systemd/dbus sockets + sensor paths read-only (Services/Temp columns)"
+        echo "[DRY-RUN] Would set security_opt: apparmor:unconfined on the agent (needed for dbus to work at all on an AppArmor host)"
         echo "[DRY-RUN] Would pause for you to log into the hub and provide its key + universal token to finish the agent"
         return 0
     fi
@@ -231,6 +276,7 @@ install_beszel() {
         case "$MODE" in
             update)
                 log_info "Refreshing images only — existing config, port, and Caddy setup are left as-is."
+                _beszel_patch_agent_compose "$DIR/docker-compose.yml"
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Beszel images refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
@@ -295,6 +341,15 @@ networks:
     # running as a normal host process, which is what first surfaced this
     # gap — a Docker-deployed agent sitting right next to it showed nothing
     # in either column until these were added.
+    #
+    # The mounts alone aren't enough on an AppArmor-enabled host (Ubuntu/
+    # Debian by default): the dbus connection attempt fails with "An
+    # AppArmor policy prevents this sender from sending this message to
+    # this recipient" (visible only at LOG_LEVEL=debug — silent otherwise),
+    # since the container has no AppArmor label the host's dbus-daemon
+    # profile recognizes. security_opt: apparmor:unconfined below is
+    # Beszel's own documented fix (beszel.dev/guide/systemd#apparmor-error)
+    # — confirmed live, this exact error on a real box.
     cat > docker-compose.yml << BESZEL_COMPOSE
 name: beszel
 
@@ -316,6 +371,8 @@ ${_CADDY_NET_BLOCK}
     container_name: beszel-agent
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - apparmor:unconfined
     env_file: .env
     environment:
       - LISTEN=/beszel_socket/beszel.sock
@@ -375,10 +432,13 @@ report every currently-running container automatically — nothing to
 configure per-service; install or remove a container on this box and the
 agent's next poll just reflects it.
 
-Also mounts the host's systemd/dbus sockets and sensor paths (read-only) so
+Also mounts the host's systemd/dbus sockets and sensor paths (read-only),
+plus `security_opt: apparmor:unconfined` (required on Ubuntu/Debian for the
+dbus connection to work at all — otherwise AppArmor silently blocks it), so
 the hub's **Services** (systemd units) and **Temp** (hardware sensors)
-columns work for this box — without them a Docker-deployed agent silently
-shows both empty, no error anywhere pointing at why.
+columns work for this box — without both, a Docker-deployed agent silently
+shows both empty, no error anywhere pointing at why (visible only at
+`LOG_LEVEL=debug`).
 
 ## First login
 
@@ -454,6 +514,7 @@ install_beszel-agent() {
         echo "[DRY-RUN] Would deploy henrygd/beszel-agent only (no hub, no web UI on this box)"
         echo "[DRY-RUN]   network_mode: host, /var/run/docker.sock mounted read-only"
         echo "[DRY-RUN]   plus host systemd/dbus sockets + sensor paths read-only (Services/Temp columns)"
+        echo "[DRY-RUN]   plus security_opt: apparmor:unconfined (needed for dbus to work at all on an AppArmor host)"
         echo "[DRY-RUN] Would prompt for the hub's public URL, then its key + universal token"
         echo "[DRY-RUN]   (same paste flow as the hub-side installer)"
         echo "[DRY-RUN] No inbound port opened — the agent connects OUTBOUND to the hub, so no"
@@ -467,6 +528,7 @@ install_beszel-agent() {
         case "$MODE" in
             update)
                 log_info "Refreshing the image only — existing hub URL/key/token are left as-is."
+                _beszel_patch_agent_compose "$DIR/docker-compose.yml"
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Beszel agent image refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
@@ -515,6 +577,8 @@ services:
     container_name: beszel-agent
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - apparmor:unconfined
     env_file: .env
     environment:
       - HUB_URL=\${HUB_URL}
@@ -544,10 +608,13 @@ Reports this box's host resources and Docker container stats to a Beszel
 HUB running elsewhere — no hub, no web UI, nothing web-facing on this box
 at all.
 
-Also mounts the host's systemd/dbus sockets and sensor paths (read-only) so
+Also mounts the host's systemd/dbus sockets and sensor paths (read-only),
+plus \`security_opt: apparmor:unconfined\` (required on Ubuntu/Debian for the
+dbus connection to work at all — otherwise AppArmor silently blocks it), so
 the hub's **Services** (systemd units) and **Temp** (hardware sensors)
-columns work for this box too — without them a Docker-deployed agent
-silently shows both empty, no error anywhere pointing at why.
+columns work for this box too — without both, a Docker-deployed agent
+silently shows both empty, no error anywhere pointing at why (visible only
+at \`LOG_LEVEL=debug\`).
 
 ## Connecting (if you skipped it during install)
 
