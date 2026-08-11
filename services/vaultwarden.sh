@@ -317,13 +317,23 @@ install_vaultwarden() {
     echo "  SMTP (optional) — for password-reset and invite emails."
     echo "  Press Enter to skip each field and configure SMTP later in .env."
     echo ""
-    local SMTP_HOST="" SMTP_FROM="" SMTP_USER="" SMTP_PASS="" SMTP_PORT="587"
+    # Every SMTP_* value (including PORT/SECURITY) stays genuinely empty
+    # unless SMTP_HOST is actually provided — confirmed live, this used to
+    # default SMTP_PORT to "587" and hardcode SMTP_SECURITY=starttls in the
+    # .env template unconditionally, so even a fully-skipped SMTP setup
+    # (SMTP_HOST left blank) still wrote real, non-empty values for those
+    # two. Vaultwarden reads that as "some SMTP config is present" and
+    # refuses to start ("Both SMTP_HOST and SMTP_FROM need to be set"),
+    # crash-looping even though the actual host/from fields were blank —
+    # the "skip SMTP" path was never actually clean.
+    local SMTP_HOST="" SMTP_FROM="" SMTP_USER="" SMTP_PASS="" SMTP_PORT="" SMTP_SECURITY=""
     prompt_text "SMTP host (e.g. smtp.gmail.com) [skip]:" "" SMTP_HOST
     if [ -n "$SMTP_HOST" ]; then
         prompt_text "SMTP port [587]:" "587" SMTP_PORT
         prompt_text "SMTP from address:" "" SMTP_FROM
         prompt_text "SMTP username:" "" SMTP_USER
         prompt_text "SMTP password:" "" SMTP_PASS
+        SMTP_SECURITY=starttls
         # Vaultwarden refuses to start at all if SMTP_HOST is set without
         # SMTP_FROM ("Both SMTP_HOST and SMTP_FROM need to be set") —
         # confirmed live, crash-loops on every start, not just a warning at
@@ -333,7 +343,7 @@ install_vaultwarden() {
         # container — better than guessing a from-address on your behalf.
         if [ -z "$SMTP_FROM" ]; then
             log_warning "No SMTP from address entered — disabling SMTP entirely (Vaultwarden requires both or neither). Re-run this installer to set it up later."
-            SMTP_HOST=""; SMTP_PORT="587"; SMTP_USER=""; SMTP_PASS=""
+            SMTP_HOST=""; SMTP_PORT=""; SMTP_SECURITY=""; SMTP_USER=""; SMTP_PASS=""
         fi
     fi
 
@@ -398,7 +408,7 @@ SIGNUPS_VERIFY=false
 # ── SMTP (optional — for password-reset and invite emails) ────────────────────
 SMTP_HOST=$SMTP_HOST
 SMTP_PORT=$SMTP_PORT
-SMTP_SECURITY=starttls
+SMTP_SECURITY=$SMTP_SECURITY
 SMTP_FROM=$SMTP_FROM
 SMTP_USERNAME=$SMTP_USER
 SMTP_PASSWORD=$SMTP_PASS

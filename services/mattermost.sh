@@ -322,13 +322,22 @@ install_mattermost() {
     ensure_docker_dir_ownership "$DIR"
     cd "$DIR" || return 1
 
-    # Reuse existing secrets on update — Postgres's volume keeps the password
-    # from its first init, so overwriting .env with a fresh one locks
-    # Mattermost out of its own database. Confirmed this was previously
-    # unconditional (regenerated every single rerun, silently breaking the DB
-    # connection) — fixed here as part of adding proper update detection.
+    # Reuse existing secrets whenever the Postgres data volume already has
+    # real data in it — not just when MODE=update. Confirmed live: picking
+    # "fresh" after removing only the mattermost APP container (docker rm,
+    # not the whole ~/docker/mattermost directory) regenerates
+    # POSTGRES_PASSWORD in a new .env while db/ still holds the OLD
+    # password baked in from its first init (postgres:15-alpine's
+    # entrypoint skips re-initializing an existing data directory, so the
+    # old credential is still the one actually enforced) — "password
+    # authentication failed for user mattermost" on every start
+    # afterward. Whether the data volume already has real data in it is
+    # what actually determines whether the old password is still live,
+    # not which reinstall mode was chosen.
     local DB_PASS="" MM_SECRET=""
-    if [ "$MODE" = "update" ]; then
+    local _db_has_data=false
+    [ -d db ] && [ -n "$(ls -A db 2>/dev/null)" ] && _db_has_data=true
+    if [ "$MODE" = "update" ] || [ "$_db_has_data" = true ]; then
         DB_PASS="$(grep '^POSTGRES_PASSWORD=' .env 2>/dev/null | cut -d= -f2-)"
         [ "$_HAD_EMBEDDED_COTURN" = true ] && MM_SECRET="$(grep '^COTURN_SECRET=' .env 2>/dev/null | cut -d= -f2-)"
     fi
