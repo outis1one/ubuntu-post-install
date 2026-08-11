@@ -13,9 +13,11 @@
 #   --dry-run      preview actions without making changes
 #   --unattended   use defaults, no prompts (pair with explicit service names)
 #   --remove       remove instead of install (pair with a service name, e.g.
-#                  ./setup.sh filebrowser --remove) — stops/removes its
-#                  containers, its Caddy site block (if any), any UFW rule
-#                  tagged for it, and optionally its ~/docker/<name> directory
+#                  ./setup.sh filebrowser --remove, or the plain word "remove"/
+#                  "uninstall" works too: ./setup.sh filebrowser remove) —
+#                  stops/removes its containers, its Caddy site block (if
+#                  any), any UFW rule tagged for it, and optionally its
+#                  ~/docker/<name> directory
 #
 # Every service lives in services/<name>.sh, registers itself with
 # register_service, and defines install_<name>. Adding a service = adding one
@@ -46,7 +48,7 @@ for arg in "$@"; do
         --unattended) UNATTENDED=true ;;
         --list|-l)    DO_LIST=true ;;
         --status)     DO_STATUS=true ;;
-        --remove)     DO_REMOVE=true ;;
+        --remove|remove|uninstall) DO_REMOVE=true ;;
         --version|-V) cat "$HERE/VERSION" 2>/dev/null || echo "unknown"; exit 0 ;;
         -h|--help)    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
