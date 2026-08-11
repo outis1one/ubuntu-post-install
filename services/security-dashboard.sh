@@ -133,6 +133,7 @@ install_security-dashboard() {
         echo "[DRY-RUN] Would grant read/write access to the detected Asterisk config dir (for the Extensions tab)"
         echo "[DRY-RUN] Would grant read-only access to the Asterisk voicemail spool dir (for the Voicemail tab)"
         echo "[DRY-RUN] Would configure Caddy + Authelia for a domain you'll be prompted for"
+        echo "[DRY-RUN] Would optionally prompt for per-admin extension scoping (Calls & Texts / Voicemail)"
         return 0
     fi
 
@@ -172,6 +173,11 @@ install_security-dashboard() {
                     _secdash_remove_caddy_block "$DASHBOARD_PORT"
                     _secdash_configure_caddy "$DASHBOARD_PORT"
                 fi
+
+                echo ""
+                local _reconf_admins=""
+                prompt_yn "Reconfigure per-admin extension scoping (Calls & Texts / Voicemail)? (y/n):" "n" _reconf_admins
+                [[ "$_reconf_admins" =~ ^[Yy]$ ]] && _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER"
                 return 0
                 ;;
             cancel)
@@ -215,6 +221,7 @@ install_security-dashboard() {
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
     _secdash_configure_caddy "$DASHBOARD_PORT"
+    _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER"
 
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
@@ -266,9 +273,6 @@ which tab a given extension's settings live on.
   dependency at all — no cost, no carrier, no DID). Enabling Voicemail
   generates a 4-digit PIN, shown in that column, for checking messages by
   phone (\`*97\`); \`*98<ext>\` leaves a message directly without ringing.
-- **Voicemail** — every message across every mailbox's spool, newest first,
-  with an inline player per row (click-to-play, no download). Read-only —
-  delete a message by dialing in with the PIN and using the phone menu.
 
   Each extension has one whitelist and a mode saying which direction(s) it
   applies to: **No PSTN**, **Unrestricted**, **Restrict outbound** (may only
@@ -346,6 +350,9 @@ which tab a given extension's settings live on.
     international-calling allow-list are deliberately **not** managed here
     — CLI-only, via \`sudo ./setup.sh pstn-trunk\` — since all three are
     more security-sensitive than what this tab already exposes.
+- **Voicemail** — every message across every mailbox's spool, newest first,
+  with an inline player per row (click-to-play, no download). Read-only —
+  delete a message by dialing in with the PIN and using the phone menu.
 - **CrowdSec** — its nav button only appears once \`cscli\` is detected on
   this host. Current bans (\`cscli decisions list\`), a delete/unban button
   per entry, carrier/ASN + country columns (sortable per column), and
@@ -360,6 +367,24 @@ which tab a given extension's settings live on.
   - **Unwhitelist + Ban** does that *and* immediately bans (24h) every IP
     CrowdSec has ever recorded for that ASN, for accidental-whitelist cases
     where you don't want to wait for it to misbehave again.
+
+## Per-admin extension scoping (optional)
+
+For a dashboard shared by more than one admin: **Calls & Texts** and
+**Voicemail** can be restricted so each admin only sees their own
+extensions' history and messages — everyone still sees the full **Security
+Log**, **CrowdSec**, and **Extensions** tabs regardless. Configured via
+\`sudo ./setup.sh security-dashboard\` (offered at install, and on every
+"reconfigure" of an existing one) — writes \`dashboard-admins.conf\` in this
+directory, matching admin usernames to their Authelia login exactly (read
+off the \`Remote-User\` header Caddy already injects once Authelia protects
+this domain).
+
+**Fail-closed**: with no \`dashboard-admins.conf\` at all, both tabs are
+unrestricted for everyone (the default). The moment ONE admin is added,
+every other identity — an admin not yet listed, a typo'd username, or a
+request with no Authelia identity at all — sees nothing on those two tabs
+until they're added too. Edits take effect immediately, no restart needed.
 
 ## Manage
 \`\`\`
@@ -743,6 +768,112 @@ CADDYBLOCK
             ufw_allow_from_caddy_net "${DASHBOARD_PORT}"
         fi
     fi
+}
+
+# Per-admin extension scoping for the Calls & Texts and Voicemail tabs only
+# — Security Log, CrowdSec, and Extensions stay open to every admin who gets
+# past Caddy/Authelia at all, unaffected by this. Writes
+# $APP_DIR/dashboard-admins.conf, read (never written) by app.py — see
+# DASHBOARD_ADMINS_FILE/allowed_extensions_for_user() in _secdash_write_app.
+# No service restart needed after this: app.py re-reads the file on every
+# request, the same live-config convention pstn-permissions.conf already
+# uses.
+#
+# Full-replace, not incremental patch — same shape as
+# _secdash_configure_caddy's own reconfigure flow (existing entries are
+# shown first so nothing is silently lost, but the operator re-enters
+# everyone they want kept). Reasonable for the two-or-three-admin case this
+# exists for; not built to scale past that.
+_secdash_configure_admin_scoping() {
+    local APP_DIR="$1" SVC_USER="$2"
+    local ADMINS_FILE="$APP_DIR/dashboard-admins.conf"
+
+    echo ""
+    if [[ -f "$ADMINS_FILE" ]]; then
+        echo "  Current per-admin scoping (Calls & Texts + Voicemail):"
+        awk -F'=' '
+            /^\[/ { gsub(/[][]/, ""); user=$0; next }
+            /^extensions/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print "    " user ": " $2 }
+        ' "$ADMINS_FILE"
+    fi
+
+    local _WANT=""
+    prompt_yn "  Restrict Calls & Texts and Voicemail to specific admins by extension? (y/n):" "n" _WANT
+    if [[ ! "$_WANT" =~ ^[Yy]$ ]]; then
+        if [[ -f "$ADMINS_FILE" ]]; then
+            local _DISABLE=""
+            prompt_yn "  Remove the existing scoping (everyone sees everything on those two tabs again)? (y/n):" "n" _DISABLE
+            if [[ "$_DISABLE" =~ ^[Yy]$ ]]; then
+                rm -f "$ADMINS_FILE"
+                log_success "Scoping removed — Calls & Texts and Voicemail are unrestricted again."
+            fi
+        fi
+        return 0
+    fi
+
+    log_warning "Fail-closed: once the first admin is added below, every OTHER identity —"
+    log_warning "including an admin you forget to list, or a request with no Authelia"
+    log_warning "identity at all — sees NOTHING on Calls & Texts or Voicemail. Security"
+    log_warning "Log, CrowdSec, and Extensions stay open to everyone either way."
+
+    local TMP_FILE
+    TMP_FILE="$(mktemp)"
+    cat > "$TMP_FILE" << 'HDR'
+; Per-admin extension scoping for the Calls & Texts and Voicemail tabs.
+; Managed by 'sudo ./setup.sh security-dashboard' (reconfigure on an
+; existing install) - safe to edit by hand too, one [username] section per
+; admin with an extensions= list, username must match that admin's Authelia
+; login exactly (this dashboard reads it off the Remote-User header Caddy's
+; forward_auth/import authelia already injects).
+;
+; Empty or missing file = scoping disabled, everyone sees everything on both
+; tabs (the default). Once ANY [username] section exists here, every OTHER
+; identity - including an unlisted admin, or a request with no Remote-User
+; at all - sees NOTHING on those two tabs. Fail closed, not fail open.
+
+HDR
+
+    local _added=0
+    while true; do
+        echo ""
+        local _USER="" _EXTS=""
+        prompt_text "  Admin username (must match their Authelia login exactly, blank to finish):" "" _USER
+        [[ -z "$_USER" ]] && break
+        if ! [[ "$_USER" =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+            log_warning "  Invalid username — letters, numbers, and . _ @ - only. Skipped."
+            continue
+        fi
+        prompt_text "  Extensions for $_USER (comma-separated, e.g. 101,102):" "" _EXTS
+        _EXTS="$(echo "$_EXTS" | tr -d ' ')"
+        local -a _EXT_ARR=() _VALID=()
+        IFS=',' read -ra _EXT_ARR <<< "$_EXTS"
+        local e
+        for e in "${_EXT_ARR[@]}"; do
+            [[ "$e" =~ ^[0-9]+$ ]] && _VALID+=("$e")
+        done
+        if [[ ${#_VALID[@]} -eq 0 ]]; then
+            log_warning "  No valid extensions entered for $_USER — skipped."
+            continue
+        fi
+        {
+            echo "[$_USER]"
+            echo "extensions = $(IFS=,; echo "${_VALID[*]}")"
+            echo ""
+        } >> "$TMP_FILE"
+        _added=$((_added + 1))
+        log_success "  Added $_USER -> $(IFS=,; echo "${_VALID[*]}")"
+    done
+
+    if [[ $_added -eq 0 ]]; then
+        rm -f "$TMP_FILE"
+        log_info "No admins added — leaving scoping as it was."
+        return 0
+    fi
+
+    mv "$TMP_FILE" "$ADMINS_FILE"
+    chown "$SVC_USER:$SVC_USER" "$ADMINS_FILE"
+    chmod 640 "$ADMINS_FILE"
+    log_success "Wrote $ADMINS_FILE with $_added admin(s) — takes effect immediately, no restart needed."
 }
 
 # Removes the dashboard's existing Caddyfile site block (found via its
@@ -1818,6 +1949,90 @@ def voicemail_audio_path(ext, msg):
     if not real_path.startswith(real_inbox + os.sep) or not os.path.isfile(real_path):
         return None
     return real_path
+
+
+# ── Per-admin extension scoping (Calls & Texts + Voicemail only) ───────────
+# Managed by services/security-dashboard.sh's CLI prompts (see
+# _secdash_configure_admin_scoping), not by this app — this file is written
+# by root at install/update time and only ever READ here, matching the
+# read-only-from-the-app-side treatment ea_config_dir already gets and for
+# the same reason: no code path in app.py needs to write it, so it never
+# gets write access.
+#
+# Security Log, CrowdSec, and Extensions are deliberately never touched by
+# this — those stay gated purely on "did you get past Caddy/Authelia at
+# all," same as before this existed. Only Calls & Texts and Voicemail are
+# scoped, per the split the dashboard's actual admins asked for: both admins
+# need the full Extensions list and Security Log to do their job, but each
+# should only see the call/text history and voicemail of their own numbers.
+DASHBOARD_ADMINS_FILE = "/opt/security-dashboard/dashboard-admins.conf"
+DASHBOARD_ADMINS_HEADER = (
+    "; Per-admin extension scoping for the Calls & Texts and Voicemail tabs.\n"
+    "; Managed by 'sudo ./setup.sh security-dashboard' (reconfigure on an\n"
+    "; existing install) - safe to edit by hand too, one [username] section\n"
+    "; per admin with an extensions= list, username must match that admin's\n"
+    "; Authelia login exactly (this dashboard reads it off the Remote-User\n"
+    "; header Caddy's forward_auth/import authelia already injects).\n"
+    ";\n"
+    "; Empty or missing file = scoping disabled, everyone sees everything on\n"
+    "; both tabs (today's default, unchanged). Once ANY [username] section\n"
+    "; exists here, every OTHER identity - including an unlisted admin, or a\n"
+    "; request with no Remote-User at all - sees NOTHING on those two tabs.\n"
+    "; Fail closed, not fail open: a typo'd or forgotten admin loses access\n"
+    "; rather than silently gaining everyone else's.\n\n"
+)
+
+
+def _dashboard_admins_cp():
+    cp = configparser.ConfigParser(delimiters=("=",))
+    if os.path.isfile(DASHBOARD_ADMINS_FILE):
+        try:
+            cp.read(DASHBOARD_ADMINS_FILE)
+        except configparser.Error:
+            pass
+    return cp
+
+
+def allowed_extensions_for_user(username):
+    """None means "no restriction" - ONLY when scoping is disabled
+    entirely (no [username] sections configured at all). Once any admin IS
+    configured, every other identity (unrecognized username, or no
+    Remote-User header at all) gets an EMPTY set back, never None, so a
+    caller can't mistake "not found" for "unrestricted" — see the fail-
+    closed reasoning in DASHBOARD_ADMINS_HEADER."""
+    cp = _dashboard_admins_cp()
+    if not cp.sections():
+        return None
+    username = (username or "").strip()
+    if not username or not cp.has_section(username):
+        return set()
+    raw = cp.get(username, "extensions", fallback="")
+    return {e.strip() for e in raw.split(",") if e.strip()}
+
+
+def _admin_scope_for_request(handler):
+    """The requesting identity's allowed-extensions set, resolved once per
+    request from the Remote-User header Caddy's Authelia integration
+    already injects (see services/authelia.sh's copy_headers). Every scoped
+    route calls this exactly once."""
+    return allowed_extensions_for_user(handler.headers.get("Remote-User", ""))
+
+
+def filter_calls_by_scope(events, allowed):
+    """events is the parse_pstn_calls()/parse_texts() shape - both
+    normalize to from/to fields regardless of direction, so one filter
+    covers both routes. Keeps a row if EITHER side is one of the caller's
+    extensions (an outbound row's "from" is the extension, an inbound row's
+    "to" is - covering both without needing to know direction here)."""
+    if allowed is None:
+        return events
+    return [e for e in events if e.get("from") in allowed or e.get("to") in allowed]
+
+
+def filter_voicemail_by_scope(messages, allowed):
+    if allowed is None:
+        return messages
+    return [m for m in messages if m.get("ext") in allowed]
 
 
 GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9_ -]{1,40}$")
@@ -5716,9 +5931,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/security-events":
             self._json(parse_security_log())
         elif self.path == "/api/pstn-calls":
-            self._json(parse_pstn_calls())
+            self._json(filter_calls_by_scope(parse_pstn_calls(), _admin_scope_for_request(self)))
         elif self.path == "/api/comms-texts":
-            self._json(parse_texts())
+            self._json(filter_calls_by_scope(parse_texts(), _admin_scope_for_request(self)))
         elif self.path == "/api/decisions":
             self._json(get_decisions())
         elif self.path == "/api/asn-exempt":
@@ -5804,21 +6019,30 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/ea-rooms":
             self._json({"rooms": ea_list_rooms()})
         elif self.path == "/api/voicemail":
-            self._json({"messages": list_voicemail_messages()})
+            self._json({"messages": filter_voicemail_by_scope(list_voicemail_messages(), _admin_scope_for_request(self))})
         elif self.path.startswith("/voicemail/audio?"):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
-            path = voicemail_audio_path((qs.get("ext") or [""])[0], (qs.get("msg") or [""])[0])
-            if not path:
+            ext = (qs.get("ext") or [""])[0]
+            allowed = _admin_scope_for_request(self)
+            # Scoping isn't just a list filter — a URL with a bare ext/msg
+            # guessed or copy-pasted from elsewhere must not bypass it, so
+            # this checks the SAME scope directly before ever resolving the
+            # file, not just before it appears in /api/voicemail's list.
+            if allowed is not None and ext not in allowed:
                 self._json({"error": "not found"}, 404)
             else:
-                with open(path, "rb") as f:
-                    raw = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "audio/wav")
-                self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
-                self.wfile.write(raw)
+                path = voicemail_audio_path(ext, (qs.get("msg") or [""])[0])
+                if not path:
+                    self._json({"error": "not found"}, 404)
+                else:
+                    with open(path, "rb") as f:
+                        raw = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/wav")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(raw)
         else:
             self._json({"error": "not found"}, 404)
 
