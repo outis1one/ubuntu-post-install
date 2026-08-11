@@ -425,7 +425,16 @@ AUTHELIA_USERS
     local CADDY_FILE="$DOCKER_DIR/caddy/Caddyfile"
     if [ -f "$CADDY_FILE" ]; then
         echo "  Configuring Caddy for Authelia..."
-        if ! grep -q "(authelia)" "$CADDY_FILE"; then
+        # Anchored to an actual, uncommented snippet definition — a bare
+        # `grep -q "(authelia)"` also matches the commented-out example
+        # block caddy.sh's starter Caddyfile ships ("# (authelia) {" as
+        # documentation). Confirmed live: that false match made this skip
+        # writing the real snippet entirely, leaving any later `import
+        # authelia` reference elsewhere in the file dangling — Caddy then
+        # refuses to start at all ("File to import not found: authelia"),
+        # taking down every site it fronts, not just the Authelia-protected
+        # one.
+        if ! grep -qE '^\(authelia\)[[:space:]]*\{' "$CADDY_FILE"; then
             cp "$CADDY_FILE" "$CADDY_FILE.backup.$(date +%Y%m%d-%H%M%S)"
             { cat << 'SNIPPET_EOF'
 # ── Authelia forward auth snippet ─────────────────────────────────────────────
