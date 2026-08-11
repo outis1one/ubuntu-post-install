@@ -247,31 +247,62 @@ install_drum-rhythm-game() {
   'use strict';
 
   const NOTE_TO_MIDI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-  const CHRISTMAS_TUNES = {
+  // Sourced tune corrections.  Do not add songs here from memory: every
+  // melody/rhythm entry must point at a reproducible score/ABC source.
+  // The first properly sourced passes cover Christmas songs from Milwaukee
+  // Irish Fest School of Music and Sing Along songs from abcnotation.com.
+  const CATEGORY_TUNES = {
     'jingle bells': {
       title: 'Jingle Bells', bpm: 112,
-      melody: 'E4 E4 E4 R E4 E4 E4 R E4 G4 C4 D4 E4 R F4 F4 F4 F4 F4 E4 E4 E4 E4 D4 D4 E4 D4 R G4 R E4 E4 E4 R E4 E4 E4 R E4 G4 C4 D4 E4 R F4 F4 F4 F4 F4 E4 E4 E4 G4 G4 F4 D4 C4',
-      beats:  '1 1 2 1 1 1 2 1 1 1 1 1 4 1 1 1 1 1 1 1 0.5 0.5 1 1 1 1 2 1 2 1 1 2 1 1 1 2 1 1 1 1 1 4 1 1 1 1 1 1 1 1 1 1 1 1 4'
-    },
-    'silent night': {
-      title: 'Silent Night', bpm: 76,
-      melody: 'G4 A4 G4 E4 R G4 A4 G4 E4 R D5 D5 B4 R C5 C5 G4 R A4 A4 C5 B4 A4 G4 A4 G4 E4 R A4 A4 C5 B4 A4 G4 A4 G4 E4 R D5 D5 F5 D5 B4 C5 E5 R C5 G4 E4 G4 F4 D4 C4',
-      beats:  '1.5 0.5 1 3 1 1.5 0.5 1 3 1 2 1 3 1 2 1 3 1 2 1 1.5 0.5 1 1.5 0.5 1 3 1 2 1 1.5 0.5 1 1.5 0.5 1 3 1 2 1 1.5 0.5 1 1 1 3 1 1 1 1.5 0.5 1 1 1 3'
+      source: 'Milwaukee Irish Fest School of Music ABC notation PDF: https://irishfestschoolofmusic.com/School-of-Music/Tunes/ifsm-polkas-xmas-jinglebells-abc.pdf',
+      sourceAbc: '|: BB B2 | BB B2 | Bd GA | B4 | |cc c>c|cB B>B |[1 BA AB | A2 d2 :|[2 dd cA | G2- G2 || DB AG | D2- DD/D/ | DB AG | E2- EE/E/ | Ec BA | F2- FA/A/ | dd cA | B4 | DB AG | D2 DD/D/| DB AG | E2- EE/E/ | Ec BA | dd dd/d/ | ed cA | G2 d2|]',
+      // Source metadata: M:2/4, L:1/8, K:Gmaj.  Repeats/endings are expanded
+      // explicitly below so the game receives deterministic note events.
+      melody: 'B4 B4 B4 B4 B4 B4 B4 B4 B4 D5 G4 A4 B4 C5 C5 C5 C5 C5 B4 B4 B4 B4 A4 A4 A4 B4 A4 D5 B4 B4 B4 B4 B4 B4 B4 B4 B4 D5 G4 A4 B4 C5 C5 C5 C5 C5 B4 B4 B4 B4 D5 D5 C5 A4 G4',
+      beats:  '1 1 2 1 1 2 1 1 1 1 4 1 1 1.5 0.5 1 1.5 0.5 1 1 1 1 2 2 1 1 1 4 1 1 1 1 1 2 1 1 1 1 4 1 1 1.5 0.5 1 1.5 0.5 1 1 1 1 1 1 1 1 4'
     },
     'deck the halls': {
-      title: 'Deck the Halls', bpm: 128,
-      melody: 'G4 F4 E4 D4 C4 D4 E4 C4 D4 E4 F4 D4 E4 D4 C4 B3 C4 R D4 E4 F4 D4 E4 F4 G4 D4 E4 F4 G4 A4 B4 C5 B4 A4 G4 F4 E4 D4 C4',
-      beats:  '1 0.5 0.5 1 1 1 1 1 0.5 0.5 1 1 0.5 0.5 1 1 2 1 1 0.5 0.5 1 0.5 0.5 1 1 0.5 0.5 1 1 1 1 0.5 0.5 1 1 1 1 2'
+      title: 'Deck The Halls', bpm: 128,
+      source: 'Milwaukee Irish Fest School of Music ABC notation PDF: https://irishfestschoolofmusic.com/School-of-Music/Tunes/ifsm-xmas-deckthehalls-abc.pdf',
+      sourceAbc: '|: d3 c B2 A2 | G2 A2 B2 G2 | ABcA B3 A | G2 F2 G4 :| |A3 B c2 A2 |B3 c d2 A2 | Bc d2 ef g2 |f2 e2 d4 |d3 c B2 A2 | G2 A2 B2 G2 |ABcA B3 A | G2 F2 G4|]',
+      melody: 'D5 C5 B4 A4 G4 A4 B4 G4 A4 B4 C5 A4 B4 A4 G4 F#4 G4 D5 C5 B4 A4 G4 A4 B4 G4 A4 B4 C5 A4 B4 A4 G4 F#4 G4 A4 B4 C5 A4 B4 C5 D5 A4 B4 C5 D5 E5 F#5 G5 F#5 E5 D5 D5 C5 B4 A4 G4 A4 B4 G4 A4 B4 C5 A4 B4 A4 G4 F#4 G4',
+      beats:  '3 1 2 2 2 2 2 2 1 1 1 1 3 1 2 2 4 3 1 2 2 2 2 2 2 1 1 1 1 3 1 2 2 4 3 1 2 2 3 1 2 2 1 1 2 1 1 2 2 2 4 3 1 2 2 2 2 2 2 1 1 1 1 3 1 2 2 4'
     },
     'we wish you a merry christmas': {
-      title: 'We Wish You a Merry Christmas', bpm: 120,
-      melody: 'D4 G4 G4 A4 G4 F#4 E4 E4 E4 A4 A4 B4 A4 G4 F#4 D4 D4 B4 B4 C5 B4 A4 G4 E4 D4 D4 E4 A4 F#4 G4',
-      beats:  '1 1 0.5 0.5 0.5 0.5 1 1 1 1 0.5 0.5 0.5 0.5 1 1 1 1 0.5 0.5 0.5 0.5 1 1 0.5 0.5 1 1 1 2'
+      title: 'We Wish You a Merry Christmas', bpm: 108,
+      source: 'Milwaukee Irish Fest School of Music ABC notation PDF: https://irishfestschoolofmusic.com/School-of-Music/Tunes/ifsm-waltz-xmas-wewishyouamerrychristmas-abc.pdf',
+      sourceAbc: 'D2 ||G2 GA GF| E2 E2 E2|A2 AB AG |F2 D2 D2| |B2 Bc BA | G2 E2 DD | E2 A2 F2 | G4 D2|| |G2 G2 G2 | F4 F2 | G2 F2 E2 | D4 A2 | |B2 A2 GG | d2 D2 DD | E2 A2 F2 | G4 D2 |]',
+      melody: 'D4 G4 G4 A4 G4 F#4 E4 E4 E4 A4 A4 B4 A4 G4 F#4 D4 D4 B4 B4 C5 B4 A4 G4 E4 D4 D4 E4 A4 F#4 G4 D4 G4 G4 G4 F#4 F#4 G4 F#4 E4 D4 A4 B4 A4 G4 G4 D5 D4 D4 E4 A4 F#4 G4 D4',
+      beats:  '2 2 1 1 1 1 2 2 2 2 1 1 1 1 2 2 2 2 1 1 1 1 2 2 1 1 2 2 2 4 2 2 2 2 4 2 2 2 2 4 2 2 2 1 1 2 2 1 1 2 2 4 2'
     },
-    'joy to the world': {
-      title: 'Joy to the World', bpm: 112,
-      melody: 'C5 B4 A4 G4 F4 E4 D4 C4 G4 A4 A4 B4 B4 C5 C5 C5 C5 B4 A4 G4 G4 F4 E4 C5 C5 B4 A4 G4 G4 F4 E4 E4 E4 E4 E4 F4 G4 F4 E4 D4 D4 D4 D4 E4 F4 E4 D4 C4',
-      beats:  '2 1.5 0.5 2 2 2 2 4 1.5 0.5 1.5 0.5 1.5 0.5 4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 4'
+    'twinkle twinkle little star': {
+      title: 'Twinkle, Twinkle, Little Star', bpm: 96,
+      source: 'abcnotation.com tune page from the John Chambers abc collection: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fabc%2Fmirror%2Fgulfweb.net%3A34043%2F~rlwalker%2Fabc%2Ftwinkle%2F0000',
+      sourceAbc: '|"D"D D A A|"G"B B "D"A2|"G"G G "D"F F|"A"E/2E/2E/2E/2 "D"D2|"D"A A "G"G G|"D"F F "A"E2|"D"A A "G"G G|"D"F F "A"E2|"D"D D A A|"G"B B "D"A2|"G"G G "D"F F|"A"E/2E/2E/2E/2 "D"D2|]',
+      // Source metadata: M:4/4, L:1/4, K:D.  F notes are raised for K:D.
+      melody: 'D4 D4 A4 A4 B4 B4 A4 G4 G4 F#4 F#4 E4 E4 E4 E4 D4 A4 A4 G4 G4 F#4 F#4 E4 A4 A4 G4 G4 F#4 F#4 E4 D4 D4 A4 A4 B4 B4 A4 G4 G4 F#4 F#4 E4 E4 E4 E4 D4',
+      beats:  '1 1 1 1 1 1 2 1 1 1 1 0.5 0.5 0.5 0.5 2 1 1 1 1 1 1 2 1 1 1 1 1 1 2 1 1 1 1 1 1 2 1 1 1 1 0.5 0.5 0.5 0.5 2'
+    },
+    'mary had a little lamb': {
+      title: 'Mary had a little lamb', bpm: 108,
+      source: 'abcnotation.com tune page from the John Chambers/Musica Viva mirror: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fabc%2Fmirror%2Fmusicaviva.com%2Fengland%2Fmary-had-a-little-lamb-f%2F0000',
+      sourceAbc: 'AGFG|AAA2|GGG2|AAA2|AGFG|AAAA|GGAG|F4|]',
+      melody: 'A4 G4 F4 G4 A4 A4 A4 G4 G4 G4 A4 A4 A4 A4 G4 F4 G4 A4 A4 A4 A4 G4 G4 A4 G4 F4',
+      beats:  '1 1 1 1 1 1 2 1 1 2 1 1 2 1 1 1 1 1 1 1 1 1 1 1 1 4'
+    },
+    'row row row your boat': {
+      title: 'Row, row, row your boat', bpm: 100,
+      source: 'abcnotation.com tune page from the John Chambers/Musica Viva mirror: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fabc%2Fmirror%2Fmusicaviva.com%2Fengland%2Frow-row-c%2Frow-row-c-c24%2F0000',
+      sourceAbc: 'C3 C3|C2D E3|E2D E2F|G6|ccc GGG|EEE CCC|G2F E2D|C6:|',
+      melody: 'C4 C4 C4 D4 E4 E4 D4 E4 F4 G4 C5 C5 C5 G4 G4 G4 E4 E4 E4 C4 C4 C4 G4 F4 E4 D4 C4',
+      beats:  '3 3 2 1 3 2 1 2 1 6 1 1 1 1 1 1 1 1 1 1 1 1 2 1 2 1 6'
+    },
+    'old macdonald': {
+      title: 'Old Mac Donald', bpm: 140,
+      source: 'abcnotation.com tune page from the John Chambers/Musica Viva mirror: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fabc%2Fmirror%2Fmusicaviva.com%2Fengland%2Fold-mac-donald-f%2Fold-mac-donald-f-1%2F0000',
+      sourceAbc: '"F"FFFC|"Bb"DD"F"C2|"G7"AA"C7"GG|"F"F2 z C|"F"FFFC|"Bb"DD"F"C2|"G7"AA"C7"GG|"F"F2 z2|]',
+      melody: 'F4 F4 F4 C4 D4 D4 C4 A4 A4 G4 G4 F4 R C4 F4 F4 F4 C4 D4 D4 C4 A4 A4 G4 G4 F4 R',
+      beats:  '1 1 1 1 1 1 2 1 1 1 1 2 1 1 1 1 1 1 1 1 2 1 1 1 1 2 2'
     }
   };
 
@@ -283,11 +314,18 @@ install_drum-rhythm-game() {
     return 12 * (Number(match[3]) + 1) + NOTE_TO_MIDI[match[1]] + accidental;
   };
   const freq = (midi) => 440 * (2 ** ((midi - 69) / 12));
-  const tuneNotes = (tune) => tune.melody.split(/\s+/).map((note, idx) => ({ note, midi: toMidi(note), frequency: toMidi(note) == null ? 0 : freq(toMidi(note)), beat: Number(tune.beats.split(/\s+/)[idx] || 1) }));
+  const tuneNotes = (tune) => {
+    const notes = tune.melody.split(/\s+/);
+    const beats = tune.beats.split(/\s+/);
+    return notes.map((note, idx) => {
+      const midi = toMidi(note);
+      return { note, midi, frequency: midi == null ? 0 : freq(midi), beat: Number(beats[idx] || 1) };
+    });
+  };
 
   const findAudioContext = () => {
     const AudioCtor = window.AudioContext || window.webkitAudioContext;
-    return AudioCtor ? Object.values(window).find((value) => value instanceof AudioCtor) : null;
+    return AudioCtor ? safeObjectValues(window).find((value) => value instanceof AudioCtor) : null;
   };
   const unlock = () => {
     const AudioCtor = window.AudioContext || window.webkitAudioContext;
@@ -320,16 +358,29 @@ install_drum-rhythm-game() {
   }, true);
 
   const normalize = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const safeObjectValues = (object) => Object.keys(object).flatMap((key) => {
+    try {
+      return [object[key]];
+    } catch (_error) {
+      return [];
+    }
+  });
+  const safeWindowObjects = () => safeObjectValues(window).filter((value) => value && typeof value === 'object');
   const patchSongs = () => {
-    for (const root of [window, ...Object.values(window).filter((value) => value && typeof value === 'object')]) {
+    for (const root of [window, ...safeWindowObjects()]) {
       for (const key of Object.keys(root)) {
-        const list = root[key];
+        let list;
+        try {
+          list = root[key];
+        } catch (_error) {
+          continue;
+        }
         if (!Array.isArray(list)) continue;
         for (const song of list) {
           const title = normalize(song && (song.title || song.name));
-          const tuneKey = Object.keys(CHRISTMAS_TUNES).find((candidate) => title.includes(candidate));
+          const tuneKey = Object.keys(CATEGORY_TUNES).find((candidate) => title.includes(candidate));
           if (!tuneKey) continue;
-          const tune = CHRISTMAS_TUNES[tuneKey];
+          const tune = CATEGORY_TUNES[tuneKey];
           song.title = song.title || tune.title;
           song.name = song.name || tune.title;
           song.bpm = tune.bpm;
