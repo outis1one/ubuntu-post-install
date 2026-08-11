@@ -20,11 +20,33 @@ set -uo pipefail
 PASS=0
 WARN=0
 FAIL=0
+WARN_MSGS=()
+FAIL_MSGS=()
 
 ok()   { printf '  [OK]   %s\n' "$1"; PASS=$((PASS + 1)); }
-warn() { printf '  [WARN] %s\n' "$1"; WARN=$((WARN + 1)); }
-fail() { printf '  [FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); }
+warn() { printf '  [WARN] %s\n' "$1"; WARN=$((WARN + 1)); WARN_MSGS+=("$1"); }
+fail() { printf '  [FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); FAIL_MSGS+=("$1"); }
 section() { printf '\n== %s ==\n' "$1"; }
+
+# One extension's softphone setup block — shared by the full run below and
+# the "print again, one at a time" prompt at the end, so the two can't drift.
+# Reads SIP_SERVER/TURN_SERVER/TURN_USERNAME/TURN_PASSWORD from the caller's
+# scope (set once, further down, before either call site runs).
+print_ext_info() {
+    local ext="$1" pass="$2" transport="$3" ice="$4" port proto
+    if [ "$transport" = "transport-tls" ]; then port=5061; proto="tls"; else port=5060; proto="udp"; fi
+    echo "  Extension $ext:"
+    echo "    SIP server:  $SIP_SERVER"
+    echo "    Username:    $ext"
+    echo "    Password:    $pass"
+    echo "    Port:        $port"
+    echo "    Transport:   $proto"
+    if [ "$ice" = "yes" ] && [ -n "${TURN_SERVER:-}" ]; then
+        echo "    TURN server: $TURN_SERVER"
+        echo "    TURN user:   $TURN_USERNAME"
+        echo "    TURN pass:   $TURN_PASSWORD"
+    fi
+}
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run with sudo — needs docker exec and (on some boxes) systemctl/journalctl." >&2
@@ -60,6 +82,10 @@ ok "Directory: $EA_DIR"
 ASTERISK_DIR="$EA_DIR/config/asterisk"
 LOGS_DIR="$EA_DIR/logs"
 
+# Fetched once, reused by both the softphone-setup and provider-checklist
+# sections below.
+PUBLIC_IP="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || true)"
+
 # ── Registration ─────────────────────────────────────────────────────────────
 section "Extension registration"
 
@@ -69,9 +95,12 @@ if [ -z "$ENDPOINTS_OUT" ]; then
 else
     # Endpoint lines look like " Endpoint:  101/101   Unavailable   0 of inf" —
     # skip the trunk itself (checked separately below) and the header/legend.
+    # State is captured with a regex, not a fixed field number: it's one or
+    # more words ("Unavailable", but also "Not in use" — a single $3 field
+    # grab truncated that to just "Not").
     while IFS= read -r line; do
         ext="$(awk '{print $2}' <<< "$line" | cut -d/ -f1)"
-        state="$(awk '{print $3}' <<< "$line")"
+        state="$(sed -E 's/^ Endpoint:[[:space:]]+[^[:space:]]+[[:space:]]+(.*[^[:space:]])[[:space:]]+[0-9]+ of inf[[:space:]]*$/\1/' <<< "$line")"
         # Skip the column-header/legend line ("<Endpoint/CID...>  <State...>")
         # printed once at the top of real output — it matches the same
         # "^ Endpoint:" grep as an actual endpoint row.
@@ -139,6 +168,64 @@ else
     fi
 fi
 
+# ── coturn (TURN) — used for remote/NAT'd extensions' media relay, and by
+# Anveo-style ICE-enabled endpoints. Asterisk caches its OWN TURN_* values
+# in its .env at the point it was configured — testing with those (not
+# re-deriving fresh credentials) proves what Asterisk is actually set up
+# to use, not just that the shared coturn instance works in general (that
+# broader, multi-consumer check is tools/coturn-test-check.sh's job). ─────────
+section "coturn (TURN relay for Asterisk)"
+
+ASTERISK_ENV="$EA_DIR/.env"
+TURN_SERVER="" TURN_USERNAME="" TURN_PASSWORD="" TURN_PORT=""
+if [ -f "$ASTERISK_ENV" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$ASTERISK_ENV"
+    set -u
+    TURN_SERVER="${TURN_SERVER:-}"
+    TURN_USERNAME="${TURN_USERNAME:-}"
+    TURN_PASSWORD="${TURN_PASSWORD:-}"
+    TURN_PORT="${TURN_PORT:-}"
+fi
+
+if [ -z "$TURN_SERVER" ]; then
+    warn "Asterisk has no TURN configured — fine for LAN-only extensions, but a phone on"
+    warn "mobile data or behind restrictive NAT may get one-way or no audio without it."
+    warn "Add it via: sudo ./setup.sh asterisk (update mode)"
+else
+    if grep -q '^  coturn:' "$EA_DIR/docker-compose.yml" 2>/dev/null; then
+        COTURN_CONTAINER="easy-asterisk-coturn"
+        [[ "$CONTAINER" == *-do ]] && COTURN_CONTAINER="easy-asterisk-do-coturn"
+        ok "Using an embedded, per-Asterisk coturn ($COTURN_CONTAINER) — not the shared"
+        ok "instance, so tools/coturn-test-check.sh won't see this one; tested separately below."
+    else
+        COTURN_CONTAINER="coturn"
+        ok "Using the shared coturn instance (also covered by tools/coturn-test-check.sh)"
+    fi
+
+    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$COTURN_CONTAINER"; then
+        fail "Container '$COTURN_CONTAINER' not running — Asterisk's TURN config points at it but it's down"
+    elif ! docker exec "$COTURN_CONTAINER" which turnutils_uclient &>/dev/null; then
+        warn "turnutils_uclient not found in $COTURN_CONTAINER — skipping live allocation test"
+    else
+        # Plain UDP only — no -t/-T (TCP/TLS) flags. coturn is started with
+        # --no-tls --no-dtls (services/coturn.sh), so requesting an
+        # encrypted/TCP transport here just fails the allocation outright
+        # against a server that never offered one, misreporting a config
+        # problem that doesn't exist. Confirmed live: this was the actual
+        # cause of a "Cannot complete Allocation" failure against an
+        # otherwise fully working coturn instance.
+        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
+        if [ $? -eq 0 ]; then
+            ok "Live TURN allocation succeeded with Asterisk's own configured credentials (user '$TURN_USERNAME')"
+        else
+            fail "Live TURN allocation FAILED with Asterisk's configured credentials — raw output:"
+            echo "$OUT" | tail -n 15 | sed 's/^/         /'
+        fi
+    fi
+fi
+
 # ── SMS inbound ───────────────────────────────────────────────────────────────
 section "SMS inbound"
 if systemctl list-unit-files sms-inbound.service &>/dev/null; then
@@ -163,12 +250,167 @@ for log in pstn-trunk-calls.log sip-messages.log; do
     fi
 done
 
+# ── Softphone setup (Sipnetic or any SIP client) ──────────────────────────────
+# Same data the Security Dashboard's per-extension "info" panel shows
+# (showEaDeviceDetails in services/security-dashboard.sh), read directly from
+# pjsip.conf here so this is useful even without the dashboard installed.
+# Passwords are read from the live config on this box, not regenerated —
+# printing them is exactly as sensitive as the dashboard's own info panel.
+section "Softphone setup — one block per extension (password shown, handle accordingly)"
+
+DOMAIN_NAME=""
+[ -f "$EA_DIR/.env" ] && DOMAIN_NAME="$(grep -E '^DOMAIN_NAME=' "$EA_DIR/.env" | cut -d= -f2-)"
+SIP_SERVER="${DOMAIN_NAME:-${PUBLIC_IP:-<could not auto-detect this box IP>}}"
+
+PJSIP_CONF="$ASTERISK_DIR/pjsip.conf"
+if [ ! -f "$PJSIP_CONF" ]; then
+    warn "pjsip.conf not found at $PJSIP_CONF — can't print softphone settings"
+else
+    DEVICE_INFO="$(awk '
+        /^\[[0-9]+\]$/ { ext = substr($0, 2, length($0)-2); cur_type=""; next }
+        /^type=endpoint/ { cur_type="endpoint"; next }
+        /^type=auth/ { cur_type="auth"; next }
+        /^type=aor/ { cur_type="aor"; next }
+        cur_type=="endpoint" && /^transport=/ { split($0,a,"="); transport[ext]=a[2] }
+        cur_type=="endpoint" && /^ice_support=yes/ { ice[ext]="yes" }
+        cur_type=="auth" && /^password=/ { split($0,a,"="); pass[ext]=a[2] }
+        END {
+            for (e in pass) printf "%s|%s|%s|%s\n", e, pass[e], transport[e], (ice[e] ? ice[e] : "no")
+        }
+    ' "$PJSIP_CONF" | sort)"
+
+    if [ -z "$DEVICE_INFO" ]; then
+        warn "No devices found in pjsip.conf"
+    else
+        while IFS='|' read -r ext pass transport ice; do
+            [ -z "$ext" ] && continue
+            print_ext_info "$ext" "$pass" "$transport" "$ice"
+            echo ""
+        done <<< "$DEVICE_INFO"
+        ok "Printed setup info for $(wc -l <<< "$DEVICE_INFO") extension(s) — same values Sipnetic's"
+        ok "'Add Account' screen (or the dashboard's QR code / Download settings) needs"
+    fi
+fi
+
+# ── Provider portal checklist ─────────────────────────────────────────────────
+# Everything above is server-side and this script's own checks; the provider
+# account/portal side (authorized IPs, DID routing, the SMS forward URL) is
+# configured entirely outside this box and can't be queried from here. What
+# CAN be done is computing the exact values Anveo's portal fields need to
+# match, so you're checking against real numbers instead of hunting for them
+# across two docs while tabbed into the portal.
+section "Provider portal checklist — values to verify in Anveo (or your provider's portal)"
+
+PSTN_ENV="$EA_DIR/.pstn-trunk.env"
+TRUNK_DID="" PROVIDER_NAME=""
+if [ -f "$PSTN_ENV" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$PSTN_ENV"
+    set -u
+    TRUNK_DID="${TRUNK_DID:-}"
+    PROVIDER_NAME="${PROVIDER_NAME:-}"
+fi
+
+if [ -n "$TRUNK_DID" ]; then
+    echo "  This box's DID:        $TRUNK_DID"
+else
+    echo "  This box's DID:        (not found — is pstn-trunk installed?)"
+fi
+if [ -n "$PUBLIC_IP" ]; then
+    echo "  This box's public IP:  $PUBLIC_IP"
+else
+    echo "  This box's public IP:  (couldn't reach ifconfig.me — check manually: curl -4 ifconfig.me)"
+fi
+echo ""
+
+if [[ "$PROVIDER_NAME" == *Anveo* ]]; then
+    echo "  Confirm in the Anveo portal (docs/anveo-direct-setup-guide.md has the full walkthrough):"
+    echo ""
+    echo "   1. Outbound Trunks -> your Call Termination Trunk -> Authorized IP Addresses"
+    echo "      includes: $PUBLIC_IP"
+    echo "   2. Account Options -> SIP Trunk (inbound) -> Primary SIP URI is exactly:"
+    echo "        \$[E164]\$@${PUBLIC_IP}:5060"
+    echo "   3. Phone Numbers -> $TRUNK_DID -> Call Options -> Destination SIP Trunk"
+    echo "      is set to that SIP Trunk object (or Account Options -> Service Defaults ->"
+    echo "      Default Destination Trunk is set, which covers every DID automatically)"
+    echo "   4. Account balance is funded and NOT at \$0 (calls silently block at \$0 balance)"
+    echo "   5. Phone Numbers -> $TRUNK_DID -> SMS tab -> \"Forward to URL\" is ticked and"
+    echo "      set to exactly the string below (see 'SMS webhook' just below if it's blank)"
+else
+    echo "  Provider not detected as Anveo Direct (PROVIDER_NAME='${PROVIDER_NAME:-unset}') —"
+    echo "  generic checklist, check your provider's own portal for the equivalents:"
+    echo ""
+    echo "   1. This box's public IP ($PUBLIC_IP) is on the trunk's authorized/allowed IP list"
+    echo "   2. The DID ($TRUNK_DID) routes inbound SIP to ${PUBLIC_IP}:5060"
+    echo "   3. Account balance isn't at \$0 or suspended"
+    echo "   4. SMS forwarding (if used) points at the URL below"
+fi
+
+echo ""
+echo "  SMS webhook (from /opt/sms-inbound/settings.env, if installed):"
+SMS_SETTINGS="/opt/sms-inbound/settings.env"
+if [ -f "$SMS_SETTINGS" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$SMS_SETTINGS"
+    set -u
+    if [ -n "${SMS_FORWARD_URL:-}" ]; then
+        echo "    ${SMS_FORWARD_URL}"
+        echo "    (paste exactly as shown — press SAVE not RETURN on Anveo's SMS tab, then"
+        echo "    reopen it to confirm the whole string came back, it's long)"
+        echo ""
+        echo "  Once that's saved: text ${TRUNK_DID:-this DID} from any OTHER phone (not a"
+        echo "  softphone registered to this Asterisk — an outside cell number), then watch:"
+        echo "    journalctl -u sms-inbound -f"
+        echo "  It should land in Sipnetic (or whichever softphone owns that DID/extension)"
+        echo "  within a few seconds. See docs/pstn-sms-test-checklist.md §10 if it doesn't."
+    else
+        echo "    sms-inbound is installed but no SMS_FORWARD_URL found in $SMS_SETTINGS"
+        echo "    — re-run: sudo ./setup.sh sms-inbound"
+    fi
+else
+    echo "    sms-inbound not installed — nothing to configure on the SMS tab yet."
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 section "Summary"
 echo "  $PASS passed, $WARN warnings, $FAIL failed."
+
+if [ "${#FAIL_MSGS[@]}" -gt 0 ] || [ "${#WARN_MSGS[@]}" -gt 0 ]; then
+    echo ""
+    echo "  Needs attention:"
+    for m in "${FAIL_MSGS[@]:-}"; do
+        [ -z "$m" ] && continue
+        echo "   [FAIL] $m"
+    done
+    for m in "${WARN_MSGS[@]:-}"; do
+        [ -z "$m" ] && continue
+        echo "   [WARN] $m"
+    done
+fi
+
 echo ""
 echo "  This covers everything that can be checked without placing a real call"
-echo "  or sending a real text. For those, and for what each result above means,"
-echo "  see docs/pstn-sms-test-checklist.md."
+echo "  or sending a real text, plus the provider-side values above that only a"
+echo "  human can confirm inside the portal itself. For the call/SMS test steps"
+echo "  and what each result means, see docs/pstn-sms-test-checklist.md."
+
+# ── Optional: reprint softphone setup one extension at a time ────────────────
+# The full setup block scrolled past earlier in a long run — offer to show
+# it again, one extension per screen, instead of scrolling back for it.
+if [ -n "${DEVICE_INFO:-}" ] && [ -t 0 ]; then
+    echo ""
+    REPRINT=""
+    read -r -p "  Show softphone setup again, one extension at a time? (y/n): " REPRINT
+    if [[ "$REPRINT" =~ ^[Yy]$ ]]; then
+        while IFS='|' read -r ext pass transport ice; do
+            [ -z "$ext" ] && continue
+            echo ""
+            print_ext_info "$ext" "$pass" "$transport" "$ice"
+            read -r -p "  Press Enter for the next extension (Ctrl+C to stop)..." _ignored
+        done <<< "$DEVICE_INFO"
+    fi
+fi
 
 [ "$FAIL" -eq 0 ]
