@@ -14,21 +14,25 @@ kill-switch trip).
 
 ## 0. Before you start
 
-Confirm which layout this box uses — commands below need the right
-container name and directory:
+`$CONTAINER`/`$EA_DIR` only live in the shell session where you set them —
+a new terminal, a reboot, or just enough time passing between test steps
+leaves them empty again, and an empty `$CONTAINER` silently turns
+`docker exec -it $CONTAINER asterisk -rx ...` into `docker exec -it
+asterisk -rx ...`, which fails with "No such container: asterisk" (there's
+no container literally named that — it's `easy-asterisk` or
+`easy-asterisk-do`). Auto-detect instead of typing it by hand, so a stale
+or forgotten variable can't silently break every command below:
 
 ```bash
-docker ps --format '{{.Names}}' | grep -i easy-asterisk
-# easy-asterisk        -> ~/docker/asterisk
-# easy-asterisk-do     -> ~/docker/asterisk-digital-ocean (pre-merge droplet)
+CONTAINER="$(docker ps --format '{{.Names}}' | grep -m1 -E '^easy-asterisk(-do)?$')"
+EA_DIR=~/docker/asterisk; [ -d ~/docker/asterisk-digital-ocean ] && EA_DIR=~/docker/asterisk-digital-ocean
+echo "Container: $CONTAINER   Dir: $EA_DIR"
 ```
 
-Set these once and reuse them in every command below:
-
-```bash
-CONTAINER=easy-asterisk        # or easy-asterisk-do
-EA_DIR=~/docker/asterisk        # or ~/docker/asterisk-digital-ocean
-```
+If `$CONTAINER` prints empty, the container isn't running at all — check
+`docker compose -f $EA_DIR/docker-compose.yml ps` before anything else.
+Re-run this block at the start of every new terminal session, not just
+once — it's cheap and removes the whole class of failure above.
 
 Check the three services this checklist covers are actually installed:
 
