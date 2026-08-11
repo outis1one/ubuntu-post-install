@@ -440,10 +440,16 @@ ${_CADDY_NET_ENTRY}
     hostname: koha-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: \${DB_ROOT_PASS}
-      MYSQL_DATABASE: koha_default
-      MYSQL_USER: koha_default
-      MYSQL_PASSWORD: \${DB_PASS}
+      # MARIADB_* not MYSQL_* — confirmed live, this image version's
+      # entrypoint doesn't recognize MYSQL_ROOT_PASSWORD as any of its
+      # accepted root-password options at all ("Database is uninitialized
+      # and password option is not specified"), so the container crash-
+      # loops even though DB_ROOT_PASS is correctly generated and present
+      # in .env the whole time. Switched all four for consistency.
+      MARIADB_ROOT_PASSWORD: \${DB_ROOT_PASS}
+      MARIADB_DATABASE: koha_default
+      MARIADB_USER: koha_default
+      MARIADB_PASSWORD: \${DB_PASS}
     volumes:
       - ./data:/var/lib/mysql
     networks:

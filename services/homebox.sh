@@ -301,6 +301,16 @@ networks:
 "
     fi
 
+    # Required since a newer homebox release, not optional — confirmed
+    # live: without it the container panics on every start ("auth.
+    # api_key_pepper must be set to at least 32 bytes") and crash-loops.
+    # generate_password's default alphanumeric output is 1 byte/char, so
+    # 48 chars comfortably clears the 32-byte minimum. Rotating this later
+    # invalidates every issued API key, per homebox's own panic message —
+    # generated once here, never touched again on a rerun.
+    local HB_PEPPER
+    HB_PEPPER="$(generate_password 48)"
+
     cat > docker-compose.yml << HB_COMPOSE
 name: $CONTAINER
 
@@ -313,6 +323,7 @@ services:
     environment:
       - HBOX_LOG_LEVEL=info
       - HBOX_WEB_MAX_UPLOAD_SIZE=10
+      - HBOX_AUTH_API_KEY_PEPPER=\${HBOX_AUTH_API_KEY_PEPPER}
     volumes:
       - ./data:/data
     ports:
@@ -322,7 +333,11 @@ HB_COMPOSE
 
     cat > .env << HB_ENV
 CADDY_NET=$SITE_CADDY_NET
+
+# Rotating this invalidates every issued API key.
+HBOX_AUTH_API_KEY_PEPPER=$HB_PEPPER
 HB_ENV
+    chmod 600 .env
 
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HB_DIR"
 
