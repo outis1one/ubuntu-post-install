@@ -177,7 +177,7 @@ install_security-dashboard() {
                 echo ""
                 local _reconf_admins=""
                 prompt_yn "Reconfigure per-admin extension scoping (Calls & Texts / Voicemail)? (y/n):" "n" _reconf_admins
-                [[ "$_reconf_admins" =~ ^[Yy]$ ]] && _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER"
+                [[ "$_reconf_admins" =~ ^[Yy]$ ]] && _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT"
                 return 0
                 ;;
             cancel)
@@ -221,7 +221,7 @@ install_security-dashboard() {
     # it later (e.g. to add Basic Auth to an already-deployed dashboard)
     # without duplicating this logic — see that function for the rest.
     _secdash_configure_caddy "$DASHBOARD_PORT"
-    _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER"
+    _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT"
 
     write_readme "$APP_DIR" << README_MD
 # Security Dashboard
@@ -385,6 +385,14 @@ unrestricted for everyone (the default). The moment ONE admin is added,
 every other identity — an admin not yet listed, a typo'd username, or a
 request with no Authelia identity at all — sees nothing on those two tabs
 until they're added too. Edits take effect immediately, no restart needed.
+
+The setup prompt shows the dashboard's current extensions (pulled live from
+its own \`/api/pstn-permissions\`) before asking for each admin's list, so
+you're picking from what's actually configured rather than typing numbers
+from memory. List extension numbers only — any personal DID directly
+assigned to one of an admin's extensions is included in their Calls & Texts
+view automatically (Voicemail is always per-extension, so DIDs don't apply
+there).
 
 ## Manage
 \`\`\`
@@ -784,8 +792,33 @@ CADDYBLOCK
 # shown first so nothing is silently lost, but the operator re-enters
 # everyone they want kept). Reasonable for the two-or-three-admin case this
 # exists for; not built to scale past that.
+#
+# Extension list/name comes from the RUNNING dashboard's own
+# /api/pstn-permissions (curl to localhost — the systemd unit is already up
+# by the time either call site below runs) instead of re-parsing pjsip.conf
+# here in bash: this reuses list_extensions()'s already-correct parsing
+# (device-comment-then-[ext]-header, category tags, etc.) instead of a
+# second, divergence-prone implementation of the same logic in a different
+# language. Best-effort — if curl/python3 aren't available, or the
+# dashboard isn't reachable yet, this just falls back to a generic example
+# and the operator types extension numbers from memory instead.
+_secdash_list_extensions() {
+    local port="$1"
+    command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || return 0
+    curl -s -m 3 "http://localhost:${port}/api/pstn-permissions" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for e in data.get("extensions") or []:
+    name = (e.get("name") or "").strip()
+    print(e.get("ext", "") + ("  " + name if name else ""))
+' 2>/dev/null
+}
+
 _secdash_configure_admin_scoping() {
-    local APP_DIR="$1" SVC_USER="$2"
+    local APP_DIR="$1" SVC_USER="$2" DASHBOARD_PORT="$3"
     local ADMINS_FILE="$APP_DIR/dashboard-admins.conf"
 
     echo ""
@@ -830,6 +863,10 @@ _secdash_configure_admin_scoping() {
 ; tabs (the default). Once ANY [username] section exists here, every OTHER
 ; identity - including an unlisted admin, or a request with no Remote-User
 ; at all - sees NOTHING on those two tabs. Fail closed, not fail open.
+;
+; List extension numbers only - any personal DID directly assigned to one of
+; an admin's extensions is automatically included in their Calls & Texts
+; view too (see _dids_for_extensions() in app.py), no need to list DIDs here.
 
 HDR
 
@@ -843,7 +880,17 @@ HDR
             log_warning "  Invalid username — letters, numbers, and . _ @ - only. Skipped."
             continue
         fi
-        prompt_text "  Extensions for $_USER (comma-separated, e.g. 101,102):" "" _EXTS
+
+        local _EXT_LIST _EXAMPLE
+        _EXT_LIST="$(_secdash_list_extensions "$DASHBOARD_PORT")"
+        if [[ -n "$_EXT_LIST" ]]; then
+            echo "  Current extensions:"
+            echo "$_EXT_LIST" | sed 's/^/    /'
+            _EXAMPLE="$(echo "$_EXT_LIST" | awk '{print $1}' | head -2 | paste -sd, -)"
+        fi
+        [[ -z "$_EXAMPLE" ]] && _EXAMPLE="101,102"
+
+        prompt_text "  Extensions for $_USER (comma-separated, e.g. ${_EXAMPLE}) — includes any DID assigned to them automatically:" "" _EXTS
         _EXTS="$(echo "$_EXTS" | tr -d ' ')"
         local -a _EXT_ARR=() _VALID=()
         IFS=',' read -ra _EXT_ARR <<< "$_EXTS"
@@ -1966,21 +2013,6 @@ def voicemail_audio_path(ext, msg):
 # need the full Extensions list and Security Log to do their job, but each
 # should only see the call/text history and voicemail of their own numbers.
 DASHBOARD_ADMINS_FILE = "/opt/security-dashboard/dashboard-admins.conf"
-DASHBOARD_ADMINS_HEADER = (
-    "; Per-admin extension scoping for the Calls & Texts and Voicemail tabs.\n"
-    "; Managed by 'sudo ./setup.sh security-dashboard' (reconfigure on an\n"
-    "; existing install) - safe to edit by hand too, one [username] section\n"
-    "; per admin with an extensions= list, username must match that admin's\n"
-    "; Authelia login exactly (this dashboard reads it off the Remote-User\n"
-    "; header Caddy's forward_auth/import authelia already injects).\n"
-    ";\n"
-    "; Empty or missing file = scoping disabled, everyone sees everything on\n"
-    "; both tabs (today's default, unchanged). Once ANY [username] section\n"
-    "; exists here, every OTHER identity - including an unlisted admin, or a\n"
-    "; request with no Remote-User at all - sees NOTHING on those two tabs.\n"
-    "; Fail closed, not fail open: a typo'd or forgotten admin loses access\n"
-    "; rather than silently gaining everyone else's.\n\n"
-)
 
 
 def _dashboard_admins_cp():
@@ -1998,8 +2030,9 @@ def allowed_extensions_for_user(username):
     entirely (no [username] sections configured at all). Once any admin IS
     configured, every other identity (unrecognized username, or no
     Remote-User header at all) gets an EMPTY set back, never None, so a
-    caller can't mistake "not found" for "unrestricted" — see the fail-
-    closed reasoning in DASHBOARD_ADMINS_HEADER."""
+    caller can't mistake "not found" for "unrestricted" — see the
+    fail-closed reasoning in _secdash_configure_admin_scoping's comment
+    (services/security-dashboard.sh), which writes this file's header."""
     cp = _dashboard_admins_cp()
     if not cp.sections():
         return None
@@ -2016,6 +2049,32 @@ def _admin_scope_for_request(handler):
     already injects (see services/authelia.sh's copy_headers). Every scoped
     route calls this exactly once."""
     return allowed_extensions_for_user(handler.headers.get("Remote-User", ""))
+
+
+def _dids_for_extensions(extensions):
+    """Personal DIDs DIRECTLY owned by any of the given extensions (owner
+    == the bare extension number — not a "@RingGroup" owner, which is a
+    separate, broader-membership case this deliberately doesn't expand
+    into). An admin scoped to an extension automatically sees that
+    extension's own DID's call/text history too, without it needing to be
+    entered separately in dashboard-admins.conf."""
+    return {d["did"] for d in list_personal_dids() if d["owner"] in extensions}
+
+
+def _admin_scope_for_calls(handler):
+    """Like _admin_scope_for_request, but expanded for Calls & Texts
+    specifically: a PSTN row for an inbound call/text to a personal DID is
+    keyed by the DID number, not the owning extension (see
+    parse_pstn_calls()'s docstring) — without this expansion, an admin
+    scoped to extension 101 would see 101's internal activity but not calls
+    to 101's own personal DID, which isn't what "has these extensions"
+    should mean. Voicemail has no equivalent: a mailbox is always keyed by
+    extension number regardless of which DID rang it, so
+    filter_voicemail_by_scope keeps using the plain extension set."""
+    allowed = _admin_scope_for_request(handler)
+    if allowed is None:
+        return None
+    return allowed | _dids_for_extensions(allowed)
 
 
 def filter_calls_by_scope(events, allowed):
@@ -5931,9 +5990,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/security-events":
             self._json(parse_security_log())
         elif self.path == "/api/pstn-calls":
-            self._json(filter_calls_by_scope(parse_pstn_calls(), _admin_scope_for_request(self)))
+            self._json(filter_calls_by_scope(parse_pstn_calls(), _admin_scope_for_calls(self)))
         elif self.path == "/api/comms-texts":
-            self._json(filter_calls_by_scope(parse_texts(), _admin_scope_for_request(self)))
+            self._json(filter_calls_by_scope(parse_texts(), _admin_scope_for_calls(self)))
         elif self.path == "/api/decisions":
             self._json(get_decisions())
         elif self.path == "/api/asn-exempt":
