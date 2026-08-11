@@ -160,7 +160,13 @@ else
             warn "$c: couldn't read cached credentials, skipping live test"
             continue
         fi
-        OUT="$(docker exec coturn timeout 10 turnutils_uclient -t -T -u "$_u" -w "$_p" "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
+        # Plain UDP only — no -t/-T (TCP/TLS) flags; coturn runs with
+        # --no-tls --no-dtls (services/coturn.sh), so requesting an
+        # encrypted/TCP transport here fails the allocation against a
+        # server that never offered one. See tools/pstn-test-check.sh's
+        # matching comment — confirmed live this was the actual cause of a
+        # "Cannot complete Allocation" failure, not a real coturn problem.
+        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
         RC=$?
         if [ "$RC" -eq 0 ]; then
             ok "$c: TURN allocation succeeded (credentials + relay range + reachability all confirmed working)"
