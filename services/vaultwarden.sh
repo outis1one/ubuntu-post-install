@@ -324,6 +324,17 @@ install_vaultwarden() {
         prompt_text "SMTP from address:" "" SMTP_FROM
         prompt_text "SMTP username:" "" SMTP_USER
         prompt_text "SMTP password:" "" SMTP_PASS
+        # Vaultwarden refuses to start at all if SMTP_HOST is set without
+        # SMTP_FROM ("Both SMTP_HOST and SMTP_FROM need to be set") —
+        # confirmed live, crash-loops on every start, not just a warning at
+        # runtime. SMTP_FROM's own prompt has no default, so leaving it
+        # blank here writes exactly that broken half-state. Disable SMTP
+        # entirely rather than let it reach a config known to crash the
+        # container — better than guessing a from-address on your behalf.
+        if [ -z "$SMTP_FROM" ]; then
+            log_warning "No SMTP from address entered — disabling SMTP entirely (Vaultwarden requires both or neither). Re-run this installer to set it up later."
+            SMTP_HOST=""; SMTP_PORT="587"; SMTP_USER=""; SMTP_PASS=""
+        fi
     fi
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
