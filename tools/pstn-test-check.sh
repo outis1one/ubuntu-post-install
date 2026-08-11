@@ -232,6 +232,12 @@ if [ -f "$SMS_SETTINGS" ]; then
         echo "    ${SMS_FORWARD_URL}"
         echo "    (paste exactly as shown — press SAVE not RETURN on Anveo's SMS tab, then"
         echo "    reopen it to confirm the whole string came back, it's long)"
+        echo ""
+        echo "  Once that's saved: text ${TRUNK_DID:-this DID} from any OTHER phone (not a"
+        echo "  softphone registered to this Asterisk — an outside cell number), then watch:"
+        echo "    journalctl -u sms-inbound -f"
+        echo "  It should land in Sipnetic (or whichever softphone owns that DID/extension)"
+        echo "  within a few seconds. See docs/pstn-sms-test-checklist.md §10 if it doesn't."
     else
         echo "    sms-inbound is installed but no SMS_FORWARD_URL found in $SMS_SETTINGS"
         echo "    — re-run: sudo ./setup.sh sms-inbound"
