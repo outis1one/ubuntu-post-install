@@ -93,6 +93,14 @@ install_security-dashboard() {
     # set up before the two Asterisk services merged, matching whichever
     # container_name services/asterisk.sh actually used there.
     local ASTERISK_EA_CONFIG_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/config/easy-asterisk}"
+    # Voicemail messages land here (Asterisk's own default spool layout:
+    # spool/voicemail/<context>/<mailbox>/INBOX/msgNNNN.{wav,txt}) — the
+    # ./spool:/var/spool/asterisk bind mount in services/asterisk.sh's
+    # compose file has always existed, voicemail is just the first feature
+    # that reads it from the host side. Read-only grant (see
+    # _secdash_grant_asterisk_access) — the Voicemail tab only ever lists
+    # and streams messages, never deletes or writes them.
+    local ASTERISK_SPOOL_DIR="${ASTERISK_EA_DIR:+$ASTERISK_EA_DIR/spool}"
     local ASTERISK_EA_CONTAINER=""
     if [[ "$ASTERISK_EA_DIR" == *asterisk-digital-ocean ]]; then
         ASTERISK_EA_CONTAINER="easy-asterisk-do"
@@ -123,6 +131,7 @@ install_security-dashboard() {
         echo "[DRY-RUN] Would write /etc/sudoers.d/security-dashboard (scoped cscli/systemctl/set-asn-exempt.sh only)"
         echo "[DRY-RUN] Would write a systemd unit and start it on 0.0.0.0:$DASHBOARD_PORT (firewalled via UFW, not interface binding)"
         echo "[DRY-RUN] Would grant read/write access to the detected Asterisk config dir (for the Extensions tab)"
+        echo "[DRY-RUN] Would grant read-only access to the Asterisk voicemail spool dir (for the Voicemail tab)"
         echo "[DRY-RUN] Would configure Caddy + Authelia for a domain you'll be prompted for"
         return 0
     fi
@@ -139,12 +148,12 @@ install_security-dashboard() {
         case "$MODE" in
             update)
                 log_info "Refreshing app code + sudoers rule + systemd unit (no Caddy/domain changes)..."
-                _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR"
+                _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_SPOOL_DIR"
                 _secdash_write_app "$APP_DIR"
                 _secdash_write_asn_helper "$APP_DIR"
                 _secdash_copy_kiosk_installer "$APP_DIR"
                 _secdash_write_sudoers "$SVC_USER" "$ASTERISK_EA_CONTAINER"
-                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER"
+                _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER" "$ASTERISK_SPOOL_DIR"
                 # systemd caches unit files; a plain restart re-runs the OLD
                 # one. Without this, any Environment= or ReadOnlyPaths line
                 # added since the last FRESH install is written to disk and
@@ -179,7 +188,7 @@ install_security-dashboard() {
         log_success "Created system user $SVC_USER"
     fi
 
-    _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR"
+    _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_SPOOL_DIR"
 
     mkdir -p "$APP_DIR"
     _secdash_write_app "$APP_DIR"
@@ -188,7 +197,7 @@ install_security-dashboard() {
     _secdash_copy_kiosk_installer "$APP_DIR"
 
     _secdash_write_sudoers "$SVC_USER" "$ASTERISK_EA_CONTAINER"
-    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER"
+    _secdash_write_systemd_unit "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_EA_CONTAINER" "$ASTERISK_SPOOL_DIR"
 
     systemctl daemon-reload
     systemctl enable security-dashboard >/dev/null 2>&1
@@ -217,10 +226,10 @@ not in Docker — it needs to call \`cscli\` and read Asterisk's log directly.
 
 ## Tabs
 
-Four tabs: **Security Log**, **Calls & Texts**, **Extensions**, **CrowdSec**.
-The first three are always there (they only need Asterisk itself, detected
-once at install time); CrowdSec checks its own live install state on every
-page load and hides its nav button if \`cscli\` isn't found.
+Five tabs: **Security Log**, **Calls & Texts**, **Extensions**, **Voicemail**,
+**CrowdSec**. The first four are always there (they only need Asterisk
+itself, detected once at install time); CrowdSec checks its own live install
+state on every page load and hides its nav button if \`cscli\` isn't found.
 
 Extensions used to be three separate tabs — *Asterisk Admin*, *Extensions*
 and *PSTN Trunk* — which between them listed the same extensions three times:
@@ -253,8 +262,13 @@ which tab a given extension's settings live on.
   always works) and, when the Easy Asterisk container is reachable, its own
   device list. Columns: Ext, Name, then Category/Status/Transport if that
   container is present, then **PSTN** + **Whitelist** if a trunk dialplan is
-  installed, then Messaging (always: internal SIP texting has no PSTN
-  dependency at all — no cost, no carrier, no DID).
+  installed, then Messaging and Voicemail (always: neither has a PSTN
+  dependency at all — no cost, no carrier, no DID). Enabling Voicemail
+  generates a 4-digit PIN, shown in that column, for checking messages by
+  phone (\`*97\`); \`*98<ext>\` leaves a message directly without ringing.
+- **Voicemail** — every message across every mailbox's spool, newest first,
+  with an inline player per row (click-to-play, no download). Read-only —
+  delete a message by dialing in with the PIN and using the phone menu.
 
   Each extension has one whitelist and a mode saying which direction(s) it
   applies to: **No PSTN**, **Unrestricted**, **Restrict outbound** (may only
@@ -436,7 +450,7 @@ _secdash_grant_ancestor_traversal() {
 # approach with a warning if the `acl` package isn't installed for some
 # reason (should always be present — installed below).
 _secdash_grant_asterisk_access() {
-    local _svc_user="$1" _log_dir="$2" _config_dir="$3" _ea_config_dir="${4:-}"
+    local _svc_user="$1" _log_dir="$2" _config_dir="$3" _ea_config_dir="${4:-}" _spool_dir="${5:-}"
 
     command -v setfacl >/dev/null 2>&1 || run_cmd apt-get install -y acl >/dev/null 2>&1
     local _have_acl=false
@@ -444,7 +458,7 @@ _secdash_grant_asterisk_access() {
     [ "$_have_acl" = true ] || log_warning "Package 'acl' unavailable — falling back to group-based access, which can silently break again whenever the Asterisk container re-chowns its own config directory. Install 'acl' and re-run to fix that properly."
 
     local _dir
-    for _dir in "$_log_dir" "$_config_dir" "$_ea_config_dir"; do
+    for _dir in "$_log_dir" "$_config_dir" "$_ea_config_dir" "$_spool_dir"; do
         [ -n "$_dir" ] && [ -d "$_dir" ] || continue
         _secdash_grant_ancestor_traversal "$_svc_user" "$_dir"
         if [ "$_have_acl" = true ]; then
@@ -503,10 +517,11 @@ _secdash_grant_asterisk_access() {
 # both layers (this AND the group access above) need to agree, or writes
 # fail even when Unix permissions alone would have allowed them.
 _secdash_write_systemd_unit() {
-    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _ea_config_dir="${6:-}" _ea_container="${7:-}"
+    local _app_dir="$1" _svc_user="$2" _port="$3" _log_dir="$4" _config_dir="$5" _ea_config_dir="${6:-}" _ea_container="${7:-}" _spool_dir="${8:-}"
     local _read_only_paths="" _read_write_paths="/etc/crowdsec/scenarios"
     [ -n "$_log_dir" ] && _read_only_paths="$_log_dir"
     [ -n "$_ea_config_dir" ] && _read_only_paths="$_read_only_paths $_ea_config_dir"
+    [ -n "$_spool_dir" ] && _read_only_paths="$_read_only_paths $_spool_dir"
     # ProtectSystem=strict hides everything not listed, so the .env grant above
     # is only half the story — the unit has to be told it may read the file too.
     [ -n "$_config_dir" ] && _read_only_paths="$_read_only_paths ${_config_dir%/config/asterisk}/.env"
@@ -528,6 +543,7 @@ Environment=ASTERISK_CONFIG_DIR=$_config_dir
 Environment=ASTERISK_EA_CONFIG_DIR=$_ea_config_dir
 Environment=ASTERISK_EA_CONTAINER=$_ea_container
 Environment=ASTERISK_EA_ENV=${_config_dir%/config/asterisk}/.env
+Environment=ASTERISK_SPOOL_DIR=$_spool_dir
 ExecStart=/usr/bin/python3 $_app_dir/app.py
 Restart=on-failure
 RestartSec=3
@@ -571,6 +587,7 @@ $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container chown asteri
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container chown asterisk\:asterisk /etc/easy-asterisk/rooms.conf
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ res_pjsip.so
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx pjsip\ show\ endpoints
+$_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container asterisk -rx module\ reload\ app_voicemail.so
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker exec $_ea_container /usr/local/bin/easy-asterisk --rebuild-dialplan
 $_svc_user ALL=(root) NOPASSWD: /usr/bin/docker restart $_ea_container"
     fi
@@ -883,6 +900,7 @@ Caddy, and CrowdSec, and shouldn't add a framework's worth of RAM overhead.
 import configparser
 import json
 import os
+import random
 import re
 import subprocess
 import time
@@ -900,6 +918,11 @@ PSTN_CALLS_LOG = os.path.join(ASTERISK_LOG_DIR, "pstn-trunk-calls.log") if ASTER
 SIP_MESSAGES_LOG = os.path.join(ASTERISK_LOG_DIR, "sip-messages.log") if ASTERISK_LOG_DIR else ""
 SMS_LOG = os.path.join(ASTERISK_LOG_DIR, "pstn-sms.log") if ASTERISK_LOG_DIR else ""
 ASTERISK_CONFIG_DIR = os.environ.get("ASTERISK_CONFIG_DIR", "")
+# Voicemail spool root — see the comment above ASTERISK_SPOOL_DIR's
+# declaration in install_security-dashboard() for the on-disk layout.
+# Read-only (ReadOnlyPaths in the systemd unit + a read-only ACL grant), the
+# Voicemail tab only ever lists/streams, never writes or deletes.
+ASTERISK_SPOOL_DIR = os.environ.get("ASTERISK_SPOOL_DIR", "")
 ASN_SCENARIO_FILES = [
     "/etc/crowdsec/scenarios/local-asterisk_bf.yaml",
     "/etc/crowdsec/scenarios/local-asterisk_user_enum.yaml",
@@ -1340,10 +1363,13 @@ PERMISSIONS_HEADER = (
     "; restrict + allowed_numbers are the authored pair; tier_out/allowed_out\n"
     "; and tier_in/allowed_in are DERIVED from them and are what the dialplan\n"
     "; reads; 'tier' is a rollback mirror for a pre-split pstn-trunk.sh.\n"
-    "; PLUS two\n"
+    "; PLUS three\n"
     "; independent per-extension axes: messaging (internal SIP MESSAGE\n"
-    "; texting) and personal_did (outbound Caller-ID override; inbound\n"
-    "; routing for personal DIDs lives in pstn-personal-dids.conf).\n"
+    "; texting), personal_did (outbound Caller-ID override; inbound\n"
+    "; routing for personal DIDs lives in pstn-personal-dids.conf), and\n"
+    "; voicemail (mailbox enabled; voicemail_pin is generated once and kept\n"
+    "; even if voicemail is later disabled, so re-enabling doesn't change it\n"
+    "; on the user - see write_voicemail()/regenerate_voicemail_conf()).\n"
     "; Read LIVE by the dialplan on every call (AST_CONFIG()) - no\n"
     "; Asterisk restart needed. Managed here (Security Dashboard); also\n"
     "; safe to edit by hand. 'sudo ./setup.sh pstn-trunk' update mode\n"
@@ -1439,6 +1465,8 @@ def get_all_permissions():
             "restrict": restrict,
             "allowed_numbers": numbers,
             "messaging": cp.getboolean(section, "messaging", fallback=False),
+            "voicemail": cp.getboolean(section, "voicemail", fallback=False),
+            "voicemail_pin": cp.get(section, "voicemail_pin", fallback=""),
         }
     return result
 
@@ -1465,9 +1493,36 @@ def _set_or_clear(cp, ext, key, value):
         cp.remove_option(ext, key)
 
 
-def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
+def _apply_voicemail_flag(cp, ext, enabled):
+    """Shared by write_permission() (the combined-save endpoint, used when a
+    PSTN trunk is installed) and write_voicemail() (the standalone endpoint,
+    used when it isn't) — same PIN-preservation behavior either way, see
+    write_voicemail()'s docstring."""
+    if enabled:
+        if not cp.has_section(ext):
+            cp.add_section(ext)
+        cp.set(ext, "voicemail", "yes")
+        if not cp.get(ext, "voicemail_pin", fallback=""):
+            cp.set(ext, "voicemail_pin", _generate_voicemail_pin())
+    elif cp.has_section(ext) and cp.has_option(ext, "voicemail"):
+        cp.remove_option(ext, "voicemail")
+
+
+def _sync_voicemail_conf_if_present():
+    """Regenerates voicemail.conf + reloads app_voicemail, but only if
+    voicemail has actually been set up on this box (asterisk.sh writes the
+    skeleton at install/update time) — silently a no-op otherwise, so boxes
+    that never touched voicemail don't get a spurious error surfaced from
+    every combined permissions save."""
+    path = _voicemail_conf_path()
+    if path and os.path.isfile(path):
+        regenerate_voicemail_conf()
+        ea_reload_voicemail()
+
+
+def write_permission(ext, restrict, numbers_raw, messaging_enabled=False, voicemail_enabled=False):
     """Saves one extension's PSTN restriction mode, its single whitelist, and
-    its messaging flag in one action.
+    its messaging/voicemail flags in one action.
 
     One list, not two: the whitelist is "the numbers this extension deals
     with", and the mode says whether that constrains dialling out, being
@@ -1480,9 +1535,10 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
       tier_in/allowed_in             what the dialplan reads
       tier, allowed_numbers          rollback mirror for a pre-split installer
 
-    Messaging is an independent axis (see pstn-trunk.sh's file-level comment:
-    an extension can have no PSTN at all and still be messaging-enabled, or
-    vice versa), so it's set/cleared regardless of the mode.
+    Messaging and voicemail are both independent axes (see pstn-trunk.sh's
+    file-level comment: an extension can have no PSTN at all and still be
+    messaging/voicemail-enabled, or vice versa), so both are set/cleared
+    regardless of the mode.
 
     Numbers normalize to a pipe-separated list of 11-digit US numbers (a bare
     10-digit entry gains a leading "1" rather than being dropped — see
@@ -1531,15 +1587,19 @@ def write_permission(ext, restrict, numbers_raw, messaging_enabled=False):
     elif cp.has_section(ext) and cp.has_option(ext, "messaging"):
         cp.remove_option(ext, "messaging")
 
+    _apply_voicemail_flag(cp, ext, voicemail_enabled)
+
     # Drop the section entirely once nothing is left in it — only reachable
-    # when the mode is internal, messaging is off, and no personal_did was
-    # ever assigned.
+    # when the mode is internal, messaging and voicemail are both off, and
+    # no personal_did/voicemail_pin was ever assigned.
     if cp.has_section(ext) and not cp.options(ext):
         cp.remove_section(ext)
 
     ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
     if not ok:
         return False, err
+
+    _sync_voicemail_conf_if_present()
 
     if restrict not in ("internal", "full") and not clean:
         return True, ("Saved, but the whitelist is EMPTY — with this mode that means no PSTN "
@@ -1576,6 +1636,188 @@ def write_messaging(ext, enabled):
     if not ok:
         return False, err
     return True, "Saved"
+
+
+def _voicemail_conf_path():
+    return os.path.join(ASTERISK_CONFIG_DIR, "voicemail.conf") if ASTERISK_CONFIG_DIR else None
+
+
+def _generate_voicemail_pin():
+    return "%04d" % random.randint(0, 9999)
+
+
+def regenerate_voicemail_conf():
+    """Rewrites voicemail.conf's [default] mailbox list from every extension
+    currently voicemail=yes in pstn-permissions.conf. [general] (and
+    anything else above [default]) is preserved verbatim — this only ever
+    replaces [default] onward, mirroring _asterisk_write_voicemail_conf's
+    skeleton in services/asterisk.sh, which always writes [default] as the
+    file's last section.
+
+    Mailbox lines can't be a live AST_CONFIG() lookup the way the messaging/
+    voicemail permission flags are — app_voicemail reads mailbox
+    definitions from its own module config, not the dialplan, so this file
+    has to actually list them. That's also why a module reload is needed
+    after this (see write_voicemail()), unlike a plain permission-flag
+    toggle."""
+    path = _voicemail_conf_path()
+    if not path or not os.path.isfile(path):
+        return False, "No voicemail.conf found — is voicemail set up? (re-run: sudo ./setup.sh asterisk)"
+
+    with open(path, "r") as f:
+        content = f.read()
+
+    idx = content.find("\n[default]")
+    if idx == -1:
+        return False, "voicemail.conf has no [default] section — was it hand-edited? Re-run: sudo ./setup.sh asterisk"
+    preamble = content[:idx]
+
+    cp = _read_permissions_cp()
+    mailbox_lines = []
+    for section in cp.sections():
+        if not EXTEN_RE.match(section):
+            continue
+        if not cp.getboolean(section, "voicemail", fallback=False):
+            continue
+        pin = cp.get(section, "voicemail_pin", fallback="")
+        if pin:
+            mailbox_lines.append("%s => %s,Extension %s" % (section, pin, section))
+
+    new_content = preamble.rstrip("\n") + "\n\n[default]\n" + "\n".join(mailbox_lines)
+    new_content += "\n" if mailbox_lines else ""
+
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(new_content)
+        os.replace(tmp, path)
+    except OSError as e:
+        return False, str(e)
+    return True, ""
+
+
+def ea_reload_voicemail():
+    if not ASTERISK_EA_CONTAINER:
+        return
+    run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "asterisk", "-rx", "module reload app_voicemail.so"])
+
+
+def write_voicemail(ext, enabled):
+    """Sets/clears the voicemail flag for one extension, then regenerates
+    voicemail.conf and reloads app_voicemail so the change takes effect
+    without a full Asterisk restart (unlike the messaging/PSTN permission
+    flags, which the dialplan reads live via AST_CONFIG() with no reload of
+    any kind needed — voicemail.conf is Asterisk's own module config, not
+    something AST_CONFIG() can substitute for).
+
+    A PIN is generated the first time voicemail is enabled and then left in
+    pstn-permissions.conf even after disabling — toggling it off and back on
+    later reuses the same PIN instead of silently changing it on the user.
+    Independent of pstn_installed() the same way messaging is: voicemail has
+    no PSTN/trunk dependency."""
+    if not ASTERISK_CONFIG_DIR:
+        return False, "No Asterisk install detected on this box"
+    ext = str(ext).strip()
+    if not EXTEN_RE.match(ext):
+        return False, "Invalid extension"
+
+    cp = _read_permissions_cp()
+    _apply_voicemail_flag(cp, ext, enabled)
+
+    if cp.has_section(ext) and not cp.options(ext):
+        cp.remove_section(ext)
+
+    ok, err = _write_ini_cp(_permissions_path(), PERMISSIONS_HEADER, cp)
+    if not ok:
+        return False, err
+
+    ok, err = regenerate_voicemail_conf()
+    if not ok:
+        return True, "Saved, but voicemail.conf couldn't be regenerated: %s" % err
+
+    ea_reload_voicemail()
+    return True, "Saved"
+
+
+# "default" here is the voicemail.conf CONTEXT name (the [default] section
+# _asterisk_write_voicemail_conf writes in services/asterisk.sh, matching
+# the "@default" suffix voicemail-dialplan.conf's VoiceMailMain()/VoiceMail()
+# calls use) — not a placeholder, Asterisk's own spool layout is
+# spool/voicemail/<context>/<mailbox>/<folder>/msgNNNN.{wav,txt}.
+VOICEMAIL_CONTEXT = "default"
+VOICEMAIL_MSG_RE = re.compile(r"^msg\d+$")
+
+
+def list_voicemail_messages():
+    """Every message across every mailbox's INBOX folder, newest first.
+    Reads each msgNNNN.txt sidecar app_voicemail writes alongside the .wav
+    (INI-style, a [message] section with callerid/origtime/duration) — this
+    dashboard never writes these files, only reads them."""
+    if not ASTERISK_SPOOL_DIR:
+        return []
+    base = os.path.join(ASTERISK_SPOOL_DIR, "voicemail", VOICEMAIL_CONTEXT)
+    if not os.path.isdir(base):
+        return []
+    messages = []
+    try:
+        mailboxes = os.listdir(base)
+    except OSError:
+        return []
+    for mailbox in mailboxes:
+        if not EXTEN_RE.match(mailbox):
+            continue
+        inbox = os.path.join(base, mailbox, "INBOX")
+        if not os.path.isdir(inbox):
+            continue
+        try:
+            files = os.listdir(inbox)
+        except OSError:
+            continue
+        for fname in files:
+            if not fname.endswith(".wav"):
+                continue
+            msg_id = fname[:-4]
+            if not VOICEMAIL_MSG_RE.match(msg_id):
+                continue
+            callerid, origtime, duration = "", "", ""
+            txt_path = os.path.join(inbox, msg_id + ".txt")
+            if os.path.isfile(txt_path):
+                cp = configparser.ConfigParser(delimiters=("=",))
+                try:
+                    cp.read(txt_path)
+                    if cp.has_section("message"):
+                        callerid = cp.get("message", "callerid", fallback="")
+                        origtime = cp.get("message", "origtime", fallback="")
+                        duration = cp.get("message", "duration", fallback="")
+                except configparser.Error:
+                    pass
+            messages.append({
+                "ext": mailbox, "msg": msg_id,
+                "callerid": callerid, "origtime": origtime, "duration": duration,
+            })
+    messages.sort(key=lambda m: int(m["origtime"]) if m["origtime"].isdigit() else 0, reverse=True)
+    return messages
+
+
+def voicemail_audio_path(ext, msg):
+    """Resolves a mailbox+message ID to an on-disk .wav path, or None if
+    anything about the request doesn't check out. Two independent checks,
+    not one: EXTEN_RE/VOICEMAIL_MSG_RE already forbid any path-traversal
+    character (only digits, and "msg"+digits, are accepted at all — no "/",
+    "..", or similar can ever reach os.path.join), and the resolved
+    realpath is then confirmed to still land inside the mailbox's own INBOX
+    before this is ever handed to open()."""
+    ext = str(ext or "").strip()
+    msg = str(msg or "").strip()
+    if not ASTERISK_SPOOL_DIR or not EXTEN_RE.match(ext) or not VOICEMAIL_MSG_RE.match(msg):
+        return None
+    inbox = os.path.join(ASTERISK_SPOOL_DIR, "voicemail", VOICEMAIL_CONTEXT, ext, "INBOX")
+    path = os.path.join(inbox, msg + ".wav")
+    real_inbox = os.path.realpath(inbox)
+    real_path = os.path.realpath(path)
+    if not real_path.startswith(real_inbox + os.sep) or not os.path.isfile(real_path):
+        return None
+    return real_path
 
 
 GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9_ -]{1,40}$")
@@ -3271,6 +3513,7 @@ INDEX_HTML = """<!doctype html>
     <button class="tab-btn" data-tab="security">Security Log</button>
     <button class="tab-btn" data-tab="comms">Calls &amp; Texts</button>
     <button class="tab-btn active" data-tab="extensions">Extensions</button>
+    <button class="tab-btn" data-tab="voicemail">Voicemail</button>
     <button class="tab-btn" id="crowdsec-tab-btn" data-tab="crowdsec" style="display:none">CrowdSec</button>
   </nav>
 </header>
@@ -3417,6 +3660,7 @@ INDEX_HTML = """<!doctype html>
           </ul>
           <p class="muted pstn-only">Internal extension-to-extension calling and ring groups are never gated by any of this. Changes are usually live on the next call; if one doesn't seem to take effect, use "Commit changes" above.</p>
           <p class="muted"><b>Messaging</b> — Asterisk's native SIP texting between extensions: no carrier SMS, no PSTN, no cost, and no dependency on a PSTN trunk at all (which is why this column is here even with no trunk installed). Independent of the calling tier. Enforced live by a dedicated dialplan context — see <code>services/asterisk.sh</code>'s README, including its caveat that the sender-extraction logic still needs real-traffic confirmation. If this box predates that wiring, rerun <code>sudo ./setup.sh asterisk</code>.</p>
+          <p class="muted"><b>Voicemail</b> — enables a mailbox for the extension. Dial <code>*97</code> to check your own messages, or <code>*98&lt;ext&gt;</code> to leave one directly without ringing it. A 4-digit PIN is generated the first time you enable it (shown in this column) and kept even if you later disable and re-enable voicemail. Also independent of the calling tier and PSTN trunk. Play messages back on the <b>Voicemail</b> tab. If this box predates voicemail support, rerun <code>sudo ./setup.sh asterisk</code>.</p>
         </details>
 
         <div class="table-wrap">
@@ -3429,6 +3673,7 @@ INDEX_HTML = """<!doctype html>
             <th class="sortable pstn-only" data-sort="restrict">PSTN</th>
             <th class="pstn-only">Whitelist</th>
             <th class="sortable" data-sort="messaging">Messaging</th>
+            <th class="sortable" data-sort="voicemail">Voicemail</th>
             <th></th>
           </tr></thead><tbody></tbody></table>
         </div>
@@ -3505,6 +3750,23 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
     </details>
+  </div>
+
+  <div id="tab-voicemail" style="display:none">
+    <div class="card">
+      <div class="card-body">
+        <p class="muted" style="margin-top:0">Messages left across every mailbox, newest first. Enable voicemail for an extension on the <b>Extensions</b> tab — that also generates the PIN shown there for checking messages by phone (<code>*97</code>). Read-only here — to delete a message, dial in with the PIN (<code>*97</code>) and delete it from the phone menu.</p>
+        <div class="table-wrap">
+          <table id="vm-table"><thead><tr>
+            <th class="sortable" data-sort="origtime">Time</th>
+            <th class="sortable" data-sort="ext">Mailbox</th>
+            <th class="sortable" data-sort="callerid">Caller ID</th>
+            <th class="sortable" data-sort="duration">Duration</th>
+            <th>Play</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
   </div>
 </main>
 <div id="toasts"></div>
@@ -4130,13 +4392,14 @@ var QRCode;
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
-const TABS = ["security", "comms", "extensions", "crowdsec"];
+const TABS = ["security", "comms", "extensions", "voicemail", "crowdsec"];
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     TABS.forEach(t => { document.getElementById("tab-" + t).style.display = btn.dataset.tab === t ? "" : "none"; });
     if (btn.dataset.tab === "extensions") refreshExtensionsTab();
+    if (btn.dataset.tab === "voicemail") loadVoicemail();
   });
 });
 
@@ -4190,6 +4453,65 @@ async function loadSecurity() {
   const res = await fetch("/api/security-events");
   lastSecurityEvents = await res.json();
   renderSecurity();
+}
+
+// ── Voicemail tab ────────────────────────────────────────────────────────
+let lastVoicemail = [];
+let vmSort = { key: "origtime", dir: -1 };
+
+function fmtVmTime(origtime) {
+  if (!origtime || !/^\d+$/.test(origtime)) return "";
+  return new Date(parseInt(origtime, 10) * 1000).toLocaleString();
+}
+
+function fmtVmDuration(seconds) {
+  const s = parseInt(seconds, 10);
+  if (!Number.isFinite(s) || s < 0) return "";
+  const m = Math.floor(s / 60), r = s % 60;
+  return m + ":" + String(r).padStart(2, "0");
+}
+
+function renderVoicemail() {
+  let rows = lastVoicemail.slice();
+  if (vmSort.key) {
+    rows.sort((a, b) => {
+      let av = a[vmSort.key], bv = b[vmSort.key];
+      if (vmSort.key === "origtime" || vmSort.key === "duration") { av = parseInt(av, 10) || 0; bv = parseInt(bv, 10) || 0; }
+      else { av = (av || "").toString().toLowerCase(); bv = (bv || "").toString().toLowerCase(); }
+      if (av < bv) return -1 * vmSort.dir;
+      if (av > bv) return 1 * vmSort.dir;
+      return 0;
+    });
+  }
+  document.querySelectorAll("#vm-table th.sortable .arrow").forEach(a => a.remove());
+  if (vmSort.key) {
+    const th = document.querySelector(`#vm-table th[data-sort="${vmSort.key}"]`);
+    if (th) th.insertAdjacentHTML("beforeend", `<span class="arrow">${vmSort.dir === 1 ? "▲" : "▼"}</span>`);
+  }
+  const tbody = document.querySelector("#vm-table tbody");
+  tbody.innerHTML = rows.map(m => `<tr>
+    <td>${esc(fmtVmTime(m.origtime))}</td>
+    <td>${esc(m.ext)}</td>
+    <td>${esc(m.callerid || "Unknown")}</td>
+    <td>${esc(fmtVmDuration(m.duration))}</td>
+    <td><audio controls preload="none" style="height:2rem" src="/voicemail/audio?ext=${encodeURIComponent(m.ext)}&msg=${encodeURIComponent(m.msg)}"></audio></td>
+  </tr>`).join("") || `<tr><td colspan=5 class=muted>No voicemail messages. Enable voicemail for an extension on the Extensions tab.</td></tr>`;
+}
+
+document.querySelectorAll("#vm-table th.sortable").forEach(th => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    vmSort.dir = (vmSort.key === key) ? -vmSort.dir : 1;
+    vmSort.key = key;
+    renderVoicemail();
+  });
+});
+
+async function loadVoicemail() {
+  const res = await fetch("/api/voicemail");
+  const data = await res.json();
+  lastVoicemail = data.messages || [];
+  renderVoicemail();
 }
 
 // ── Calls & Texts tab ───────────────────────────────────────────────────────
@@ -4484,7 +4806,8 @@ async function loadExtensions() {
   (permData.extensions || []).forEach(e => byExt.set(e.ext, {
     ext: e.ext, name: e.name,
     restrict: e.restrict, allowed_numbers: e.allowed_numbers,
-    messaging: e.messaging, ea: false, category: "", status: "", transport: "", encryption: "",
+    messaging: e.messaging, voicemail: e.voicemail, voicemail_pin: e.voicemail_pin,
+    ea: false, category: "", status: "", transport: "", encryption: "",
   }));
 
   if (eaInstalled) {
@@ -4551,6 +4874,7 @@ const RESTRICT_LABELS = [
 function extSortValue(e, key) {
   if (key === "ext") return parseInt(e.ext, 10);
   if (key === "messaging") return e.messaging ? 1 : 0;
+  if (key === "voicemail") return e.voicemail ? 1 : 0;
   if (key === "restrict") return RESTRICT_ORDER[e[key]] ?? -1;
   return (e[key] || "").toString().toLowerCase();
 }
@@ -4618,6 +4942,10 @@ function renderExtensions() {
       <td class="pstn-only">${restrictSelect(e.restrict)}</td>
       <td class="pstn-only"><input type="text" class="ext-numbers" value="${esc(e.allowed_numbers)}" placeholder="5551234567,5559876543" ${restrictUsesList(e.restrict) ? "" : "disabled"} style="width:16rem" aria-label="Whitelist for extension ${esc(e.ext)}"></td>
       <td style="text-align:center"><input type="checkbox" class="ext-messaging" ${e.messaging ? "checked" : ""} aria-label="Messaging for extension ${esc(e.ext)}"></td>
+      <td style="text-align:center">
+        <input type="checkbox" class="ext-voicemail" ${e.voicemail ? "checked" : ""} aria-label="Voicemail for extension ${esc(e.ext)}">
+        ${e.voicemail_pin ? `<span class="muted" style="font-size:0.85em" title="Voicemail PIN">PIN ${esc(e.voicemail_pin)}</span>` : ""}
+      </td>
       <td class="actions">
         <button class="icon ea-only" title="Connection details for ${esc(e.ext)}" onclick="toggleEaDeviceDetails('${esc(e.ext)}')">&#9432;</button>
         <button class="icon ea-only" title="Delete extension ${esc(e.ext)}" onclick="deleteEaDevice('${esc(e.ext)}')">&times;</button>
@@ -4653,12 +4981,14 @@ function rowEdits(tr) {
   const modeEl = tr.querySelector(".ext-restrict");
   const numsEl = tr.querySelector(".ext-numbers");
   const msgEl = tr.querySelector(".ext-messaging");
+  const vmEl = tr.querySelector(".ext-voicemail");
   const edits = {};
   if (nameEl && !nameEl.disabled && nameEl.value.trim() !== (model.name || "").trim()) edits.name = nameEl.value.trim();
   if (mobileEl && mobileEl.checked !== (model.category === "mobile")) edits.category = mobileEl.checked ? "mobile" : "standard";
   if (modeEl && modeEl.value !== model.restrict) edits.restrict = modeEl.value;
   if (numsEl && numsEl.value !== model.allowed_numbers) edits.allowed_numbers = numsEl.value;
   if (msgEl && msgEl.checked !== !!model.messaging) edits.messaging = msgEl.checked;
+  if (vmEl && vmEl.checked !== !!model.voicemail) edits.voicemail = vmEl.checked;
   return {ext, model, edits, tr, count: Object.keys(edits).length};
 }
 
@@ -4708,24 +5038,36 @@ document.getElementById("ext-save-all").addEventListener("click", async () => {
         if (!r.ok) throw new Error(r.message || "category change failed");
       }
       const permKeys = ["restrict", "allowed_numbers", "messaging"];
-      if (permKeys.some(k => k in edits)) {
-        const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
-        let r;
-        if (pstnInstalled) {
+      if (pstnInstalled) {
+        if (permKeys.some(k => k in edits) || "voicemail" in edits) {
+          const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
+          const voicemail = "voicemail" in edits ? edits.voicemail : !!model.voicemail;
           // Send the whole permission record, not just the changed fields —
           // the endpoint rewrites all of it, so omitting an unchanged value
           // would silently reset it.
-          r = await postJSON("/api/pstn-permissions", {
+          const r = await postJSON("/api/pstn-permissions", {
             ext: ext,
             restrict: "restrict" in edits ? edits.restrict : model.restrict,
             allowed_numbers: "allowed_numbers" in edits ? edits.allowed_numbers : model.allowed_numbers,
             messaging: messaging,
+            voicemail: voicemail,
           });
-        } else {
-          r = await postJSON("/api/pstn-messaging", {ext: ext, enabled: messaging});
+          if (!r.ok) throw new Error(r.message || "permission save failed");
+          markPstnDirty(); touchedPstn = true;
         }
-        if (!r.ok) throw new Error(r.message || "permission save failed");
-        if (pstnInstalled) { markPstnDirty(); touchedPstn = true; }
+      } else {
+        // No PSTN trunk — messaging and voicemail are each independent of
+        // it, so they go through their own standalone endpoints instead of
+        // the combined one above.
+        if (permKeys.some(k => k in edits)) {
+          const messaging = "messaging" in edits ? edits.messaging : !!model.messaging;
+          const r = await postJSON("/api/pstn-messaging", {ext: ext, enabled: messaging});
+          if (!r.ok) throw new Error(r.message || "permission save failed");
+        }
+        if ("voicemail" in edits) {
+          const r = await postJSON("/api/pstn-voicemail", {ext: ext, enabled: edits.voicemail});
+          if (!r.ok) throw new Error(r.message || "voicemail save failed");
+        }
       }
       saved++;
     } catch (err) {
@@ -5331,10 +5673,15 @@ loadDecisions();
 loadAsnExempt();
 loadCrowdsecStatus();
 initExtensionsTab();
+loadVoicemail();
 setInterval(loadSecurity, 30000);
 setInterval(loadCalls, 30000);
 setInterval(loadTexts, 30000);
 setInterval(loadDecisions, 30000);
+// No setInterval for voicemail (unlike the tabs above) — re-rendering the
+// table while a message is mid-playback would yank the <audio> element out
+// from under the user. Refreshed on tab click instead (see the .tab-btn
+// listener above) and once here at page load.
 </script>
 </body></html>
 """
@@ -5384,11 +5731,14 @@ class Handler(BaseHTTPRequestHandler):
             perms = get_all_permissions()
             extensions = []
             for e in list_extensions():
-                p = perms.get(e["ext"], {"restrict": "internal", "allowed_numbers": "", "messaging": False})
+                p = perms.get(e["ext"], {"restrict": "internal", "allowed_numbers": "",
+                                          "messaging": False, "voicemail": False, "voicemail_pin": ""})
                 extensions.append({"ext": e["ext"], "name": e["name"],
                                     "restrict": p["restrict"],
                                     "allowed_numbers": p["allowed_numbers"],
-                                    "messaging": p["messaging"]})
+                                    "messaging": p["messaging"],
+                                    "voicemail": p["voicemail"],
+                                    "voicemail_pin": p["voicemail_pin"]})
             self._json({"extensions": extensions})
         elif self.path == "/api/pstn-limits":
             self._json(get_limits())
@@ -5453,6 +5803,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"devices": ea_list_devices(), "status": ea_get_status()})
         elif self.path == "/api/ea-rooms":
             self._json({"rooms": ea_list_rooms()})
+        elif self.path == "/api/voicemail":
+            self._json({"messages": list_voicemail_messages()})
+        elif self.path.startswith("/voicemail/audio?"):
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            path = voicemail_audio_path((qs.get("ext") or [""])[0], (qs.get("msg") or [""])[0])
+            if not path:
+                self._json({"error": "not found"}, 404)
+            else:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -5477,6 +5843,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload.get("ext", ""),
                 payload.get("restrict", ""), payload.get("allowed_numbers", ""),
                 bool(payload.get("messaging", False)),
+                bool(payload.get("voicemail", False)),
             )
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-limits":
@@ -5490,6 +5857,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/pstn-messaging":
             ok, message = write_messaging(payload.get("ext", ""), bool(payload.get("enabled", False)))
+            self._json({"ok": ok, "message": message})
+        elif self.path == "/api/pstn-voicemail":
+            ok, message = write_voicemail(payload.get("ext", ""), bool(payload.get("enabled", False)))
             self._json({"ok": ok, "message": message})
         elif self.path == "/api/asterisk-restart":
             ok, message = restart_asterisk_container()

@@ -579,6 +579,21 @@ _asterisk_patch_messaging_vendor_files() {
     # extensions.conf: same [intercom] anchor _pstn_patch_vendor_files uses,
     # a SEPARATE #include so this coexists whether or not pstn-trunk is
     # installed — messaging is independent of the PSTN trunk entirely.
+    #
+    # Anchor AFTER [intercom]$, not before — confirmed live (see
+    # _pstn_write_inbound_dialplan_include's comment in pstn-trunk.sh,
+    # 2026-07-24): a #include'd file whose first real line is its own
+    # [context] header, inserted right after [intercom]$ via this same
+    # mechanism, loads fine and does NOT swallow the per-device "exten =>"
+    # lines the runtime loop appends after it — messaging-dialplan.conf has
+    # done exactly this since it was written. (The failure mode that
+    # comment documents is different: mixing "continues the ambient
+    # context" content with a later context header IN THE SAME FILE broke
+    # everything in that file, which is why pstn-trunk-dialplan.conf and
+    # pstn-trunk-inbound-dialplan.conf are two separate files. That doesn't
+    # apply here — this file is nothing but [sip-messaging] from its first
+    # line.) Asterisk's exact internal handling isn't fully understood, but
+    # this position is the one this repo has actually verified working.
     for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
         [[ -f "$f" ]] || continue
         if ! grep -q 'messaging-dialplan.conf' "$f"; then
@@ -612,7 +627,7 @@ _asterisk_ensure_live_messaging_include() {
             log_success "Patched the messaging #include directly into the live extensions.conf."
         else
             log_warning "Couldn't find '[intercom]' in the live extensions.conf — add"
-            log_warning "'#include messaging-dialplan.conf' manually, then: docker exec ${CONTAINER_NAME} asterisk -rx \"dialplan reload\""
+            log_warning "'#include messaging-dialplan.conf' manually after [intercom], then: docker exec ${CONTAINER_NAME} asterisk -rx \"dialplan reload\""
         fi
     fi
     docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
@@ -699,6 +714,138 @@ exten => _X.,1,NoOp(SIP MESSAGE to ${EXTEN})
  same => n,System(printf '%s|deny|%s|%s\n' "${EPOCH}" "${FROM_EXT}" "${EXTEN}" >> /var/log/asterisk/sip-messages.log)
  same => n,Hangup()
 EOF
+}
+
+# Voicemail access codes — reached via [intercom]'s "include => voicemail-
+# access" fallback (patched into Easy Asterisk's own device-creation code —
+# see _asterisk_patch_voicemail_vendor_files): if a dialed pattern isn't one
+# of [intercom]'s own per-device "exten =>" declarations, Asterisk checks
+# this context next. *97/*98 are reserved codes here — Easy Asterisk only
+# ever assigns numeric-only device extensions, so they can't collide.
+#
+# Gated live on the TARGET's own "voicemail" flag in pstn-permissions.conf
+# (same AST_CONFIG() mechanism messaging-dialplan.conf uses for its
+# "messaging" flag, and the exact flag the Security Dashboard's Extensions
+# tab writes) — no restart needed to take effect. Off by default: an
+# extension with no entry, or voicemail=no, is denied. The mailbox itself
+# (password/greeting) lives in voicemail.conf, generated/kept in sync by the
+# dashboard's write_voicemail() whenever the flag is toggled — always
+# regenerated here is safe since this file has no per-extension state of its
+# own, unlike voicemail.conf.
+_asterisk_write_voicemail_dialplan() {
+    local FILE="$1"
+    cat > "$FILE" << 'EOF'
+; Voicemail access codes — services/asterisk.sh.
+; Regenerated on every install/update; edit there, not here directly.
+[voicemail-access]
+; Dial *97 to check your OWN mailbox (matched by caller ID).
+exten => *97,1,NoOp(Voicemail check from ${CALLERID(num)})
+ same => n,VoiceMailMain(${CALLERID(num)}@default)
+ same => n,Hangup()
+
+; Dial *98<extension> to leave a message directly in that extension's
+; mailbox without ringing it first.
+exten => _*98X.,1,NoOp(Direct voicemail drop for ${EXTEN:4})
+ same => n,Set(TARGET=${EXTEN:4})
+ same => n,Set(VM_OK=${AST_CONFIG(pstn-permissions.conf,${TARGET},voicemail)})
+ same => n,GotoIf($["${VM_OK}" = "yes"]?leave:deny)
+ same => n(leave),VoiceMail(${TARGET}@default,u)
+ same => n,Hangup()
+ same => n(deny),Playback(privacy-incorrect)
+ same => n,Hangup()
+EOF
+}
+
+# Mailbox skeleton only — [general] settings plus an empty [default]
+# section. Deliberately NOT regenerated on every install/update once it
+# exists: past this point, the Security Dashboard's write_voicemail() owns
+# the [default] section's actual mailbox lines (added/removed as extensions
+# toggle their voicemail flag, with a PIN generated once and persisted in
+# pstn-permissions.conf's voicemail_pin= so it survives every future
+# regeneration). Regenerating wholesale here on every "update" would fight
+# that — same non-destructive-update rule as every other install-time-vs-
+# dashboard-owned file split in this repo (.env, firewall rules, etc.).
+_asterisk_write_voicemail_conf() {
+    local FILE="$1"
+    [[ -f "$FILE" ]] && return 0
+    cat > "$FILE" << 'EOF'
+; Voicemail mailboxes — services/asterisk.sh (initial skeleton).
+; Mailbox lines below [default] are added/removed by the Security
+; Dashboard's Extensions tab (write_voicemail() in app.py) when voicemail is
+; toggled for an extension, and this file is never regenerated wholesale
+; after this first creation — hand edits below [default] survive.
+[general]
+format=wav
+attach=no
+maxmsg=100
+maxsecs=180
+minsecs=3
+review=yes
+operator=no
+
+[default]
+EOF
+}
+
+# Same anchor-position reasoning as _asterisk_patch_messaging_vendor_files:
+# Same anchor as messaging's own patch (see the comment above
+# _asterisk_patch_messaging_vendor_files for the live-confirmed reasoning):
+# #include voicemail-dialplan.conf goes right AFTER [intercom]$, same
+# position that's actually been verified not to disturb the per-device
+# "exten =>" lines that follow it. Unlike messaging, though, voicemail
+# access codes (*97/*98<ext>) need to actually be DIALABLE from [intercom]
+# — messaging is reached via message_context and never through call
+# dialplan at all — so this also adds a plain "include => voicemail-access"
+# line INSIDE [intercom]'s own body (a dialplan include, not a config
+# #include — doesn't open a new context, just tells Asterisk to check
+# voicemail-access next if nothing in [intercom] itself matches the dialed
+# digits). Both anchor on the same [intercom]$ line; order between them
+# doesn't matter to Asterisk (neither is a context header), only that both
+# land inside [intercom]'s body.
+_asterisk_patch_voicemail_vendor_files() {
+    local EA_DIR="$1"
+    local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
+    local EASY1="$EA_DIR/easy-asterisk.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+    local f
+
+    for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
+        [[ -f "$f" ]] || continue
+        if ! grep -q '^\[intercom\]$' "$f"; then
+            log_warning "$(basename "$f"): '[intercom]' anchor not found — vendor template changed upstream."
+            log_warning "  Add '#include voicemail-dialplan.conf' and 'include => voicemail-access' manually after [intercom] in this file's extensions.conf heredoc."
+            continue
+        fi
+        grep -q '^include => voicemail-access$' "$f" || sed -i '/^\[intercom\]$/a include => voicemail-access' "$f"
+        grep -q 'voicemail-dialplan.conf' "$f" || sed -i '/^\[intercom\]$/a #include voicemail-dialplan.conf' "$f"
+    done
+
+    log_success "Vendor generator functions patched for voicemail access codes."
+}
+
+# Live-file counterpart to the vendor-template patch above, same reasoning
+# as _asterisk_ensure_live_messaging_include (Easy Asterisk's entrypoint
+# only regenerates extensions.conf if it's missing, so a box with existing
+# devices never picks up the vendor patch on a plain restart).
+_asterisk_ensure_live_voicemail_include() {
+    local EA_DIR="$1" CONTAINER_NAME="$2"
+    local EXT_LIVE="$EA_DIR/config/asterisk/extensions.conf"
+    [[ -f "$EXT_LIVE" ]] || return 0
+    if ! grep -q '^\[intercom\]$' "$EXT_LIVE"; then
+        log_warning "Couldn't find '[intercom]' in the live extensions.conf — add"
+        log_warning "'#include voicemail-dialplan.conf' and 'include => voicemail-access' manually after [intercom], then: docker exec ${CONTAINER_NAME} asterisk -rx \"dialplan reload\""
+        return 0
+    fi
+    if ! grep -q '^include => voicemail-access$' "$EXT_LIVE"; then
+        sed -i '/^\[intercom\]$/a include => voicemail-access' "$EXT_LIVE"
+    fi
+    if ! grep -q 'voicemail-dialplan.conf' "$EXT_LIVE"; then
+        sed -i '/^\[intercom\]$/a #include voicemail-dialplan.conf' "$EXT_LIVE"
+    fi
+    log_success "Patched voicemail access codes directly into the live extensions.conf."
+    docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
 }
 
 _asterisk_remove_presence_timer() {
@@ -1494,8 +1641,12 @@ install_asterisk() {
                 _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
                 _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
                 _asterisk_migrate_existing_devices_message_context "$EA_DIR/config/asterisk/pjsip.conf"
+                _asterisk_patch_voicemail_vendor_files "$EA_DIR"
+                _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+                _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+                _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
 
                 log_info "Rebuilding and restarting containers..."
                 if docker compose up -d --build --force-recreate; then
@@ -1552,8 +1703,12 @@ install_asterisk() {
     _asterisk_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
     _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
+    _asterisk_patch_voicemail_vendor_files "$EA_DIR"
+    _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+    _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+    _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf"
+    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
 
     # ── Domain / networking mode ──────────────────────────────────────────────
     # A public cloud box is always reachable from anywhere, so there's no
