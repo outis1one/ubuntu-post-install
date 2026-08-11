@@ -235,6 +235,119 @@ install_drum-rhythm-game() {
             || { log_error "Clone failed — check network and git access"; return 1; }
     fi
 
+    # Apply local runtime fixes for the upstream single-page game.  The game is
+    # intentionally static, so we patch index.html after clone/pull instead of
+    # forking the deployment source.  The shim is defensive: it fixes Web Audio
+    # resume/unlock behavior, guarantees every visible drum pad has an audible
+    # fallback, and replaces Christmas melody metadata with well-known public
+    # domain tunes using MIDI pitches.
+    log_info "Applying drum-rhythm-game Christmas/audio fixes..."
+    cat > "$DRUM_DIR/html/ubuntu-post-install-fixes.js" <<'DRUM_FIXES_JS'
+(() => {
+  'use strict';
+
+  const NOTE_TO_MIDI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const CHRISTMAS_TUNES = {
+    'jingle bells': {
+      title: 'Jingle Bells', bpm: 112,
+      melody: 'E4 E4 E4 R E4 E4 E4 R E4 G4 C4 D4 E4 R F4 F4 F4 F4 F4 E4 E4 E4 E4 D4 D4 E4 D4 R G4 R E4 E4 E4 R E4 E4 E4 R E4 G4 C4 D4 E4 R F4 F4 F4 F4 F4 E4 E4 E4 G4 G4 F4 D4 C4',
+      beats:  '1 1 2 1 1 1 2 1 1 1 1 1 4 1 1 1 1 1 1 1 0.5 0.5 1 1 1 1 2 1 2 1 1 2 1 1 1 2 1 1 1 1 1 4 1 1 1 1 1 1 1 1 1 1 1 1 4'
+    },
+    'silent night': {
+      title: 'Silent Night', bpm: 76,
+      melody: 'G4 A4 G4 E4 R G4 A4 G4 E4 R D5 D5 B4 R C5 C5 G4 R A4 A4 C5 B4 A4 G4 A4 G4 E4 R A4 A4 C5 B4 A4 G4 A4 G4 E4 R D5 D5 F5 D5 B4 C5 E5 R C5 G4 E4 G4 F4 D4 C4',
+      beats:  '1.5 0.5 1 3 1 1.5 0.5 1 3 1 2 1 3 1 2 1 3 1 2 1 1.5 0.5 1 1.5 0.5 1 3 1 2 1 1.5 0.5 1 1.5 0.5 1 3 1 2 1 1.5 0.5 1 1 1 3 1 1 1 1.5 0.5 1 1 1 3'
+    },
+    'deck the halls': {
+      title: 'Deck the Halls', bpm: 128,
+      melody: 'G4 F4 E4 D4 C4 D4 E4 C4 D4 E4 F4 D4 E4 D4 C4 B3 C4 R D4 E4 F4 D4 E4 F4 G4 D4 E4 F4 G4 A4 B4 C5 B4 A4 G4 F4 E4 D4 C4',
+      beats:  '1 0.5 0.5 1 1 1 1 1 0.5 0.5 1 1 0.5 0.5 1 1 2 1 1 0.5 0.5 1 0.5 0.5 1 1 0.5 0.5 1 1 1 1 0.5 0.5 1 1 1 1 2'
+    },
+    'we wish you a merry christmas': {
+      title: 'We Wish You a Merry Christmas', bpm: 120,
+      melody: 'D4 G4 G4 A4 G4 F#4 E4 E4 E4 A4 A4 B4 A4 G4 F#4 D4 D4 B4 B4 C5 B4 A4 G4 E4 D4 D4 E4 A4 F#4 G4',
+      beats:  '1 1 0.5 0.5 0.5 0.5 1 1 1 1 0.5 0.5 0.5 0.5 1 1 1 1 0.5 0.5 0.5 0.5 1 1 0.5 0.5 1 1 1 2'
+    },
+    'joy to the world': {
+      title: 'Joy to the World', bpm: 112,
+      melody: 'C5 B4 A4 G4 F4 E4 D4 C4 G4 A4 A4 B4 B4 C5 C5 C5 C5 B4 A4 G4 G4 F4 E4 C5 C5 B4 A4 G4 G4 F4 E4 E4 E4 E4 E4 F4 G4 F4 E4 D4 D4 D4 D4 E4 F4 E4 D4 C4',
+      beats:  '2 1.5 0.5 2 2 2 2 4 1.5 0.5 1.5 0.5 1.5 0.5 4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 4'
+    }
+  };
+
+  const toMidi = (note) => {
+    if (!note || note === 'R') return null;
+    const match = /^([A-G])([#b]?)(-?\d+)$/.exec(note);
+    if (!match) return null;
+    const accidental = match[2] === '#' ? 1 : match[2] === 'b' ? -1 : 0;
+    return 12 * (Number(match[3]) + 1) + NOTE_TO_MIDI[match[1]] + accidental;
+  };
+  const freq = (midi) => 440 * (2 ** ((midi - 69) / 12));
+  const tuneNotes = (tune) => tune.melody.split(/\s+/).map((note, idx) => ({ note, midi: toMidi(note), frequency: toMidi(note) == null ? 0 : freq(toMidi(note)), beat: Number(tune.beats.split(/\s+/)[idx] || 1) }));
+
+  const findAudioContext = () => {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    return AudioCtor ? Object.values(window).find((value) => value instanceof AudioCtor) : null;
+  };
+  const unlock = () => {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    window.__drumRhythmAudioContext = window.__drumRhythmAudioContext || (AudioCtor ? new AudioCtor() : null);
+    [window.__drumRhythmAudioContext, findAudioContext()].filter(Boolean).forEach((ctx) => ctx.state === 'suspended' && ctx.resume());
+  };
+  ['pointerdown', 'keydown', 'gamepadconnected', 'touchstart', 'click'].forEach((eventName) => window.addEventListener(eventName, unlock, { passive: true }));
+
+  const padSound = (index = 0) => {
+    unlock();
+    const ctx = window.__drumRhythmAudioContext;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = ['sine', 'triangle', 'square', 'sawtooth'][index % 4];
+    osc.frequency.setValueAtTime([110, 146.83, 196, 246.94, 329.63, 392][index % 6], now);
+    gain.gain.setValueAtTime(0.24, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.13);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.14);
+  };
+  window.ubuntuPostInstallDrumPadSound = padSound;
+
+  document.addEventListener('pointerdown', (event) => {
+    const pad = event.target.closest('[data-pad], .pad, .drum-pad, button');
+    if (!pad || /play|start|stop|pause|song/i.test(pad.textContent || '')) return;
+    padSound([...document.querySelectorAll('[data-pad], .pad, .drum-pad, button')].indexOf(pad));
+  }, true);
+
+  const normalize = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const patchSongs = () => {
+    for (const root of [window, ...Object.values(window).filter((value) => value && typeof value === 'object')]) {
+      for (const key of Object.keys(root)) {
+        const list = root[key];
+        if (!Array.isArray(list)) continue;
+        for (const song of list) {
+          const title = normalize(song && (song.title || song.name));
+          const tuneKey = Object.keys(CHRISTMAS_TUNES).find((candidate) => title.includes(candidate));
+          if (!tuneKey) continue;
+          const tune = CHRISTMAS_TUNES[tuneKey];
+          song.title = song.title || tune.title;
+          song.name = song.name || tune.title;
+          song.bpm = tune.bpm;
+          song.notes = tuneNotes(tune);
+          song.melody = tune.melody;
+          song.beats = tune.beats;
+        }
+      }
+    }
+  };
+  window.addEventListener('load', () => { unlock(); patchSongs(); setTimeout(patchSongs, 250); });
+  setInterval(patchSongs, 2000);
+})();
+DRUM_FIXES_JS
+    if [ -f "$DRUM_DIR/html/index.html" ] && ! grep -q "ubuntu-post-install-fixes.js" "$DRUM_DIR/html/index.html"; then
+        sed -i 's#</body>#  <script src="ubuntu-post-install-fixes.js"></script>\n</body>#' "$DRUM_DIR/html/index.html"
+    fi
+
     chown -R "$ACTUAL_USER:$ACTUAL_USER" "$DRUM_DIR/html"
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
