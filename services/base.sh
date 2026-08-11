@@ -22,8 +22,6 @@ install_base() {
         echo "[DRY-RUN] Would offer Caddy reverse proxy install (full repo only)"
         echo "[DRY-RUN] Would offer CrowdSec intrusion prevention install (full repo only)"
         echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
-        echo "[DRY-RUN] Would add setup.sh tab completion to ~/.bashrc (if not already there)"
-        echo "[DRY-RUN] Would set up daily pruning of old *.backup.* config files (systemd timer, if not already there)"
         return 0
     fi
 
@@ -85,11 +83,17 @@ install_base() {
     # ── SSH Host aliases ─────────────────────────────────────────────────────
     _base_setup_ssh_aliases
 
-    # ── setup.sh tab completion ─────────────────────────────────────────────
-    _base_setup_tab_completion
-
-    # ── Old config-backup pruning ────────────────────────────────────────────
-    _base_setup_backup_pruning
+    # setup.sh tab completion and old-config-backup pruning are no longer
+    # called from here — setup.sh itself now runs both unconditionally on
+    # every invocation (see the block right after --list/--status in
+    # setup.sh), since install_base() only ever runs downstream of that
+    # point anyway (base.sh has no standalone-bootstrap block — see the
+    # header comment — so it's only ever reached via setup.sh's own
+    # dispatcher). Calling them here too would just be a redundant, harmless
+    # no-op given both are idempotent, but the single call site in setup.sh
+    # is the one that actually matters: it's what fixed a box that ran e.g.
+    # `sudo ./setup.sh beszel-agent` directly and never explicitly ran
+    # `base` first, which used to mean tab completion never got set up.
 }
 
 # Wires tools/setup-completion.bash into ACTUAL_USER's shell automatically —
@@ -104,10 +108,11 @@ _base_setup_tab_completion() {
     [ -f "$bashrc" ] || return 0
     grep -qF "$comp_script" "$bashrc" 2>/dev/null && return 0
 
-    # No DRY_RUN check here — install_base()'s own top-level one (above)
-    # already returns before this helper is ever called in that mode,
-    # unlike install_glow()'s check further down, which is independently
-    # invokable (sudo ./setup.sh glow --dry-run) and genuinely reachable.
+    # No DRY_RUN check here — setup.sh's own top-level call site (see the
+    # block right after --list/--status) already skips calling this at all
+    # when --dry-run is set, unlike install_glow()'s check further down,
+    # which is independently invokable (sudo ./setup.sh glow --dry-run) and
+    # genuinely reachable.
     {
         echo ""
         echo "# ubuntu-post-install: setup.sh tab completion"
