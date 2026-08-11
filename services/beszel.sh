@@ -134,6 +134,20 @@ fi
 
 register_service beszel utilities "Lightweight server + Docker monitoring (Beszel) — CPU/RAM/disk/network, auto-discovers running containers" 8090
 
+# Pulls a NAME's value out of a pasted blob regardless of which shape it
+# arrives in — Beszel's own "copy for docker compose" button (the most
+# prominent option next to the key/token fields, confirmed live to be
+# what people actually click) hands you YAML (`KEY: 'value'` or
+# `- KEY=value`), not a bare string — matches "KEY"/"TOKEN" with either
+# `:` or `=`, optional leading `- ` list marker, and strips a single
+# layer of surrounding quotes if present.
+_beszel_extract_field() {
+    local field="$1" blob="$2"
+    echo "$blob" | grep -iE "^[[:space:]]*-?[[:space:]]*${field}[[:space:]]*[:=]" | head -1 \
+        | sed -E "s/^[[:space:]]*-?[[:space:]]*${field}[[:space:]]*[:=][[:space:]]*//I" \
+        | sed -E "s/^[\"']//; s/[\"'][[:space:]]*\$//"
+}
+
 _beszel_configure_agent() {
     local dir="$1" web_port="$2"
 
@@ -142,19 +156,43 @@ _beszel_configure_agent() {
     echo "    http://localhost:${web_port}  (or its Caddy domain, once configured)"
     echo ""
     echo "  Create the admin account, then go to Settings → Tokens & Fingerprints:"
-    echo "    - Enable the universal token and copy its value"
-    echo "    - Copy the public key shown there too"
+    echo "    - Enable the universal token"
+    echo "    - The key/token fields there usually offer a 'copy for docker"
+    echo "      compose' shortcut — paste whatever that gives you below as-is,"
+    echo "      whole snippet or just the two lines, doesn't matter which."
     echo ""
 
-    local AGENT_KEY="" AGENT_TOKEN=""
-    prompt_text "  Paste the public key (blank to skip and do this later):" "" AGENT_KEY
-    if [ -z "$AGENT_KEY" ]; then
+    if [ "${UNATTENDED:-false}" = "true" ]; then
+        log_info "Skipping agent setup (unattended) — re-run this installer to finish it."
+        return 0
+    fi
+
+    echo "  Paste it below, then an empty line to finish (blank first line to skip for now):"
+    local PASTE="" LINE
+    while IFS= read -r LINE; do
+        [ -z "$LINE" ] && break
+        PASTE="${PASTE}${LINE}"$'\n'
+    done
+
+    if [ -z "$PASTE" ]; then
         log_info "Skipping agent setup for now — re-run this installer once you have the key and token."
         return 0
     fi
-    prompt_text "  Paste the universal token:" "" AGENT_TOKEN
-    if [ -z "$AGENT_TOKEN" ]; then
-        log_info "No token entered — skipping agent setup for now. Re-run this installer to finish."
+
+    local AGENT_KEY AGENT_TOKEN
+    AGENT_KEY="$(_beszel_extract_field KEY "$PASTE")"
+    AGENT_TOKEN="$(_beszel_extract_field TOKEN "$PASTE")"
+
+    # Didn't find a labeled KEY/TOKEN line at all — treat the paste as a
+    # single bare value and ask for the other one directly, so a UI that
+    # really does just show plain strings (no YAML) still works.
+    if [ -z "$AGENT_KEY" ] && [ -z "$AGENT_TOKEN" ]; then
+        AGENT_KEY="$(echo "$PASTE" | head -1)"
+        prompt_text "  Paste the universal token:" "" AGENT_TOKEN
+    fi
+
+    if [ -z "$AGENT_KEY" ] || [ -z "$AGENT_TOKEN" ]; then
+        log_warning "Couldn't find both a key and a token in that — skipping agent setup. Re-run this installer to try again."
         return 0
     fi
 
