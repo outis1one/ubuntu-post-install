@@ -334,6 +334,160 @@ ufw_allow_from_caddy_net() {
     fi
 }
 
+# ── Remove a service ──────────────────────────────────────────────────────────
+# Removes a specific site block from a Caddyfile, keyed on the block whose
+# body reverse_proxy's to the given container name. Bounded by tracking
+# actual brace depth (handles nested log{}/header{}/forward_auth{} blocks
+# correctly), not a "delete to next blank line" scan — see this repo's own
+# history for why an unbounded range delete on a live Caddy/Samba config is
+# exactly the kind of thing that silently destroys unrelated content.
+_remove_caddy_site_block() {
+    local caddy_file="$1" container="$2"
+    awk -v container="$container" '
+    BEGIN { depth = 0; buf = ""; skip = 0; pending_comment = "" }
+    {
+        line = $0
+        opens = gsub(/\{/, "{", line)
+        closes = gsub(/\}/, "}", line)
+
+        if (depth == 0 && opens == 0) {
+            if ($0 ~ /^#/) {
+                if (pending_comment != "") print pending_comment
+                pending_comment = $0
+                next
+            } else {
+                if (pending_comment != "") { print pending_comment; pending_comment = "" }
+                print $0
+                next
+            }
+        }
+        if (depth == 0 && opens > 0) {
+            buf = $0 "\n"
+            depth += opens - closes
+            if (index($0, "reverse_proxy " container ":") > 0) skip = 1
+            next
+        }
+        if (depth > 0) {
+            buf = buf $0 "\n"
+            if (index($0, "reverse_proxy " container ":") > 0) skip = 1
+            depth += opens - closes
+            if (depth <= 0) {
+                depth = 0
+                if (!skip) {
+                    if (pending_comment != "") print pending_comment
+                    printf "%s", buf
+                }
+                pending_comment = ""
+                buf = ""
+                skip = 0
+                next
+            }
+            next
+        }
+    }
+    END { if (pending_comment != "") print pending_comment }
+    ' "$caddy_file"
+}
+
+# Generic per-service removal: stops/removes its containers, its Caddy site
+# block (if any), any UFW rule tagged with its name, and optionally its
+# ~/docker/<name> directory. Scoped to the common case (a Docker service
+# living at $DOCKER_DIR/<name> with a standard configure_caddy_for_service
+# site block) — a service with a hand-built Caddy block or non-standard
+# layout may need manual cleanup for the parts this can't find.
+remove_service() {
+    local name="$1"
+    local dir="$DOCKER_DIR/$name"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would stop/remove $name's containers, Caddy site block, and any tagged UFW rule"
+        return 0
+    fi
+
+    if [ ! -d "$dir" ]; then
+        log_error "No $dir found — nothing to remove. (Non-Docker services, e.g. base/ssh-key-import, aren't handled by this — remove those manually.)"
+        return 1
+    fi
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Remove $name"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "  This will, as applicable:"
+    [ -f "$dir/docker-compose.yml" ] && echo "    - Stop and remove its Docker container(s)"
+    echo "    - Remove its Caddy site block, if any (Caddyfile backed up first)"
+    echo "    - Remove any UFW rule tagged with '$name'"
+    echo ""
+
+    local CONFIRM=""
+    prompt_yn "  Continue? (y/n):" "n" CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        log_info "Cancelled."
+        return 0
+    fi
+
+    # ── Docker teardown ────────────────────────────────────────────────────
+    local container=""
+    if [ -f "$dir/docker-compose.yml" ]; then
+        container="$(grep -m1 '^\s*container_name:' "$dir/docker-compose.yml" 2>/dev/null | awk '{print $2}')"
+        local WIPE_DATA=""
+        prompt_yn "  Also delete its data volumes (database, uploaded files, etc. — irreversible)? (y/n):" "n" WIPE_DATA
+        if [[ "$WIPE_DATA" =~ ^[Yy]$ ]]; then
+            ( cd "$dir" && docker compose down -v ) \
+                && log_success "Containers and volumes removed" \
+                || log_warning "docker compose down -v failed — check manually"
+        else
+            ( cd "$dir" && docker compose down ) \
+                && log_success "Containers stopped and removed (data left on disk)" \
+                || log_warning "docker compose down failed — check manually"
+        fi
+    fi
+
+    # ── Caddy site block ────────────────────────────────────────────────────
+    local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
+    if [ -n "$container" ] && [ -f "$caddy_file" ] && grep -q "reverse_proxy ${container}:" "$caddy_file"; then
+        local bk="$caddy_file.backup.$(date +%Y%m%d-%H%M%S)"
+        cp "$caddy_file" "$bk"
+        _remove_caddy_site_block "$caddy_file" "$container" > "$caddy_file.tmp" \
+            && mv "$caddy_file.tmp" "$caddy_file"
+        log_success "Removed $name's Caddy site block (backup: $(basename "$bk"))"
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx caddy; then
+            docker exec caddy caddy fmt --overwrite /etc/caddy/Caddyfile 2>/dev/null || true
+            docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null \
+                || docker restart caddy &>/dev/null \
+                || log_warning "Reload/restart Caddy manually to apply this."
+        fi
+    fi
+
+    # ── UFW rules ───────────────────────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        local rule_nums
+        # [[:space:]]* after the opening bracket — ufw pads single-digit
+        # rule numbers with a leading space to align with double-digit
+        # ones ("[ 3]" vs "[10]"); without it, every single-digit rule
+        # silently fails to match and never gets deleted.
+        rule_nums="$(ufw status numbered 2>/dev/null | grep -i "# .*\b${name}\b" | grep -oE '^\[[[:space:]]*[0-9]+\]' | tr -d '[] ' | sort -rn)"
+        if [ -n "$rule_nums" ]; then
+            local n
+            for n in $rule_nums; do
+                ufw --force delete "$n" >/dev/null 2>&1
+            done
+            log_success "Removed UFW rule(s) tagged for $name"
+        fi
+    fi
+
+    # ── Directory itself ────────────────────────────────────────────────────
+    local DELETE_DIR=""
+    prompt_yn "  Also delete $dir itself (its README, configs, and any data left on disk)? (y/n):" "n" DELETE_DIR
+    if [[ "$DELETE_DIR" =~ ^[Yy]$ ]]; then
+        rm -rf "$dir"
+        log_success "Removed $dir"
+    else
+        log_info "Left $dir in place."
+    fi
+}
+
 # ── SSH client config (~/.ssh/config) Host aliases ────────────────────────────
 # Lets "ssh <alias>" connect directly to user@host without typing it out each
 # time — handy for VPN/NetBird peers with unmemorable IPs. Operates on the
