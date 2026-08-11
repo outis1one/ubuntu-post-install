@@ -259,7 +259,7 @@ services:
     volumes:
       - ./beszel_data:/beszel_data
       - ./beszel_socket:/beszel_socket
-${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
+${_CADDY_NET_BLOCK}
   beszel-agent:
     image: henrygd/beszel-agent:latest
     container_name: beszel-agent
@@ -275,6 +275,7 @@ ${_CADDY_NET_BLOCK}${_CADDY_NET_SECTION}
       - ./beszel_agent_data:/var/lib/beszel-agent
       - ./beszel_socket:/beszel_socket
       - /var/run/docker.sock:/var/run/docker.sock:ro
+${_CADDY_NET_SECTION}
 BESZEL_COMPOSE
 
     # APP_URL only matters for the hub's own generated links and origin
