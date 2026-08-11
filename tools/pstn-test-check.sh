@@ -20,11 +20,33 @@ set -uo pipefail
 PASS=0
 WARN=0
 FAIL=0
+WARN_MSGS=()
+FAIL_MSGS=()
 
 ok()   { printf '  [OK]   %s\n' "$1"; PASS=$((PASS + 1)); }
-warn() { printf '  [WARN] %s\n' "$1"; WARN=$((WARN + 1)); }
-fail() { printf '  [FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); }
+warn() { printf '  [WARN] %s\n' "$1"; WARN=$((WARN + 1)); WARN_MSGS+=("$1"); }
+fail() { printf '  [FAIL] %s\n' "$1"; FAIL=$((FAIL + 1)); FAIL_MSGS+=("$1"); }
 section() { printf '\n== %s ==\n' "$1"; }
+
+# One extension's softphone setup block — shared by the full run below and
+# the "print again, one at a time" prompt at the end, so the two can't drift.
+# Reads SIP_SERVER/TURN_SERVER/TURN_USERNAME/TURN_PASSWORD from the caller's
+# scope (set once, further down, before either call site runs).
+print_ext_info() {
+    local ext="$1" pass="$2" transport="$3" ice="$4" port proto
+    if [ "$transport" = "transport-tls" ]; then port=5061; proto="tls"; else port=5060; proto="udp"; fi
+    echo "  Extension $ext:"
+    echo "    SIP server:  $SIP_SERVER"
+    echo "    Username:    $ext"
+    echo "    Password:    $pass"
+    echo "    Port:        $port"
+    echo "    Transport:   $proto"
+    if [ "$ice" = "yes" ] && [ -n "${TURN_SERVER:-}" ]; then
+        echo "    TURN server: $TURN_SERVER"
+        echo "    TURN user:   $TURN_USERNAME"
+        echo "    TURN pass:   $TURN_PASSWORD"
+    fi
+}
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run with sudo — needs docker exec and (on some boxes) systemctl/journalctl." >&2
@@ -187,7 +209,14 @@ else
     elif ! docker exec "$COTURN_CONTAINER" which turnutils_uclient &>/dev/null; then
         warn "turnutils_uclient not found in $COTURN_CONTAINER — skipping live allocation test"
     else
-        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -t -T -u "$TURN_USERNAME" -w "$TURN_PASSWORD" 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
+        # Plain UDP only — no -t/-T (TCP/TLS) flags. coturn is started with
+        # --no-tls --no-dtls (services/coturn.sh), so requesting an
+        # encrypted/TCP transport here just fails the allocation outright
+        # against a server that never offered one, misreporting a config
+        # problem that doesn't exist. Confirmed live: this was the actual
+        # cause of a "Cannot complete Allocation" failure against an
+        # otherwise fully working coturn instance.
+        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
         if [ $? -eq 0 ]; then
             ok "Live TURN allocation succeeded with Asterisk's own configured credentials (user '$TURN_USERNAME')"
         else
@@ -255,22 +284,7 @@ else
     else
         while IFS='|' read -r ext pass transport ice; do
             [ -z "$ext" ] && continue
-            if [ "$transport" = "transport-tls" ]; then
-                port=5061; proto="tls"
-            else
-                port=5060; proto="udp"
-            fi
-            echo "  Extension $ext:"
-            echo "    SIP server:  $SIP_SERVER"
-            echo "    Username:    $ext"
-            echo "    Password:    $pass"
-            echo "    Port:        $port"
-            echo "    Transport:   $proto"
-            if [ "$ice" = "yes" ] && [ -n "$TURN_SERVER" ]; then
-                echo "    TURN server: $TURN_SERVER"
-                echo "    TURN user:   $TURN_USERNAME"
-                echo "    TURN pass:   $TURN_PASSWORD"
-            fi
+            print_ext_info "$ext" "$pass" "$transport" "$ice"
             echo ""
         done <<< "$DEVICE_INFO"
         ok "Printed setup info for $(wc -l <<< "$DEVICE_INFO") extension(s) — same values Sipnetic's"
@@ -362,10 +376,41 @@ fi
 # ── Summary ───────────────────────────────────────────────────────────────────
 section "Summary"
 echo "  $PASS passed, $WARN warnings, $FAIL failed."
+
+if [ "${#FAIL_MSGS[@]}" -gt 0 ] || [ "${#WARN_MSGS[@]}" -gt 0 ]; then
+    echo ""
+    echo "  Needs attention:"
+    for m in "${FAIL_MSGS[@]:-}"; do
+        [ -z "$m" ] && continue
+        echo "   [FAIL] $m"
+    done
+    for m in "${WARN_MSGS[@]:-}"; do
+        [ -z "$m" ] && continue
+        echo "   [WARN] $m"
+    done
+fi
+
 echo ""
 echo "  This covers everything that can be checked without placing a real call"
 echo "  or sending a real text, plus the provider-side values above that only a"
 echo "  human can confirm inside the portal itself. For the call/SMS test steps"
 echo "  and what each result means, see docs/pstn-sms-test-checklist.md."
+
+# ── Optional: reprint softphone setup one extension at a time ────────────────
+# The full setup block scrolled past earlier in a long run — offer to show
+# it again, one extension per screen, instead of scrolling back for it.
+if [ -n "${DEVICE_INFO:-}" ] && [ -t 0 ]; then
+    echo ""
+    REPRINT=""
+    read -r -p "  Show softphone setup again, one extension at a time? (y/n): " REPRINT
+    if [[ "$REPRINT" =~ ^[Yy]$ ]]; then
+        while IFS='|' read -r ext pass transport ice; do
+            [ -z "$ext" ] && continue
+            echo ""
+            print_ext_info "$ext" "$pass" "$transport" "$ice"
+            read -r -p "  Press Enter for the next extension (Ctrl+C to stop)..." _ignored
+        done <<< "$DEVICE_INFO"
+    fi
+fi
 
 [ "$FAIL" -eq 0 ]
