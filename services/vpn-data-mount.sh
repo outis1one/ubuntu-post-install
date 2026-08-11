@@ -372,6 +372,61 @@ _vdm_remove_mount() {
     log_success "Removed the existing mount for '$label' (fstab backup: $(basename "$bk"))"
 }
 
+# ── Every configured mount, for the removal menu below ─────────────────────
+# Prints "label|host:share|mount_point" one per line. Unlike
+# _vdm_find_existing_mount, not scoped to a particular host+share.
+_vdm_list_all_mounts() {
+    grep -E "^${_VDM_TAG_PREFIX} " /etc/fstab 2>/dev/null \
+        | sed -E "s/^${_VDM_TAG_PREFIX} ([^ ]+) — ([^ ]+) -> (.*)\$/\1|\2|\3/"
+}
+
+# ── Pick one or more configured mounts by number and remove them ──────────
+_vdm_remove_mount_interactive() {
+    local entries=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        entries+=("$line")
+    done < <(_vdm_list_all_mounts)
+
+    if [ "${#entries[@]}" -eq 0 ]; then
+        log_info "No vpn-data-mount mounts configured — nothing to remove."
+        return 0
+    fi
+
+    while true; do
+        echo ""
+        echo "  Configured mounts:"
+        local i label hostshare point
+        for i in "${!entries[@]}"; do
+            IFS='|' read -r label hostshare point <<< "${entries[$i]}"
+            printf "    %d) %-15s %-28s -> %s\n" "$((i + 1))" "$label" "$hostshare" "$point"
+        done
+        echo ""
+        local CHOICE=""
+        prompt_text "  Remove which one? (number, or blank to stop):" "" CHOICE
+        [ -z "$CHOICE" ] && break
+
+        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#entries[@]}" ]; then
+            log_warning "'$CHOICE' isn't one of the listed mounts."
+            continue
+        fi
+
+        IFS='|' read -r label hostshare point <<< "${entries[$((CHOICE - 1))]}"
+        local CONFIRM=""
+        prompt_yn "  Remove '$label' ($point)? This unmounts it, removes its credentials, and removes it from /etc/fstab (backed up first). (y/n):" "n" CONFIRM
+        if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+            _vdm_remove_mount "$label" "$point"
+            unset "entries[$((CHOICE - 1))]"
+            entries=("${entries[@]}")
+        fi
+
+        [ "${#entries[@]}" -eq 0 ] && break
+        local AGAIN=""
+        prompt_yn "  Remove another? (y/n):" "n" AGAIN
+        [[ "$AGAIN" =~ ^[Yy]$ ]] || break
+    done
+}
+
 # ── Prompt for a password twice, hidden, matching ──────────────────────────
 # Prints the password on success. No log_* calls — same reason as above;
 # uses plain stderr output instead so it's visible without corrupting a
@@ -771,6 +826,7 @@ install_vpn-data-mount() {
         echo "[DRY-RUN] Would let you pick one or more by number and mount them locally over CIFS"
         echo "[DRY-RUN] Would add each to /etc/fstab with a root-only credentials file (not guest)"
         echo "[DRY-RUN] Would offer a gocryptfs decrypt layer per share (opt-in, requires the home box already set up via tools/gocryptfs-setup-home.sh)"
+        echo "[DRY-RUN] Would offer to remove any existing mount (unmount, drop its credentials + fstab entry)"
         echo "[DRY-RUN] Repeatable — can be run again for additional home boxes"
         return 0
     fi
@@ -785,6 +841,10 @@ install_vpn-data-mount() {
     fi
 
     _vdm_list_existing
+
+    local REMOVE=""
+    prompt_yn "Remove any existing VPN data mounts? (y/n):" "n" REMOVE
+    [[ "$REMOVE" =~ ^[Yy]$ ]] && _vdm_remove_mount_interactive
 
     while true; do
         local ADD=""
