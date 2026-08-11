@@ -163,12 +163,90 @@ for log in pstn-trunk-calls.log sip-messages.log; do
     fi
 done
 
+# ── Provider portal checklist ─────────────────────────────────────────────────
+# Everything above is server-side and this script's own checks; the provider
+# account/portal side (authorized IPs, DID routing, the SMS forward URL) is
+# configured entirely outside this box and can't be queried from here. What
+# CAN be done is computing the exact values Anveo's portal fields need to
+# match, so you're checking against real numbers instead of hunting for them
+# across two docs while tabbed into the portal.
+section "Provider portal checklist — values to verify in Anveo (or your provider's portal)"
+
+PSTN_ENV="$EA_DIR/.pstn-trunk.env"
+TRUNK_DID="" PROVIDER_NAME=""
+if [ -f "$PSTN_ENV" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$PSTN_ENV"
+    set -u
+    TRUNK_DID="${TRUNK_DID:-}"
+    PROVIDER_NAME="${PROVIDER_NAME:-}"
+fi
+
+PUBLIC_IP="$(curl -4 -s --max-time 5 ifconfig.me 2>/dev/null || true)"
+
+if [ -n "$TRUNK_DID" ]; then
+    echo "  This box's DID:        $TRUNK_DID"
+else
+    echo "  This box's DID:        (not found — is pstn-trunk installed?)"
+fi
+if [ -n "$PUBLIC_IP" ]; then
+    echo "  This box's public IP:  $PUBLIC_IP"
+else
+    echo "  This box's public IP:  (couldn't reach ifconfig.me — check manually: curl -4 ifconfig.me)"
+fi
+echo ""
+
+if [[ "$PROVIDER_NAME" == *Anveo* ]]; then
+    echo "  Confirm in the Anveo portal (docs/anveo-direct-setup-guide.md has the full walkthrough):"
+    echo ""
+    echo "   1. Outbound Trunks -> your Call Termination Trunk -> Authorized IP Addresses"
+    echo "      includes: $PUBLIC_IP"
+    echo "   2. Account Options -> SIP Trunk (inbound) -> Primary SIP URI is exactly:"
+    echo "        \$[E164]\$@${PUBLIC_IP}:5060"
+    echo "   3. Phone Numbers -> $TRUNK_DID -> Call Options -> Destination SIP Trunk"
+    echo "      is set to that SIP Trunk object (or Account Options -> Service Defaults ->"
+    echo "      Default Destination Trunk is set, which covers every DID automatically)"
+    echo "   4. Account balance is funded and NOT at \$0 (calls silently block at \$0 balance)"
+    echo "   5. Phone Numbers -> $TRUNK_DID -> SMS tab -> \"Forward to URL\" is ticked and"
+    echo "      set to exactly the string below (see 'SMS webhook' just below if it's blank)"
+else
+    echo "  Provider not detected as Anveo Direct (PROVIDER_NAME='${PROVIDER_NAME:-unset}') —"
+    echo "  generic checklist, check your provider's own portal for the equivalents:"
+    echo ""
+    echo "   1. This box's public IP ($PUBLIC_IP) is on the trunk's authorized/allowed IP list"
+    echo "   2. The DID ($TRUNK_DID) routes inbound SIP to ${PUBLIC_IP}:5060"
+    echo "   3. Account balance isn't at \$0 or suspended"
+    echo "   4. SMS forwarding (if used) points at the URL below"
+fi
+
+echo ""
+echo "  SMS webhook (from /opt/sms-inbound/settings.env, if installed):"
+SMS_SETTINGS="/opt/sms-inbound/settings.env"
+if [ -f "$SMS_SETTINGS" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$SMS_SETTINGS"
+    set -u
+    if [ -n "${SMS_FORWARD_URL:-}" ]; then
+        echo "    ${SMS_FORWARD_URL}"
+        echo "    (paste exactly as shown — press SAVE not RETURN on Anveo's SMS tab, then"
+        echo "    reopen it to confirm the whole string came back, it's long)"
+    else
+        echo "    sms-inbound is installed but no SMS_FORWARD_URL found in $SMS_SETTINGS"
+        echo "    — re-run: sudo ./setup.sh sms-inbound"
+    fi
+else
+    echo "    sms-inbound not installed — nothing to configure on the SMS tab yet."
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 section "Summary"
 echo "  $PASS passed, $WARN warnings, $FAIL failed."
 echo ""
 echo "  This covers everything that can be checked without placing a real call"
-echo "  or sending a real text. For those, and for what each result above means,"
-echo "  see docs/pstn-sms-test-checklist.md."
+echo "  or sending a real text, plus the provider-side values above that only a"
+echo "  human can confirm inside the portal itself. For the call/SMS test steps"
+echo "  and what each result means, see docs/pstn-sms-test-checklist.md."
 
 [ "$FAIL" -eq 0 ]
