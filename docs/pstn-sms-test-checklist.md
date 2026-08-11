@@ -12,6 +12,24 @@ Asterisk or PSTN trunk reinstall, or just periodically to catch drift (a
 provider-side change, an expired international allow-list, a forgotten
 kill-switch trip).
 
+## How do I know a test call/text actually used THIS box?
+
+Short answer: there's no ambiguity to resolve — a DID can only point at one
+place. In the Anveo (or any IP-auth) portal, the DID's inbound routing
+targets one specific IP:port (`$[E164]$@<this box's public IP>:5060`), and
+the Outbound Trunk's Authorized IP Addresses list is what lets *this* box's
+outbound calls out. If you have multiple boxes, only the one whose IP is
+actually configured in the portal can send or receive on that DID at all —
+there's nothing to "make sure" beyond confirming the portal points at this
+box's current IP (§ Provider portal checklist output from
+`tools/pstn-test-check.sh` prints it directly).
+
+The practical way to *watch* it happen on this box specifically, live,
+while you place the test: run `docker exec -it $CONTAINER asterisk -rvvv`
+or `journalctl -u sms-inbound -f` in one terminal, then place the call/text
+from another phone in real time. If it shows up here as it happens, this
+box handled it — no separate confirmation needed.
+
 ## 0. Before you start
 
 `$CONTAINER`/`$EA_DIR` only live in the shell session where you set them —
@@ -34,10 +52,13 @@ If `$CONTAINER` prints empty, the container isn't running at all — check
 Re-run this block at the start of every new terminal session, not just
 once — it's cheap and removes the whole class of failure above.
 
-Check the three services this checklist covers are actually installed:
+Check the three services this checklist covers are actually installed —
+run this from the repo directory itself (`~/ubuntu-post-install`, not
+`~/docker/asterisk` or wherever you happen to be — `./setup.sh` is a
+relative path and fails with "command not found" from anywhere else):
 
 ```bash
-sudo ./setup.sh --list | grep -E "asterisk|pstn-trunk|sms-inbound|security-dashboard"
+cd ~/ubuntu-post-install && sudo ./setup.sh --list | grep -E "asterisk|pstn-trunk|sms-inbound|security-dashboard"
 ```
 
 Read your box's own current settings before testing — this file has your
