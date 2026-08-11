@@ -434,6 +434,49 @@ ensure_docker_dir_ownership() {
     done
 }
 
+# Waits briefly after a container starts, then reports whether it's
+# actually running or stuck restarting/crash-looping — printing recent
+# logs on failure instead of leaving a silent "started" message that
+# doesn't reflect whether it's actually working. Confirmed live:
+# several services' own "Started"-looking `docker compose up -d`
+# success message meant nothing — the container was already
+# crash-looping by the time that message printed, with no indication
+# anything was wrong until someone separately ran `docker ps -a` much
+# later and had to go dig through logs by hand.
+#
+# Usage: check_container_health CONTAINER_NAME [WAIT_SECONDS]
+# Returns 0 if the container is up and hasn't restarted, 1 otherwise.
+check_container_health() {
+    local container="$1" wait_seconds="${2:-8}"
+    [ "$DRY_RUN" = true ] && return 0
+
+    sleep "$wait_seconds"
+
+    local status
+    status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null)"
+    if [ -z "$status" ]; then
+        log_warning "Container '$container' doesn't exist — something failed before it could even be created."
+        return 1
+    fi
+
+    local restart_count
+    restart_count="$(docker inspect -f '{{.RestartCount}}' "$container" 2>/dev/null || echo 0)"
+
+    if [ "$status" = "running" ] && [ "$restart_count" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$status" = "running" ]; then
+        log_warning "Container '$container' is running now but already restarted $restart_count time(s) — check the logs below."
+    else
+        log_warning "Container '$container' is not running (status: $status) — recent logs:"
+    fi
+    echo ""
+    docker logs "$container" --tail 20 2>&1 | sed 's/^/    /'
+    echo ""
+    return 1
+}
+
 # Generate a secure alphanumeric password (no special characters)
 generate_password() {
     local length="${1:-32}"

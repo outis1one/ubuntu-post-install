@@ -742,9 +742,19 @@ MIGRATE_BODY
     local START=""
     prompt_yn "Start Mattermost now? (y/n):" "y" START
     if [ "$START" = "y" ] || [ "$START" = "Y" ]; then
-        docker compose up -d \
-            && log_success "Mattermost started" \
-            || log_warning "Start failed — check: docker compose logs"
+        if docker compose up -d; then
+            log_success "Mattermost started"
+            # Reference implementation of the shared health check — a
+            # "Started" message alone doesn't mean the app is actually up;
+            # it can still crash-loop (bad DB password, missing required
+            # env var, etc.) with no visible sign until someone separately
+            # runs `docker ps -a` much later. Mattermost's own first DB
+            # connection attempt can take a few seconds, hence the longer
+            # wait than check_container_health's 8s default.
+            declare -F check_container_health >/dev/null 2>&1 && check_container_health "$MM_CONTAINER" 12
+        else
+            log_warning "Start failed — check: docker compose logs"
+        fi
     fi
 
     echo ""
