@@ -12,6 +12,10 @@
 # Flags:
 #   --dry-run      preview actions without making changes
 #   --unattended   use defaults, no prompts (pair with explicit service names)
+#   --remove       remove instead of install (pair with a service name, e.g.
+#                  ./setup.sh filebrowser --remove) — stops/removes its
+#                  containers, its Caddy site block (if any), any UFW rule
+#                  tagged for it, and optionally its ~/docker/<name> directory
 #
 # Every service lives in services/<name>.sh, registers itself with
 # register_service, and defines install_<name>. Adding a service = adding one
@@ -34,7 +38,7 @@ declare -A SERVICE_PRIORITY=( [caddy]=1 [crowdsec]=2 [authelia]=3 )
 declare -A SERVICE_ALIAS=( [asterisk-digital-ocean]=asterisk )
 
 # ── Parse flags / collect service names ──────────────────────────────────────
-DRY_RUN=false; UNATTENDED=false; DO_LIST=false; DO_STATUS=false
+DRY_RUN=false; UNATTENDED=false; DO_LIST=false; DO_STATUS=false; DO_REMOVE=false
 REQUESTED=()
 for arg in "$@"; do
     case "$arg" in
@@ -42,6 +46,7 @@ for arg in "$@"; do
         --unattended) UNATTENDED=true ;;
         --list|-l)    DO_LIST=true ;;
         --status)     DO_STATUS=true ;;
+        --remove)     DO_REMOVE=true ;;
         --version|-V) cat "$HERE/VERSION" 2>/dev/null || echo "unknown"; exit 0 ;;
         -h|--help)    sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "Unknown flag: $arg" >&2; exit 1 ;;
@@ -265,6 +270,29 @@ if [ "${REQUESTED[*]:-}" = "configure" ]; then
     require_root
     run_site_configure
     exit 0
+fi
+
+# ── --remove: ./setup.sh filebrowser --remove ────────────────────────────────
+if [ "$DO_REMOVE" = true ]; then
+    require_root
+    if [ "${#REQUESTED[@]}" -eq 0 ]; then
+        log_error "--remove needs a service name, e.g. ./setup.sh filebrowser --remove"
+        exit 1
+    fi
+    rc=0
+    for name in "${REQUESTED[@]}"; do
+        if [ -n "${SERVICE_ALIAS[$name]:-}" ]; then
+            log_info "'$name' is now part of '${SERVICE_ALIAS[$name]}' — removing that instead."
+            name="${SERVICE_ALIAS[$name]}"
+        fi
+        if [ -z "${SERVICE_GROUP[$name]:-}" ]; then
+            log_error "Unknown service: $name (try --list)"
+            rc=1
+            continue
+        fi
+        remove_service "$name" || rc=1
+    done
+    exit "$rc"
 fi
 
 # ── Direct install: ./setup.sh caddy homeassistant ──────────────────────────
