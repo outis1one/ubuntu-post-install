@@ -23,7 +23,7 @@ install_base() {
         echo "[DRY-RUN] Would offer CrowdSec intrusion prevention install (full repo only)"
         echo "[DRY-RUN] Would offer to add SSH Host aliases to ~/.ssh/config"
         echo "[DRY-RUN] Would add setup.sh tab completion to ~/.bashrc (if not already there)"
-        echo "[DRY-RUN] Would offer daily pruning of old *.backup.* config files (systemd timer)"
+        echo "[DRY-RUN] Would set up daily pruning of old *.backup.* config files (systemd timer, if not already there)"
         return 0
     fi
 
@@ -120,20 +120,18 @@ _base_setup_tab_completion() {
 # Every service in this repo backs up a live config before overwriting it
 # (Caddyfile, /etc/fstab, ...) but none of them ever clean those up
 # afterward — see tools/prune-old-backups.sh's own header for the full
-# reasoning. Offers a daily systemd timer that prunes anything older than
+# reasoning. Sets up a daily systemd timer that prunes anything older than
 # 30 days, always keeping at least the single newest backup per file
-# regardless of age.
+# regardless of age. No prompt — same reasoning as _base_setup_tab_completion
+# right above: idempotent, and the safety net (only ever touches disposable
+# *.backup.* files, never the newest one for anything) makes this low-stakes
+# enough not to ask about, the same way that one doesn't.
 _base_setup_backup_pruning() {
     command -v systemctl >/dev/null 2>&1 || return 0
     systemctl list-unit-files prune-old-backups.timer --no-legend 2>/dev/null | grep -q . && return 0
 
     local prune_script="$HERE/tools/prune-old-backups.sh"
     [ -f "$prune_script" ] || return 0
-
-    echo ""
-    local ENABLE_PRUNE=""
-    prompt_yn "Automatically prune old config backups (Caddyfile.backup.*, fstab.backup.*, etc — keeps 30 days, always keeps at least the newest one)? (y/n):" "y" ENABLE_PRUNE
-    [[ "$ENABLE_PRUNE" =~ ^[Yy]$ ]] || return 0
 
     cat > /etc/systemd/system/prune-old-backups.service << UNIT
 [Unit]

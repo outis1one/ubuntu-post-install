@@ -322,10 +322,13 @@ docker compose down         # stop
 Every service in this repo backs up a live config before overwriting it —
 `Caddyfile.backup.<timestamp>`, `/etc/fstab.backup.<timestamp>`, and so on —
 but nothing cleans those up afterward, so they build up on any box
-reconfigured regularly. `base` offers a daily systemd timer
-(`prune-old-backups`) that removes anything older than 30 days, always
-keeping at least the single newest backup per file regardless of age — a
-box left alone for months never ends up with zero backups for something.
+reconfigured regularly. `base` sets up a daily systemd timer
+(`prune-old-backups`), automatically and without asking (the same way it
+sets up [tab completion](#tab-completion) — low-stakes enough not to need
+a prompt, and idempotent either way), that removes anything older than 30
+days, always keeping at least the single newest backup per file regardless
+of age — a box left alone for months never ends up with zero backups for
+something.
 
 ```bash
 sudo bash tools/prune-old-backups.sh [KEEP_DAYS]   # run by hand, default 30
