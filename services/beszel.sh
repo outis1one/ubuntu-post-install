@@ -149,11 +149,11 @@ _beszel_extract_field() {
 }
 
 _beszel_configure_agent() {
-    local dir="$1" web_port="$2"
+    local dir="$1" login_url="$2"
 
     echo ""
     echo "  To finish connecting the agent, log into the hub first:"
-    echo "    http://localhost:${web_port}  (or its Caddy domain, once configured)"
+    echo "    ${login_url}"
     echo ""
     echo "  Create the admin account, then go to Settings → Tokens & Fingerprints:"
     echo "    - Enable the universal token"
@@ -234,9 +234,10 @@ install_beszel() {
                     && log_success "Beszel images refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
                 if ! grep -q '^AGENT_KEY=' "$DIR/.env" 2>/dev/null; then
-                    local FINISH_AGENT=""
+                    local FINISH_AGENT="" _WP
+                    _WP="$(grep '^BESZEL_WEB_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
                     prompt_yn "  The agent was never connected — set it up now? (y/n):" "y" FINISH_AGENT
-                    [[ "$FINISH_AGENT" =~ ^[Yy]$ ]] && _beszel_configure_agent "$DIR" "$(grep '^BESZEL_WEB_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+                    [[ "$FINISH_AGENT" =~ ^[Yy]$ ]] && _beszel_configure_agent "$DIR" "http://localhost:${_WP}  (or its Caddy domain, once configured)"
                 fi
                 return 0
                 ;;
@@ -347,7 +348,7 @@ BESZEL_ENV
         fi
     fi
 
-    _beszel_configure_agent "$DIR" "$WEB_PORT"
+    _beszel_configure_agent "$DIR" "http://localhost:${WEB_PORT}  (or its Caddy domain, once configured)"
 
     write_readme "$DIR" << 'BESZEL_README'
 # Beszel — lightweight server + Docker monitoring
@@ -378,9 +379,13 @@ available after logging in:
 
 ## Monitoring additional boxes
 
-Add another agent from the hub's UI ("Add System") — that generates the
-connection details for a *remote* box's agent. This installer only sets
-up the agent for the box it's run on.
+Add another agent from the hub's UI ("Add System") to generate its
+connection details, then on the OTHER box (a homelab machine, not this
+VPS) run `sudo ./setup.sh beszel-agent` — a separate, agent-only install
+(no hub, no web UI) built for exactly this. It connects OUTBOUND to this
+hub over HTTPS, so no VPN, port-forwarding, or FQDN is needed for that box
+— only this hub needs to be reachable, which it already is. See
+`services/beszel.sh`'s `install_beszel-agent()`.
 
 ## Fronting this with Caddy
 
@@ -405,6 +410,144 @@ BESZEL_README
 
     echo ""
     log_success "Beszel configured at $DIR"
+}
+
+# ── Agent-only install, for a box that ISN'T the hub ────────────────────────
+# A second register_service in this same file — precedented by base.sh's
+# base+glow — rather than a separate services/beszel-agent.sh, since this
+# shares _beszel_extract_field/_beszel_configure_agent with install_beszel()
+# above and would otherwise duplicate that paste/parse logic across two
+# files. Run this on a homelab/remote box (a plain VPN peer isn't needed —
+# see the README this writes for why) pointed at a hub running on THIS repo's
+# main box (install_beszel() above, or any other Beszel hub).
+register_service beszel-agent utilities "Beszel monitoring AGENT only, for a remote/homelab box reporting to a hub running elsewhere"
+
+install_beszel-agent() {
+    require_docker || return 1
+    log_info "Installing the Beszel agent (reports to a hub running on another machine)..."
+
+    local DIR="$DOCKER_DIR/beszel-agent"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would create $DIR"
+        echo "[DRY-RUN] Would deploy henrygd/beszel-agent only (no hub, no web UI on this box)"
+        echo "[DRY-RUN]   network_mode: host, /var/run/docker.sock mounted read-only"
+        echo "[DRY-RUN] Would prompt for the hub's public URL, then its key + universal token"
+        echo "[DRY-RUN]   (same paste flow as the hub-side installer)"
+        echo "[DRY-RUN] No inbound port opened — the agent connects OUTBOUND to the hub, so no"
+        echo "[DRY-RUN]   VPN, port-forwarding, or FQDN is needed for THIS box"
+        return 0
+    fi
+
+    if [[ -f "$DIR/docker-compose.yml" && -f "$DIR/.env" ]]; then
+        local MODE=""
+        prompt_reinstall_mode MODE
+        case "$MODE" in
+            update)
+                log_info "Refreshing the image only — existing hub URL/key/token are left as-is."
+                ( cd "$DIR" && docker compose pull && docker compose up -d ) \
+                    && log_success "Beszel agent image refreshed" \
+                    || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
+                if ! grep -q '^AGENT_KEY=' "$DIR/.env" 2>/dev/null; then
+                    local FINISH_AGENT="" _HUB_URL
+                    _HUB_URL="$(grep '^HUB_URL=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+                    prompt_yn "  The agent was never connected — set it up now? (y/n):" "y" FINISH_AGENT
+                    [[ "$FINISH_AGENT" =~ ^[Yy]$ ]] && _beszel_configure_agent "$DIR" "$_HUB_URL"
+                fi
+                return 0
+                ;;
+            cancel)
+                log_info "Leaving the existing install as-is."
+                return 0
+                ;;
+            fresh) ;;  # fall through to the full install flow below
+        esac
+    fi
+
+    mkdir -p "$DIR/beszel_agent_data"
+    ensure_docker_dir_ownership "$DIR"
+    cd "$DIR" || return 1
+
+    echo ""
+    echo "  This box's agent connects OUTBOUND to a Beszel hub running elsewhere"
+    echo "  (e.g. your VPS) — no VPN, no router port-forwarding, and no FQDN needed"
+    echo "  for THIS box. Only the hub itself needs to already be reachable."
+    echo ""
+    local HUB_URL=""
+    while [ -z "$HUB_URL" ]; do
+        prompt_text "  Hub URL (e.g. https://beszel.yourdomain.com, or http://vps-ip:port):" "" HUB_URL
+        [ -z "$HUB_URL" ] && log_warning "  A hub URL is required."
+    done
+
+    # No network_mode: host caveat here beyond what install_beszel() already
+    # documents — same reasoning (accurate host network-interface stats),
+    # and there's no caddy_net to conditionally join since this box never
+    # runs a web UI of its own.
+    cat > docker-compose.yml << AGENT_COMPOSE
+name: beszel-agent
+
+services:
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: beszel-agent
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    environment:
+      - HUB_URL=\${HUB_URL}
+      - TOKEN=\${AGENT_TOKEN:-}
+      - KEY=\${AGENT_KEY:-}
+    volumes:
+      - ./beszel_agent_data:/var/lib/beszel-agent
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+AGENT_COMPOSE
+
+    cat > .env << AGENT_ENV
+TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
+HUB_URL=$HUB_URL
+AGENT_ENV
+    chmod 600 .env
+
+    _beszel_configure_agent "$DIR" "$HUB_URL"
+
+    write_readme "$DIR" << AGENT_README_MD
+# Beszel agent (remote/homelab box)
+
+Reports this box's host resources and Docker container stats to a Beszel
+HUB running elsewhere — no hub, no web UI, nothing web-facing on this box
+at all.
+
+## Connecting (if you skipped it during install)
+
+Same flow as the hub side, just on a different machine: log into the hub at
+\`$HUB_URL\`, go to Settings → Tokens & Fingerprints, enable the universal
+token, and paste whatever it gives you (the "copy for docker compose"
+shortcut works fine) by re-running:
+
+\`\`\`bash
+sudo ./setup.sh beszel-agent
+\`\`\`
+
+## Why no VPN or port-forwarding
+
+This agent connects OUTBOUND to the hub over HTTPS/WebSocket using the key
+and token above — nothing on this box ever needs to be reached FROM the
+hub, so there's no inbound port to open, no router port-forward, no VPN
+tunnel, and no FQDN needed for this box itself. Only the hub needs to
+already be reachable at the URL you gave it.
+
+## Manage
+
+\`\`\`bash
+docker compose up -d
+docker compose logs -f
+docker compose pull && docker compose up -d
+docker compose down
+\`\`\`
+AGENT_README_MD
+
+    echo ""
+    log_success "Beszel agent configured at $DIR — connecting to $HUB_URL"
 }
 
 [[ "${_RUN_STANDALONE:-0}" == 1 ]] && install_beszel
