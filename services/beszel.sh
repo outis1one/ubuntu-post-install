@@ -219,6 +219,7 @@ install_beszel() {
         echo "[DRY-RUN] Would deploy henrygd/beszel (hub) and henrygd/beszel-agent (agent, network_mode: host)"
         echo "[DRY-RUN] Port 8090 published for the hub (auto-scanned for a free host port)"
         echo "[DRY-RUN] Agent connects to the hub over a shared unix socket, not a TCP port"
+        echo "[DRY-RUN] Would mount host systemd/dbus sockets + sensor paths read-only (Services/Temp columns)"
         echo "[DRY-RUN] Would pause for you to log into the hub and provide its key + universal token to finish the agent"
         return 0
     fi
@@ -283,6 +284,17 @@ networks:
     # exclusive with a `networks:` block in Compose, so it never joins
     # caddy_net regardless of Caddy mode; it doesn't need to, since it talks
     # to the hub over the shared beszel_socket volume, not a published port.
+    #
+    # The systemd/dbus/sensor mounts below aren't optional extras — without
+    # them the agent silently reports empty Services and Temp columns for
+    # this box, with no error anywhere pointing at why. A container is
+    # isolated from the host's systemd/dbus and most of /sys by default;
+    # docker.sock alone (already needed for the Docker-container-stats
+    # feature) doesn't grant any of that. Confirmed live: a native
+    # (non-Docker) agent install gets both for free just by virtue of
+    # running as a normal host process, which is what first surfaced this
+    # gap — a Docker-deployed agent sitting right next to it showed nothing
+    # in either column until these were added.
     cat > docker-compose.yml << BESZEL_COMPOSE
 name: beszel
 
@@ -314,6 +326,10 @@ ${_CADDY_NET_BLOCK}
       - ./beszel_agent_data:/var/lib/beszel-agent
       - ./beszel_socket:/beszel_socket
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/systemd/private:/var/run/systemd/private:ro
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro
+      - /sys/class/hwmon:/sys/class/hwmon:ro
+      - /sys/class/thermal:/sys/class/thermal:ro
 ${_CADDY_NET_SECTION}
 BESZEL_COMPOSE
 
@@ -358,6 +374,11 @@ this box. The agent reads `/var/run/docker.sock` (mounted read-only) to
 report every currently-running container automatically — nothing to
 configure per-service; install or remove a container on this box and the
 agent's next poll just reflects it.
+
+Also mounts the host's systemd/dbus sockets and sensor paths (read-only) so
+the hub's **Services** (systemd units) and **Temp** (hardware sensors)
+columns work for this box — without them a Docker-deployed agent silently
+shows both empty, no error anywhere pointing at why.
 
 ## First login
 
@@ -432,6 +453,7 @@ install_beszel-agent() {
         echo "[DRY-RUN] Would create $DIR"
         echo "[DRY-RUN] Would deploy henrygd/beszel-agent only (no hub, no web UI on this box)"
         echo "[DRY-RUN]   network_mode: host, /var/run/docker.sock mounted read-only"
+        echo "[DRY-RUN]   plus host systemd/dbus sockets + sensor paths read-only (Services/Temp columns)"
         echo "[DRY-RUN] Would prompt for the hub's public URL, then its key + universal token"
         echo "[DRY-RUN]   (same paste flow as the hub-side installer)"
         echo "[DRY-RUN] No inbound port opened — the agent connects OUTBOUND to the hub, so no"
@@ -482,7 +504,8 @@ install_beszel-agent() {
     # No network_mode: host caveat here beyond what install_beszel() already
     # documents — same reasoning (accurate host network-interface stats),
     # and there's no caddy_net to conditionally join since this box never
-    # runs a web UI of its own.
+    # runs a web UI of its own. See that function's own comment for why the
+    # systemd/dbus/sensor mounts below matter (Services/Temp columns).
     cat > docker-compose.yml << AGENT_COMPOSE
 name: beszel-agent
 
@@ -500,6 +523,10 @@ services:
     volumes:
       - ./beszel_agent_data:/var/lib/beszel-agent
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/systemd/private:/var/run/systemd/private:ro
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket:ro
+      - /sys/class/hwmon:/sys/class/hwmon:ro
+      - /sys/class/thermal:/sys/class/thermal:ro
 AGENT_COMPOSE
 
     cat > .env << AGENT_ENV
@@ -516,6 +543,11 @@ AGENT_ENV
 Reports this box's host resources and Docker container stats to a Beszel
 HUB running elsewhere — no hub, no web UI, nothing web-facing on this box
 at all.
+
+Also mounts the host's systemd/dbus sockets and sensor paths (read-only) so
+the hub's **Services** (systemd units) and **Temp** (hardware sensors)
+columns work for this box too — without them a Docker-deployed agent
+silently shows both empty, no error anywhere pointing at why.
 
 ## Connecting (if you skipped it during install)
 
