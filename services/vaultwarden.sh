@@ -214,6 +214,29 @@ fi
 
 register_service vaultwarden utilities "Bitwarden-compatible password manager (Vaultwarden)" 80
 
+# Vaultwarden refuses to start at all — crash-loops — if exactly one of
+# SMTP_HOST/SMTP_FROM is set in .env ("Both SMTP_HOST and SMTP_FROM need to
+# be set for email support without USE_SENDMAIL"). The fresh-install prompt
+# flow below never writes that half-state, but "update" mode deliberately
+# never touches .env (same non-destructive-update rule as everywhere else
+# in this repo), so a box whose .env was written before that prompt-side
+# fix existed — or hand-edited since — stays stuck crash-looping forever,
+# on every future update too, since nothing ever re-checks it. Confirmed
+# live. Called right before every `docker compose up` this file does, not
+# just at install time, so it self-heals regardless of how the box got into
+# this state.
+_vaultwarden_fix_smtp_halfstate() {
+    local env_file="$1"
+    [ -f "$env_file" ] || return 0
+    local host from
+    host="$(grep '^SMTP_HOST=' "$env_file" 2>/dev/null | cut -d= -f2-)"
+    from="$(grep '^SMTP_FROM=' "$env_file" 2>/dev/null | cut -d= -f2-)"
+    if { [ -n "$host" ] && [ -z "$from" ]; } || { [ -z "$host" ] && [ -n "$from" ]; }; then
+        log_warning "SMTP_HOST/SMTP_FROM in $env_file are half-set (Vaultwarden requires both or neither) — disabling SMTP so the container can actually start. Edit $env_file (or run a fresh reinstall) to set up email properly."
+        sed -i -E 's/^SMTP_HOST=.*/SMTP_HOST=/; s/^SMTP_FROM=.*/SMTP_FROM=/; s/^SMTP_PORT=.*/SMTP_PORT=/; s/^SMTP_SECURITY=.*/SMTP_SECURITY=/; s/^SMTP_USERNAME=.*/SMTP_USERNAME=/; s/^SMTP_PASSWORD=.*/SMTP_PASSWORD=/' "$env_file"
+    fi
+}
+
 install_vaultwarden() {
     require_docker || return 1
     log_info "Installing Vaultwarden..."
@@ -275,6 +298,7 @@ install_vaultwarden() {
                 case "$MODE" in
                     update)
                         log_info "Refreshing the Vaultwarden image only — existing config, port, and Caddy setup are left as-is."
+                        _vaultwarden_fix_smtp_halfstate "$VW_DIR/.env"
                         ( cd "$VW_DIR" && docker compose pull && docker compose up -d ) \
                             && log_success "Vaultwarden image refreshed" \
                             || log_warning "Refresh failed — check: docker compose -f $VW_DIR/docker-compose.yml logs"
@@ -463,6 +487,7 @@ MD
     local START_VW=""
     prompt_yn "Start Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_VW
     if [ "$START_VW" = "y" ] || [ "$START_VW" = "Y" ]; then
+        _vaultwarden_fix_smtp_halfstate "$VW_DIR/.env"
         docker compose up -d \
             && log_success "Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
             || log_warning "Failed to start — check: docker compose logs"
