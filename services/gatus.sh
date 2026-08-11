@@ -262,14 +262,34 @@ EXISTING_SYNCED="$(yq e '.endpoints[] | select(.group == "caddy-sync") | .name' 
 ADDED=0
 REMOVED=0
 
+# [CONNECTED] == true catches an actual outage (refused/timed-out
+# connection, DNS failure, TLS failure — [STATUS] reads 0 in all of those,
+# which is < 400 too, so that condition ALONE would have silently reported
+# a fully unreachable site as "up"). [STATUS] < 500 accepts anything the
+# server actually answered with, including 401/403/redirects from an
+# Authelia-protected site — Gatus's own probe is never logged in, so an
+# Authelia-gated site correctly returns 401 to it every time, which is the
+# site working exactly as designed, not an outage. Only Caddy's own
+# 502/503/504 (backend unreachable) or a connection failure should ever
+# read as down here. Confirmed live: with the old "[STATUS] < 400" alone,
+# every Authelia-protected site the user actually logs into showed red
+# permanently, and a would-be-real outage (STATUS=0) would have shown green.
+CONDITIONS='["[CONNECTED] == true", "[STATUS] < 500"]'
+
 while IFS= read -r domain; do
     [ -z "$domain" ] && continue
     # Domains only — a defensive filter, not strictly needed since these
     # come from our own Caddyfile, but cheap insurance against ever
     # building a yq expression out of anything unexpected.
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || continue
-    if ! grep -qxF "$domain" <<< "$EXISTING_SYNCED"; then
-        yq e -i ".endpoints += [{\"name\": \"${domain}\", \"group\": \"caddy-sync\", \"url\": \"https://${domain}\", \"interval\": \"5m\", \"conditions\": [\"[STATUS] < 400\"]}]" "$GATUS_CONFIG" \
+    if grep -qxF "$domain" <<< "$EXISTING_SYNCED"; then
+        # Already synced — refresh its conditions too, not just add-if-
+        # missing, so a template fix like this one reaches every
+        # already-added endpoint on the very next sync instead of leaving
+        # them stuck on whatever conditions they were first created with.
+        yq e -i "(.endpoints[] | select(.group == \"caddy-sync\" and .name == \"${domain}\") | .conditions) = ${CONDITIONS}" "$GATUS_CONFIG"
+    else
+        yq e -i ".endpoints += [{\"name\": \"${domain}\", \"group\": \"caddy-sync\", \"url\": \"https://${domain}\", \"interval\": \"5m\", \"conditions\": ${CONDITIONS}}]" "$GATUS_CONFIG" \
             && ADDED=$((ADDED + 1))
     fi
 done <<< "$CURRENT_DOMAINS"
