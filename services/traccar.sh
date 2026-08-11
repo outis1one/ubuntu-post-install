@@ -231,7 +231,8 @@ install_traccar() {
         echo "  - Point Traccar at it via env vars (CONFIG_USE_ENVIRONMENT_VARIABLES) — no secrets in a config file"
         echo "  - Deploy an autoheal container that restarts Traccar if its healthcheck fails"
         echo "  - Expose port 8082 (web) and 5000-5150 (device protocols; 5038/5060/5061 skipped — Asterisk keeps"
-        echo "    priority on those); an additional instance's device-protocol range shifts by 1000 instead"
+        echo "    priority on those); shifts by 1000 instead, whether for an additional instance or because"
+        echo "    something else already has a port in that range"
         echo "  - No default login — register the first account at the web UI, it becomes admin"
         echo "  - Offer optional ntfy push notifications (self-hosted anywhere, or ntfy.sh)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
@@ -309,6 +310,36 @@ install_traccar() {
     # PROTO_MIN/PROTO_MAX device-protocol range above is a different,
     # directory-count-based mechanism (not an ss scan) and is unaffected.
     find_free_port WEB_PORT "$WEB_PORT"
+
+    # Live-check the whole device-protocol range too — the directory-count
+    # offset above only avoids colliding with an *earlier Traccar instance*,
+    # not an unrelated single-port service. Confirmed live: this range sat
+    # unclaimed at the OS level while this Traccar instance's own container
+    # had never actually started (still `docker compose up`'d for the first
+    # time), so a completely unrelated service's own find_free_port scan
+    # found 5007 "free" (nothing was listening there yet) and took it —
+    # invisible to any check until Traccar itself actually tried to bind
+    # its declared range. Shift by 1000 (reusing the same offset step the
+    # multi-instance path uses) until the whole range is genuinely clear.
+    _traccar_range_conflict() {
+        local min="$1" max="$2" p
+        for ((p = min; p <= max; p++)); do
+            # The base 5000-5150 range's own carve-outs for Asterisk are
+            # expected occupants, not a conflict — only relevant at the
+            # unshifted range; a shifted range never overlaps them anyway.
+            if [ "$min" -eq 5000 ] && { [ "$p" -eq 5038 ] || [ "$p" -eq 5060 ] || [ "$p" -eq 5061 ]; }; then
+                continue
+            fi
+            port_in_use "$p" tcp && return 0
+            port_in_use "$p" udp && return 0
+        done
+        return 1
+    }
+    while _traccar_range_conflict "$PROTO_MIN" "$PROTO_MAX"; do
+        log_warning "Device-protocol range $PROTO_MIN-$PROTO_MAX collides with something already running — shifting to $((PROTO_MIN + 1000))-$((PROTO_MAX + 1000))."
+        PROTO_MIN=$((PROTO_MIN + 1000))
+        PROTO_MAX=$((PROTO_MAX + 1000))
+    done
 
     mkdir -p "$TRACCAR_DIR"
     # Non-recursive on purpose — a rerun already has a `db/` full of Postgres's
@@ -406,13 +437,16 @@ networks:
 "
     fi
 
-    # First instance keeps the exact existing Asterisk-exclusion port block
-    # (5000-5150 with 5038/5060/5061 carved out). An additional instance's
-    # range is shifted by 1000 per instance (computed above), which never
-    # lands on Asterisk's fixed ports, so it just publishes the plain range
-    # with no exclusions needed.
+    # Keyed on whether the range is still the unshifted default (5000), not
+    # on INSTANCE_SUFFIX — a first instance can also end up shifted now, if
+    # the live-collision check above moved it off 5000 (see that check's
+    # comment). Only the unshifted base range needs Asterisk's ports carved
+    # out; any shifted range (whether from a genuine additional instance or
+    # a first instance that got bumped for a live collision) never lands on
+    # Asterisk's fixed ports, so it just publishes the plain range with no
+    # exclusions needed.
     local _PROTO_PORT_BLOCK
-    if [ -z "$INSTANCE_SUFFIX" ]; then
+    if [ "$PROTO_MIN" -eq 5000 ]; then
         _PROTO_PORT_BLOCK="      # 5038 (AMI), 5060 (SIP, tcp+udp), and 5061 (SIP TLS, tcp) are skipped:
       # they're Asterisk's ports (services/asterisk.sh runs Asterisk with
       # network_mode: host, so it binds them directly on the host, not
@@ -584,7 +618,7 @@ Traccar instance.")
   stays open to anyone who reaches this server until you turn it off, so do
   this right away, then go to Settings → Server → Permissions and uncheck
   Registration.
-- Device protocols: ports ${PROTO_MIN}-${PROTO_MAX} (TCP + UDP$( [ -z "$INSTANCE_SUFFIX" ] && echo "; 5038/tcp, 5060/tcp+udp, and 5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also runs Asterisk from this repo, which gets priority on those ports"))
+- Device protocols: ports ${PROTO_MIN}-${PROTO_MAX} (TCP + UDP$( [ "$PROTO_MIN" -eq 5000 ] && echo "; 5038/tcp, 5060/tcp+udp, and 5061/tcp are skipped — reserved for Asterisk's AMI and SIP if this box also runs Asterisk from this repo, which gets priority on those ports"))
 - App data: \`data/\` and \`logs/\`
 - Database: PostgreSQL (\`$DB_CONTAINER\` container, data in \`db/\`)
 - All database settings (name, user, password) live in \`.env\` — Traccar
