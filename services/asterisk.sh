@@ -385,6 +385,30 @@ _asterisk_refresh_vendor_files() {
     else
         log_warning "entrypoint.sh logger.conf template changed upstream — security events won't be logged to a file. Update the sed patch in this installer."
     fi
+
+    # Regenerate the self-signed TLS cert when it doesn't match the current
+    # DOMAIN_NAME. Vendor's own check only asks "does the file exist" and
+    # "does it have a SAN extension" -- never "does the SAN match the domain
+    # actually configured now" -- so a domain entered once (even a
+    # placeholder, or one later changed) sticks in the cert FOREVER: it
+    # survives every subsequent update *and* full reinstall, because
+    # /etc/asterisk/certs is a bind-mounted host directory neither install
+    # mode ever wipes (the same reason pjsip.conf/devices survive reinstalls
+    # too). Confirmed live: a box's TLS transport kept presenting a cert for
+    # a stale, originally-entered domain long after DOMAIN_NAME had changed
+    # and a full reinstall had been run in between -- most SIP/TLS clients
+    # refuse a cert like that outright with no clear error, and this was the
+    # actual cause of a "port's open but registration still fails" case that
+    # every other check (firewall, coturn, DNS) had already come back clean.
+    if grep -q '^if \$regen_cert; then$' ./docker/entrypoint.sh; then
+        sed -i '/^if \$regen_cert; then$/i\
+if [[ "$regen_cert" != true && -n "${DOMAIN_NAME:-}" ]] && ! openssl x509 -in /etc/asterisk/certs/server.crt -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:${DOMAIN_NAME}"; then\
+    log_info "Existing TLS cert does not match current DOMAIN_NAME (${DOMAIN_NAME}) -- regenerating"\
+    regen_cert=true\
+fi' ./docker/entrypoint.sh
+    else
+        log_warning "entrypoint.sh cert-regen check changed upstream — a stale-domain cert won't auto-regenerate. Update the sed patch in this installer."
+    fi
 }
 
 # ── Shared: log rotation for logs/full (unbounded otherwise) ──────────────
