@@ -1655,6 +1655,21 @@ install_asterisk() {
                     log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
                 fi
 
+                # Self-heal a stale/orphaned shared-coturn registration on
+                # every update, not just a full reinstall — the check inside
+                # ensure_coturn_user() is what actually re-registers a
+                # missing user, this just needs to reach it. Gated on NOT
+                # having an embedded coturn: an install with its own
+                # dedicated coturn deliberately never touches the shared one
+                # on update (see the warning above and CLAUDE.md's coturn
+                # migration guidance) — calling this unconditionally would
+                # silently chain-install services/coturn.sh for a box that
+                # was never using it, the exact "don't migrate silently on
+                # update" mistake that guidance warns against.
+                if [[ "$_HAD_EMBEDDED_COTURN" != true ]]; then
+                    ensure_coturn_user "asterisk"
+                fi
+
                 _asterisk_run_presence_step "$EA_DIR" "$CONTAINER"
                 _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
