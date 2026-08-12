@@ -1310,6 +1310,44 @@ _asterisk_configure_do_cloud_firewall() {
     fi
 }
 
+# ── Non-DO public VPS: no automated network-edge firewall step exists for
+# arbitrary providers the way _asterisk_configure_do_cloud_firewall automates
+# DigitalOcean via doctl -- there's no universal API to drive. But a box set
+# up with a public FQDN is, in practice, almost always sitting behind some
+# provider-managed firewall anyway, and skipping this reminder left it
+# entirely unmentioned. Confirmed live on an IONOS VPS: UFW showed every SIP/
+# TURN/RTP port as ALLOW, Asterisk's own PJSIP logger showed zero incoming
+# packets of any kind, and nothing in this installer's own output pointed at
+# the actual cause -- IONOS's separate network-level firewall (Cloud Panel ->
+# Networking -> Firewall Policies) only allowed 22/80/443/8443/8447 and
+# silently dropped everything else before it ever reached the box. UFW being
+# wide open proves nothing about a layer in front of it that UFW can't see.
+_asterisk_remind_non_do_firewall() {
+    local WEB_ADMIN_PORT_VAL="$1" WEB_ADMIN_PUBLIC_ACCESS_NEEDED="$2" USE_EMBEDDED_COTURN_VAL="${3:-true}"
+    echo ""
+    log_warning "This box is reachable via FQDN but wasn't set up as a DigitalOcean droplet,"
+    log_warning "so no automatic network-edge firewall was configured (that step only exists"
+    log_warning "for DO, via doctl). Most VPS/cloud providers run their OWN network-level"
+    log_warning "firewall in front of the box, separate from UFW and invisible to it — UFW can"
+    log_warning "show every port as ALLOW while traffic still gets silently dropped before it"
+    log_warning "ever reaches this box. Check your provider's console for it (e.g. IONOS: Cloud"
+    log_warning "Panel -> Networking -> Firewall Policies) and allow inbound, matching what UFW"
+    log_warning "just opened on this box:"
+    echo "    TCP      22              (SSH)"
+    echo "    UDP/TCP  5060            (SIP)"
+    echo "    TCP      5061            (SIP TLS)"
+    [[ "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" == true ]] && echo "    TCP      ${WEB_ADMIN_PORT_VAL}              (web admin)"
+    echo "    TCP      8088, 8089      (Asterisk HTTP/HTTPS)"
+    echo "    UDP      10000-20000     (RTP media)"
+    if [[ "$USE_EMBEDDED_COTURN_VAL" == true ]]; then
+        echo "    UDP/TCP  3478             (TURN/STUN)"
+        echo "    UDP      49152-49252     (TURN relay)"
+    else
+        echo "    UDP/TCP  3478 and UDP 49152-49252 too, if the shared coturn instance"
+        echo "    (services/coturn.sh) lives on this same box."
+    fi
+}
+
 # ── Shared: README ─────────────────────────────────────────────────────────
 # One document with a droplet-only section appended in public-cloud mode, so
 # the two deployment shapes can't document themselves differently by accident.
@@ -1964,9 +2002,12 @@ ENV
         log_success "UFW rules added."
     fi
 
-    # ── DigitalOcean Cloud Firewall (network edge) ────────────────────────────
-    [[ "$IS_DO" == true ]] && \
+    # ── Network-edge firewall (in front of the box, not UFW) ──────────────────
+    if [[ "$IS_DO" == true ]]; then
         _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED"
+    elif [[ -n "$DOMAIN_NAME" ]]; then
+        _asterisk_remind_non_do_firewall "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" "$USE_EMBEDDED_COTURN"
+    fi
 
     # ── CrowdSec note ──────────────────────────────────────────────────────────
     # Not installed here — select it separately from the whiptail menu, or
