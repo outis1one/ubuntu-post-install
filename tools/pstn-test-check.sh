@@ -217,15 +217,22 @@ else
         # cause of a "Cannot complete Allocation" failure against an
         # otherwise fully working coturn instance.
         #
-        # -e <peer> is required too — turnutils_uclient refuses to run at
-        # all without either -e or -y ("Either -e peer_address or -y must
-        # be specified", confirmed live), since without a peer address it
-        # has nothing to relay data to/from and there'd be no way to prove
-        # the allocation actually works end to end, not just that auth
-        # succeeded. Loopback is fine here — the test runs via `docker exec`
-        # inside the coturn container itself, so 127.0.0.1 is always
-        # reachable regardless of what's actually listening there.
-        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" -e 127.0.0.1 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
+        # turnutils_uclient also refuses to run at all without either -e
+        # <peer> or -y ("Either -e peer_address or -y must be specified",
+        # confirmed live). -e needs an actual reachable, non-loopback peer
+        # to relay through — services/coturn.sh never sets
+        # --allow-loopback-peers, so -e 127.0.0.1 gets rejected with
+        # "channel bind: error 403 (Forbidden IP)" (also confirmed live,
+        # against a real local coturn instance built to test this exact
+        # invocation). -y ("client-to-client") sidesteps this entirely: it
+        # negotiates both ends of a real relay through the server itself,
+        # no separate peer needed, and works fine over loopback since nothing
+        # about it is treated as an external peer address. Confirmed against
+        # a real coturn instance: -y correctly reports success (exit 0, real
+        # packet-loss stats) with valid credentials and correctly fails
+        # ("Cannot complete Allocation", exit 255) with a wrong password —
+        # a real pass/fail signal, not just "didn't crash."
+        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" -y 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
         if [ $? -eq 0 ]; then
             ok "Live TURN allocation succeeded with Asterisk's own configured credentials (user '$TURN_USERNAME')"
         else
