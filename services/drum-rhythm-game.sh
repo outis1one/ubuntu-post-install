@@ -250,9 +250,10 @@ install_drum-rhythm-game() {
   // Sourced tune corrections.  Do not add songs here from memory: every
   // melody/rhythm entry must point at a reproducible score/ABC source.
   // The properly sourced passes now cover Christmas songs from Milwaukee
-  // Irish Fest School of Music, plus Sing Along and Classical songs from
-  // abcnotation.com.  The classical selections below are public-domain
-  // compositions; source URLs are retained for reproducible transcription.
+  // Irish Fest School of Music, plus Sing Along, Classical, and Nursery
+  // Rhymes songs from abcnotation.com.  Classical entries are public-domain
+  // compositions, and nursery-rhyme entries are traditional/public-domain
+  // melodies; source URLs are retained for reproducible transcription.
   const CATEGORY_TUNES = {
     'jingle bells': {
       title: 'Jingle Bells', bpm: 112,
@@ -325,6 +326,36 @@ install_drum-rhythm-game() {
       // Source metadata: C:Christian Petzold (1677-1733), formerly attributed to J. S. Bach; L:1/4, M:3/4, K:G.
       melody: 'D5 G4 A4 B4 C5 D5 G4 G4 E5 C5 D5 E5 F#5 G5 G4 G4',
       beats:  '1 0.5 0.5 0.5 0.5 1 1 1 1 0.5 0.5 0.5 0.5 1 1 1'
+    },
+    'baa baa black sheep': {
+      title: 'Baa Baa Black Sheep', bpm: 112,
+      publicDomainComposition: true,
+      composer: 'Traditional',
+      source: 'abcnotation.com tune page from John Chambers music books collection: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fbook%2FTomAnderson%2FHaandMeDoonDaFiddle%2F0002',
+      sourceAbc: 'A2A2 e2e2 | fgaf e4 | d2d2 c2c2 | B2B2 A4 | e2ee d2d2 | c2cc B4 | e2ee d2d2 | c2cc B4 | A2A2 e2e2 | fgaf e4 | d2d2 c2c2 | B2B2 A4 |]',
+      // Source metadata: M:C, L:1/8, K:A. C/F/G are raised for K:A.
+      melody: 'A4 A4 E5 E5 F#5 G#5 A5 F#5 E5 D5 D5 C#5 C#5 B4 B4 A4 E5 E5 E5 D5 D5 C#5 C#5 C#5 B4 E5 E5 E5 D5 D5 C#5 C#5 C#5 B4 A4 A4 E5 E5 F#5 G#5 A5 F#5 E5 D5 D5 C#5 C#5 B4 B4 A4',
+      beats:  '2 2 2 2 1 1 1 1 4 2 2 2 2 2 2 4 2 1 1 2 2 2 1 1 4 2 1 1 2 2 2 1 1 4 2 2 2 2 1 1 1 1 4 2 2 2 2 2 2 4'
+    },
+    'three blind mice': {
+      title: 'The Three Blind Mice', bpm: 104,
+      publicDomainComposition: true,
+      composer: 'Traditional',
+      source: 'abcnotation.com tune page from the John Chambers Everyday Song Book mirror: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fbook%2FEverydaySongBook%2FEverydaySongBook1%2F0224',
+      sourceAbc: 'G3 F3 | E3 z2z | G3 F3 | E3 z2z | B3 A2 A | G3 z2z | B3 A2 A | G3 z2B | e2 e d c d | e2 B B2 B | e e e d c d | e2 B B2 B | e e e d c d | e B B B2 A | G3 F3 | E3 z2z |]',
+      // Source metadata: O:Old Round, M:6/8, L:1/8, K:Eb. E/A/B are flattened for K:Eb.
+      melody: 'G4 F4 Eb4 R G4 F4 Eb4 R Bb4 Ab4 Ab4 G4 R Bb4 Ab4 Ab4 G4 R Bb4 Eb5 Eb5 Eb5 D5 C5 D5 Eb5 Bb4 Bb4 Bb4 Eb5 Eb5 Eb5 D5 C5 D5 Eb5 Bb4 Bb4 Bb4 Eb5 Eb5 Eb5 D5 C5 D5 Eb5 Bb4 Bb4 Bb4 Ab4 G4 F4 Eb4 R',
+      beats:  '3 3 3 3 3 3 3 3 3 2 1 3 3 3 2 1 3 2 1 2 1 1 1 1 2 1 2 1 1 1 1 1 1 2 1 2 1 1 1 1 1 1 1 1 1 1 1 2 1 3 3 3 3 3'
+    },
+    'pop goes the weasel': {
+      title: 'Pop Goes the Weasel', bpm: 120,
+      publicDomainComposition: true,
+      composer: 'Traditional',
+      source: 'abcnotation.com tune page from the John Chambers mirror of PopGoesTheWeasel: https://abcnotation.com/tunePage?a=trillian.mit.edu%2F~jc%2Fmusic%2Fabc%2Fmirror%2Fsbigraf.tamu.edu%2FPopGoesTheWeasel%2F0000',
+      sourceAbc: 'G2G A2A | BdB G2z | G2G A2c | B3 G2z | G2G A2A | BdB G2z | e3 A2c | B3 G2z :|',
+      // Source metadata: B:Ryan's Mammoth Collection (1882), L:1/8, M:6/8, K:G.
+      melody: 'G4 G4 A4 A4 B4 D5 B4 G4 R G4 G4 A4 C5 B4 G4 R G4 G4 A4 A4 B4 D5 B4 G4 R E5 A4 C5 B4 G4 R',
+      beats:  '2 1 2 1 1 1 1 2 1 2 1 2 1 3 2 1 2 1 2 1 1 1 1 2 1 3 2 1 3 2 1'
     }
   };
 
