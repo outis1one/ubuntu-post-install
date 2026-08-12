@@ -3815,7 +3815,7 @@ INDEX_HTML = """<!doctype html>
   }
   #qr-modal-overlay.show { display: flex; }
   .qr-modal {
-    position: relative; width: 2in;
+    position: relative;
     background: var(--surface); border: 1px solid var(--line);
     border-radius: var(--radius); padding: var(--sp-4);
     box-shadow: 0 8px 24px rgba(0,0,0,0.45);
@@ -3827,8 +3827,20 @@ INDEX_HTML = """<!doctype html>
     font-size: 1.3rem; line-height: 1; padding: 0.2rem 0.4rem; border-radius: var(--radius-sm);
   }
   .qr-modal-close:hover { color: var(--danger); background: rgba(255,107,107,0.1); }
-  #qr-modal-canvas { width: 2in; height: 2in; }
-  #qr-modal-canvas img, #qr-modal-canvas canvas { width: 100%; height: 100%; }
+  /* qrcode.js draws modules edge-to-edge with no margin of its own -- the
+     rendered image's own content ran right to its edge (verified against
+     the raw generated PNG: the code region covered all but ~1px of it).
+     Real camera scanners need an actual light quiet zone around the code
+     per the QR spec, not the modal's dark theme background touching the
+     modules directly -- this was reported as unreadable by both Sipnetic
+     and Linphone before this fix. 192px/20px = 2in outer frame, ~4-module
+     white border on each side, sized generously since exact module count
+     varies with the encoded string length. */
+  #qr-modal-canvas {
+    width: 192px; height: 192px; box-sizing: border-box;
+    background: #fff; padding: 20px; border-radius: var(--radius-sm);
+  }
+  #qr-modal-canvas img, #qr-modal-canvas canvas { width: 100%; height: 100%; display: block; }
 
   /* The one-time device password must not auto-dismiss like a toast does. */
   .callout {
@@ -5588,7 +5600,9 @@ async function showSipneticQr(ext) {
   const data = await res.json();
   canvas.innerHTML = "";
   new QRCode(canvas, {
-    text: data.account_string, width: 192, height: 192,
+    // 152 = the 192px frame's content box after its 20px white quiet-zone
+    // padding on each side (192 - 2*20) -- keep in sync with #qr-modal-canvas.
+    text: data.account_string, width: 152, height: 152,
     correctLevel: QRCode.CorrectLevel.M,
   });
   overlay.classList.add("show");
