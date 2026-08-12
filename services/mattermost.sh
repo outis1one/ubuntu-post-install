@@ -314,6 +314,20 @@ install_mattermost() {
                     log_warning "the shared coturn service — the Calls plugin's TURN config in System"
                     log_warning "Console will need updating to the new credentials afterward (see below)."
                 fi
+                echo ""
+                log_warning "Full reinstall stops the existing containers and re-runs every prompt"
+                log_warning "below from scratch. The TURN credential registered with the shared"
+                log_warning "coturn service is reused as-is — no need to touch coturn for this."
+                local _WIPE_MM_DATA=""
+                prompt_yn "  Also delete stored data (Postgres database, uploaded files, config, plugins)? (y/n):" "n" _WIPE_MM_DATA
+
+                log_info "Stopping the existing containers..."
+                (cd "$DIR" && docker compose down 2>/dev/null)
+
+                if [[ "$_WIPE_MM_DATA" =~ ^[Yy]$ ]]; then
+                    rm -rf "$DIR/db" "$DIR/data" "$DIR/logs" "$DIR/config" "$DIR/plugins"
+                    log_warning "Deleted the Postgres database, uploaded files, config, and plugins."
+                fi
                 ;;
         esac
     fi

@@ -1692,7 +1692,26 @@ install_asterisk() {
                 return 0
                 ;;
             fresh)
-                log_info "Proceeding with a full fresh reinstall — every prompt below runs from scratch."
+                echo ""
+                log_warning "Full reinstall stops the existing containers and re-runs every"
+                log_warning "prompt below from scratch (domain, networking, firewall, Caddy/"
+                log_warning "Authelia). The TURN credential registered with the shared coturn"
+                log_warning "service is reused as-is — no need to touch coturn for this."
+                local _WIPE_PBX_DATA=""
+                prompt_yn "  Also delete stored PBX data (extensions, voicemail, recordings, spool)? (y/n):" "n" _WIPE_PBX_DATA
+
+                log_info "Stopping the existing containers..."
+                (cd "$EA_DIR" && docker compose down 2>/dev/null)
+
+                if [[ "$_WIPE_PBX_DATA" =~ ^[Yy]$ ]]; then
+                    rm -rf "$EA_DIR/config/asterisk" "$EA_DIR/spool" "$EA_DIR/logs" "$EA_DIR/lib"
+                    log_warning "Deleted config/asterisk, spool, logs, and lib — extensions,"
+                    log_warning "voicemail, and call recordings are gone."
+                    if declare -F install_pstn-trunk >/dev/null 2>&1 || [ -f "$EA_DIR/pstn-trunk-usage-alert.sh" ]; then
+                        log_warning "PSTN trunk patches config/asterisk's dialplan — re-run"
+                        log_warning "'sudo ./setup.sh pstn-trunk' afterward to restore it."
+                    fi
+                fi
                 ;;
         esac
     fi

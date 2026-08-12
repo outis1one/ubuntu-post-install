@@ -186,6 +186,27 @@ install_coturn() {
                 log_warning "change the host/port/realm below, every already-registered consumer"
                 log_warning "(Asterisk, Mattermost, ...) keeps pointing at the OLD values in its own"
                 log_warning ".env until you re-run that service's installer too."
+
+                local _consumers=""
+                [ -d "$DIR/users" ] && _consumers="$(find "$DIR/users" -maxdepth 1 -name '*.env' -printf '%f\n' 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')"
+                if [ -n "$_consumers" ]; then
+                    echo ""
+                    log_info "Registered consumers: $_consumers"
+                    local _WIPE_USERS=""
+                    prompt_yn "  Also delete all TURN user credentials and the user database (forces every consumer above to re-register)? (y/n):" "n" _WIPE_USERS
+                    if [[ "$_WIPE_USERS" =~ ^[Yy]$ ]]; then
+                        rm -rf "$DIR/users" "$DIR/db"
+                        mkdir -p "$DIR/db" "$DIR/users"
+                        # The running container (if any) still holds the old,
+                        # now-deleted turndb file open — new turnadmin writes
+                        # to the fresh file at that path go unseen until the
+                        # server process restarts and reopens it.
+                        docker restart coturn >/dev/null 2>&1
+                        log_warning "Deleted TURN credentials and the user database."
+                        log_warning "Re-run each consumer's installer in Update mode afterward —"
+                        log_warning "ensure_coturn_user() auto-recovers a fresh credential for it."
+                    fi
+                fi
                 ;;
         esac
     fi
