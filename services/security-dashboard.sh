@@ -3632,7 +3632,14 @@ INDEX_HTML = """<!doctype html>
   }
   nav button:hover { color: var(--text); }
   nav button.active { color: var(--text); border-bottom-color: var(--accent); }
-  main { padding: var(--sp-6); max-width: 1180px; margin: 0 auto; }
+  /* 1180 was too narrow for the Extensions table specifically (Ext, Name,
+     Mobile, Status, Transport, PSTN, Whitelist, Messaging, Voicemail, plus
+     the row-action column) -- ten columns including a dropdown and a free-text
+     whitelist field forced .table-wrap's horizontal scrollbar even on a normal
+     desktop viewport. 1600 gives every tab's tables room without it; narrow
+     viewports still fall back to that same scrollbar (.table-wrap already
+     handles it), this only raises the ceiling for wide ones. */
+  main { padding: var(--sp-6); max-width: 1600px; margin: 0 auto; }
 
   /* ── Cards ────────────────────────────────────────────────────────────── */
   .card {
