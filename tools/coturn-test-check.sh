@@ -167,11 +167,19 @@ else
         # matching comment — confirmed live this was the actual cause of a
         # "Cannot complete Allocation" failure, not a real coturn problem.
         #
-        # -e <peer> is also required — turnutils_uclient refuses to run at
-        # all without either -e or -y ("Either -e peer_address or -y must
-        # be specified", confirmed live). Loopback is fine since this runs
-        # via `docker exec` inside the coturn container itself.
-        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" -e 127.0.0.1 "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
+        # -y ("client-to-client"), not -e <peer>: turnutils_uclient refuses
+        # to run at all without one of the two ("Either -e peer_address or
+        # -y must be specified", confirmed live), but -e needs an actual
+        # reachable, non-loopback peer — services/coturn.sh never sets
+        # --allow-loopback-peers, so -e 127.0.0.1 gets rejected with
+        # "channel bind: error 403 (Forbidden IP)" (confirmed live against
+        # a real local coturn instance built specifically to test this).
+        # -y negotiates both ends of a real relay through the server
+        # itself, no separate peer needed, and works over loopback —
+        # confirmed correctly reporting success (exit 0, real packet-loss
+        # stats) with valid credentials and failure ("Cannot complete
+        # Allocation", exit 255) with a wrong password.
+        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" -y "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
         RC=$?
         if [ "$RC" -eq 0 ]; then
             ok "$c: TURN allocation succeeded (credentials + relay range + reachability all confirmed working)"
