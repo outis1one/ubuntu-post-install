@@ -166,7 +166,12 @@ else
         # server that never offered one. See tools/pstn-test-check.sh's
         # matching comment — confirmed live this was the actual cause of a
         # "Cannot complete Allocation" failure, not a real coturn problem.
-        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
+        #
+        # -e <peer> is also required — turnutils_uclient refuses to run at
+        # all without either -e or -y ("Either -e peer_address or -y must
+        # be specified", confirmed live). Loopback is fine since this runs
+        # via `docker exec` inside the coturn container itself.
+        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" -e 127.0.0.1 "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
         RC=$?
         if [ "$RC" -eq 0 ]; then
             ok "$c: TURN allocation succeeded (credentials + relay range + reachability all confirmed working)"

@@ -216,7 +216,16 @@ else
         # problem that doesn't exist. Confirmed live: this was the actual
         # cause of a "Cannot complete Allocation" failure against an
         # otherwise fully working coturn instance.
-        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
+        #
+        # -e <peer> is required too — turnutils_uclient refuses to run at
+        # all without either -e or -y ("Either -e peer_address or -y must
+        # be specified", confirmed live), since without a peer address it
+        # has nothing to relay data to/from and there'd be no way to prove
+        # the allocation actually works end to end, not just that auth
+        # succeeded. Loopback is fine here — the test runs via `docker exec`
+        # inside the coturn container itself, so 127.0.0.1 is always
+        # reachable regardless of what's actually listening there.
+        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" -e 127.0.0.1 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
         if [ $? -eq 0 ]; then
             ok "Live TURN allocation succeeded with Asterisk's own configured credentials (user '$TURN_USERNAME')"
         else
