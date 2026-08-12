@@ -718,12 +718,12 @@ prompt_reinstall_mode() {
         return
     fi
     echo "  Existing install detected. Choose:"
-    echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
-    echo "    f) Full install — re-run every prompt from scratch"
+    echo "    u) Update — refresh vendor files/config, keep existing settings"
+    echo "    f) Full reinstall — re-run every prompt from scratch"
     echo "    c) Cancel — leave everything as-is [default]"
-    read -p "  Choice [r/f/c, Enter=cancel]: " response
+    read -p "  Choice [u/f/c, Enter=cancel]: " response
     case "${response,,}" in
-        r) eval "$varname='update'" ;;
+        u) eval "$varname='update'" ;;
         f) eval "$varname='fresh'" ;;
         *) eval "$varname='cancel'" ;;
     esac

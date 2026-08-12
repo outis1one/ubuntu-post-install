@@ -143,7 +143,7 @@ account default in step 6 and skip even that:
 sudo ./setup.sh pstn-trunk
 ```
 
-- Existing install → choose **update** (`r`) if you're just changing the
+- Existing install → choose **update** (`u`) if you're just changing the
   DID/server, or the CLI will walk fresh prompts if none exists yet.
 - Provider quick-pick: **1) Anveo Direct** — pre-fills `sbc.anveo.com` and
   Anveo's 4 published signaling IPs (only one of which the hostname

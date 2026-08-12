@@ -82,12 +82,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 return
             fi
             echo "  Existing install detected. Choose:"
-            echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
-            echo "    f) Full install — re-run every prompt from scratch"
+            echo "    u) Update — refresh vendor files/config, keep existing settings"
+            echo "    f) Full reinstall — re-run every prompt from scratch"
             echo "    c) Cancel — leave everything as-is [default]"
-            read -r -p "  Choice [r/f/c, Enter=cancel]: " _r
+            read -r -p "  Choice [u/f/c, Enter=cancel]: " _r
             case "${_r,,}" in
-                r) eval "$_var='update'" ;;
+                u) eval "$_var='update'" ;;
                 f) eval "$_var='fresh'" ;;
                 *) eval "$_var='cancel'" ;;
             esac
