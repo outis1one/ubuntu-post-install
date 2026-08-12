@@ -76,7 +76,14 @@ ok "Relay port range: ${COTURN_MIN_PORT}-${COTURN_MAX_PORT}"
 # ── Registered consumers ──────────────────────────────────────────────────────
 section "Registered consumers"
 
-DB_USERS="$(docker exec coturn turnadmin -l -b /var/lib/coturn/turndb 2>/dev/null | sed -E 's/\[.*//' | awk 'NF' | sort -u)"
+# turnadmin -l writes its own startup log lines ("INFO SQLite connection
+# was closed.", "INFO log file opened: ...") to STDOUT on at least some
+# coturn builds, not stderr — confirmed live, `2>/dev/null` alone let them
+# through and got misparsed as usernames. A real "user[realm]" line never
+# contains a space; every log line here does, so filtering those out is a
+# safe, simple way to keep only genuine entries regardless of which coturn
+# build's log-noise happens to leak onto stdout.
+DB_USERS="$(docker exec coturn turnadmin -l -b /var/lib/coturn/turndb 2>/dev/null | grep -v ' ' | sed -E 's/\[.*//' | awk 'NF' | sort -u)"
 if [ -z "$DB_USERS" ]; then
     warn "No users found in coturn's own database — nothing has actually registered yet, or turnadmin -l's output format changed. Raw:"
     docker exec coturn turnadmin -l -b /var/lib/coturn/turndb 2>&1 | sed 's/^/         /'
