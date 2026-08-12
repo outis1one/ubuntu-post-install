@@ -3036,10 +3036,22 @@ def ea_device_sipnetic_string(extension):
     """Sipnetic's own documented "account string" QR-scan format
     (https://www.sipnetic.com/qr-codes): semicolon-separated key=value pairs,
     n=display name, u=username, d=domain/IP (no port), p=password,
-    dt=default transport (0=UDP, 1=TCP, 2=TLS). Unlike
+    dt=default transport (0=UDP, 1=TCP, 2=TLS), st=STUN/TURN server. Unlike
     ea_device_provisioning()'s deliberately generic plain-text file, this one
     IS a verified, documented format for one specific app, built from the
     exact same ea_device_details() data.
+
+    st is intentionally set to an explicit turn:user:pass@host:port URI
+    (Sipnetic's doc confirms the st field accepts embedded credentials in
+    that form) whenever coturn is configured, rather than left unset --
+    leaving it out doesn't mean "no TURN", it means Sipnetic falls back to
+    its own default/built-in STUN server instead of the coturn instance
+    Asterisk itself is actually using, which is silently wrong rather than
+    absent. This is the same TURN_SERVER/TURN_USERNAME/TURN_PASSWORD
+    ea_device_details() already reads from the Asterisk .env (see
+    ea_connection_defaults()) -- whichever coturn Asterisk was configured
+    against (the shared instance on a droplet, or an embedded one), not a
+    second, separately-derived value.
 
     A literal ';' in any field must be doubled per that same doc page --
     generated passwords are alnum-only (_ea_generate_password) so this only
@@ -3053,10 +3065,18 @@ def ea_device_sipnetic_string(extension):
 
     host = d["server"] or ""
     dt = "2" if d["transport"] == "TLS" else "0"
-    return "n=%s;u=%s;d=%s;p=%s;dt=%s;" % (
-        esc_field(d["name"] or d["extension"]), esc_field(d["extension"]),
-        esc_field(host), esc_field(d["password"]), dt,
-    )
+    fields = [
+        "n=%s" % esc_field(d["name"] or d["extension"]),
+        "u=%s" % esc_field(d["extension"]),
+        "d=%s" % esc_field(host),
+        "p=%s" % esc_field(d["password"]),
+        "dt=%s" % dt,
+    ]
+    if d.get("turn_server") and d.get("turn_username") and d.get("turn_password"):
+        fields.append("st=%s" % esc_field(
+            "turn:%s:%s@%s" % (d["turn_username"], d["turn_password"], d["turn_server"])
+        ))
+    return ";".join(fields) + ";"
 
 
 def _ea_edit_device_block(extension, mutate):
@@ -3814,8 +3834,12 @@ INDEX_HTML = """<!doctype html>
     padding: var(--sp-4);
   }
   #qr-modal-overlay.show { display: flex; }
+  /* Sized to the QR frame's own 192px, not this -- the caption text below it
+     (TURN credentials warning included) wrapped down to a couple of
+     characters per line at that width. 320px gives it room to breathe while
+     staying well short of the surrounding card. */
   .qr-modal {
-    position: relative;
+    position: relative; width: 320px; max-width: calc(100vw - 2 * var(--sp-4));
     background: var(--surface); border: 1px solid var(--line);
     border-radius: var(--radius); padding: var(--sp-4);
     box-shadow: 0 8px 24px rgba(0,0,0,0.45);
@@ -4148,7 +4172,8 @@ INDEX_HTML = """<!doctype html>
   <div class="qr-modal">
     <button class="qr-modal-close" onclick="closeSipneticQr()" aria-label="Close">&times;</button>
     <div id="qr-modal-canvas"></div>
-    <p class="muted" style="margin:0; font-size:0.8rem; text-align:center">Scan with Sipnetic (Add Account → Scan QR Code)</p>
+    <p class="muted" style="margin:var(--sp-2) 0 0; font-size:0.8rem; width:100%">Scan with Sipnetic (Add Account → Scan QR Code) to auto-fill this extension's SIP and TURN settings.</p>
+    <p class="muted" style="margin:0; font-size:0.75rem; width:100%">Contains the extension's password and TURN credentials in plain text — treat the image like the password itself.</p>
   </div>
 </div>
 <script>
@@ -5600,9 +5625,18 @@ async function showSipneticQr(ext) {
   const data = await res.json();
   canvas.innerHTML = "";
   new QRCode(canvas, {
-    // 152 = the 192px frame's content box after its 20px white quiet-zone
-    // padding on each side (192 - 2*20) -- keep in sync with #qr-modal-canvas.
-    text: data.account_string, width: 152, height: 152,
+    // Rendered at 3x the on-screen size (456, not 152) then scaled back down
+    // by the #qr-modal-canvas img/canvas{width:100%} CSS rule -- the physical
+    // footprint doesn't change, but the extra resolution gives the browser's
+    // downscaling real anti-aliasing to work with instead of the blocky
+    // 1px-per-module edges qrcode.js draws natively. Verified with a headless
+    // render + OpenCV decode: since the st= TURN field was added, the account
+    // string is long enough to need a denser QR (more modules in the same
+    // frame) that a real camera reads far more reliably at this resolution
+    // than at 1:1. 152 = the 192px frame's content box after its 20px white
+    // quiet-zone padding on each side (192 - 2*20) -- keep the *displayed*
+    // size (via CSS, not this) in sync with #qr-modal-canvas if that changes.
+    text: data.account_string, width: 456, height: 456,
     correctLevel: QRCode.CorrectLevel.M,
   });
   overlay.classList.add("show");
