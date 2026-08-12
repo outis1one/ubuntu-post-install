@@ -3804,6 +3804,32 @@ INDEX_HTML = """<!doctype html>
   .toast.ok { border-left-color: var(--ok); }
   @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
+  /* ── QR modal ─────────────────────────────────────────────────────────── */
+  /* Above #toasts (z-index 60) since a toast firing while the modal is open
+     (e.g. a save from another tab action) should still be visible on top. */
+  #qr-modal-overlay {
+    position: fixed; inset: 0; z-index: 70;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+    padding: var(--sp-4);
+  }
+  #qr-modal-overlay.show { display: flex; }
+  .qr-modal {
+    position: relative; width: 2in;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: var(--sp-4);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  }
+  .qr-modal-close {
+    position: absolute; top: var(--sp-2); right: var(--sp-2);
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    font-size: 1.3rem; line-height: 1; padding: 0.2rem 0.4rem; border-radius: var(--radius-sm);
+  }
+  .qr-modal-close:hover { color: var(--danger); background: rgba(255,107,107,0.1); }
+  #qr-modal-canvas { width: 2in; height: 2in; }
+  #qr-modal-canvas img, #qr-modal-canvas canvas { width: 100%; height: 100%; }
+
   /* The one-time device password must not auto-dismiss like a toast does. */
   .callout {
     display: none; align-items: flex-start; gap: var(--sp-3);
@@ -4033,7 +4059,7 @@ INDEX_HTML = """<!doctype html>
           <p class="muted"><b>Ring</b> dials every member at once — first to answer gets the call, everyone else stops ringing. <b>Page</b> tells Asterisk to signal auto-answer to every member via SIP headers, for devices that honor it, turning the same simultaneous dial into a one-way intercom-style broadcast instead.</p>
           <p class="muted">You don't need <b>Page</b> just to mix an auto-answering device with normally-ringing phones in the same group, though — auto-answer is really a property of the device's own SIP client configuration, not something Asterisk enforces per member. Confirmed against baresip's own source: it decides purely from its account's local <code>answermode</code> setting and never looks at any auto-answer signal on the incoming call, so a device configured to auto-answer (e.g. a dedicated intercom/kiosk running <code>baresip</code> in Answer Mode: Auto) picks up <i>everything</i> routed to it instantly and unconditionally, while ordinary phones in the same plain <b>Ring</b> group just keep ringing until a person answers — no extra setting needed here for that mix.</p>
           <p class="muted">For a dedicated always-on auto-answer device (a wall-mounted intercom, a paging station), Easy Asterisk — the vendor project this installer builds on — has a built-in <code>baresip</code>-based kiosk client for exactly that. It installs on a separate small Linux machine (an old PC, a Raspberry Pi), not this Asterisk server itself: <a href="/download/kiosk-client-installer.sh" download>download the installer script</a>, then see <code>docs/kiosk-paging-setup.md</code> in this repo for the full walkthrough.</p>
-          <p class="muted">For a phone or tablet running Sipnetic instead, each extension's own detail panel below (Extensions tab → click a row → "Sipnetic QR code") can generate a scan-to-configure code — no dedicated kiosk hardware needed for that one.</p>
+          <p class="muted">For a phone or tablet running Sipnetic instead, each extension's own detail panel below (Extensions tab → click a row → "Click here for a QR code") can generate a scan-to-configure code — no dedicated kiosk hardware needed for that one.</p>
         </details>
         <div class="row" style="margin-bottom:var(--sp-2)">
           <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
@@ -4106,6 +4132,13 @@ INDEX_HTML = """<!doctype html>
   </div>
 </main>
 <div id="toasts"></div>
+<div id="qr-modal-overlay" onclick="if (event.target === this) closeSipneticQr()">
+  <div class="qr-modal">
+    <button class="qr-modal-close" onclick="closeSipneticQr()" aria-label="Close">&times;</button>
+    <div id="qr-modal-canvas"></div>
+    <p class="muted" style="margin:0; font-size:0.8rem; text-align:center">Scan with Sipnetic (Add Account → Scan QR Code)</p>
+  </div>
+</div>
 <script>
 // Embedded verbatim (license header preserved below) for the Sipnetic
 // QR-provisioning feature -- self-contained, no CDN dependency, same
@@ -5525,10 +5558,9 @@ async function showEaDeviceDetails(ext) {
         </button>
         <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
         <a class="action" style="text-decoration:none" href="/api/ea-device-provisioning?ext=${encodeURIComponent(d.extension)}" download>Download settings</a>
-        <button class="action" onclick="toggleSipneticQr('${esc(d.extension)}')">Sipnetic QR code</button>
+        <button class="action" onclick="showSipneticQr('${esc(d.extension)}')">Click here for a QR code</button>
         <button class="action" onclick="closeEaDeviceDetails()">Close</button>
       </div>
-      <div id="sipnetic-qr-box" style="display:none"></div>
       ${d.env_error ? `<p class="muted" style="margin:var(--sp-2) 0 0; color:var(--warn)">${esc(d.env_error)}</p>` : ""}
       <p class="muted" style="margin:var(--sp-2) 0 0">A phone that never registers is most often the transport above: an extension
       written LAN-only while the phone dials in over TLS from outside. If the Security Log shows nothing at all for it, the traffic
@@ -5543,33 +5575,34 @@ async function showEaDeviceDetails(ext) {
 // qr-codes) -- scan-to-configure, built server-side from the same data the
 // details panel already shows. Rendered client-side with the embedded
 // qrcode.js at the top of this script block so nothing here needs a CDN or
-// a new Python dependency.
-async function toggleSipneticQr(ext) {
-  const box = document.getElementById("sipnetic-qr-box");
-  if (!box) return;
-  if (box.style.display !== "none" && box.dataset.ext === ext) {
-    box.style.display = "none";
-    box.innerHTML = "";
-    return;
-  }
+// a new Python dependency. Shown in a small popup (#qr-modal-overlay, ~2in
+// square) rather than inline -- it contains the extension's password in
+// plain text, so it should be glanced at and dismissed, not left sitting
+// open in the page.
+async function showSipneticQr(ext) {
+  const overlay = document.getElementById("qr-modal-overlay");
+  const canvas = document.getElementById("qr-modal-canvas");
+  if (!overlay || !canvas) return;
   const res = await fetch("/api/ea-device-qr?ext=" + encodeURIComponent(ext));
   if (!res.ok) { toast("No QR data for extension " + ext, "err"); return; }
   const data = await res.json();
-  box.dataset.ext = ext;
-  box.innerHTML = `
-    <div class="row" style="align-items:flex-start; gap:var(--sp-3); margin-top:var(--sp-3)">
-      <div id="sipnetic-qr-canvas"></div>
-      <div style="flex:1">
-        <p class="muted" style="margin-top:0">Scan with Sipnetic (Add Account → Scan QR Code) to auto-fill this extension's SIP settings.</p>
-        <p class="muted">Contains this extension's password in plain text — treat the image like the password itself.</p>
-        <code style="word-break:break-all; display:block; margin-top:var(--sp-1)">${esc(data.account_string)}</code>
-      </div>
-    </div>`;
-  box.style.display = "";
-  new QRCode(document.getElementById("sipnetic-qr-canvas"), {
-    text: data.account_string, width: 180, height: 180,
+  canvas.innerHTML = "";
+  new QRCode(canvas, {
+    text: data.account_string, width: 192, height: 192,
     correctLevel: QRCode.CorrectLevel.M,
   });
+  overlay.classList.add("show");
+  document.addEventListener("keydown", qrModalEscHandler);
+}
+
+function closeSipneticQr() {
+  const overlay = document.getElementById("qr-modal-overlay");
+  if (overlay) overlay.classList.remove("show");
+  document.removeEventListener("keydown", qrModalEscHandler);
+}
+
+function qrModalEscHandler(e) {
+  if (e.key === "Escape") closeSipneticQr();
 }
 
 async function setEaTransport(ext, connType) {
