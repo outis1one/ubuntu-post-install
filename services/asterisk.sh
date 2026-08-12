@@ -1084,10 +1084,24 @@ EOF
 
     # Share Caddy's cert store (read-only) so the entrypoint can auto-sync a
     # real Let's Encrypt cert for DOMAIN_NAME instead of falling back to
-    # self-signed. No-op if Caddy isn't installed on this box. Only relevant
-    # to the embedded coturn — the shared coturn service doesn't do TLS/TURNS
-    # at all (see services/coturn.sh's README for that tradeoff).
-    if [[ "$USE_EMBEDDED_COTURN" == true && -d "$DOCKER_DIR/caddy/data" ]]; then
+    # self-signed. No-op if Caddy isn't installed on this box.
+    #
+    # This is entirely about Asterisk's OWN SIP transport-tls cert (port
+    # 5061) -- it has nothing to do with coturn's separate, unrelated TURNS
+    # (TLS-wrapped TURN) capability, which the shared coturn service indeed
+    # doesn't support (see services/coturn.sh's README). A previous version
+    # of this check gated the mount on USE_EMBEDDED_COTURN == true, conflating
+    # the two. Confirmed live: on a shared-coturn install with a real Caddy
+    # cert already sitting on disk for DOMAIN_NAME, Asterisk silently kept
+    # generating (and re-generating) a self-signed cert forever, because
+    # /caddy-data was never mounted into the container at all -- sync_caddy_
+    # cert() couldn't see a cert store that, from its own vantage point,
+    # simply didn't exist. Most SIP/TLS clients refuse a self-signed cert
+    # outright with no clear error, which was the actual cause of a
+    # "port's open, cert domain matches, registration still silently fails"
+    # case that every other layer (firewall, coturn reachability, DNS, cert
+    # CN/SAN) had already checked out clean on.
+    if [[ -d "$DOCKER_DIR/caddy/data" ]]; then
         sed -i "s#CADDY_VOLUME_PLACEHOLDER#      - ${DOCKER_DIR}/caddy/data:/caddy-data:ro#" docker-compose.yml
     else
         sed -i "/CADDY_VOLUME_PLACEHOLDER/d" docker-compose.yml
