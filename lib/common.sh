@@ -718,12 +718,12 @@ prompt_reinstall_mode() {
         return
     fi
     echo "  Existing install detected. Choose:"
-    echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
-    echo "    f) Full install — re-run every prompt from scratch"
+    echo "    u) Update — refresh vendor files/config, keep existing settings"
+    echo "    f) Full reinstall — re-run every prompt from scratch"
     echo "    c) Cancel — leave everything as-is [default]"
-    read -p "  Choice [r/f/c, Enter=cancel]: " response
+    read -p "  Choice [u/f/c, Enter=cancel]: " response
     case "${response,,}" in
-        r) eval "$varname='update'" ;;
+        u) eval "$varname='update'" ;;
         f) eval "$varname='fresh'" ;;
         *) eval "$varname='cancel'" ;;
     esac
@@ -1076,6 +1076,31 @@ ensure_coturn_user() {
         _u="$(grep '^COTURN_USER=' "$_userfile" | cut -d= -f2-)"
         _p="$(grep '^COTURN_PASS=' "$_userfile" | cut -d= -f2-)"
         COTURN_USERNAME="$_u" COTURN_PASSWORD="$_p"
+
+        # The cache file surviving doesn't mean the username still exists in
+        # coturn's own live database — confirmed live: a coturn
+        # container/volume recreated without preserving ./db wipes the
+        # database while this file (a separate directory) survives
+        # untouched, silently orphaning every consumer's credentials until
+        # something re-registers them. Without this check, re-running the
+        # consumer's installer (fresh or update) never re-registers anything
+        # since it only ever hits the else branch below on a MISSING cache
+        # file — a stale-but-present one looked identical to a healthy one.
+        # A real "user[realm]" line never contains a space; turnadmin -l's
+        # own startup log lines do (confirmed live, at least one coturn
+        # build writes them to stdout, not stderr), so filtering on that
+        # keeps this robust across builds without needing to match a
+        # specific log format.
+        local _db_users
+        _db_users="$(docker exec coturn turnadmin -l -b /var/lib/coturn/turndb 2>/dev/null | grep -v ' ' | sed -E 's/\[.*//' | awk 'NF')"
+        if ! grep -qx "$_u" <<< "$_db_users"; then
+            log_warning "coturn user '$_u' ($_consumer) has cached credentials but isn't in coturn's live database — re-registering with the same password."
+            if docker exec coturn turnadmin -a -u "$_u" -p "$_p" -r "$_realm" -b /var/lib/coturn/turndb >/dev/null 2>&1; then
+                log_success "Re-registered coturn user '$_u' for $_consumer"
+            else
+                log_warning "Could not re-register coturn user '$_u' for $_consumer — is the coturn container running?"
+            fi
+        fi
     else
         COTURN_USERNAME="$_consumer"
         COTURN_PASSWORD="$(generate_password 24)"

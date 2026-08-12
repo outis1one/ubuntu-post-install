@@ -82,12 +82,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 return
             fi
             echo "  Existing install detected. Choose:"
-            echo "    r) Reinstall in place — refresh vendor files/config, keep existing settings"
-            echo "    f) Full install — re-run every prompt from scratch"
+            echo "    u) Update — refresh vendor files/config, keep existing settings"
+            echo "    f) Full reinstall — re-run every prompt from scratch"
             echo "    c) Cancel — leave everything as-is [default]"
-            read -r -p "  Choice [r/f/c, Enter=cancel]: " _r
+            read -r -p "  Choice [u/f/c, Enter=cancel]: " _r
             case "${_r,,}" in
-                r) eval "$_var='update'" ;;
+                u) eval "$_var='update'" ;;
                 f) eval "$_var='fresh'" ;;
                 *) eval "$_var='cancel'" ;;
             esac
@@ -1655,6 +1655,21 @@ install_asterisk() {
                     log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
                 fi
 
+                # Self-heal a stale/orphaned shared-coturn registration on
+                # every update, not just a full reinstall — the check inside
+                # ensure_coturn_user() is what actually re-registers a
+                # missing user, this just needs to reach it. Gated on NOT
+                # having an embedded coturn: an install with its own
+                # dedicated coturn deliberately never touches the shared one
+                # on update (see the warning above and CLAUDE.md's coturn
+                # migration guidance) — calling this unconditionally would
+                # silently chain-install services/coturn.sh for a box that
+                # was never using it, the exact "don't migrate silently on
+                # update" mistake that guidance warns against.
+                if [[ "$_HAD_EMBEDDED_COTURN" != true ]]; then
+                    ensure_coturn_user "asterisk"
+                fi
+
                 _asterisk_run_presence_step "$EA_DIR" "$CONTAINER"
                 _asterisk_offer_dashboard_and_trunk "$EA_DIR"
 
@@ -1677,7 +1692,26 @@ install_asterisk() {
                 return 0
                 ;;
             fresh)
-                log_info "Proceeding with a full fresh reinstall — every prompt below runs from scratch."
+                echo ""
+                log_warning "Full reinstall stops the existing containers and re-runs every"
+                log_warning "prompt below from scratch (domain, networking, firewall, Caddy/"
+                log_warning "Authelia). The TURN credential registered with the shared coturn"
+                log_warning "service is reused as-is — no need to touch coturn for this."
+                local _WIPE_PBX_DATA=""
+                prompt_yn "  Also delete stored PBX data (extensions, voicemail, recordings, spool)? (y/n):" "n" _WIPE_PBX_DATA
+
+                log_info "Stopping the existing containers..."
+                (cd "$EA_DIR" && docker compose down 2>/dev/null)
+
+                if [[ "$_WIPE_PBX_DATA" =~ ^[Yy]$ ]]; then
+                    rm -rf "$EA_DIR/config/asterisk" "$EA_DIR/spool" "$EA_DIR/logs" "$EA_DIR/lib"
+                    log_warning "Deleted config/asterisk, spool, logs, and lib — extensions,"
+                    log_warning "voicemail, and call recordings are gone."
+                    if declare -F install_pstn-trunk >/dev/null 2>&1 || [ -f "$EA_DIR/pstn-trunk-usage-alert.sh" ]; then
+                        log_warning "PSTN trunk patches config/asterisk's dialplan — re-run"
+                        log_warning "'sudo ./setup.sh pstn-trunk' afterward to restore it."
+                    fi
+                fi
                 ;;
         esac
     fi

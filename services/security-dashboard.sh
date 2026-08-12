@@ -184,7 +184,24 @@ install_security-dashboard() {
                 log_info "Leaving the existing install as-is."
                 return 0
                 ;;
-            fresh) ;;
+            fresh)
+                echo ""
+                log_warning "Full reinstall stops the dashboard and removes its systemd unit,"
+                log_warning "sudoers grant, Caddy block, service user, and app files, then sets"
+                log_warning "it up again from scratch — every prompt below runs as if this were"
+                log_warning "a brand new install."
+                local _WIPE_ADMINS=""
+                prompt_yn "  Also delete dashboard-admins.conf (per-admin Calls/Texts/Voicemail scoping)? (y/n):" "n" _WIPE_ADMINS
+
+                local _ADMINS_BACKUP=""
+                if [[ ! "$_WIPE_ADMINS" =~ ^[Yy]$ ]] && [ -f "$APP_DIR/dashboard-admins.conf" ]; then
+                    _ADMINS_BACKUP="$(mktemp)"
+                    cp "$APP_DIR/dashboard-admins.conf" "$_ADMINS_BACKUP"
+                    log_info "Preserving dashboard-admins.conf across the reinstall."
+                fi
+
+                _secdash_teardown "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT"
+                ;;
         esac
     fi
 
@@ -197,6 +214,11 @@ install_security-dashboard() {
     _secdash_grant_asterisk_access "$SVC_USER" "$ASTERISK_LOG_DIR" "$ASTERISK_CONFIG_DIR" "$ASTERISK_EA_CONFIG_DIR" "$ASTERISK_SPOOL_DIR"
 
     mkdir -p "$APP_DIR"
+    if [ -n "${_ADMINS_BACKUP:-}" ]; then
+        cp "$_ADMINS_BACKUP" "$APP_DIR/dashboard-admins.conf"
+        rm -f "$_ADMINS_BACKUP"
+        log_success "Restored dashboard-admins.conf"
+    fi
     _secdash_write_app "$APP_DIR"
     chown -R "$SVC_USER:$SVC_USER" "$APP_DIR"
     _secdash_write_asn_helper "$APP_DIR"
@@ -972,6 +994,35 @@ _secdash_remove_caddy_block() {
 
     sed -i "${domain_line},${end_line}d" "$caddy_file"
     log_info "Removed the existing dashboard Caddy block (regenerating it fresh)."
+}
+
+# Full teardown for "Full reinstall" — stops the service and removes
+# everything a fresh install recreates: systemd unit, sudoers grant, Caddy
+# site block, the secdash system user, and the app directory. Non-Docker
+# service (systemd + /opt, not a container), so lib/common.sh's
+# remove_service() (Docker-only, $DOCKER_DIR/<name>) doesn't apply here —
+# this is the equivalent for this one service. Callers are responsible for
+# backing up/restoring anything under $_app_dir they want to survive (see
+# the dashboard-admins.conf handling around the "fresh" case in
+# install_security-dashboard() — this function does not know which files,
+# if any, the caller wants to keep).
+_secdash_teardown() {
+    local _app_dir="$1" _svc_user="$2" _port="$3"
+
+    systemctl stop security-dashboard 2>/dev/null || true
+    systemctl disable security-dashboard 2>/dev/null || true
+    rm -f /etc/systemd/system/security-dashboard.service
+    systemctl daemon-reload
+
+    rm -f /etc/sudoers.d/security-dashboard
+
+    _secdash_remove_caddy_block "$_port"
+
+    id "$_svc_user" &>/dev/null && userdel "$_svc_user" 2>/dev/null
+
+    rm -rf "$_app_dir"
+
+    log_success "Removed security-dashboard's systemd unit, sudoers grant, Caddy block, user, and app files."
 }
 
 # Root-owned helper for editing CrowdSec's Asterisk-scenario YAMLs — the
