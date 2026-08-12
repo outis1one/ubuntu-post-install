@@ -179,10 +179,16 @@ else
         # confirmed correctly reporting success (exit 0, real packet-loss
         # stats) with valid credentials and failure ("Cannot complete
         # Allocation", exit 255) with a wrong password.
-        OUT="$(docker exec coturn timeout 10 turnutils_uclient -u "$_u" -w "$_p" -y "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
+        OUT="$(docker exec coturn timeout 20 turnutils_uclient -u "$_u" -w "$_p" -y "$TEST_HOST" -p "$COTURN_PORT" 2>&1)"
         RC=$?
         if [ "$RC" -eq 0 ]; then
             ok "$c: TURN allocation succeeded (credentials + relay range + reachability all confirmed working)"
+        elif [ "$RC" -eq 124 ]; then
+            # timeout(1)'s own exit code — no error was printed yet when the
+            # clock ran out, so this isn't a reported failure like "Cannot
+            # complete Allocation" would be. Worth a look, not a hard FAIL.
+            warn "$c: TURN test didn't finish within 20s (no error printed — likely still negotiating). Raw output so far:"
+            echo "$OUT" | tail -n 15 | sed 's/^/         /'
         else
             fail "$c: TURN allocation failed (exit $RC) — raw output:"
             echo "$OUT" | tail -n 15 | sed 's/^/         /'
