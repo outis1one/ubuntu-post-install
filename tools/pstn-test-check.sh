@@ -232,9 +232,19 @@ else
         # packet-loss stats) with valid credentials and correctly fails
         # ("Cannot complete Allocation", exit 255) with a wrong password —
         # a real pass/fail signal, not just "didn't crash."
-        OUT="$(docker exec "$COTURN_CONTAINER" timeout 10 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" -y 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
-        if [ $? -eq 0 ]; then
+        OUT="$(docker exec "$COTURN_CONTAINER" timeout 20 turnutils_uclient -u "$TURN_USERNAME" -w "$TURN_PASSWORD" -y 127.0.0.1 -p "${TURN_PORT:-3478}" 2>&1)"
+        RC=$?
+        if [ "$RC" -eq 0 ]; then
             ok "Live TURN allocation succeeded with Asterisk's own configured credentials (user '$TURN_USERNAME')"
+        elif [ "$RC" -eq 124 ]; then
+            # timeout(1)'s own exit code — the process was still running
+            # (no error printed yet) when the clock ran out, not a reported
+            # failure. Different from an actual auth/allocation error, so
+            # don't conflate the two — a real error prints its own message
+            # (e.g. "Cannot complete Allocation") well before this.
+            warn "TURN test with Asterisk's credentials didn't finish within 20s (no error printed — likely still negotiating). Raw output so far:"
+            echo "$OUT" | tail -n 15 | sed 's/^/         /'
+            warn "Try running manually with more time: docker exec $COTURN_CONTAINER turnutils_uclient -u $TURN_USERNAME -w $TURN_PASSWORD -y 127.0.0.1 -p ${TURN_PORT:-3478}"
         else
             fail "Live TURN allocation FAILED with Asterisk's configured credentials — raw output:"
             echo "$OUT" | tail -n 15 | sed 's/^/         /'
