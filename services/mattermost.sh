@@ -440,12 +440,33 @@ networks:
     local EMBEDDED_COTURN_SLOT=""
     [ -f "$DIR/.env" ] && EMBEDDED_COTURN_SLOT="$(grep '^EMBEDDED_COTURN_SLOT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
     if [ -z "$EMBEDDED_COTURN_SLOT" ]; then
-        local _used_slots
+        # Assigning a NEW slot — also live-verify the candidate control port
+        # and relay-range boundaries aren't already bound by something this
+        # box's own .env files don't know about (a manually-run process, an
+        # unrelated service). An already-cached slot (the branch above) is
+        # trusted as-is and never re-verified — that's what "stable across
+        # re-runs" means; a live process squatting on an already-assigned
+        # slot's port is a conflict to report, not silently route around by
+        # moving an already-configured instance. Can't scan the full
+        # 200-port relay range port-by-port (CLAUDE.md's
+        # port-collision-avoidance section covers why large ranges use an
+        # offset instead of scanning) — checking the control port plus the
+        # relay range's own two boundary ports is the practical middle
+        # ground between "no live check at all" and a full range scan.
+        local _used_slots _cand _p _min _max
         _used_slots="$(grep -h '^EMBEDDED_COTURN_SLOT=' "$DOCKER_DIR"/mattermost*/.env 2>/dev/null | cut -d= -f2-)"
-        EMBEDDED_COTURN_SLOT=0
-        while echo "$_used_slots" | grep -qx "$EMBEDDED_COTURN_SLOT"; do
-            EMBEDDED_COTURN_SLOT=$((EMBEDDED_COTURN_SLOT + 1))
+        _cand=0
+        while true; do
+            _p=$((3479 + _cand)); _min=$((49253 + _cand * 200)); _max=$((_min + 199))
+            if echo "$_used_slots" | grep -qx "$_cand" \
+               || port_in_use "$_p" || port_in_use "$_p" udp \
+               || port_in_use "$_min" udp || port_in_use "$_max" udp; then
+                _cand=$((_cand + 1))
+                continue
+            fi
+            break
         done
+        EMBEDDED_COTURN_SLOT="$_cand"
     fi
     local _MM_COTURN_PORT=$((3479 + EMBEDDED_COTURN_SLOT))
     local _MM_COTURN_MIN=$((49253 + EMBEDDED_COTURN_SLOT * 200))
