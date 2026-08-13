@@ -3041,17 +3041,25 @@ def ea_device_sipnetic_string(extension):
     IS a verified, documented format for one specific app, built from the
     exact same ea_device_details() data.
 
-    st is intentionally set to an explicit turn:user:pass@host:port URI
-    (Sipnetic's doc confirms the st field accepts embedded credentials in
-    that form) whenever coturn is configured, rather than left unset --
-    leaving it out doesn't mean "no TURN", it means Sipnetic falls back to
-    its own default/built-in STUN server instead of the coturn instance
-    Asterisk itself is actually using, which is silently wrong rather than
-    absent. This is the same TURN_SERVER/TURN_USERNAME/TURN_PASSWORD
-    ea_device_details() already reads from the Asterisk .env (see
-    ea_connection_defaults()) -- whichever coturn Asterisk was configured
-    against (the shared instance on a droplet, or an embedded one), not a
-    second, separately-derived value.
+    st is intentionally set to an explicit turn:user:pass@host URI whenever
+    coturn is configured, rather than left unset -- leaving it out doesn't
+    mean "no TURN", it means Sipnetic falls back to its own default/built-in
+    STUN server instead of the coturn instance Asterisk itself is actually
+    using, which is silently wrong rather than absent. This is the same
+    TURN_SERVER/TURN_USERNAME/TURN_PASSWORD ea_device_details() already
+    reads from the Asterisk .env (see ea_connection_defaults()) -- whichever
+    coturn Asterisk is actually configured against.
+
+    The host is deliberately stripped of its port before going into st.
+    Sipnetic's own doc for this field is explicit that the value is a
+    "hostname or IP address without port", and its own worked example is
+    `st=turn:user:password@turn.mydomain.com;` -- no port anywhere, even
+    in the URI form. Confirmed live: appending :3478 (matching the doc's
+    generic URI-with-credentials description, which doesn't actually show a
+    port example) gets silently truncated by the app -- the FQDN came
+    through, the port after it did not. coturn's listening port in this
+    repo is always the STUN/TURN-conventional 3478, which is what a
+    portless address implies anyway, so dropping it costs nothing.
 
     A literal ';' in any field must be doubled per that same doc page --
     generated passwords are alnum-only (_ea_generate_password) so this only
@@ -3073,8 +3081,9 @@ def ea_device_sipnetic_string(extension):
         "dt=%s" % dt,
     ]
     if d.get("turn_server") and d.get("turn_username") and d.get("turn_password"):
+        turn_host = d["turn_server"].rsplit(":", 1)[0]
         fields.append("st=%s" % esc_field(
-            "turn:%s:%s@%s" % (d["turn_username"], d["turn_password"], d["turn_server"])
+            "turn:%s:%s@%s" % (d["turn_username"], d["turn_password"], turn_host)
         ))
     return ";".join(fields) + ";"
 
