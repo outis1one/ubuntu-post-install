@@ -633,15 +633,36 @@ install_backup() {
         log_success "test_backup.sh installed"
     fi
 
-    # ── 11b. Weekly backup test timer ────────────────────────────────────────
+    # ── 11b. Backup test timer ───────────────────────────────────────────────
+    # Every service in this test stops briefly (seconds) while its data gets
+    # moved aside and restored back — same interruption profile as the main
+    # backup job itself. Weekly is the most thorough default, but that's a
+    # standing tradeoff against a weekly blip on every service; offer the
+    # same Daily/Weekly/Monthly/Custom shape the main backup schedule above
+    # already gives, rather than hardcoding one choice.
     local TEST_SVC_NAME="post-install-backup-test"
     local _add_test=""
-    prompt_yn "  Schedule a weekly automated backup test? (y/N):" "n" _add_test
+    prompt_yn "  Schedule an automated backup restore test? (y/N):" "n" _add_test
     if [[ "$_add_test" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "    1) Weekly (Saturday 03:00)         (recommended)"
+        echo "    2) Monthly (1st of the month, 03:00)"
+        echo "    3) Custom (systemd OnCalendar)"
+        echo ""
+        local _test_sch=""
+        prompt_text "  How often? [1]:" "1" _test_sch
+        local TEST_ONCALENDAR TEST_SCHED_LABEL TEST_CRON=""
+        case "${_test_sch:-1}" in
+            2) TEST_ONCALENDAR="*-*-01 03:00:00"; TEST_SCHED_LABEL="monthly (1st, 03:00)"; TEST_CRON="0 3 1 * *" ;;
+            3) prompt_text "  OnCalendar expression:" "Sat *-*-* 03:00:00" TEST_ONCALENDAR
+               TEST_SCHED_LABEL="$TEST_ONCALENDAR" ;;
+            *) TEST_ONCALENDAR="Sat *-*-* 03:00:00"; TEST_SCHED_LABEL="weekly (Saturday 03:00)"; TEST_CRON="0 3 * * 6" ;;
+        esac
+
         if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
             tee "/etc/systemd/system/${TEST_SVC_NAME}.service" >/dev/null << SVCEOF
 [Unit]
-Description=Weekly restore test for Kopia backup
+Description=Automated restore test for Kopia backup
 After=docker.service
 
 [Service]
@@ -651,10 +672,10 @@ SVCEOF
 
             tee "/etc/systemd/system/${TEST_SVC_NAME}.timer" >/dev/null << SVCEOF
 [Unit]
-Description=Weekly Kopia backup restore test (Saturday 03:00)
+Description=Kopia backup restore test ($TEST_SCHED_LABEL)
 
 [Timer]
-OnCalendar=Sat *-*-* 03:00:00
+OnCalendar=$TEST_ONCALENDAR
 Persistent=true
 RandomizedDelaySec=600
 
@@ -664,11 +685,24 @@ SVCEOF
 
             systemctl daemon-reload
             systemctl enable --now "${TEST_SVC_NAME}.timer"
-            log_success "Weekly test timer enabled (Saturday 03:00)"
+            log_success "Backup test timer enabled ($TEST_SCHED_LABEL)"
         else
-            echo "0 3 * * 6 root /bin/bash $TEST_SCRIPT >> /var/log/${TEST_SVC_NAME}.log 2>&1" \
+            if [ -z "$TEST_CRON" ]; then
+                log_warning "Custom OnCalendar schedules aren't auto-translated to cron — installing"
+                log_warning "a weekly placeholder; edit /etc/cron.d/${TEST_SVC_NAME} to adjust the timing."
+                TEST_CRON="0 3 * * 6"
+            fi
+            echo "$TEST_CRON root /bin/bash $TEST_SCRIPT >> /var/log/${TEST_SVC_NAME}.log 2>&1" \
                 > "/etc/cron.d/${TEST_SVC_NAME}"
-            log_success "Weekly test cron installed (Saturday 03:00)"
+            log_success "Backup test cron installed ($TEST_SCHED_LABEL)"
+        fi
+
+        echo ""
+        local _run_now=""
+        prompt_yn "  Run the first test now, instead of waiting for the schedule? (y/N):" "n" _run_now
+        if [[ "$_run_now" =~ ^[Yy]$ ]]; then
+            log_info "Running initial backup restore test..."
+            bash "$TEST_SCRIPT" || log_warning "Initial test reported failures — see the output above and /var/log/post-install-backup-test.log."
         fi
     fi
 
