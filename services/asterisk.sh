@@ -1885,6 +1885,7 @@ install_asterisk() {
     # end up with no TURN at all just because the shared path had a problem.
     local USE_EMBEDDED_COTURN=true
     local TURN_USERNAME TURN_PASSWORD TURN_PORT_VAL TURN_SERVER_VAL
+    local FORCE_EMBEDDED_COTURN=""
 
     # Only reachable here via an explicit "fresh" choice above — "update"
     # is handled separately and always preserves whatever coturn shape
@@ -1897,8 +1898,19 @@ install_asterisk() {
         log_warning "need updating once this completes."
     fi
 
-    ensure_coturn_user "asterisk"
-    if [[ -n "${COTURN_HOST:-}" ]]; then
+    # Opt-out of the shared coturn preference below, for the rare case where
+    # you specifically want Asterisk isolated on its own TURN relay again
+    # (e.g. reproducing an older install's exact shape to rule out anything
+    # coturn-sharing-specific during troubleshooting). Only offered when a
+    # shared instance actually exists — no meaningful choice otherwise.
+    if [[ -d "$DOCKER_DIR/coturn" ]]; then
+        local _USE_SHARED_COTURN=""
+        prompt_yn "Use the shared coturn service for TURN? (n = run Asterisk's own dedicated coturn instead) (y/n):" "y" _USE_SHARED_COTURN
+        [[ "$_USE_SHARED_COTURN" =~ ^[Nn]$ ]] && FORCE_EMBEDDED_COTURN=true
+    fi
+
+    [[ "$FORCE_EMBEDDED_COTURN" != true ]] && ensure_coturn_user "asterisk"
+    if [[ "$FORCE_EMBEDDED_COTURN" != true && -n "${COTURN_HOST:-}" ]]; then
         USE_EMBEDDED_COTURN=false
         TURN_USERNAME="$COTURN_USERNAME"
         TURN_PASSWORD="$COTURN_PASSWORD"
@@ -1918,7 +1930,11 @@ install_asterisk() {
         elif [[ -n "$DOMAIN_NAME" ]]; then
             TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
         fi
-        log_info "Shared coturn unavailable — Asterisk will run its own dedicated coturn."
+        if [[ "$FORCE_EMBEDDED_COTURN" == true ]]; then
+            log_info "Running Asterisk's own dedicated coturn, as requested."
+        else
+            log_info "Shared coturn unavailable — Asterisk will run its own dedicated coturn."
+        fi
     fi
 
     _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN"
