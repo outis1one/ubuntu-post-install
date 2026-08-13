@@ -1447,9 +1447,11 @@ docker exec -it ${CONTAINER} easy-asterisk
 | 5061          | TCP      | SIP over TLS                     |
 | ${WEB_ADMIN_PORT_VAL}          | TCP      | Easy Asterisk web admin (auto-picked — see \`.env\`) |
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
-| 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
-| 49152–49252   | UDP      | TURN relay media ports           |
+$( [[ "$USE_EMBEDDED_COTURN" == true ]] \
+    && echo "| 3478          | UDP/TCP  | TURN/STUN (this install's own dedicated coturn) |
+| 49152–49252   | UDP      | TURN relay media ports (dedicated coturn)  |" \
+    || echo "| See \`~/docker/coturn/.env\` | UDP/TCP | TURN/STUN — shared coturn service, not opened by this install |" )
 
 ## Data directories (all inside ${EA_DIR}/, included in backup)
 

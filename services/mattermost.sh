@@ -415,6 +415,18 @@ networks:
     fi
     [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
 
+    # Listening port (3479, vs. Asterisk's embedded coturn on 3478) and relay
+    # range (49253-49452, vs. Asterisk's 49152-49252) are both deliberately
+    # offset from services/asterisk.sh's embedded coturn defaults. Confirmed
+    # live: an earlier version of this range (49153-49352) overlapped
+    # Asterisk's by ~100 ports — the exact bug the shared coturn service
+    # (services/coturn.sh) exists to avoid, reintroduced here because this
+    # is the no-shared-coturn fallback path. If more than one Mattermost
+    # instance ever falls back to embedded coturn at the same time, they'll
+    # collide with EACH OTHER on these same fixed numbers — not handled here
+    # (single-instance-without-shared-coturn is the case this fallback is
+    # actually for; install services/coturn.sh instead if you need more than
+    # one consumer without hand-managing per-instance port math).
     local _COTURN_SERVICE=""
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
         _COTURN_SERVICE="
@@ -431,8 +443,8 @@ networks:
       - --use-auth-secret
       - --static-auth-secret=\${COTURN_SECRET}
       - --realm=\${MM_REALM:-localhost}
-      - --min-port=49153
-      - --max-port=49352
+      - --min-port=49253
+      - --max-port=49452
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -532,7 +544,7 @@ EOF
         ufw allow "${CALLS_UDP_PORT}/udp" comment "Mattermost Calls RTC${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         if [ "$USE_EMBEDDED_COTURN" = true ]; then
             ufw allow 3479/udp; ufw allow 3479/tcp
-            ufw allow 49153:49352/udp comment "Mattermost coturn relay"
+            ufw allow 49253:49452/udp comment "Mattermost coturn relay"
         fi
         # Shared coturn opens its own ports once, at its own install time.
     fi
