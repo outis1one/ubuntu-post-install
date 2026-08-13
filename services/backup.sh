@@ -520,6 +520,106 @@ install_backup() {
     done
     unset -f kp_d
 
+    # ── 7b. Offsite mirror (Backblaze B2) ────────────────────────────────────
+    # Kopia's dedicated "b2" sync-to provider is marked [DEPRECATED] in
+    # Kopia's own docs (kopia.io/docs/reference/command-line/common/
+    # repository-sync-to-b2/) — confirmed before writing this rather than
+    # building on a command that's on its way out. B2's S3-compatible
+    # endpoint plus the actively-maintained `sync-to s3` provider is the
+    # supported path instead: same B2 application key, just pointed at
+    # B2's own s3.<region>.backblazeb2.com endpoint instead of AWS.
+    #
+    # Bucket creation and the application key can't be automated here on
+    # purpose — Object Lock in particular is a deliberate, one-time choice
+    # B2 only lets you make at bucket creation, not something safe for a
+    # script to flip on (or skip) silently on someone's behalf. This walks
+    # through both console steps, then handles the mechanical part: taking
+    # the resulting bucket/endpoint/key and writing a verified
+    # REMOTE_TYPE/REMOTE_ARGS into backup.conf.
+    #
+    # Encryption is NOT a separate step here — Kopia already encrypts
+    # everything client-side (AES-256-GCM) using the repository password
+    # set above, before any of it leaves this box. B2's own optional
+    # Server-Side Encryption toggle is redundant on top of that; harmless
+    # to also enable for defense-in-depth, but nothing here depends on it.
+    local REMOTE_TYPE="none" REMOTE_ARGS=""
+    if [ -f "$CONF_FILE" ]; then
+        # Preserve whatever's already configured if this is a re-run and
+        # the operator doesn't re-answer the prompt below — re-running this
+        # installer has no update/fresh distinction, so without this an
+        # already-working offsite mirror would silently reset to "none".
+        REMOTE_TYPE="$(grep '^REMOTE_TYPE=' "$CONF_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"')"
+        REMOTE_ARGS="$(grep '^REMOTE_ARGS=' "$CONF_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"')"
+        [ -z "$REMOTE_TYPE" ] && REMOTE_TYPE="none"
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  OFFSITE MIRROR (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Mirrors every local repo above to Backblaze B2 after each backup run —"
+    echo "  the actual '1 copy offsite' piece of a real 3-2-1 backup. Skip this if"
+    echo "  you don't have a B2 account yet, or would rather set REMOTE_TYPE/"
+    echo "  REMOTE_ARGS in backup.conf by hand later."
+    if [ "$REMOTE_TYPE" != "none" ]; then
+        echo ""
+        echo "  Offsite mirroring is already configured (REMOTE_TYPE=$REMOTE_TYPE)."
+        echo "  Answering yes below replaces it; answering no leaves it as-is."
+    fi
+    echo ""
+    local _setup_b2=""
+    prompt_yn "  Set up Backblaze B2 offsite mirroring now? (y/N):" "n" _setup_b2
+    if [[ "$_setup_b2" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "  Two one-time steps in the B2 web console first — this script can't do"
+        echo "  these for you:"
+        echo ""
+        echo "  1) Buckets → Create a Bucket"
+        echo "       - Files in Bucket: Private"
+        echo "       - Object Lock: your call. ON means backups in this bucket can't be"
+        echo "         deleted or overwritten for a retention period you choose, even by"
+        echo "         someone holding valid credentials for it — protects the offsite"
+        echo "         copy if this box is ever compromised, at the cost of genuinely not"
+        echo "         being able to delete early yourself either. Can only be set at"
+        echo "         bucket creation, not turned on later."
+        echo "       - Note the endpoint shown on the bucket's details page afterward,"
+        echo "         e.g. s3.us-west-004.backblazeb2.com — you'll need it below."
+        echo ""
+        echo "  2) Account → App Keys → Add a New Application Key"
+        echo "       - Allow access to: the bucket you just created (not 'All')"
+        echo "       - Type: Read and Write"
+        echo "       - B2 shows the application key ONLY once — copy both values now,"
+        echo "         you can't retrieve the key itself again afterward."
+        echo ""
+        local B2_BUCKET="" B2_ENDPOINT="" B2_KEY_ID="" B2_APP_KEY=""
+        prompt_text "  Bucket name:" "" B2_BUCKET
+        prompt_text "  Endpoint (e.g. s3.us-west-004.backblazeb2.com):" "" B2_ENDPOINT
+        prompt_text "  Application Key ID:" "" B2_KEY_ID
+        read -rsp "  Application Key (input hidden): " B2_APP_KEY; echo
+
+        if [ -z "$B2_BUCKET" ] || [ -z "$B2_ENDPOINT" ] || [ -z "$B2_KEY_ID" ] || [ -z "$B2_APP_KEY" ]; then
+            log_warning "One or more fields left blank — skipping B2 setup this run."
+        else
+            log_info "Verifying B2 credentials (dry-run sync against the 'default' repo)..."
+            local _b2_err
+            if _b2_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
+                    --config-file="${DEST_CONFIGS[default]}" repository sync-to s3 \
+                    --bucket="$B2_BUCKET" --access-key="$B2_KEY_ID" \
+                    --secret-access-key="$B2_APP_KEY" --endpoint="$B2_ENDPOINT" \
+                    --dry-run 2>&1)"; then
+                REMOTE_TYPE="s3"
+                REMOTE_ARGS="--bucket=$B2_BUCKET --access-key=$B2_KEY_ID --secret-access-key=$B2_APP_KEY --endpoint=$B2_ENDPOINT"
+                log_success "B2 credentials verified — offsite mirroring will run after each backup."
+            else
+                log_warning "B2 dry-run failed — check bucket name, endpoint, and key permissions:"
+                log_warning "$_b2_err"
+                log_warning "Not enabling offsite mirroring this run. Re-run this installer once"
+                log_warning "fixed, or hand-edit REMOTE_TYPE/REMOTE_ARGS in backup.conf directly."
+            fi
+        fi
+    fi
+
     # ── 8. Write backup.conf ─────────────────────────────────────────────────
     log_info "Writing $CONF_FILE ..."
     {
@@ -556,9 +656,12 @@ install_backup() {
         echo ""
         echo "# ── Optional offsite mirror ─────────────────────────────────────────────────"
         echo "# Mirror ALL repos offsite after each run (see kopia repository sync-to --help)."
+        echo "# B2: use the s3 provider against B2's S3-compatible endpoint, not the b2"
+        echo "# provider — kopia.io marks repository-sync-to-b2 as deprecated. Example:"
+        echo "#   REMOTE_TYPE=s3  REMOTE_ARGS=\"--bucket=NAME --access-key=KEYID --secret-access-key=KEY --endpoint=s3.us-west-004.backblazeb2.com\""
         echo "# Example SFTP: REMOTE_TYPE=sftp  REMOTE_ARGS=\"--host H --username U --path /srv/...\""
-        echo "REMOTE_TYPE=\"none\""
-        echo "REMOTE_ARGS=\"\""
+        echo "REMOTE_TYPE=\"$REMOTE_TYPE\""
+        echo "REMOTE_ARGS=\"$REMOTE_ARGS\""
         echo ""
         echo "# ── Notifications (ntfy) ─────────────────────────────────────────────────────"
         echo "# Set NTFY_URL to receive backup success/failure alerts."
