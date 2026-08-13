@@ -415,18 +415,42 @@ networks:
     fi
     [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
 
-    # Listening port (3479, vs. Asterisk's embedded coturn on 3478) and relay
-    # range (49253-49452, vs. Asterisk's 49152-49252) are both deliberately
-    # offset from services/asterisk.sh's embedded coturn defaults. Confirmed
-    # live: an earlier version of this range (49153-49352) overlapped
-    # Asterisk's by ~100 ports — the exact bug the shared coturn service
-    # (services/coturn.sh) exists to avoid, reintroduced here because this
-    # is the no-shared-coturn fallback path. If more than one Mattermost
-    # instance ever falls back to embedded coturn at the same time, they'll
-    # collide with EACH OTHER on these same fixed numbers — not handled here
-    # (single-instance-without-shared-coturn is the case this fallback is
-    # actually for; install services/coturn.sh instead if you need more than
-    # one consumer without hand-managing per-instance port math).
+    # Each embedded-coturn instance (this Mattermost falls back to its own
+    # dedicated coturn when the shared one isn't available) needs its own
+    # listening port and relay range, or two instances both on embedded
+    # coturn collide on identical fixed numbers — confirmed live for the
+    # Asterisk-vs-Mattermost case this same offset scheme now also fixes
+    # (see the git history on this block). A relay range can't be found by
+    # scanning port-by-port like find_free_port does for a single port
+    # (CLAUDE.md's port-collision-avoidance section is explicit about this
+    # for large ranges) — so instead each instance gets an integer "slot"
+    # or the next one already used elsewhere, and a wide-enough width
+    # (200, matching this range's existing size) keeps slots from
+    # overlapping each other. base 3479/49253 is right after Asterisk's own
+    # embedded-coturn numbers (3478/49152-49252) so slot 0 doesn't collide
+    # with Asterisk either.
+    #
+    # The slot is assigned once (the smallest integer not already claimed
+    # by another mattermost*/.env on this box) and cached in THIS
+    # instance's own .env as EMBEDDED_COTURN_SLOT, so re-running this same
+    # instance's installer (update or full reinstall) always reads the
+    # same slot back instead of potentially reassigning it — reassignment
+    # would silently move an already-configured instance's TURN port out
+    # from under it.
+    local EMBEDDED_COTURN_SLOT=""
+    [ -f "$DIR/.env" ] && EMBEDDED_COTURN_SLOT="$(grep '^EMBEDDED_COTURN_SLOT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+    if [ -z "$EMBEDDED_COTURN_SLOT" ]; then
+        local _used_slots
+        _used_slots="$(grep -h '^EMBEDDED_COTURN_SLOT=' "$DOCKER_DIR"/mattermost*/.env 2>/dev/null | cut -d= -f2-)"
+        EMBEDDED_COTURN_SLOT=0
+        while echo "$_used_slots" | grep -qx "$EMBEDDED_COTURN_SLOT"; do
+            EMBEDDED_COTURN_SLOT=$((EMBEDDED_COTURN_SLOT + 1))
+        done
+    fi
+    local _MM_COTURN_PORT=$((3479 + EMBEDDED_COTURN_SLOT))
+    local _MM_COTURN_MIN=$((49253 + EMBEDDED_COTURN_SLOT * 200))
+    local _MM_COTURN_MAX=$((_MM_COTURN_MIN + 199))
+
     local _COTURN_SERVICE=""
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
         _COTURN_SERVICE="
@@ -437,14 +461,14 @@ networks:
     user: root
     command:
       - -n
-      - --listening-port=3479
+      - --listening-port=${_MM_COTURN_PORT}
       - --listening-ip=0.0.0.0
       - --fingerprint
       - --use-auth-secret
       - --static-auth-secret=\${COTURN_SECRET}
       - --realm=\${MM_REALM:-localhost}
-      - --min-port=49253
-      - --max-port=49452
+      - --min-port=${_MM_COTURN_MIN}
+      - --max-port=${_MM_COTURN_MAX}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -521,6 +545,12 @@ TURN_HOST=$TURN_HOST_VAL
 TURN_PORT=$TURN_PORT_VAL
 TURN_USERNAME=$TURN_USERNAME_VAL
 TURN_PASSWORD=$TURN_PASSWORD_VAL
+# This instance's embedded-coturn port slot (see the comment above the
+# EMBEDDED_COTURN_SLOT assignment in mattermost.sh) — read back on every
+# re-run so it never gets reassigned out from under an already-running
+# instance. Reserved even when USE_EMBEDDED_COTURN is currently false, in
+# case this instance ever falls back to its own coturn later.
+EMBEDDED_COTURN_SLOT=$EMBEDDED_COTURN_SLOT
 EOF
     chmod 600 .env
 
@@ -543,8 +573,8 @@ EOF
         ufw allow "${WEB_PORT}/tcp" comment "Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         ufw allow "${CALLS_UDP_PORT}/udp" comment "Mattermost Calls RTC${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         if [ "$USE_EMBEDDED_COTURN" = true ]; then
-            ufw allow 3479/udp; ufw allow 3479/tcp
-            ufw allow 49253:49452/udp comment "Mattermost coturn relay"
+            ufw allow "${_MM_COTURN_PORT}/udp"; ufw allow "${_MM_COTURN_PORT}/tcp"
+            ufw allow "${_MM_COTURN_MIN}:${_MM_COTURN_MAX}/udp" comment "Mattermost coturn relay${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         fi
         # Shared coturn opens its own ports once, at its own install time.
     fi
@@ -562,9 +592,9 @@ EOF
     # cannot run at the same time as --lt-cred-mech on one instance).
     local _ICE_JSON _turn_config_md
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
-        _ICE_JSON="[{\"urls\":[\"turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\"],\"username\":\"static\",\"credential\":\"see COTURN_SECRET below — this dedicated coturn uses use-auth-secret/HMAC, not a fixed credential\"}]"
+        _ICE_JSON="[{\"urls\":[\"turn:${SITE_DOMAIN:-YOUR_IP}:${_MM_COTURN_PORT}?transport=udp\"],\"username\":\"static\",\"credential\":\"see COTURN_SECRET below — this dedicated coturn uses use-auth-secret/HMAC, not a fixed credential\"}]"
         _turn_config_md="This instance runs its own dedicated coturn (HMAC/REST-API auth):
-- TURN Server URI: \`turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\`
+- TURN Server URI: \`turn:${SITE_DOMAIN:-YOUR_IP}:${_MM_COTURN_PORT}?transport=udp\`
 - System Console → Plugins → Calls → **TURN Static Auth Secret**: value of \`COTURN_SECRET\` in \`.env\`"
     else
         _ICE_JSON="[{\"urls\":[\"turn:${TURN_HOST_VAL}:${TURN_PORT_VAL}?transport=udp\"],\"username\":\"${TURN_USERNAME_VAL}\",\"credential\":\"${TURN_PASSWORD_VAL}\"}]"
