@@ -270,19 +270,12 @@ install_mattermost() {
         fi
     fi
 
-    # Free-port scan — runs unconditionally, not just when adding an explicit
-    # additional instance, so a plain first install also can't collide with
-    # an unrelated service that already claimed these default ports. Same
-    # pattern services/asterisk.sh uses for its web admin port. WEB_PORT is
-    # also set as Mattermost's own internal ListenAddress below (not just the
-    # host publish side), so configure_caddy_for_service's single upstream
-    # "name:port" string works unmodified in both local and remote-Caddy mode —
-    # it assumes host-published-port == container-internal-port, true for
-    # every other service in this repo and made true here too rather than
-    # special-casing the shared helper for one caller. See CLAUDE.md's "Port
-    # collision avoidance" section.
-    find_free_port WEB_PORT "$WEB_PORT"
-    find_free_port CALLS_UDP_PORT "$CALLS_UDP_PORT" udp
+    # WEB_PORT/CALLS_UDP_PORT are resolved further down, after we know
+    # whether this is an update (read the existing port back, never rescan
+    # — see the comment there) or a fresh/new install (scan from these
+    # defaults). Scanning here, before that's known, used to mean an
+    # update run could see this instance's OWN currently-published port as
+    # "in use" and silently move it — see git history on this block.
 
     log_info "Installing Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}..."
 
@@ -330,6 +323,41 @@ install_mattermost() {
                 fi
                 ;;
         esac
+    fi
+
+    # ── Web/Calls ports: read back on update, scan fresh on a new/full install ──
+    # Mirrors services/asterisk.sh's WEB_ADMIN_PORT handling: update must
+    # never rescan here — nothing has stopped the currently-running
+    # container yet at this point (fresh/"Full reinstall" already did,
+    # above), so find_free_port would see this instance's OWN
+    # already-published port as "in use" and silently move it to a
+    # different one on every single update run. Falls back to parsing the
+    # existing MM_SERVICESETTINGS_LISTENADDRESS / docker-compose.yml port
+    # mapping for installs from before WEB_PORT/CALLS_UDP_PORT were written
+    # to .env directly — so this doesn't regress anyone already running.
+    if [ "$MODE" = "update" ] && [ -f "$DIR/.env" ]; then
+        local _EXISTING_WEB_PORT _EXISTING_CALLS_PORT
+        _EXISTING_WEB_PORT="$(grep '^WEB_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [ -z "$_EXISTING_WEB_PORT" ] && _EXISTING_WEB_PORT="$(grep '^MM_SERVICESETTINGS_LISTENADDRESS=:' "$DIR/.env" 2>/dev/null | sed 's/.*://')"
+        [ -n "$_EXISTING_WEB_PORT" ] && WEB_PORT="$_EXISTING_WEB_PORT"
+
+        _EXISTING_CALLS_PORT="$(grep '^CALLS_UDP_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [ -z "$_EXISTING_CALLS_PORT" ] && _EXISTING_CALLS_PORT="$(grep -oE '"[0-9]+:8443/udp"' "$DIR/docker-compose.yml" 2>/dev/null | head -1 | cut -d: -f1 | tr -d '"')"
+        [ -n "$_EXISTING_CALLS_PORT" ] && CALLS_UDP_PORT="$_EXISTING_CALLS_PORT"
+    else
+        # Fresh/new install — runs unconditionally, not just when adding an
+        # explicit additional instance, so a plain first install also can't
+        # collide with an unrelated service that already claimed these
+        # default ports. WEB_PORT is also set as Mattermost's own internal
+        # ListenAddress below (not just the host publish side), so
+        # configure_caddy_for_service's single upstream "name:port" string
+        # works unmodified in both local and remote-Caddy mode — it assumes
+        # host-published-port == container-internal-port, true for every
+        # other service in this repo and made true here too rather than
+        # special-casing the shared helper for one caller. See CLAUDE.md's
+        # "Port collision avoidance" section.
+        find_free_port WEB_PORT "$WEB_PORT"
+        find_free_port CALLS_UDP_PORT "$CALLS_UDP_PORT" udp
     fi
 
     mkdir -p "$DIR"
@@ -540,6 +568,13 @@ EOF
     cat > .env << EOF
 TZ=$TZ_VAL
 CADDY_NET=$SITE_CADDY_NET
+
+# Host-published ports this install is actually using — read back on every
+# Update run (see the WEB_PORT/CALLS_UDP_PORT resolution above
+# install_mattermost's mkdir) instead of rescanning while this instance's
+# own container is still up.
+WEB_PORT=$WEB_PORT
+CALLS_UDP_PORT=$CALLS_UDP_PORT
 
 # PostgreSQL
 POSTGRES_DB=mattermost
