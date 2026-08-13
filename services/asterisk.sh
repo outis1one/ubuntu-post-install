@@ -1017,6 +1017,7 @@ _asterisk_offer_dashboard_and_trunk() {
 # the two call sites below for how each decides.
 _asterisk_write_compose() {
     local PROJECT="$1" CONTAINER="$2" COTURN_CONTAINER="$3" USE_EMBEDDED_COTURN="${4:-true}"
+    local COTURN_MIN_PORT_VAL="${5:-49152}" COTURN_MAX_PORT_VAL="${6:-49252}"
 
     local _COTURN_DEPENDS="    depends_on:
       coturn:
@@ -1040,8 +1041,8 @@ _asterisk_write_compose() {
       - --lt-cred-mech
       - --user=\${TURN_USERNAME:-easyasterisk}:\${TURN_PASSWORD}
       - --realm=\${DOMAIN_NAME:-localhost}
-      - --min-port=49152
-      - --max-port=49252
+      - --min-port=${COTURN_MIN_PORT_VAL}
+      - --max-port=${COTURN_MAX_PORT_VAL}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -1296,6 +1297,7 @@ CADDY_BLOCK
 # ── DigitalOcean Cloud Firewall (network edge, in front of the droplet) ────
 _asterisk_configure_do_cloud_firewall() {
     local DROPLET_ID="$1" WEB_ADMIN_PORT_VAL="$2" WEB_ADMIN_PUBLIC="$3"
+    local COTURN_MIN_PORT_VAL="${4:-49152}" COTURN_MAX_PORT_VAL="${5:-49252}"
 
     local DO_FW_RULES=(
         "protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
@@ -1311,7 +1313,7 @@ _asterisk_configure_do_cloud_firewall() {
         "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:${COTURN_MIN_PORT_VAL}-${COTURN_MAX_PORT_VAL},address:0.0.0.0/0,address:::/0"
     )
 
     echo ""
@@ -1362,6 +1364,7 @@ _asterisk_configure_do_cloud_firewall() {
 # wide open proves nothing about a layer in front of it that UFW can't see.
 _asterisk_remind_non_do_firewall() {
     local WEB_ADMIN_PORT_VAL="$1" WEB_ADMIN_PUBLIC_ACCESS_NEEDED="$2" USE_EMBEDDED_COTURN_VAL="${3:-true}"
+    local COTURN_MIN_PORT_VAL="${4:-49152}" COTURN_MAX_PORT_VAL="${5:-49252}"
     echo ""
     log_warning "This box is reachable via FQDN but wasn't set up as a DigitalOcean droplet,"
     log_warning "so no automatic network-edge firewall was configured (that step only exists"
@@ -1379,10 +1382,12 @@ _asterisk_remind_non_do_firewall() {
     echo "    UDP      10000-20000     (RTP media)"
     if [[ "$USE_EMBEDDED_COTURN_VAL" == true ]]; then
         echo "    UDP/TCP  3478             (TURN/STUN)"
-        echo "    UDP      49152-49252     (TURN relay)"
+        echo "    UDP      ${COTURN_MIN_PORT_VAL}-${COTURN_MAX_PORT_VAL}     (TURN relay)"
     else
-        echo "    UDP/TCP  3478 and UDP 49152-49252 too, if the shared coturn instance"
-        echo "    (services/coturn.sh) lives on this same box."
+        echo "    UDP/TCP  3478 too, if the shared coturn instance (services/coturn.sh) lives"
+        echo "    on this same box — its exact TURN relay range is in its own README"
+        echo "    (~/docker/coturn/README.md), not repeated here since it's independently"
+        echo "    configurable and this install doesn't own it."
     fi
 }
 
@@ -1392,6 +1397,7 @@ _asterisk_remind_non_do_firewall() {
 _asterisk_write_readme() {
     local EA_DIR="$1" CONTAINER="$2" IS_DO="$3" DOMAIN_NAME="$4" PUBLIC_IP="$5" WEB_ADMIN_PORT_VAL="$6"
     local USE_EMBEDDED_COTURN="${7:-true}" TURN_USERNAME_VAL="${8:-easyasterisk}" TURN_SERVER_DISPLAY="${9:-}"
+    local COTURN_MIN_PORT_VAL="${10:-49152}" COTURN_MAX_PORT_VAL="${11:-49252}"
     local _host="${DOMAIN_NAME:-${PUBLIC_IP:-<host-ip>}}"
     [ -z "$TURN_SERVER_DISPLAY" ] && TURN_SERVER_DISPLAY="${_host}:3478"
 
@@ -1525,7 +1531,7 @@ docker exec -it ${CONTAINER} easy-asterisk
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
-| 49152–49252   | UDP      | TURN relay media ports           |
+| ${COTURN_MIN_PORT_VAL}–${COTURN_MAX_PORT_VAL}   | UDP      | TURN relay media ports (only if this install runs its own dedicated coturn — see below) |
 
 ## Data directories (all inside ${EA_DIR}/, included in backup)
 
@@ -1937,7 +1943,30 @@ install_asterisk() {
         fi
     fi
 
-    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN"
+    # A dedicated embedded coturn running ALONGSIDE the shared instance on the
+    # same box (this install's own choice above, or Mattermost/anything else
+    # still using the shared one) is exactly the pre-merge collision bug this
+    # repo's coturn history warns about if both claim the same relay ports —
+    # confirmed live, their default ranges used to overlap by ~100 UDP ports.
+    # Read the shared instance's actual configured range (not just its
+    # install-time default, since coturn.sh lets that be customized) and pick
+    # a range that starts safely past its end, so the two can never collide
+    # regardless of what the shared instance was configured with. No shared
+    # instance on this box at all means no collision is possible, so the
+    # historical default is left alone in that case.
+    local EMBEDDED_COTURN_MIN_PORT=49152 EMBEDDED_COTURN_MAX_PORT=49252
+    if [[ "$USE_EMBEDDED_COTURN" == true && -f "$DOCKER_DIR/coturn/.env" ]]; then
+        local _shared_coturn_max_port=""
+        _shared_coturn_max_port="$(grep -E '^COTURN_MAX_PORT=' "$DOCKER_DIR/coturn/.env" 2>/dev/null | cut -d= -f2-)"
+        if [[ "$_shared_coturn_max_port" =~ ^[0-9]+$ ]]; then
+            EMBEDDED_COTURN_MIN_PORT=$((_shared_coturn_max_port + 50))
+            EMBEDDED_COTURN_MAX_PORT=$((EMBEDDED_COTURN_MIN_PORT + 100))
+            log_info "Dedicated coturn relay range shifted to ${EMBEDDED_COTURN_MIN_PORT}-${EMBEDDED_COTURN_MAX_PORT} to stay clear of the shared instance's ${_shared_coturn_max_port}-port ceiling."
+        fi
+    fi
+
+    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN" \
+        "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share
@@ -2048,7 +2077,7 @@ ENV
         if [[ "$USE_EMBEDDED_COTURN" == true ]]; then
             ufw allow 3478/udp
             ufw allow 3478/tcp
-            ufw allow 49152:49252/udp
+            ufw allow "${EMBEDDED_COTURN_MIN_PORT}:${EMBEDDED_COTURN_MAX_PORT}/udp"
         fi
         # Shared coturn opens its own ports once, at its own install time
         # (services/coturn.sh) — nothing to open here when using it.
@@ -2058,9 +2087,11 @@ ENV
 
     # ── Network-edge firewall (in front of the box, not UFW) ──────────────────
     if [[ "$IS_DO" == true ]]; then
-        _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED"
+        _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" \
+            "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
     elif [[ -n "$DOMAIN_NAME" ]]; then
-        _asterisk_remind_non_do_firewall "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" "$USE_EMBEDDED_COTURN"
+        _asterisk_remind_non_do_firewall "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" "$USE_EMBEDDED_COTURN" \
+            "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
     fi
 
     # ── CrowdSec note ──────────────────────────────────────────────────────────
@@ -2086,7 +2117,8 @@ ENV
 
     # ── README ────────────────────────────────────────────────────────────────
     _asterisk_write_readme "$EA_DIR" "$CONTAINER" "$IS_DO" "$DOMAIN_NAME" "$PUBLIC_IP" "$WEB_ADMIN_PORT_VAL" \
-        "$USE_EMBEDDED_COTURN" "$TURN_USERNAME" "$TURN_SERVER_VAL"
+        "$USE_EMBEDDED_COTURN" "$TURN_USERNAME" "$TURN_SERVER_VAL" \
+        "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
 
     # ── Start ─────────────────────────────────────────────────────────────────
     echo ""
