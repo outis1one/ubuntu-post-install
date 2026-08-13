@@ -238,7 +238,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service mattermost utilities "Team messaging with voice/video calls (Mattermost; TURN via the shared coturn service); supports multiple isolated instances" 8065
+register_service mattermost utilities "Team messaging with voice/video calls (Mattermost; own dedicated coturn for TURN); supports multiple isolated instances" 8065
 
 install_mattermost() {
     require_docker || return 1
@@ -251,7 +251,6 @@ install_mattermost() {
     local INSTANCE_SUFFIX="" PROJECT="mattermost"
     local MM_CONTAINER="mattermost" DB_CONTAINER="mattermost-db"
     local WEB_PORT="8065" CALLS_UDP_PORT="8443"
-    local COTURN_CONSUMER="mattermost"
 
     if [ -d "$DIR" ]; then
         echo ""
@@ -280,7 +279,6 @@ install_mattermost() {
             PROJECT="mattermost-$_suffix"
             MM_CONTAINER="mattermost-$_suffix"
             DB_CONTAINER="mattermost-$_suffix-db"
-            COTURN_CONSUMER="mattermost-$_suffix"
             log_info "New instance: $DIR"
         fi
     fi
@@ -305,8 +303,8 @@ install_mattermost() {
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
         echo "[DRY-RUN] Would write .env with DB and Mattermost secrets"
         echo "[DRY-RUN] Would create data/ logs/ config/ plugins/ db/ subdirectories"
-        echo "[DRY-RUN] Would register a TURN user with the shared coturn service for '$COTURN_CONSUMER'"
-        echo "[DRY-RUN]   (falling back to a dedicated coturn if the shared service is unavailable)"
+        echo "[DRY-RUN] Would run this instance's own dedicated coturn container for TURN, with a relay"
+        echo "[DRY-RUN]   port range picked to avoid colliding with any other coturn already on the box"
         echo "[DRY-RUN] Would open UFW ports ${WEB_PORT}/tcp, ${CALLS_UDP_PORT}/udp"
         return 0
     fi
@@ -323,16 +321,11 @@ install_mattermost() {
                 return 0
                 ;;
             fresh)
-                if [ "$_HAD_EMBEDDED_COTURN" = true ]; then
-                    echo ""
-                    log_warning "This install has its own dedicated coturn. Continuing may switch it to"
-                    log_warning "the shared coturn service — the Calls plugin's TURN config in System"
-                    log_warning "Console will need updating to the new credentials afterward (see below)."
-                fi
                 echo ""
                 log_warning "Full reinstall stops the existing containers and re-runs every prompt"
-                log_warning "below from scratch. The TURN credential registered with the shared"
-                log_warning "coturn service is reused as-is — no need to touch coturn for this."
+                log_warning "below from scratch, including generating a fresh dedicated coturn"
+                log_warning "container with new TURN credentials — the Calls plugin's TURN config in"
+                log_warning "System Console will need updating afterward (see below)."
                 local _WIPE_MM_DATA=""
                 prompt_yn "  Also delete stored data (Postgres database, uploaded files, config, plugins)? (y/n):" "n" _WIPE_MM_DATA
 
@@ -408,47 +401,31 @@ networks:
 "
     fi
 
-    # ── TURN: shared coturn preferred, dedicated coturn as fallback ─────────
-    # See services/coturn.sh's header for why one shared TURN server beats
-    # every service (Asterisk, each Mattermost instance, ...) running its
-    # own and fighting over host relay ports.
+    # ── TURN: always this instance's own dedicated coturn ───────────────────
+    # There is no shared coturn service in this repo anymore (see
+    # attic/coturn.sh for why it was retired) — every instance runs its own.
+    # find_free_coturn_range (below) is what makes that safe: it checks
+    # every coturn-owning service's .env on the box and picks a relay range
+    # that can't collide with any of them.
     local USE_EMBEDDED_COTURN=true
     local TURN_HOST_VAL="" TURN_PORT_VAL="" TURN_USERNAME_VAL="" TURN_PASSWORD_VAL=""
-    local FORCE_EMBEDDED_COTURN=""
 
-    # Opt-out of the shared coturn preference, same as services/asterisk.sh —
-    # only offered on a genuinely fresh install (never re-asked on update,
-    # matching every other coturn-shape decision in this file) and only when
-    # a shared instance actually exists to opt out of.
-    if [ "$MODE" = "fresh" ] && [ -d "$DOCKER_DIR/coturn" ]; then
-        local _USE_SHARED_COTURN=""
-        prompt_yn "Use the shared coturn service for TURN? (n = run this instance's own dedicated coturn instead) (y/n):" "y" _USE_SHARED_COTURN
-        [[ "$_USE_SHARED_COTURN" =~ ^[Nn]$ ]] && FORCE_EMBEDDED_COTURN=true
-    fi
-
-    if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" = true ]; then
-        USE_EMBEDDED_COTURN=true   # preserve exactly — never switch on update
-    elif [ "$FORCE_EMBEDDED_COTURN" = true ]; then
-        USE_EMBEDDED_COTURN=true
-        log_info "Running this instance's own dedicated coturn, as requested."
-    else
-        ensure_coturn_user "$COTURN_CONSUMER"
-        if [ -n "${COTURN_HOST:-}" ]; then
-            USE_EMBEDDED_COTURN=false
-            TURN_HOST_VAL="$COTURN_HOST"; TURN_PORT_VAL="$COTURN_PORT"
-            TURN_USERNAME_VAL="$COTURN_USERNAME"; TURN_PASSWORD_VAL="$COTURN_PASSWORD"
-            log_success "Using the shared coturn service — TURN username '$COTURN_USERNAME'."
-        else
-            log_info "Shared coturn unavailable — this instance will run its own dedicated coturn."
-        fi
+    # A pre-existing instance with no embedded coturn block predates this
+    # repo's dedicated-coturn-only model — it's still pointed at a shared
+    # coturn container this repo no longer installs or manages. Leave it
+    # running as-is (update never touches .env anyway) rather than trying
+    # to heal a registration against a service that no longer exists here.
+    if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" != true ]; then
+        USE_EMBEDDED_COTURN=false
+        log_info "This instance still points at a shared coturn service, which this repo no longer installs or manages. It will keep working as long as that coturn container keeps running. Run a full reinstall (not update) to migrate to a dedicated coturn."
     fi
     [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
 
-    # A dedicated coturn here running alongside the shared instance, Asterisk's
-    # own, or a sibling Mattermost instance's own is the same pre-merge relay-
-    # port collision this repo's coturn history warns about (confirmed live:
-    # two independent coturns' default ranges used to overlap by ~100 UDP
-    # ports). find_free_coturn_range (lib/common.sh) checks every coturn-
+    # A dedicated coturn here running alongside Asterisk's own, a sibling
+    # Mattermost instance's own, or a legacy shared instance still running is
+    # the same pre-merge relay-port collision this repo's coturn history
+    # warns about (confirmed live: two independent coturns' default ranges
+    # used to overlap by ~100 UDP ports). find_free_coturn_range (lib/common.sh) checks every coturn-
     # owning service's .env on the box and picks a range starting safely past
     # whatever's already claimed; the historical 49153-49352 default only
     # survives when nothing else on the box claims a range at all.
@@ -593,7 +570,9 @@ EOF
             ufw allow 3479/udp; ufw allow 3479/tcp
             ufw allow "${MM_COTURN_MIN_PORT}:${MM_COTURN_MAX_PORT}/udp" comment "Mattermost coturn relay"
         fi
-        # Shared coturn opens its own ports once, at its own install time.
+        # A legacy instance still on a shared coturn (USE_EMBEDDED_COTURN=false
+        # above) has nothing to open here — that coturn's ports were opened
+        # once, at its own install time, whenever that was.
     fi
 
     echo ""
