@@ -674,7 +674,7 @@ interpolates `${WEB_PORT}` directly. A quoted `<< 'MD'` heredoc doesn't,
 and converting it means escaping *every* backtick used for inline-code
 formatting (`` \`...\` ``) — miss one and bash tries to execute it as a
 command substitution the next time the heredoc is read, the same class of
-bug the coturn.sh backtick incident was (see `services/coturn.sh`'s
+bug the coturn.sh backtick incident was (see `attic/coturn.sh`'s
 `write_readme` call). For a README with only one or two backticks,
 escaping them is fine. For one with many (`services/iopaint.sh`'s model
 reference table), it's safer to leave the heredoc quoted and patch the
@@ -778,63 +778,72 @@ so that hostname resolves; `configure_caddy_for_service`'s bare-port upstream
 case already does this for you — don't hand-roll `localhost:PORT` in a
 Caddy site block.
 
-## Shared coturn (TURN/STUN) relay
+## coturn (TURN/STUN) relay — dedicated per service, not shared
 
-Any service that needs a TURN server for WebRTC/SIP NAT traversal shares
-**one** coturn instance (`services/coturn.sh`) instead of running its own.
-This exists because it didn't always: `asterisk` and `mattermost` used to
-each embed a dedicated coturn container (`network_mode: host`, each with its
-own relay port range) — confirmed live, their default ranges overlapped by
-~100 UDP ports, so running both on one box meant a coin-flip over which
-service's active call lost its media relay. One shared instance with one
-port range removes the collision instead of just moving it around.
+Any service that needs a TURN server for WebRTC/SIP NAT traversal runs its
+**own dedicated** coturn container. There is no shared coturn service to
+install or point at — `services/coturn.sh` was tried and retired; it's
+parked at `attic/coturn.sh` (outside `services/*.sh`'s glob, so it never
+registers or appears in the menu — see `attic/README.md`). Sharing one
+instance saved a container per consumer (~40MB) but was a single point of
+failure every consumer depended on, and needing a dedicated per-consumer
+long-term-credential user added real setup complexity for a small RAM win.
+Don't reintroduce it — give every new WebRTC/SIP-capable service its own
+coturn, following the pattern below.
 
-**Use `ensure_coturn_user` (`lib/common.sh`), not your own coturn container:**
+**The collision this pattern has to avoid:** `asterisk` and `mattermost`
+each embed a dedicated coturn container (`network_mode: host`, each with
+its own relay port range) — confirmed live, two independent coturns'
+default ranges used to overlap by ~100 UDP ports, so running both on one
+box meant a coin-flip over which service's active call lost its media
+relay. Static default ranges alone don't solve this; something has to pick
+non-overlapping ranges per box.
+
+**Use `find_free_coturn_range` (`lib/common.sh`) to size the range, not a
+hardcoded default:**
 
 ```bash
-ensure_coturn_user "my-service"
-if [ -n "$COTURN_HOST" ]; then
-    # Out-params (not `local` — read them after the call returns, same
-    # convention as configure_caddy_for_service's CADDY_SERVICE_*):
-    #   COTURN_HOST COTURN_PORT COTURN_USERNAME COTURN_PASSWORD
-else
-    # coturn unavailable (not installed and services/coturn.sh isn't loaded
-    # to chain-install it — e.g. this file run fully standalone) — degrade
-    # gracefully. Don't block the rest of your install on this.
-fi
+local MY_COTURN_MIN_PORT=49152 MY_COTURN_MAX_PORT=49252
+find_free_coturn_range MY_COTURN_MIN_PORT MY_COTURN_MAX_PORT 100 49152
+[[ "$MY_COTURN_MIN_PORT" != 49152 ]] && \
+    log_info "Dedicated coturn relay range shifted to ${MY_COTURN_MIN_PORT}-${MY_COTURN_MAX_PORT} to stay clear of another coturn already on this box."
 ```
 
-`ensure_coturn_user` chain-installs `services/coturn.sh` the first time
-*any* service needs one (guarded with `declare -F install_coturn`, same
-pattern as the asterisk → security-dashboard chaining below), then
-registers a dedicated long-term-credential username/password for your
-consumer name. The credential is cached in
-`~/docker/coturn/users/<consumer>.env`, so calling this again on a rerun
-reuses the same credential instead of minting a new one and silently
-orphaning whatever client already has the old one configured.
+Unlike a single fixed host port (`find_free_port`'s job — coturn's relay
+range isn't a statically bound listening socket you can detect with a live
+`ss`/socket scan), `find_free_coturn_range` scans every `$DOCKER_DIR/*/.env`
+for a `TURN_MAX_PORT=` line and starts the new range 50 ports past the
+highest one found — so it works across every coturn-owning service on the
+box (Asterisk, each Mattermost instance, yours), regardless of install
+order. Persist the chosen range as `TURN_MIN_PORT=`/`TURN_MAX_PORT=` in your
+own `.env` so later installs' scans see it, and on an `update` rerun read
+those same keys back from the existing `.env` instead of re-scanning — a
+live coturn container must never silently move to a different port range
+(breaks in-flight/repeat sessions on whatever client already has the old
+range's ports allowed through its own firewall/NAT). See
+`services/asterisk.sh`'s and `services/mattermost.sh`'s `EMBEDDED_COTURN_MIN_PORT`/
+`MM_COTURN_MIN_PORT` handling for the reference pattern, including the
+`MODE != "update"` gate that scans only on a fresh install.
 
-**Why long-term credentials (`--lt-cred-mech`), not the REST-API/HMAC mode
-(`--use-auth-secret`) some WebRTC apps default to:** coturn does not support
-running both auth mechanisms on one instance at once — enabling
-`--use-auth-secret` silently overrides `--lt-cred-mech` server-wide, which
-would break every static-credential consumer. `--lt-cred-mech` supports any
-number of named users out of the box, which is the actual shape a
-shared-multi-consumer coturn needs. If the service you're adding only
-exposes an HMAC-secret TURN setting in its own UI (no plain
-username/password option), check its docs for an alternative field first —
-Mattermost's Calls plugin looked HMAC-only at a glance but also accepts a
-fixed username/credential pair via its "ICE Servers Configurations" JSON
-field (see `services/mattermost.sh` for the exact format). Don't fall back
-to a second coturn instance just because the first field you found expects
-a shared secret.
+**Auth mode — long-term credentials (`--lt-cred-mech`) or HMAC
+(`--use-auth-secret`), your choice per instance:** coturn doesn't support
+running both on one instance at once, but since each service now owns its
+instance outright, this is a free per-service choice — no shared-instance
+constraint forcing one mode across every consumer. `services/asterisk.sh`
+uses `--lt-cred-mech` (fixed username/password, simplest to bake into a SIP
+device's config); `services/mattermost.sh` uses `--use-auth-secret` (HMAC),
+matching the Calls plugin's own "TURN Static Auth Secret" field. Check the
+consuming app's own TURN settings UI for which fields it actually exposes
+before picking.
 
-**Migrating an existing service from its own embedded coturn:** don't do it
-silently. An `update` rerun must keep whatever coturn shape a service
-already has — detect the existing embedded container (e.g. `grep -q '^
-coturn:' docker-compose.yml` before regenerating it) and preserve it
-exactly, the same non-destructive rule as every other `update` path in this
-file. Only switch to the shared coturn on an explicit `fresh` reinstall, and
-warn before doing it — the TURN username/password changes, and any
-already-configured client (a SIP phone, a browser session) keeps the old
-credentials until it's reconfigured. See `services/asterisk.sh`'s
-`USE_EMBEDDED_COTURN` handling for the reference pattern.
+**Legacy installs still on the old shared coturn:** an `update` rerun on an
+install that predates this repo's dedicated-coturn-only model (no `coturn:`
+block in its `docker-compose.yml`) must not try to silently migrate or
+"heal" it — there's no shared coturn service left in this repo to heal it
+against. Leave it running exactly as-is (an `update` never touches `.env`
+anyway) and point at a full/fresh reinstall as the migration path, which
+generates a new dedicated coturn container with fresh credentials. See the
+`_HAD_EMBEDDED_COTURN` handling in `services/asterisk.sh` and
+`services/mattermost.sh` for the reference pattern — detect via `grep -q
+'^  coturn:' docker-compose.yml` before regenerating it, same as any other
+non-destructive `update` path in this file.

@@ -1,10 +1,30 @@
 #!/bin/bash
-# services/coturn.sh — Shared TURN/STUN relay (coturn) for WebRTC-capable services.
-# Part of the modular post-install system (sourced by setup.sh).
+# attic/coturn.sh — RETIRED. Formerly services/coturn.sh.
 #
-# Can also be run standalone on any machine:
-#   sudo bash coturn.sh
-# (Docker must already be installed when run standalone)
+# The shared-coturn model this file implements is no longer offered by this
+# repo at all: services/asterisk.sh and services/mattermost.sh each now run
+# their own dedicated coturn unconditionally, with lib/common.sh's
+# find_free_coturn_range() making that safe (it scans every coturn-owning
+# service's own .env on the box for already-claimed relay ranges and picks
+# a block that can't collide with any of them, dedicated or shared). Sharing
+# one instance only ever saved ~40MB RAM per additional consumer beyond the
+# first — real, but small — and it was a single point of failure every
+# consumer depended on. Parked here, not deleted, since the code is still
+# correct and someone could resurrect it if a future need for it shows up;
+# living in attic/ (outside services/*.sh's glob) means it never
+# self-registers, never appears in the menu, and `sudo ./setup.sh coturn`
+# now correctly fails with "unknown service" instead of silently offering
+# a coturn shape nothing else in this repo will register a user against.
+#
+# ── Everything below this point is the file exactly as it ran before
+#    retirement, kept for reference/rollback, not actively maintained. ────────
+#
+# Can still be run standalone on any machine, same as before:
+#   sudo bash attic/coturn.sh
+# (Docker must already be installed when run standalone) — but nothing in
+# this repo will call ensure_coturn_user() to register with it anymore, so
+# doing this only makes sense if you're deliberately reintroducing the
+# shared-coturn pattern yourself.
 #
 # One coturn instance, shared by every service that needs TURN (Asterisk,
 # Mattermost, and anything added later) instead of each service running its
