@@ -123,6 +123,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
         }
 
+        # Standalone-mode copy of lib/common.sh's find_free_coturn_range() —
+        # kept in sync by hand, same as every other helper stubbed in this block.
+        find_free_coturn_range() {
+            local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+            local _highest_max=$((_start - 1)) _f _found
+            for _f in "$DOCKER_DIR"/*/.env; do
+                [ -f "$_f" ] || continue
+                _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+                [[ "$_found" =~ ^[0-9]+$ ]] || continue
+                [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+            done
+            local _min=$_start
+            [ "$_highest_max" -ge "$_start" ] && _min=$((_highest_max + 50))
+            eval "$_min_varname='$_min'"
+            eval "$_max_varname='$((_min + _range_size))'"
+        }
+
         configure_caddy_for_service() {
             local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
             local _caddy_dir="$DOCKER_DIR/caddy"
@@ -1943,26 +1960,21 @@ install_asterisk() {
         fi
     fi
 
-    # A dedicated embedded coturn running ALONGSIDE the shared instance on the
-    # same box (this install's own choice above, or Mattermost/anything else
-    # still using the shared one) is exactly the pre-merge collision bug this
-    # repo's coturn history warns about if both claim the same relay ports —
-    # confirmed live, their default ranges used to overlap by ~100 UDP ports.
-    # Read the shared instance's actual configured range (not just its
-    # install-time default, since coturn.sh lets that be customized) and pick
-    # a range that starts safely past its end, so the two can never collide
-    # regardless of what the shared instance was configured with. No shared
-    # instance on this box at all means no collision is possible, so the
-    # historical default is left alone in that case.
+    # A dedicated embedded coturn running ALONGSIDE any other coturn on the
+    # same box (the shared instance, Asterisk's own on a prior install,
+    # any Mattermost instance's own) is exactly the pre-merge collision bug
+    # this repo's coturn history warns about if two of them claim overlapping
+    # relay ports — confirmed live, two independent coturns' default ranges
+    # used to overlap by ~100 UDP ports. find_free_coturn_range (lib/common.sh)
+    # checks every coturn-owning service's .env on the box, not just the
+    # shared instance's, and picks a range starting safely past whatever's
+    # already claimed. No other coturn on the box at all leaves it at the
+    # historical 49152-49252 default — nothing to collide with yet.
     local EMBEDDED_COTURN_MIN_PORT=49152 EMBEDDED_COTURN_MAX_PORT=49252
-    if [[ "$USE_EMBEDDED_COTURN" == true && -f "$DOCKER_DIR/coturn/.env" ]]; then
-        local _shared_coturn_max_port=""
-        _shared_coturn_max_port="$(grep -E '^COTURN_MAX_PORT=' "$DOCKER_DIR/coturn/.env" 2>/dev/null | cut -d= -f2-)"
-        if [[ "$_shared_coturn_max_port" =~ ^[0-9]+$ ]]; then
-            EMBEDDED_COTURN_MIN_PORT=$((_shared_coturn_max_port + 50))
-            EMBEDDED_COTURN_MAX_PORT=$((EMBEDDED_COTURN_MIN_PORT + 100))
-            log_info "Dedicated coturn relay range shifted to ${EMBEDDED_COTURN_MIN_PORT}-${EMBEDDED_COTURN_MAX_PORT} to stay clear of the shared instance's ${_shared_coturn_max_port}-port ceiling."
-        fi
+    if [[ "$USE_EMBEDDED_COTURN" == true ]]; then
+        find_free_coturn_range EMBEDDED_COTURN_MIN_PORT EMBEDDED_COTURN_MAX_PORT 100 49152
+        [[ "$EMBEDDED_COTURN_MIN_PORT" != 49152 ]] && \
+            log_info "Dedicated coturn relay range shifted to ${EMBEDDED_COTURN_MIN_PORT}-${EMBEDDED_COTURN_MAX_PORT} to stay clear of another coturn already on this box."
     fi
 
     _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN" \
@@ -2011,6 +2023,12 @@ TURN_PASSWORD=${TURN_PASSWORD}
 TURN_PORT=${TURN_PORT_VAL}
 # Empty when there's no publicly resolvable address (LAN-only, no FQDN).
 TURN_SERVER=${TURN_SERVER_VAL}
+# This install's OWN coturn relay range -- only set when USE_EMBEDDED_COTURN
+# is true above. Left blank when using the shared coturn service, so other
+# services' find_free_coturn_range (lib/common.sh) scan correctly skips this
+# file instead of treating a range this install doesn't actually own as claimed.
+TURN_MIN_PORT=$( [[ "$USE_EMBEDDED_COTURN" == true ]] && echo "$EMBEDDED_COTURN_MIN_PORT" )
+TURN_MAX_PORT=$( [[ "$USE_EMBEDDED_COTURN" == true ]] && echo "$EMBEDDED_COTURN_MAX_PORT" )
 
 # ── RTP port range ────────────────────────────────────────────
 RTP_START=10000

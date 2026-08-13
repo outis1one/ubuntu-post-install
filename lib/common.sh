@@ -805,6 +805,41 @@ find_free_port() {
     eval "$_varname='$_port'"
 }
 
+# find_free_coturn_range MIN_VARNAME MAX_VARNAME RANGE_SIZE [START_PORT]
+# A coturn relay port range can't be collision-checked with port_in_use /
+# find_free_port the way a single fixed port can: coturn only opens ports
+# inside min-port..max-port on demand, per active TURN allocation, so an
+# idle range shows up as nothing listening either way — a live socket scan
+# can't tell two coturn CONFIGS apart. The only reliable check is reading
+# what range every other coturn-owning service on the box actually claims,
+# from its own .env (COTURN_MAX_PORT for the shared instance in
+# ~/docker/coturn/.env, TURN_MAX_PORT for every dedicated per-service coturn
+# — Asterisk's own, each Mattermost instance's, etc., each in that service's
+# own .env). Every service directory keeps its .env at the same top-level
+# path, so one glob covers all of them without needing to know which
+# services exist ahead of time.
+#
+# Writes a RANGE_SIZE-wide block starting safely past the highest claimed
+# max-port back into MIN_VARNAME/MAX_VARNAME. No other coturn on the box at
+# all (fresh install, nothing else uses TURN) leaves it at START_PORT — no
+# collision is possible yet, so there's nothing to shift away from.
+find_free_coturn_range() {
+    local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+    local _highest_max=$((_start - 1)) _f _found
+    for _f in "$DOCKER_DIR"/*/.env; do
+        [ -f "$_f" ] || continue
+        _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+        [[ "$_found" =~ ^[0-9]+$ ]] || continue
+        [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+    done
+    local _min=$_start
+    if [ "$_highest_max" -ge "$_start" ]; then
+        _min=$((_highest_max + 50))
+    fi
+    eval "$_min_varname='$_min'"
+    eval "$_max_varname='$((_min + _range_size))'"
+}
+
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
 # Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"]
 # UPSTREAM: container:port for caddy_net routing (e.g. "filebrowser:80"),
