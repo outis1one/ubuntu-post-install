@@ -59,6 +59,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             eval "$_varname='$_port'"
         }
 
+        find_free_coturn_range() {
+            local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+            local _highest_max=$((_start - 1)) _f _found
+            for _f in "$DOCKER_DIR"/*/.env; do
+                [ -f "$_f" ] || continue
+                _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+                [[ "$_found" =~ ^[0-9]+$ ]] || continue
+                [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+            done
+            local _min=$_start
+            [ "$_highest_max" -ge "$_start" ] && _min=$((_highest_max + 50))
+            eval "$_min_varname='$_min'"
+            eval "$_max_varname='$((_min + _range_size))'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -399,9 +414,23 @@ networks:
     # own and fighting over host relay ports.
     local USE_EMBEDDED_COTURN=true
     local TURN_HOST_VAL="" TURN_PORT_VAL="" TURN_USERNAME_VAL="" TURN_PASSWORD_VAL=""
+    local FORCE_EMBEDDED_COTURN=""
+
+    # Opt-out of the shared coturn preference, same as services/asterisk.sh —
+    # only offered on a genuinely fresh install (never re-asked on update,
+    # matching every other coturn-shape decision in this file) and only when
+    # a shared instance actually exists to opt out of.
+    if [ "$MODE" = "fresh" ] && [ -d "$DOCKER_DIR/coturn" ]; then
+        local _USE_SHARED_COTURN=""
+        prompt_yn "Use the shared coturn service for TURN? (n = run this instance's own dedicated coturn instead) (y/n):" "y" _USE_SHARED_COTURN
+        [[ "$_USE_SHARED_COTURN" =~ ^[Nn]$ ]] && FORCE_EMBEDDED_COTURN=true
+    fi
 
     if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" = true ]; then
         USE_EMBEDDED_COTURN=true   # preserve exactly — never switch on update
+    elif [ "$FORCE_EMBEDDED_COTURN" = true ]; then
+        USE_EMBEDDED_COTURN=true
+        log_info "Running this instance's own dedicated coturn, as requested."
     else
         ensure_coturn_user "$COTURN_CONSUMER"
         if [ -n "${COTURN_HOST:-}" ]; then
@@ -414,6 +443,30 @@ networks:
         fi
     fi
     [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
+
+    # A dedicated coturn here running alongside the shared instance, Asterisk's
+    # own, or a sibling Mattermost instance's own is the same pre-merge relay-
+    # port collision this repo's coturn history warns about (confirmed live:
+    # two independent coturns' default ranges used to overlap by ~100 UDP
+    # ports). find_free_coturn_range (lib/common.sh) checks every coturn-
+    # owning service's .env on the box and picks a range starting safely past
+    # whatever's already claimed; the historical 49153-49352 default only
+    # survives when nothing else on the box claims a range at all.
+    local MM_COTURN_MIN_PORT=49153 MM_COTURN_MAX_PORT=49352
+    if [ "$USE_EMBEDDED_COTURN" = true ] && [ "$MODE" != "update" ]; then
+        find_free_coturn_range MM_COTURN_MIN_PORT MM_COTURN_MAX_PORT 200 49153
+        [[ "$MM_COTURN_MIN_PORT" != 49153 ]] && \
+            log_info "Dedicated coturn relay range shifted to ${MM_COTURN_MIN_PORT}-${MM_COTURN_MAX_PORT} to stay clear of another coturn already on this box."
+    elif [ "$MODE" = "update" ] && [ -f "$DIR/.env" ]; then
+        # Preserve whatever range this instance was already using — an update
+        # must never silently move it (a live coturn container restarting on
+        # a different port range would break in-flight/repeat Calls sessions).
+        local _existing_min _existing_max
+        _existing_min="$(grep -E '^TURN_MIN_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        _existing_max="$(grep -E '^TURN_MAX_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [[ "$_existing_min" =~ ^[0-9]+$ ]] && MM_COTURN_MIN_PORT="$_existing_min"
+        [[ "$_existing_max" =~ ^[0-9]+$ ]] && MM_COTURN_MAX_PORT="$_existing_max"
+    fi
 
     local _COTURN_SERVICE=""
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
@@ -431,8 +484,8 @@ networks:
       - --use-auth-secret
       - --static-auth-secret=\${COTURN_SECRET}
       - --realm=\${MM_REALM:-localhost}
-      - --min-port=49153
-      - --max-port=49352
+      - --min-port=${MM_COTURN_MIN_PORT}
+      - --max-port=${MM_COTURN_MAX_PORT}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -509,6 +562,12 @@ TURN_HOST=$TURN_HOST_VAL
 TURN_PORT=$TURN_PORT_VAL
 TURN_USERNAME=$TURN_USERNAME_VAL
 TURN_PASSWORD=$TURN_PASSWORD_VAL
+# This instance's OWN coturn relay range -- only set when it runs a dedicated
+# coturn above. Left blank when using the shared coturn service, so other
+# services' find_free_coturn_range (lib/common.sh) scan correctly skips this
+# file instead of treating a range this instance doesn't actually own as claimed.
+TURN_MIN_PORT=$( [ "$USE_EMBEDDED_COTURN" = true ] && echo "$MM_COTURN_MIN_PORT" )
+TURN_MAX_PORT=$( [ "$USE_EMBEDDED_COTURN" = true ] && echo "$MM_COTURN_MAX_PORT" )
 EOF
     chmod 600 .env
 
@@ -532,7 +591,7 @@ EOF
         ufw allow "${CALLS_UDP_PORT}/udp" comment "Mattermost Calls RTC${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         if [ "$USE_EMBEDDED_COTURN" = true ]; then
             ufw allow 3479/udp; ufw allow 3479/tcp
-            ufw allow 49153:49352/udp comment "Mattermost coturn relay"
+            ufw allow "${MM_COTURN_MIN_PORT}:${MM_COTURN_MAX_PORT}/udp" comment "Mattermost coturn relay"
         fi
         # Shared coturn opens its own ports once, at its own install time.
     fi

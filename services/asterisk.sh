@@ -123,6 +123,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             log_success "Swapfile enabled (${SWAP_MB}MB, swappiness=10, persists across reboots)."
         }
 
+        # Standalone-mode copy of lib/common.sh's find_free_coturn_range() —
+        # kept in sync by hand, same as every other helper stubbed in this block.
+        find_free_coturn_range() {
+            local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+            local _highest_max=$((_start - 1)) _f _found
+            for _f in "$DOCKER_DIR"/*/.env; do
+                [ -f "$_f" ] || continue
+                _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+                [[ "$_found" =~ ^[0-9]+$ ]] || continue
+                [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+            done
+            local _min=$_start
+            [ "$_highest_max" -ge "$_start" ] && _min=$((_highest_max + 50))
+            eval "$_min_varname='$_min'"
+            eval "$_max_varname='$((_min + _range_size))'"
+        }
+
         configure_caddy_for_service() {
             local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
             local _caddy_dir="$DOCKER_DIR/caddy"
@@ -1017,6 +1034,7 @@ _asterisk_offer_dashboard_and_trunk() {
 # the two call sites below for how each decides.
 _asterisk_write_compose() {
     local PROJECT="$1" CONTAINER="$2" COTURN_CONTAINER="$3" USE_EMBEDDED_COTURN="${4:-true}"
+    local COTURN_MIN_PORT_VAL="${5:-49152}" COTURN_MAX_PORT_VAL="${6:-49252}"
 
     local _COTURN_DEPENDS="    depends_on:
       coturn:
@@ -1040,8 +1058,8 @@ _asterisk_write_compose() {
       - --lt-cred-mech
       - --user=\${TURN_USERNAME:-easyasterisk}:\${TURN_PASSWORD}
       - --realm=\${DOMAIN_NAME:-localhost}
-      - --min-port=49152
-      - --max-port=49252
+      - --min-port=${COTURN_MIN_PORT_VAL}
+      - --max-port=${COTURN_MAX_PORT_VAL}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -1296,6 +1314,7 @@ CADDY_BLOCK
 # ── DigitalOcean Cloud Firewall (network edge, in front of the droplet) ────
 _asterisk_configure_do_cloud_firewall() {
     local DROPLET_ID="$1" WEB_ADMIN_PORT_VAL="$2" WEB_ADMIN_PUBLIC="$3"
+    local COTURN_MIN_PORT_VAL="${4:-49152}" COTURN_MAX_PORT_VAL="${5:-49252}"
 
     local DO_FW_RULES=(
         "protocol:tcp,ports:22,address:0.0.0.0/0,address:::/0"
@@ -1311,7 +1330,7 @@ _asterisk_configure_do_cloud_firewall() {
         "protocol:tcp,ports:3478,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:3478,address:0.0.0.0/0,address:::/0"
         "protocol:udp,ports:10000-20000,address:0.0.0.0/0,address:::/0"
-        "protocol:udp,ports:49152-49252,address:0.0.0.0/0,address:::/0"
+        "protocol:udp,ports:${COTURN_MIN_PORT_VAL}-${COTURN_MAX_PORT_VAL},address:0.0.0.0/0,address:::/0"
     )
 
     echo ""
@@ -1362,6 +1381,7 @@ _asterisk_configure_do_cloud_firewall() {
 # wide open proves nothing about a layer in front of it that UFW can't see.
 _asterisk_remind_non_do_firewall() {
     local WEB_ADMIN_PORT_VAL="$1" WEB_ADMIN_PUBLIC_ACCESS_NEEDED="$2" USE_EMBEDDED_COTURN_VAL="${3:-true}"
+    local COTURN_MIN_PORT_VAL="${4:-49152}" COTURN_MAX_PORT_VAL="${5:-49252}"
     echo ""
     log_warning "This box is reachable via FQDN but wasn't set up as a DigitalOcean droplet,"
     log_warning "so no automatic network-edge firewall was configured (that step only exists"
@@ -1379,10 +1399,12 @@ _asterisk_remind_non_do_firewall() {
     echo "    UDP      10000-20000     (RTP media)"
     if [[ "$USE_EMBEDDED_COTURN_VAL" == true ]]; then
         echo "    UDP/TCP  3478             (TURN/STUN)"
-        echo "    UDP      49152-49252     (TURN relay)"
+        echo "    UDP      ${COTURN_MIN_PORT_VAL}-${COTURN_MAX_PORT_VAL}     (TURN relay)"
     else
-        echo "    UDP/TCP  3478 and UDP 49152-49252 too, if the shared coturn instance"
-        echo "    (services/coturn.sh) lives on this same box."
+        echo "    UDP/TCP  3478 too, if the shared coturn instance (services/coturn.sh) lives"
+        echo "    on this same box — its exact TURN relay range is in its own README"
+        echo "    (~/docker/coturn/README.md), not repeated here since it's independently"
+        echo "    configurable and this install doesn't own it."
     fi
 }
 
@@ -1392,6 +1414,7 @@ _asterisk_remind_non_do_firewall() {
 _asterisk_write_readme() {
     local EA_DIR="$1" CONTAINER="$2" IS_DO="$3" DOMAIN_NAME="$4" PUBLIC_IP="$5" WEB_ADMIN_PORT_VAL="$6"
     local USE_EMBEDDED_COTURN="${7:-true}" TURN_USERNAME_VAL="${8:-easyasterisk}" TURN_SERVER_DISPLAY="${9:-}"
+    local COTURN_MIN_PORT_VAL="${10:-49152}" COTURN_MAX_PORT_VAL="${11:-49252}"
     local _host="${DOMAIN_NAME:-${PUBLIC_IP:-<host-ip>}}"
     [ -z "$TURN_SERVER_DISPLAY" ] && TURN_SERVER_DISPLAY="${_host}:3478"
 
@@ -1525,7 +1548,7 @@ docker exec -it ${CONTAINER} easy-asterisk
 | 8088/8089     | TCP      | Asterisk HTTP/WS (ARI/AMI)       |
 | 3478          | UDP/TCP  | TURN/STUN (coturn)               |
 | 10000–20000   | UDP      | RTP media streams                |
-| 49152–49252   | UDP      | TURN relay media ports           |
+| ${COTURN_MIN_PORT_VAL}–${COTURN_MAX_PORT_VAL}   | UDP      | TURN relay media ports (only if this install runs its own dedicated coturn — see below) |
 
 ## Data directories (all inside ${EA_DIR}/, included in backup)
 
@@ -1885,6 +1908,7 @@ install_asterisk() {
     # end up with no TURN at all just because the shared path had a problem.
     local USE_EMBEDDED_COTURN=true
     local TURN_USERNAME TURN_PASSWORD TURN_PORT_VAL TURN_SERVER_VAL
+    local FORCE_EMBEDDED_COTURN=""
 
     # Only reachable here via an explicit "fresh" choice above — "update"
     # is handled separately and always preserves whatever coturn shape
@@ -1897,8 +1921,19 @@ install_asterisk() {
         log_warning "need updating once this completes."
     fi
 
-    ensure_coturn_user "asterisk"
-    if [[ -n "${COTURN_HOST:-}" ]]; then
+    # Opt-out of the shared coturn preference below, for the rare case where
+    # you specifically want Asterisk isolated on its own TURN relay again
+    # (e.g. reproducing an older install's exact shape to rule out anything
+    # coturn-sharing-specific during troubleshooting). Only offered when a
+    # shared instance actually exists — no meaningful choice otherwise.
+    if [[ -d "$DOCKER_DIR/coturn" ]]; then
+        local _USE_SHARED_COTURN=""
+        prompt_yn "Use the shared coturn service for TURN? (n = run Asterisk's own dedicated coturn instead) (y/n):" "y" _USE_SHARED_COTURN
+        [[ "$_USE_SHARED_COTURN" =~ ^[Nn]$ ]] && FORCE_EMBEDDED_COTURN=true
+    fi
+
+    [[ "$FORCE_EMBEDDED_COTURN" != true ]] && ensure_coturn_user "asterisk"
+    if [[ "$FORCE_EMBEDDED_COTURN" != true && -n "${COTURN_HOST:-}" ]]; then
         USE_EMBEDDED_COTURN=false
         TURN_USERNAME="$COTURN_USERNAME"
         TURN_PASSWORD="$COTURN_PASSWORD"
@@ -1918,10 +1953,32 @@ install_asterisk() {
         elif [[ -n "$DOMAIN_NAME" ]]; then
             TURN_SERVER_VAL="${DOMAIN_NAME}:3478"
         fi
-        log_info "Shared coturn unavailable — Asterisk will run its own dedicated coturn."
+        if [[ "$FORCE_EMBEDDED_COTURN" == true ]]; then
+            log_info "Running Asterisk's own dedicated coturn, as requested."
+        else
+            log_info "Shared coturn unavailable — Asterisk will run its own dedicated coturn."
+        fi
     fi
 
-    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN"
+    # A dedicated embedded coturn running ALONGSIDE any other coturn on the
+    # same box (the shared instance, Asterisk's own on a prior install,
+    # any Mattermost instance's own) is exactly the pre-merge collision bug
+    # this repo's coturn history warns about if two of them claim overlapping
+    # relay ports — confirmed live, two independent coturns' default ranges
+    # used to overlap by ~100 UDP ports. find_free_coturn_range (lib/common.sh)
+    # checks every coturn-owning service's .env on the box, not just the
+    # shared instance's, and picks a range starting safely past whatever's
+    # already claimed. No other coturn on the box at all leaves it at the
+    # historical 49152-49252 default — nothing to collide with yet.
+    local EMBEDDED_COTURN_MIN_PORT=49152 EMBEDDED_COTURN_MAX_PORT=49252
+    if [[ "$USE_EMBEDDED_COTURN" == true ]]; then
+        find_free_coturn_range EMBEDDED_COTURN_MIN_PORT EMBEDDED_COTURN_MAX_PORT 100 49152
+        [[ "$EMBEDDED_COTURN_MIN_PORT" != 49152 ]] && \
+            log_info "Dedicated coturn relay range shifted to ${EMBEDDED_COTURN_MIN_PORT}-${EMBEDDED_COTURN_MAX_PORT} to stay clear of another coturn already on this box."
+    fi
+
+    _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$USE_EMBEDDED_COTURN" \
+        "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
 
     # ── Pick a free port for the web admin ─────────────────────────────────────
     # Hardcoding a single number gets fragile fast once several services share
@@ -1966,6 +2023,12 @@ TURN_PASSWORD=${TURN_PASSWORD}
 TURN_PORT=${TURN_PORT_VAL}
 # Empty when there's no publicly resolvable address (LAN-only, no FQDN).
 TURN_SERVER=${TURN_SERVER_VAL}
+# This install's OWN coturn relay range -- only set when USE_EMBEDDED_COTURN
+# is true above. Left blank when using the shared coturn service, so other
+# services' find_free_coturn_range (lib/common.sh) scan correctly skips this
+# file instead of treating a range this install doesn't actually own as claimed.
+TURN_MIN_PORT=$( [[ "$USE_EMBEDDED_COTURN" == true ]] && echo "$EMBEDDED_COTURN_MIN_PORT" )
+TURN_MAX_PORT=$( [[ "$USE_EMBEDDED_COTURN" == true ]] && echo "$EMBEDDED_COTURN_MAX_PORT" )
 
 # ── RTP port range ────────────────────────────────────────────
 RTP_START=10000
@@ -2032,7 +2095,7 @@ ENV
         if [[ "$USE_EMBEDDED_COTURN" == true ]]; then
             ufw allow 3478/udp
             ufw allow 3478/tcp
-            ufw allow 49152:49252/udp
+            ufw allow "${EMBEDDED_COTURN_MIN_PORT}:${EMBEDDED_COTURN_MAX_PORT}/udp"
         fi
         # Shared coturn opens its own ports once, at its own install time
         # (services/coturn.sh) — nothing to open here when using it.
@@ -2042,9 +2105,11 @@ ENV
 
     # ── Network-edge firewall (in front of the box, not UFW) ──────────────────
     if [[ "$IS_DO" == true ]]; then
-        _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED"
+        _asterisk_configure_do_cloud_firewall "$DROPLET_ID" "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" \
+            "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
     elif [[ -n "$DOMAIN_NAME" ]]; then
-        _asterisk_remind_non_do_firewall "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" "$USE_EMBEDDED_COTURN"
+        _asterisk_remind_non_do_firewall "$WEB_ADMIN_PORT_VAL" "$WEB_ADMIN_PUBLIC_ACCESS_NEEDED" "$USE_EMBEDDED_COTURN" \
+            "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
     fi
 
     # ── CrowdSec note ──────────────────────────────────────────────────────────
@@ -2070,7 +2135,8 @@ ENV
 
     # ── README ────────────────────────────────────────────────────────────────
     _asterisk_write_readme "$EA_DIR" "$CONTAINER" "$IS_DO" "$DOMAIN_NAME" "$PUBLIC_IP" "$WEB_ADMIN_PORT_VAL" \
-        "$USE_EMBEDDED_COTURN" "$TURN_USERNAME" "$TURN_SERVER_VAL"
+        "$USE_EMBEDDED_COTURN" "$TURN_USERNAME" "$TURN_SERVER_VAL" \
+        "$EMBEDDED_COTURN_MIN_PORT" "$EMBEDDED_COTURN_MAX_PORT"
 
     # ── Start ─────────────────────────────────────────────────────────────────
     echo ""
