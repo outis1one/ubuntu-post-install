@@ -770,11 +770,25 @@ install_backup() {
     prompt_yn "  Add a direct SFTP mirror to another box$( [ -n "$_sftp_default_host" ] && echo " (e.g. $_sftp_default_host, same as the DR-spare above)")? (y/n):" "n" _ADD_SFTP_MIRROR
     if [[ "$_ADD_SFTP_MIRROR" =~ ^[Yy]$ ]]; then
         local _SFTP_DEST=""
-        prompt_text "  SSH destination, user@host:" "$_sftp_default_host" _SFTP_DEST
+        prompt_text "  SSH destination, user@host (~/.ssh/config aliases work too):" "$_sftp_default_host" _SFTP_DEST
         if [ -z "$_SFTP_DEST" ]; then
             log_warning "  No destination entered — skipping this mirror."
         else
-            local _SFTP_USER="${_SFTP_DEST%%@*}" _SFTP_HOSTNAME="${_SFTP_DEST#*@}"
+            # Resolve through `ssh -G` rather than a plain @-split, so an
+            # ~/.ssh/config alias (e.g. from wg-easy's sync-ssh-aliases.sh)
+            # works here too. Kopia's sync-to sftp has its own SFTP client
+            # and does not read ~/.ssh/config itself — --host has to be the
+            # real hostname/IP either way, so this resolves it once here
+            # instead of failing later with the alias name as a literal,
+            # unresolvable hostname. Falls back to the plain @-split if
+            # `ssh -G` can't resolve it (e.g. no matching Host block).
+            local _ssh_g _SFTP_USER _SFTP_HOSTNAME
+            _ssh_g="$(ssh -G "$_SFTP_DEST" 2>/dev/null)"
+            _SFTP_USER="$(echo "$_ssh_g" | awk '/^user /{print $2; exit}')"
+            _SFTP_HOSTNAME="$(echo "$_ssh_g" | awk '/^hostname /{print $2; exit}')"
+            [ -z "$_SFTP_USER" ] && _SFTP_USER="${_SFTP_DEST%%@*}"
+            [ -z "$_SFTP_HOSTNAME" ] && _SFTP_HOSTNAME="${_SFTP_DEST#*@}"
+            log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME} for this mirror (resolved via ~/.ssh/config)."
             local _SFTP_PATH="" _MIRROR_NAME=""
             prompt_text "  Remote path for the repo:" "~/backups/kopia-mirror" _SFTP_PATH
             _SFTP_PATH="${_SFTP_PATH:-~/backups/kopia-mirror}"
