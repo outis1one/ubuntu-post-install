@@ -499,19 +499,55 @@ install_backup() {
 
             # If the spare isn't reachable at all (behind NAT, no port-forward —
             # a home box is the common case), a passwordless key won't help
-            # until there's a network path there in the first place. Offer the
-            # VPN hub right here instead of just telling the user to go set
-            # one up separately and come back.
-            if [ ! -d "$DOCKER_DIR/wg-easy" ]; then
-                local _SETUP_VPN=""
-                prompt_yn "  Spare box not directly reachable (behind NAT, no port-forward)? Set up a WireGuard VPN hub (wg-easy) now so they can reach each other? (y/n):" "n" _SETUP_VPN
-                if [[ "$_SETUP_VPN" =~ ^[Yy]$ ]]; then
-                    if declare -F install_wg-easy >/dev/null 2>&1; then
-                        install_wg-easy
-                    else
-                        log_warning "  services/wg-easy.sh isn't loaded — run: sudo ./setup.sh wg-easy"
-                    fi
-                fi
+            # until there's a network path there in the first place. Check
+            # for an already-running mesh VPN first — wg-easy (this repo's
+            # own), Netbird, or Tailscale are all common, and if the
+            # operator already has any ONE of them running, pushing them
+            # toward installing a second, redundant mesh would be actively
+            # wrong. Only offer a choice when none of the three are present.
+            local _VPN_DETECTED=""
+            if [ -d "$DOCKER_DIR/wg-easy" ]; then
+                _VPN_DETECTED="wg-easy"
+            elif command -v netbird >/dev/null 2>&1 && systemctl is-active --quiet netbird 2>/dev/null; then
+                _VPN_DETECTED="Netbird"
+            elif command -v tailscale >/dev/null 2>&1 && systemctl is-active --quiet tailscaled 2>/dev/null; then
+                _VPN_DETECTED="Tailscale"
+            fi
+
+            if [ -n "$_VPN_DETECTED" ]; then
+                log_info "  Detected $_VPN_DETECTED already running — use its address for the spare box"
+                log_info "  destination above instead of the public one, if you haven't already."
+            else
+                echo ""
+                echo "    1) wg-easy — this repo's own guided WireGuard hub (chain-installs now)"
+                echo "    2) Netbird — official installer (needs a setup key from your Netbird"
+                echo "       account/self-hosted server — https://docs.netbird.io)"
+                echo "    3) Tailscale — official installer (opens an auth link to your account —"
+                echo "       https://tailscale.com)"
+                echo "    4) Skip"
+                echo ""
+                local _VPN_CHOICE=""
+                prompt_text "  Spare box not directly reachable? Set up a VPN mesh now [4]:" "4" _VPN_CHOICE
+                case "${_VPN_CHOICE:-4}" in
+                    1)
+                        if declare -F install_wg-easy >/dev/null 2>&1; then
+                            install_wg-easy
+                        else
+                            log_warning "  services/wg-easy.sh isn't loaded — run: sudo ./setup.sh wg-easy"
+                        fi
+                        ;;
+                    2)
+                        curl -fsSL https://pkgs.netbird.io/install.sh | sh \
+                            && log_success "  Netbird installed — finish setup with: netbird up --setup-key <YOUR_SETUP_KEY>" \
+                            || log_warning "  Netbird install failed — see https://docs.netbird.io/get-started/install/linux"
+                        ;;
+                    3)
+                        curl -fsSL https://tailscale.com/install.sh | sh \
+                            && log_success "  Tailscale installed — finish setup with: tailscale up" \
+                            || log_warning "  Tailscale install failed — see https://tailscale.com/docs/install/linux"
+                        ;;
+                    *) : ;;
+                esac
             fi
 
             local _HAVE_KEY=false
