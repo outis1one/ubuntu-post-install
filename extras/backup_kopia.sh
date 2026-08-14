@@ -59,9 +59,19 @@ categorize_error() {
 # go look at. This makes that claim true: the raw text now lands in the
 # same log stream (journal, when run via the systemd timer) as everything
 # else, surviving past the run that produced it.
+#
+# Takes the already-read error TEXT, not the file path. A live run showed
+# categorize_error() correctly matching a specific pattern (so $_ERR had
+# real content at that point) while a second, later read of the same file
+# for this function came back completely empty — every failure that night
+# logged its categorized reason but zero "Raw error:" lines. Whatever causes
+# that (the file is reused across the whole script run and read twice per
+# failure), reading it once and passing the string to both this function and
+# categorize_error() removes the second read entirely, so there's nothing
+# left to race.
 log_raw_error() {
-    local errfile="$1" raw
-    raw="$(tr '\n' ' ' < "$errfile" | head -c 500)"
+    local raw
+    raw="$(printf '%s' "$1" | tr '\n' ' ' | head -c 500)"
     [ -n "$raw" ] && log "  Raw error: $raw"
 }
 
@@ -137,9 +147,10 @@ for svc_dir in "$DOCKER_DIR"/*/; do
             log "OK $svc (Minecraft, no downtime)"
             BACKUP_COUNT=$((BACKUP_COUNT+1))
         else
-            _reason="$(categorize_error "$(cat "$_ERR")")"
+            _err_text="$(cat "$_ERR" 2>/dev/null)"
+            _reason="$(categorize_error "$_err_text")"
             log "WARNING: snapshot failed for $svc — $_reason"
-            log_raw_error "$_ERR"
+            log_raw_error "$_err_text"
             FAILED_SVCS+=("$svc: $_reason")
             rc=1
         fi
@@ -158,9 +169,10 @@ for svc_dir in "$DOCKER_DIR"/*/; do
             log "OK $svc"
             BACKUP_COUNT=$((BACKUP_COUNT+1))
         else
-            _reason="$(categorize_error "$(cat "$_ERR")")"
+            _err_text="$(cat "$_ERR" 2>/dev/null)"
+            _reason="$(categorize_error "$_err_text")"
             log "WARNING: snapshot failed for $svc — $_reason"
-            log_raw_error "$_ERR"
+            log_raw_error "$_err_text"
             FAILED_SVCS+=("$svc: $_reason")
             rc=1
         fi
@@ -178,9 +190,10 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
         log "Mirroring '$dest' offsite ($REMOTE_TYPE)..."
         # shellcheck disable=SC2086
         if ! kp_for "$dest" repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS 2>"$_ERR"; then
-            _reason="$(categorize_error "$(cat "$_ERR")")"
+            _err_text="$(cat "$_ERR" 2>/dev/null)"
+            _reason="$(categorize_error "$_err_text")"
             log "WARNING: mirror failed for '$dest' — $_reason"
-            log_raw_error "$_ERR"
+            log_raw_error "$_err_text"
             FAILED_SVCS+=("mirror[$dest]: $_reason")
             rc=1
         fi
@@ -200,9 +213,10 @@ for mirror_name in ${EXTRA_MIRROR_NAMES:-}; do
         log "Mirroring '$dest' to '$mirror_name' ($_mtype)..."
         # shellcheck disable=SC2086
         if ! kp_for "$dest" repository sync-to "$_mtype" $_margs 2>"$_ERR"; then
-            _reason="$(categorize_error "$(cat "$_ERR")")"
+            _err_text="$(cat "$_ERR" 2>/dev/null)"
+            _reason="$(categorize_error "$_err_text")"
             log "WARNING: mirror '$mirror_name' failed for '$dest' — $_reason"
-            log_raw_error "$_ERR"
+            log_raw_error "$_err_text"
             FAILED_SVCS+=("mirror[$mirror_name/$dest]: $_reason")
             rc=1
         fi
@@ -220,14 +234,21 @@ if [ -n "${DR_SYNC_HOST:-}" ]; then
     log "Syncing backup.conf + README to spare ($DR_SYNC_HOST:$_dr_path)..."
     _dr_files=("$CONF")
     [ -f "$HERE/README.md" ] && _dr_files+=("$HERE/README.md")
+    # rsync instead of scp: modern OpenSSH (9.0+) defaults scp to an
+    # SFTP-based transfer, and some remote-side setups (restricted shells,
+    # forced commands, older sshd) reject that with an immediate "Connection
+    # closed" while plain ssh exec and rsync's own protocol both still work
+    # fine over the same connection. Confirmed live: scp failing this way
+    # while `ssh "$DR_SYNC_HOST" true` succeeded, rsync doesn't hit it.
     if ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "mkdir -p '$_dr_path'" 2>"$_ERR" \
-        && scp -o BatchMode=yes -o ConnectTimeout=10 "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
+        && rsync -a -e 'ssh -o BatchMode=yes -o ConnectTimeout=10' "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
         && ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "chmod 600 '$_dr_path/backup.conf'" 2>>"$_ERR"; then
         log "OK spare sync ($DR_SYNC_HOST)"
     else
-        _reason="$(categorize_error "$(cat "$_ERR")")"
+        _err_text="$(cat "$_ERR" 2>/dev/null)"
+        _reason="$(categorize_error "$_err_text")"
         log "WARNING: spare sync failed — $_reason"
-        log_raw_error "$_ERR"
+        log_raw_error "$_err_text"
         FAILED_SVCS+=("spare-sync: $_reason")
         rc=1
     fi
