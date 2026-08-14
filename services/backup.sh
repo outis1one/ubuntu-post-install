@@ -397,11 +397,26 @@ install_backup() {
     fi
 
     # ── 5. Passwords ─────────────────────────────────────────────────────────
+    # A destination's password is read back from an existing backup.conf
+    # (if this destination name was already configured) rather than
+    # re-prompted every run — this script has no update/fresh distinction,
+    # so re-running it (e.g. to add a destination, or just re-running it
+    # by habit) used to always mint a fresh/auto-generated password even
+    # for an already-existing repo. Confirmed live: that fresh password
+    # then fails to open the real repo at that path with "invalid
+    # repository password" — the repo's actual password was whatever got
+    # typed/generated the FIRST time, permanently, and nothing here ever
+    # read that back.
     echo ""
     log_info "Setting repository passwords (stored in backup.conf, chmod 600)..."
     for dn in "${DEST_NAMES_ARR[@]}"; do
         local pw=""
-        if [ "$UNATTENDED" = true ]; then
+        if [ -f "$CONF_FILE" ]; then
+            pw="$(grep "^DEST_${dn}_PASSWORD=" "$CONF_FILE" 2>/dev/null | sed -E "s/^DEST_${dn}_PASSWORD='(.*)'$/\1/")"
+        fi
+        if [ -n "$pw" ]; then
+            log_info "  Reusing existing password for '$dn' (from $CONF_FILE)."
+        elif [ "$UNATTENDED" = true ]; then
             pw="$(generate_password 32)"
         else
             read -rsp "  Password for '$dn' [Enter = auto-generate]: " pw; echo
