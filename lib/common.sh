@@ -1031,6 +1031,21 @@ ensure_coturn_user() {
     local _consumer="$1"
     COTURN_HOST="" COTURN_PORT="" COTURN_USERNAME="" COTURN_PASSWORD=""
 
+    # An operator can permanently retire shared coturn (e.g. deciding every
+    # consumer should run its own dedicated instance instead) by creating
+    # this flag file. Without checking it here first, retiring shared coturn
+    # by just deleting $DOCKER_DIR/coturn wouldn't actually stick — the very
+    # next service that calls this function (a Mattermost reinstall, a fresh
+    # Asterisk install, ...) would silently reinstall it right back, since
+    # the only signal this function otherwise has is "does the directory
+    # exist yet", which looks identical to "never installed" and "removed on
+    # purpose". touch/rm $DOCKER_DIR/.coturn-retired to toggle this.
+    if [ -f "$DOCKER_DIR/.coturn-retired" ]; then
+        log_info "Shared coturn is retired on this box ($DOCKER_DIR/.coturn-retired exists) —"
+        log_info "$_consumer will run its own dedicated coturn instead."
+        return 1
+    fi
+
     if [ ! -d "$DOCKER_DIR/coturn" ]; then
         if declare -F install_coturn >/dev/null 2>&1; then
             log_info "No shared coturn (TURN/STUN) server yet — setting one up for $_consumer..."
