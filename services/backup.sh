@@ -563,9 +563,13 @@ install_backup() {
     echo "  up first if you haven't (ssh-keygen, then ssh-copy-id to the spare)."
     echo ""
     local DR_SYNC_HOST="" DR_SYNC_PATH=""
-    prompt_text "  Spare box SSH destination, user@host (blank to skip):" "" DR_SYNC_HOST
+    if [ -f "$CONF_FILE" ]; then
+        DR_SYNC_HOST="$(grep '^DR_SYNC_HOST=' "$CONF_FILE" 2>/dev/null | sed -E "s/^DR_SYNC_HOST='(.*)'\$/\1/")"
+        DR_SYNC_PATH="$(grep '^DR_SYNC_PATH=' "$CONF_FILE" 2>/dev/null | sed -E "s/^DR_SYNC_PATH='(.*)'\$/\1/")"
+    fi
+    prompt_text "  Spare box SSH destination, user@host (blank to skip):" "$DR_SYNC_HOST" DR_SYNC_HOST
     if [ -n "$DR_SYNC_HOST" ]; then
-        prompt_text "  Path for backup.conf/README on the spare:" "~/docker/backup" DR_SYNC_PATH
+        prompt_text "  Path for backup.conf/README on the spare:" "${DR_SYNC_PATH:-~/docker/backup}" DR_SYNC_PATH
         DR_SYNC_PATH="${DR_SYNC_PATH:-~/docker/backup}"
 
         # Catch a missing/unauthorized key now, not at 2am during the first
