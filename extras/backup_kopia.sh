@@ -170,6 +170,27 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
     done
 fi
 
+# Additional mirrors (EXTRA_MIRROR_NAMES) — run alongside REMOTE_TYPE above,
+# not instead of it, so a box can mirror to e.g. Backblaze B2 AND directly
+# to a spare over SSH/SFTP at the same time.
+for mirror_name in ${EXTRA_MIRROR_NAMES:-}; do
+    _mtype_var="MIRROR_${mirror_name}_TYPE"
+    _margs_var="MIRROR_${mirror_name}_ARGS"
+    _mtype="${!_mtype_var:-}"
+    _margs="${!_margs_var:-}"
+    [ -n "$_mtype" ] || continue
+    for dest in ${DEST_NAMES:-default}; do
+        log "Mirroring '$dest' to '$mirror_name' ($_mtype)..."
+        # shellcheck disable=SC2086
+        if ! kp_for "$dest" repository sync-to "$_mtype" $_margs 2>"$_ERR"; then
+            _reason="$(categorize_error "$(cat "$_ERR")")"
+            log "WARNING: mirror '$mirror_name' failed for '$dest' — $_reason"
+            FAILED_SVCS+=("mirror[$mirror_name/$dest]: $_reason")
+            rc=1
+        fi
+    done
+done
+
 # ── Keep a spare box's copy of backup.conf + README current ─────────────────
 # Runs after the data itself is backed up (and mirrored, if configured) so a
 # sync never ships config pointing at a repo state that isn't actually there

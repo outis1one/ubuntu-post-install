@@ -732,6 +732,113 @@ install_backup() {
         fi
     fi
 
+    # ── 7c. Additional mirror — direct SFTP to another box (optional) ────────
+    # REMOTE_TYPE/REMOTE_ARGS above is ONE offsite mirror. This adds any
+    # number of FURTHER ones that all run after every backup too — e.g.
+    # Backblaze B2 AND a spare box reachable over Tailscale/wg-easy/Netbird,
+    # simultaneously, not one instead of the other. Stored as its own list
+    # (EXTRA_MIRROR_NAMES + MIRROR_<name>_TYPE/_ARGS per entry) so it's
+    # additive on top of the existing single-mirror REMOTE_TYPE mechanism
+    # rather than replacing it — an existing B2-only backup.conf keeps
+    # working unchanged if this section is skipped.
+    local EXTRA_MIRROR_NAMES=""
+    declare -A EXTRA_MIRROR_TYPE=() EXTRA_MIRROR_ARGS=()
+    if [ -f "$CONF_FILE" ]; then
+        EXTRA_MIRROR_NAMES="$(grep '^EXTRA_MIRROR_NAMES=' "$CONF_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"')"
+        local _emn
+        for _emn in $EXTRA_MIRROR_NAMES; do
+            EXTRA_MIRROR_TYPE["$_emn"]="$(grep "^MIRROR_${_emn}_TYPE=" "$CONF_FILE" 2>/dev/null | cut -d= -f2- | tr -d '"')"
+            EXTRA_MIRROR_ARGS["$_emn"]="$(grep "^MIRROR_${_emn}_ARGS=" "$CONF_FILE" 2>/dev/null | cut -d= -f2- | sed -E 's/^"(.*)"$/\1/')"
+        done
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════"
+    echo "  ADDITIONAL MIRROR — direct to another box (optional)"
+    echo "═══════════════════════════════════════════════════════"
+    echo ""
+    echo "  Mirrors to a SECOND destination over SSH/SFTP, in addition to (not"
+    echo "  instead of) the offsite mirror above."
+    if [ -n "$EXTRA_MIRROR_NAMES" ]; then
+        echo ""
+        echo "  Already configured: $EXTRA_MIRROR_NAMES — kept either way; answering"
+        echo "  yes below only adds another one, it doesn't replace these."
+    fi
+    echo ""
+    local _ADD_SFTP_MIRROR=""
+    local _sftp_default_host="${DR_SYNC_HOST:-}"
+    prompt_yn "  Add a direct SFTP mirror to another box$( [ -n "$_sftp_default_host" ] && echo " (e.g. $_sftp_default_host, same as the DR-spare above)")? (y/n):" "n" _ADD_SFTP_MIRROR
+    if [[ "$_ADD_SFTP_MIRROR" =~ ^[Yy]$ ]]; then
+        local _SFTP_DEST=""
+        prompt_text "  SSH destination, user@host (~/.ssh/config aliases work too):" "$_sftp_default_host" _SFTP_DEST
+        if [ -z "$_SFTP_DEST" ]; then
+            log_warning "  No destination entered — skipping this mirror."
+        else
+            # Resolve through `ssh -G` rather than a plain @-split, so an
+            # ~/.ssh/config alias (e.g. from wg-easy's sync-ssh-aliases.sh)
+            # works here too. Kopia's sync-to sftp has its own SFTP client
+            # and does not read ~/.ssh/config itself — --host has to be the
+            # real hostname/IP either way, so this resolves it once here
+            # instead of failing later with the alias name as a literal,
+            # unresolvable hostname. Falls back to the plain @-split if
+            # `ssh -G` can't resolve it (e.g. no matching Host block).
+            local _ssh_g _SFTP_USER _SFTP_HOSTNAME
+            _ssh_g="$(ssh -G "$_SFTP_DEST" 2>/dev/null)"
+            _SFTP_USER="$(echo "$_ssh_g" | awk '/^user /{print $2; exit}')"
+            _SFTP_HOSTNAME="$(echo "$_ssh_g" | awk '/^hostname /{print $2; exit}')"
+            [ -z "$_SFTP_USER" ] && _SFTP_USER="${_SFTP_DEST%%@*}"
+            [ -z "$_SFTP_HOSTNAME" ] && _SFTP_HOSTNAME="${_SFTP_DEST#*@}"
+            log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME} for this mirror (resolved via ~/.ssh/config)."
+            local _SFTP_PATH="" _MIRROR_NAME=""
+            prompt_text "  Remote path for the repo:" "~/backups/kopia-mirror" _SFTP_PATH
+            _SFTP_PATH="${_SFTP_PATH:-~/backups/kopia-mirror}"
+            prompt_text "  Short name for this mirror (letters/numbers/underscores):" "spare" _MIRROR_NAME
+            _MIRROR_NAME="${_MIRROR_NAME:-spare}"
+            _MIRROR_NAME="${_MIRROR_NAME//[^a-zA-Z0-9_]/_}"
+
+            # sync-to sftp doesn't shell out to the system ssh client, so it
+            # needs an explicit key/known_hosts file rather than picking up
+            # whatever plain `ssh` already trusts automatically.
+            local _SFTP_KEYFILE=""
+            [ -f /root/.ssh/id_ed25519 ] && _SFTP_KEYFILE=/root/.ssh/id_ed25519
+            [ -z "$_SFTP_KEYFILE" ] && [ -f /root/.ssh/id_rsa ] && _SFTP_KEYFILE=/root/.ssh/id_rsa
+
+            if [ -z "$_SFTP_KEYFILE" ]; then
+                log_warning "  No SSH key found for root — this mirror needs one. Set one up (the"
+                log_warning "  DISASTER-RECOVERY SPARE section above offers to generate one) and"
+                log_warning "  re-run this installer to add the mirror."
+            elif ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$_SFTP_DEST" true 2>/dev/null; then
+                log_warning "  Couldn't SSH to $_SFTP_DEST without a password — not adding this"
+                log_warning "  mirror until that works: ssh-copy-id $_SFTP_DEST"
+            else
+                log_info "Verifying SFTP mirror (dry-run sync against the 'default' repo)..."
+                local _sftp_err
+                if _sftp_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
+                        --config-file="${DEST_CONFIGS[default]}" repository sync-to sftp \
+                        --host="$_SFTP_HOSTNAME" --username="$_SFTP_USER" --path="$_SFTP_PATH" \
+                        --keyfile="$_SFTP_KEYFILE" --known-hosts=/root/.ssh/known_hosts \
+                        --dry-run 2>&1)"; then
+                    EXTRA_MIRROR_TYPE["$_MIRROR_NAME"]="sftp"
+                    EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--host=$_SFTP_HOSTNAME --username=$_SFTP_USER --path=$_SFTP_PATH --keyfile=$_SFTP_KEYFILE --known-hosts=/root/.ssh/known_hosts"
+                    # Reusing an existing mirror name reconfigures it (the
+                    # associative-array assignments above already do that)
+                    # without duplicating it in the space-separated name list.
+                    if [[ " $EXTRA_MIRROR_NAMES " != *" $_MIRROR_NAME "* ]]; then
+                        if [ -z "$EXTRA_MIRROR_NAMES" ]; then
+                            EXTRA_MIRROR_NAMES="$_MIRROR_NAME"
+                        else
+                            EXTRA_MIRROR_NAMES="$EXTRA_MIRROR_NAMES $_MIRROR_NAME"
+                        fi
+                    fi
+                    log_success "  SFTP mirror '$_MIRROR_NAME' verified — will run after every backup."
+                else
+                    log_warning "  SFTP dry-run failed — not adding this mirror:"
+                    log_warning "  $_sftp_err"
+                fi
+            fi
+        fi
+    fi
+
     # ── 8. Write backup.conf ─────────────────────────────────────────────────
     log_info "Writing $CONF_FILE ..."
     {
@@ -774,6 +881,16 @@ install_backup() {
         echo "# Example SFTP: REMOTE_TYPE=sftp  REMOTE_ARGS=\"--host H --username U --path /srv/...\""
         echo "REMOTE_TYPE=\"$REMOTE_TYPE\""
         echo "REMOTE_ARGS=\"$REMOTE_ARGS\""
+        echo ""
+        echo "# ── Additional mirrors — run alongside REMOTE_TYPE above, not instead of it ──"
+        echo "# Space-separated list of names; each gets its own MIRROR_<name>_TYPE/_ARGS,"
+        echo "# same argument shape as REMOTE_ARGS. Every one of these runs after every"
+        echo "# backup too, in addition to the REMOTE_TYPE mirror above."
+        echo "EXTRA_MIRROR_NAMES=\"$EXTRA_MIRROR_NAMES\""
+        for _emn in $EXTRA_MIRROR_NAMES; do
+            echo "MIRROR_${_emn}_TYPE=\"${EXTRA_MIRROR_TYPE[$_emn]}\""
+            echo "MIRROR_${_emn}_ARGS=\"${EXTRA_MIRROR_ARGS[$_emn]}\""
+        done
         echo ""
         echo "# ── Notifications (ntfy) ─────────────────────────────────────────────────────"
         echo "# Set NTFY_URL to receive backup success/failure alerts."
