@@ -496,8 +496,53 @@ install_backup() {
             log_success "  SSH to $DR_SYNC_HOST works — spare sync will run after each backup."
         else
             log_warning "  Couldn't SSH to $DR_SYNC_HOST without a password right now."
-            log_warning "  Spare sync is saved but will fail until this works (as root, since"
-            log_warning "  the backup timer runs as root): ssh-keygen; ssh-copy-id $DR_SYNC_HOST"
+
+            # If the spare isn't reachable at all (behind NAT, no port-forward —
+            # a home box is the common case), a passwordless key won't help
+            # until there's a network path there in the first place. Offer the
+            # VPN hub right here instead of just telling the user to go set
+            # one up separately and come back.
+            if [ ! -d "$DOCKER_DIR/wg-easy" ]; then
+                local _SETUP_VPN=""
+                prompt_yn "  Spare box not directly reachable (behind NAT, no port-forward)? Set up a WireGuard VPN hub (wg-easy) now so they can reach each other? (y/n):" "n" _SETUP_VPN
+                if [[ "$_SETUP_VPN" =~ ^[Yy]$ ]]; then
+                    if declare -F install_wg-easy >/dev/null 2>&1; then
+                        install_wg-easy
+                    else
+                        log_warning "  services/wg-easy.sh isn't loaded — run: sudo ./setup.sh wg-easy"
+                    fi
+                fi
+            fi
+
+            local _HAVE_KEY=false
+            [ -f /root/.ssh/id_ed25519 ] || [ -f /root/.ssh/id_rsa ] && _HAVE_KEY=true
+            if [ "$_HAVE_KEY" = false ]; then
+                local _GEN_KEY=""
+                prompt_yn "  No SSH key found for root — generate one now (ssh-keygen)? (y/n):" "y" _GEN_KEY
+                if [[ "$_GEN_KEY" =~ ^[Yy]$ ]]; then
+                    ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 -q \
+                        && log_success "  Generated /root/.ssh/id_ed25519" \
+                        || log_warning "  ssh-keygen failed — generate one manually."
+                fi
+            fi
+
+            local _COPY_KEY=""
+            prompt_yn "  Run ssh-copy-id to $DR_SYNC_HOST now? (asks for its login password interactively) (y/n):" "y" _COPY_KEY
+            if [[ "$_COPY_KEY" =~ ^[Yy]$ ]]; then
+                if ssh-copy-id "$DR_SYNC_HOST"; then
+                    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$DR_SYNC_HOST" true 2>/dev/null; then
+                        log_success "  SSH to $DR_SYNC_HOST now works — spare sync will run after each backup."
+                    else
+                        log_warning "  ssh-copy-id reported success but the passwordless check still failed — check manually."
+                    fi
+                else
+                    log_warning "  ssh-copy-id failed. Spare sync is saved but will fail until this works:"
+                    log_warning "    ssh-copy-id $DR_SYNC_HOST"
+                fi
+            else
+                log_warning "  Spare sync is saved but will fail until this works (as root, since"
+                log_warning "  the backup timer runs as root): ssh-copy-id $DR_SYNC_HOST"
+            fi
         fi
     fi
 
