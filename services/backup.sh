@@ -207,6 +207,60 @@ fi
 
 register_service backup backup "Encrypted backup of all Docker services (full restore)"
 
+# Ensures root has an SSH key usable for the systemd-run (root, unattended)
+# backup/mirror steps. The DR-spare and SFTP-mirror prompts both need one —
+# both used to check ONLY /root/.ssh, missing the common case where
+# whoever ran `sudo ./setup.sh backup` already has a key under their OWN
+# home directory (used interactively, quite possibly already authorized on
+# the target box) while root — who actually runs the scheduled service —
+# has none. Prefers reusing that existing keypair over minting a fresh
+# one, since the existing one may already be trusted where it's needed;
+# ssh-copy-id-ing a brand new key is the fallback, not the first move.
+# Sets _ROOT_SSH_KEYFILE (out-param, not local) to the resulting keyfile
+# path, empty if none is available/created.
+_backup_ensure_root_ssh_key() {
+    _ROOT_SSH_KEYFILE=""
+    if [ -f /root/.ssh/id_ed25519 ]; then
+        _ROOT_SSH_KEYFILE=/root/.ssh/id_ed25519; return 0
+    fi
+    if [ -f /root/.ssh/id_rsa ]; then
+        _ROOT_SSH_KEYFILE=/root/.ssh/id_rsa; return 0
+    fi
+
+    local _user_key=""
+    [ -f "$ACTUAL_HOME/.ssh/id_ed25519" ] && _user_key="$ACTUAL_HOME/.ssh/id_ed25519"
+    [ -z "$_user_key" ] && [ -f "$ACTUAL_HOME/.ssh/id_rsa" ] && _user_key="$ACTUAL_HOME/.ssh/id_rsa"
+
+    if [ -n "$_user_key" ]; then
+        local _COPY_USER_KEY=""
+        prompt_yn "  No SSH key for root, but $ACTUAL_USER has one ($_user_key) — reuse it for root too (it may already be authorized where you need it)? (y/n):" "y" _COPY_USER_KEY
+        if [[ "$_COPY_USER_KEY" =~ ^[Yy]$ ]]; then
+            mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            local _keyname; _keyname="$(basename "$_user_key")"
+            cp "$_user_key" "/root/.ssh/$_keyname"
+            [ -f "${_user_key}.pub" ] && cp "${_user_key}.pub" "/root/.ssh/${_keyname}.pub"
+            chown root:root "/root/.ssh/$_keyname" "/root/.ssh/${_keyname}.pub" 2>/dev/null
+            chmod 600 "/root/.ssh/$_keyname"
+            [ -f "/root/.ssh/${_keyname}.pub" ] && chmod 644 "/root/.ssh/${_keyname}.pub"
+            log_success "  Copied $_user_key to /root/.ssh/ for root's use."
+            _ROOT_SSH_KEYFILE="/root/.ssh/$_keyname"
+            return 0
+        fi
+    fi
+
+    local _GEN_KEY=""
+    prompt_yn "  Generate a new SSH key for root (ssh-keygen)? (y/n):" "y" _GEN_KEY
+    if [[ "$_GEN_KEY" =~ ^[Yy]$ ]]; then
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        if ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 -q; then
+            log_success "  Generated /root/.ssh/id_ed25519"
+            _ROOT_SSH_KEYFILE=/root/.ssh/id_ed25519
+        else
+            log_warning "  ssh-keygen failed — generate one manually."
+        fi
+    fi
+}
+
 install_backup() {
     require_docker || return 1
 
@@ -550,17 +604,7 @@ install_backup() {
                 esac
             fi
 
-            local _HAVE_KEY=false
-            [ -f /root/.ssh/id_ed25519 ] || [ -f /root/.ssh/id_rsa ] && _HAVE_KEY=true
-            if [ "$_HAVE_KEY" = false ]; then
-                local _GEN_KEY=""
-                prompt_yn "  No SSH key found for root — generate one now (ssh-keygen)? (y/n):" "y" _GEN_KEY
-                if [[ "$_GEN_KEY" =~ ^[Yy]$ ]]; then
-                    ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519 -q \
-                        && log_success "  Generated /root/.ssh/id_ed25519" \
-                        || log_warning "  ssh-keygen failed — generate one manually."
-                fi
-            fi
+            _backup_ensure_root_ssh_key
 
             local _COPY_KEY=""
             prompt_yn "  Run ssh-copy-id to $DR_SYNC_HOST now? (asks for its login password interactively) (y/n):" "y" _COPY_KEY
@@ -724,7 +768,23 @@ install_backup() {
                 REMOTE_ARGS="--bucket=$B2_BUCKET --access-key=$B2_KEY_ID --secret-access-key=$B2_APP_KEY --endpoint=$B2_ENDPOINT"
                 log_success "B2 credentials verified — offsite mirroring will run after each backup."
             else
-                log_warning "B2 dry-run failed — check bucket name, endpoint, and key permissions:"
+                # All four fields were non-empty (the blank-field check above
+                # already ruled that out) — this is B2 rejecting what was
+                # entered, not missing input. Echoing back what was actually
+                # used (never the secret) so it's easy to eyeball against
+                # B2's own confirmation screen — the most common cause here
+                # is pairing the Key ID from one Application Key with the
+                # Secret from a different one (e.g. after creating more than
+                # one while troubleshooting).
+                log_warning "B2 rejected these credentials — bucket, endpoint, or key mismatch"
+                log_warning "(not blank input — all four fields were entered):"
+                log_warning "  Bucket:          $B2_BUCKET"
+                log_warning "  Endpoint:        $B2_ENDPOINT"
+                log_warning "  Application Key ID: $B2_KEY_ID"
+                log_warning "Common cause: the Key ID and Application Key are from two DIFFERENT"
+                log_warning "keys (easy to mix up if you created more than one). Re-check both"
+                log_warning "values come from the SAME entry on B2's App Keys page."
+                log_warning "Raw error from B2/Kopia:"
                 log_warning "$_b2_err"
                 log_warning "Not enabling offsite mirroring this run. Re-run this installer once"
                 log_warning "fixed, or hand-edit REMOTE_TYPE/REMOTE_ARGS in backup.conf directly."
@@ -799,14 +859,11 @@ install_backup() {
             # sync-to sftp doesn't shell out to the system ssh client, so it
             # needs an explicit key/known_hosts file rather than picking up
             # whatever plain `ssh` already trusts automatically.
-            local _SFTP_KEYFILE=""
-            [ -f /root/.ssh/id_ed25519 ] && _SFTP_KEYFILE=/root/.ssh/id_ed25519
-            [ -z "$_SFTP_KEYFILE" ] && [ -f /root/.ssh/id_rsa ] && _SFTP_KEYFILE=/root/.ssh/id_rsa
+            _backup_ensure_root_ssh_key
+            local _SFTP_KEYFILE="$_ROOT_SSH_KEYFILE"
 
             if [ -z "$_SFTP_KEYFILE" ]; then
-                log_warning "  No SSH key found for root — this mirror needs one. Set one up (the"
-                log_warning "  DISASTER-RECOVERY SPARE section above offers to generate one) and"
-                log_warning "  re-run this installer to add the mirror."
+                log_warning "  No SSH key available for root — can't add this mirror."
             elif ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$_SFTP_DEST" true 2>/dev/null; then
                 log_warning "  Couldn't SSH to $_SFTP_DEST without a password — not adding this"
                 log_warning "  mirror until that works: ssh-copy-id $_SFTP_DEST"
