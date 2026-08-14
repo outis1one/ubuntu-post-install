@@ -229,6 +229,26 @@ done
 # yet. dr_bringup.sh on the spare only needs these two small files — the
 # repo data itself already lives wherever REMOTE_TYPE mirrored it (or is
 # local, if the spare IS that target).
+# Wraps a remote path for use inside a `ssh host "command '...'"` string so
+# it's still safely quoted (spaces etc.) while a leading ~/ stays OUTSIDE
+# the quotes — single-quoting a leading tilde stops the remote shell from
+# expanding it at all, so it goes looking for a literal directory named
+# "~" instead of the actual home directory. Confirmed live: this is exactly
+# what broke `mkdir -p '~/docker/backup'` / `chmod 600 '~/docker/backup/...'`
+# — the DEFAULT DR_SYNC_PATH — while rsync's own transfer step (which has
+# its own tilde-aware remote-path handling, unrelated to shell quoting)
+# succeeded against the exact same path.
+_dr_remote_quote() {
+    local p="$1"
+    if [[ "$p" == "~/"* ]]; then
+        printf "~/'%s'" "${p#\~/}"
+    elif [[ "$p" == "~" ]]; then
+        printf '~'
+    else
+        printf "'%s'" "$p"
+    fi
+}
+
 if [ -n "${DR_SYNC_HOST:-}" ]; then
     _dr_path="${DR_SYNC_PATH:-~/docker/backup}"
     log "Syncing backup.conf + README to spare ($DR_SYNC_HOST:$_dr_path)..."
@@ -240,9 +260,9 @@ if [ -n "${DR_SYNC_HOST:-}" ]; then
     # closed" while plain ssh exec and rsync's own protocol both still work
     # fine over the same connection. Confirmed live: scp failing this way
     # while `ssh "$DR_SYNC_HOST" true` succeeded, rsync doesn't hit it.
-    if ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "mkdir -p '$_dr_path'" 2>"$_ERR" \
+    if ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "mkdir -p $(_dr_remote_quote "$_dr_path")" 2>"$_ERR" \
         && rsync -a -e 'ssh -o BatchMode=yes -o ConnectTimeout=10' "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
-        && ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "chmod 600 '$_dr_path/backup.conf'" 2>>"$_ERR"; then
+        && ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "chmod 600 $(_dr_remote_quote "$_dr_path/backup.conf")" 2>>"$_ERR"; then
         log "OK spare sync ($DR_SYNC_HOST)"
     else
         _err_text="$(cat "$_ERR" 2>/dev/null)"
