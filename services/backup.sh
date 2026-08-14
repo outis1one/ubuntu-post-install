@@ -421,6 +421,11 @@ install_backup() {
     echo ""
 
     local DEFAULT_DEST="$ACTUAL_HOME/backups/kopia-backup"
+    if [ -f "$CONF_FILE" ]; then
+        local _existing_default_repo
+        _existing_default_repo="$(grep '^DEST_default_REPO=' "$CONF_FILE" 2>/dev/null | sed -E 's/^DEST_default_REPO="(.*)"$/\1/')"
+        [ -n "$_existing_default_repo" ] && DEFAULT_DEST="$_existing_default_repo"
+    fi
     local _repo=""
     prompt_text "  Default repository path [${DEFAULT_DEST}]:" "$DEFAULT_DEST" _repo
     _repo="${_repo/#\~/$ACTUAL_HOME}"; _repo="${_repo%/}"
@@ -429,6 +434,28 @@ install_backup() {
     local -A DEST_REPOS=() DEST_PASSWORDS=() DEST_CONFIGS=()
     DEST_REPOS["default"]="$_repo"
     DEST_CONFIGS["default"]="/etc/kopia-backup/default.config"
+
+    # Preserve any extra (non-"default") destinations already configured.
+    # This script has no update/fresh distinction, so without this,
+    # skipping the "Add more destinations?" prompt below on a rerun would
+    # silently drop every extra destination — and anything mapped to it —
+    # from the rewritten backup.conf, rather than just leaving it as-is.
+    if [ -f "$CONF_FILE" ]; then
+        local _existing_dest_names _en _existing_repo _existing_cfg
+        _existing_dest_names="$(grep '^DEST_NAMES=' "$CONF_FILE" 2>/dev/null | sed -E 's/^DEST_NAMES="(.*)"$/\1/')"
+        for _en in $_existing_dest_names; do
+            [ "$_en" = "default" ] && continue
+            _existing_repo="$(grep "^DEST_${_en}_REPO=" "$CONF_FILE" 2>/dev/null | sed -E "s/^DEST_${_en}_REPO=\"(.*)\"\$/\1/")"
+            [ -z "$_existing_repo" ] && continue
+            _existing_cfg="$(grep "^DEST_${_en}_CONFIG=" "$CONF_FILE" 2>/dev/null | sed -E "s/^DEST_${_en}_CONFIG=\"(.*)\"\$/\1/")"
+            DEST_REPOS["$_en"]="$_existing_repo"
+            DEST_CONFIGS["$_en"]="${_existing_cfg:-/etc/kopia-backup/${_en}.config}"
+            DEST_NAMES_ARR+=("$_en")
+        done
+        if [ "${#DEST_NAMES_ARR[@]}" -gt 1 ]; then
+            log_info "  Keeping already-configured destination(s): ${DEST_NAMES_ARR[*]:1}"
+        fi
+    fi
 
     local _extra=""
     prompt_yn "  Add more destinations (for services on different drives)? (y/N):" "n" _extra
@@ -440,12 +467,16 @@ install_backup() {
             [ -z "$_dn" ] && break
             _dn="${_dn//[^a-zA-Z0-9_]/_}"
             [ "$_dn" = "default" ] && { log_warning "  'default' is reserved — use another name."; continue; }
-            prompt_text "    Path for '$_dn' repository:" "" _dr
+            # Typing an already-known name reconfigures its path rather than
+            # duplicating it in DEST_NAMES_ARR.
+            prompt_text "    Path for '$_dn' repository:" "${DEST_REPOS[$_dn]:-}" _dr
             [ -z "$_dr" ] && continue
             _dr="${_dr/#\~/$ACTUAL_HOME}"; _dr="${_dr%/}"
             DEST_REPOS["$_dn"]="$_dr"
             DEST_CONFIGS["$_dn"]="/etc/kopia-backup/${_dn}.config"
-            DEST_NAMES_ARR+=("$_dn")
+            if [[ " ${DEST_NAMES_ARR[*]} " != *" $_dn "* ]]; then
+                DEST_NAMES_ARR+=("$_dn")
+            fi
             log_success "    Destination '$_dn' → $_dr"
         done
     fi
@@ -464,11 +495,17 @@ install_backup() {
             printf "    %-16s %s\n" "$dn" "${DEST_REPOS[$dn]}"
         done
         echo ""
-        echo "  Press Enter to accept the default for each service."
+        echo "  Press Enter to accept the shown default for each service."
         echo ""
-        local _d
+        local _d _svc_var _existing_svc_dest
         for svc in "${ALL_SVCS[@]}"; do
-            prompt_text "    $svc [default]:" "default" _d
+            _svc_var="${svc//-/_}"
+            _existing_svc_dest="default"
+            if [ -f "$CONF_FILE" ]; then
+                _existing_svc_dest="$(grep -E "^#?SVC_${_svc_var}=" "$CONF_FILE" 2>/dev/null | tail -1 | sed -E 's/^#?SVC_[A-Za-z0-9_]+="(.*)"$/\1/')"
+                [ -z "$_existing_svc_dest" ] && _existing_svc_dest="default"
+            fi
+            prompt_text "    $svc [$_existing_svc_dest]:" "$_existing_svc_dest" _d
             if [ -n "$_d" ] && [ "$_d" != "default" ] && [ -n "${DEST_REPOS[$_d]:-}" ]; then
                 SVC_DEST_MAP["$svc"]="$_d"
             fi
@@ -518,13 +555,27 @@ install_backup() {
     echo "    3) Weekly (Sunday 02:00)"
     echo "    4) Custom (systemd OnCalendar)"
     echo ""
-    local _sch=""
-    prompt_text "  How often? [1]:" "1" _sch
+    # Preselect whatever's already scheduled, read back from the live timer
+    # unit rather than backup.conf (the schedule isn't stored there — it's
+    # baked directly into the .timer file). Without this, re-running the
+    # installer and just hitting Enter through this prompt would silently
+    # revert a customized schedule back to "1) Daily at 02:00" every time.
+    local _sch="1" _existing_oncal=""
+    if [ -f "/etc/systemd/system/${SVC_NAME}.timer" ]; then
+        _existing_oncal="$(grep '^OnCalendar=' "/etc/systemd/system/${SVC_NAME}.timer" 2>/dev/null | cut -d= -f2-)"
+        case "$_existing_oncal" in
+            "*-*-* 02,14:00:00") _sch="2" ;;
+            "Sun *-*-* 02:00:00") _sch="3" ;;
+            "*-*-* 02:00:00"|"")  _sch="1" ;;
+            *)                    _sch="4" ;;
+        esac
+    fi
+    prompt_text "  How often? [$_sch]:" "$_sch" _sch
     local ONCALENDAR SCHED_LABEL
     case "${_sch:-1}" in
         2) ONCALENDAR="*-*-* 02,14:00:00"; SCHED_LABEL="every 12 hours"       ;;
         3) ONCALENDAR="Sun *-*-* 02:00:00"; SCHED_LABEL="weekly Sunday 02:00" ;;
-        4) prompt_text "  OnCalendar expression:" "*-*-* 02:00:00" ONCALENDAR; SCHED_LABEL="$ONCALENDAR" ;;
+        4) prompt_text "  OnCalendar expression:" "${_existing_oncal:-*-*-* 02:00:00}" ONCALENDAR; SCHED_LABEL="$ONCALENDAR" ;;
         *) ONCALENDAR="*-*-* 02:00:00";     SCHED_LABEL="daily at 02:00"      ;;
     esac
     local KEEP_LATEST=""
@@ -542,9 +593,13 @@ install_backup() {
     echo "  Example URL: https://ntfy.sh/my-backup-alerts"
     echo ""
     local NTFY_URL="" NTFY_TOKEN=""
-    prompt_text "  ntfy topic URL (blank to skip):" "" NTFY_URL
+    if [ -f "$CONF_FILE" ]; then
+        NTFY_URL="$(grep "^NTFY_URL=" "$CONF_FILE" 2>/dev/null | sed -E "s/^NTFY_URL='(.*)'\$/\1/")"
+        NTFY_TOKEN="$(grep "^NTFY_TOKEN=" "$CONF_FILE" 2>/dev/null | sed -E "s/^NTFY_TOKEN='(.*)'\$/\1/")"
+    fi
+    prompt_text "  ntfy topic URL (blank to skip)${NTFY_URL:+ — already set to $NTFY_URL}:" "$NTFY_URL" NTFY_URL
     if [ -n "$NTFY_URL" ]; then
-        prompt_text "  ntfy access token (blank if public/no auth):" "" NTFY_TOKEN
+        prompt_text "  ntfy access token (blank if public/no auth${NTFY_TOKEN:+ — one is already set, Enter keeps it}):" "$NTFY_TOKEN" NTFY_TOKEN
     fi
 
     # ── Disaster-recovery spare box (optional) ────────────────────────────────
@@ -774,14 +829,29 @@ install_backup() {
         # live: a paste into the hidden Application Key field can silently
         # capture nothing depending on the terminal/SSH client, with no
         # other symptom until this point.
-        local B2_BUCKET="" B2_ENDPOINT="" B2_KEY_ID="" B2_APP_KEY=""
-        prompt_text "  Bucket name:" "" B2_BUCKET
+        # Pre-fill from whatever's already configured (only meaningful if the
+        # existing REMOTE_TYPE really is s3/B2 — a REMOTE_ARGS left over from
+        # a different provider, e.g. sftp, wouldn't parse into anything
+        # useful here and is harmlessly skipped). Otherwise reconfiguring
+        # just to rotate one field means blindly retyping all four, and a
+        # mispaste on any one of them loses the other three that were
+        # already typed correctly this run.
+        local _existing_b2_bucket="" _existing_b2_endpoint="" _existing_b2_keyid="" _existing_b2_appkey=""
+        if [ "$REMOTE_TYPE" = "s3" ]; then
+            _existing_b2_bucket="$(echo "$REMOTE_ARGS" | grep -oE -- '--bucket=[^ ]*' | cut -d= -f2-)"
+            _existing_b2_endpoint="$(echo "$REMOTE_ARGS" | grep -oE -- '--endpoint=[^ ]*' | cut -d= -f2-)"
+            _existing_b2_keyid="$(echo "$REMOTE_ARGS" | grep -oE -- '--access-key=[^ ]*' | cut -d= -f2-)"
+            _existing_b2_appkey="$(echo "$REMOTE_ARGS" | grep -oE -- '--secret-access-key=[^ ]*' | cut -d= -f2-)"
+        fi
+        local B2_BUCKET="$_existing_b2_bucket" B2_ENDPOINT="$_existing_b2_endpoint" B2_KEY_ID="$_existing_b2_keyid" B2_APP_KEY=""
+        prompt_text "  Bucket name:" "$B2_BUCKET" B2_BUCKET
         echo "    (${#B2_BUCKET} characters entered)"
-        prompt_text "  Endpoint (e.g. s3.us-west-004.backblazeb2.com):" "" B2_ENDPOINT
+        prompt_text "  Endpoint (e.g. s3.us-west-004.backblazeb2.com):" "$B2_ENDPOINT" B2_ENDPOINT
         echo "    (${#B2_ENDPOINT} characters entered)"
-        prompt_text "  Application Key ID:" "" B2_KEY_ID
+        prompt_text "  Application Key ID:" "$B2_KEY_ID" B2_KEY_ID
         echo "    (${#B2_KEY_ID} characters entered)"
-        read -rsp "  Application Key (input hidden): " B2_APP_KEY; echo
+        read -rsp "  Application Key (input hidden${_existing_b2_appkey:+ — leave blank to keep the existing one}): " B2_APP_KEY; echo
+        [ -z "$B2_APP_KEY" ] && B2_APP_KEY="$_existing_b2_appkey"
         echo "    (${#B2_APP_KEY} characters entered)"
 
         local _B2_MISSING=""
