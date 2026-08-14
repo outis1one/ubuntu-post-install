@@ -216,15 +216,40 @@ register_service backup backup "Encrypted backup of all Docker services (full re
 # has none. Prefers reusing that existing keypair over minting a fresh
 # one, since the existing one may already be trusted where it's needed;
 # ssh-copy-id-ing a brand new key is the fallback, not the first move.
+#
+# Takes an optional target host as $1. Confirmed live: root can already
+# `ssh main` successfully — proven by this same script's own DR-spare sync
+# succeeding — while root has neither /root/.ssh/id_ed25519 nor id_rsa. The
+# working key just has some other filename (e.g. a ~/.ssh/config alias
+# pointing at it). Without checking this first, the function would offer to
+# generate/copy a redundant key instead of reusing the one that's already
+# trusted where it's needed. When a host is given, this tests root's SSH
+# access to it as-is and resolves the actual key ssh would use via `ssh -G`
+# before falling back to the copy/generate prompts.
+#
 # Sets _ROOT_SSH_KEYFILE (out-param, not local) to the resulting keyfile
 # path, empty if none is available/created.
 _backup_ensure_root_ssh_key() {
+    local _target_host="${1:-}"
     _ROOT_SSH_KEYFILE=""
     if [ -f /root/.ssh/id_ed25519 ]; then
         _ROOT_SSH_KEYFILE=/root/.ssh/id_ed25519; return 0
     fi
     if [ -f /root/.ssh/id_rsa ]; then
         _ROOT_SSH_KEYFILE=/root/.ssh/id_rsa; return 0
+    fi
+
+    if [ -n "$_target_host" ] && ssh -o BatchMode=yes -o ConnectTimeout=5 "$_target_host" true 2>/dev/null; then
+        local _resolved_key
+        _resolved_key="$(ssh -G "$_target_host" 2>/dev/null | awk '/^identityfile /{print $2; exit}')"
+        _resolved_key="${_resolved_key/#\~/\/root}"
+        if [ -n "$_resolved_key" ] && [ -f "$_resolved_key" ]; then
+            log_success "  root already has working SSH access to $_target_host via $_resolved_key — reusing it, not generating a new one."
+            _ROOT_SSH_KEYFILE="$_resolved_key"
+            return 0
+        fi
+        log_warning "  root can already SSH to $_target_host, but its actual identity file (agent-based auth?)"
+        log_warning "  can't be resolved to a file kopia can use directly — falling back below."
     fi
 
     local _user_key=""
@@ -604,7 +629,7 @@ install_backup() {
                 esac
             fi
 
-            _backup_ensure_root_ssh_key
+            _backup_ensure_root_ssh_key "$DR_SYNC_HOST"
 
             local _COPY_KEY=""
             prompt_yn "  Run ssh-copy-id to $DR_SYNC_HOST now? (asks for its login password interactively) (y/n):" "y" _COPY_KEY
@@ -865,7 +890,7 @@ install_backup() {
             # sync-to sftp doesn't shell out to the system ssh client, so it
             # needs an explicit key/known_hosts file rather than picking up
             # whatever plain `ssh` already trusts automatically.
-            _backup_ensure_root_ssh_key
+            _backup_ensure_root_ssh_key "$_SFTP_DEST"
             local _SFTP_KEYFILE="$_ROOT_SSH_KEYFILE"
 
             if [ -z "$_SFTP_KEYFILE" ]; then
