@@ -418,6 +418,167 @@ LOGROTATE
     rm -f /etc/logrotate.d/asterisk-digital-ocean
 }
 
+# ── Shared: standalone backup/restore, independent of the Kopia backup
+# service ─────────────────────────────────────────────────────────────────
+# Unlike Mattermost (a database export that needed real work to get right —
+# see migrate-from-pikapods.sh), Asterisk's entire state is already plain
+# files under one directory: dialplan, pjsip devices, voicemail, recordings,
+# .env (including its coturn credential), docker-compose.yml. So this is
+# just a tar of the whole directory, with the stop/restart safety a live
+# PBX needs around it — no export format to get wrong.
+#
+# Output defaults to a path OUTSIDE $DOCKER_DIR (~/asterisk-backups/) so a
+# Kopia-based backup of this same box doesn't also end up backing up a
+# backup-of-itself on every run — the same lesson as not leaving Mattermost
+# migration scratch files inside ~/docker/mattermost.
+_asterisk_write_standalone_backup_script() {
+    local _ea_dir="$1" _container="$2"
+    cat > "$_ea_dir/asterisk-standalone-backup.sh" << 'BACKUPSCRIPT'
+#!/bin/bash
+# __EA_DIR__/asterisk-standalone-backup.sh — independent backup/restore for
+# this Asterisk install. No Kopia/backup-service dependency — everything
+# this PBX needs to come back already lives under this one directory, so
+# this is a tar of the whole thing plus the stop/restart safety a live PBX
+# needs around it.
+#
+#   sudo ./asterisk-standalone-backup.sh backup [output-dir]
+#   sudo ./asterisk-standalone-backup.sh restore <archive.tar.gz>
+#
+# Output defaults to ~/asterisk-backups/ — deliberately OUTSIDE ~/docker/,
+# so a Kopia-based backup of this same box doesn't also end up backing up
+# a backup-of-itself on every run.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONTAINER="__CONTAINER_NAME__"
+ACTUAL_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+ACTUAL_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$ACTUAL_USER")"
+
+[ "${EUID:-$(id -u)}" -eq 0 ] || { echo "Run as root: sudo $0 ..."; exit 1; }
+
+usage() {
+    echo "Usage:"
+    echo "  sudo $0 backup [output-dir]      (default: $ACTUAL_HOME/asterisk-backups)"
+    echo "  sudo $0 restore <archive.tar.gz>"
+    exit 1
+}
+
+container_running() {
+    docker compose ps --status running -q 2>/dev/null | grep -q .
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    backup)
+        OUT_DIR="${2:-$ACTUAL_HOME/asterisk-backups}"
+        mkdir -p "$OUT_DIR"
+        TS="$(date +%Y%m%d-%H%M%S)"
+        ARCHIVE="$OUT_DIR/asterisk-backup-$TS.tar.gz"
+
+        echo "This stops Asterisk briefly (voicemail/spool are written to"
+        echo "continuously — a live tar could capture a half-written file"
+        echo "otherwise) and restarts it after."
+        echo "Target: $ARCHIVE"
+        read -r -p "Type YES to proceed: " CONFIRM
+        [ "$CONFIRM" = "YES" ] || { echo "Aborted — no changes made."; exit 0; }
+
+        cd "$HERE" || exit 1
+        WAS_RUNNING=false
+        if container_running; then
+            echo "Stopping Asterisk..."
+            docker compose stop
+            WAS_RUNNING=true
+        fi
+
+        echo "Archiving $HERE -> $ARCHIVE ..."
+        if tar -czf "$ARCHIVE" -C "$(dirname "$HERE")" "$(basename "$HERE")"; then
+            chown "$ACTUAL_USER:$ACTUAL_USER" "$ARCHIVE"
+            echo "Done: $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1))"
+        else
+            echo "tar failed — restarting Asterisk regardless; check disk space."
+        fi
+
+        if [ "$WAS_RUNNING" = true ]; then
+            echo "Starting Asterisk..."
+            (cd "$HERE" && docker compose up -d)
+        fi
+        ;;
+
+    restore)
+        ARCHIVE="${2:-}"
+        [ -n "$ARCHIVE" ] || usage
+        [ -f "$ARCHIVE" ] || { echo "Archive not found: $ARCHIVE"; exit 1; }
+
+        echo "┌─────────────────────────────────────────────────────────────────┐"
+        echo "│ ASTERISK RESTORE — THIS REPLACES $HERE"
+        echo "└─────────────────────────────────────────────────────────────────┘"
+        echo ""
+        echo "  Archive: $ARCHIVE"
+        echo "  Target:  $HERE"
+        echo ""
+        read -r -p "Type YES to proceed: " CONFIRM
+        [ "$CONFIRM" = "YES" ] || { echo "Aborted — no changes made."; exit 0; }
+
+        cd "$HERE" || exit 1
+        WAS_RUNNING=false
+        if container_running; then
+            echo "Stopping Asterisk..."
+            docker compose stop
+            WAS_RUNNING=true
+        fi
+
+        PARENT_DIR="$(dirname "$HERE")"
+        BASE_NAME="$(basename "$HERE")"
+        ASIDE="${HERE}.restore-aside-$(date +%Y%m%d-%H%M%S)"
+
+        # Leave the directory being renamed before renaming it, rather than
+        # relying on renaming-your-own-cwd being safe (it generally is on
+        # Linux, but there's no reason to lean on that when cd'ing out first
+        # costs nothing).
+        cd "$PARENT_DIR" || exit 1
+
+        echo "Moving current install aside: $ASIDE"
+        mv "$HERE" "$ASIDE"
+
+        echo "Extracting $ARCHIVE -> $PARENT_DIR ..."
+        if tar -xzf "$ARCHIVE" -C "$PARENT_DIR"; then
+            echo "Extracted."
+        else
+            echo "Extraction failed — rolling back to the pre-restore install."
+            rm -rf "${PARENT_DIR:?}/$BASE_NAME"
+            mv "$ASIDE" "$HERE"
+            exit 1
+        fi
+
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HERE"
+
+        if [ "$WAS_RUNNING" = true ]; then
+            echo "Starting Asterisk..."
+            (cd "$HERE" && docker compose up -d)
+        fi
+
+        echo ""
+        echo "Done. Previous install kept at: $ASIDE"
+        echo "Delete it once you've verified this restore is good — it's not"
+        echo "cleaned up automatically."
+        echo ""
+        echo "If you ran this from inside $HERE, your current shell may still show"
+        echo "the old directory's contents (a normal Linux quirk — your shell's"
+        echo "working directory followed the OLD directory when it got renamed"
+        echo "aside). Run 'cd $HERE' again (or open a new shell) to see the"
+        echo "restored files."
+        ;;
+
+    *)
+        usage
+        ;;
+esac
+BACKUPSCRIPT
+    sed -i "s/__CONTAINER_NAME__/${_container}/g" "$_ea_dir/asterisk-standalone-backup.sh"
+    chmod +x "$_ea_dir/asterisk-standalone-backup.sh"
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$_ea_dir/asterisk-standalone-backup.sh" 2>/dev/null || true
+}
+
 # ── Shared: extension presence (online/offline) ntfy alerts ────────────────
 # Polls PJSIP registration state and alerts only on a CHANGE from the last
 # check (never on every poll) — same periodic-check shape as pstn-trunk.sh's
@@ -1426,6 +1587,34 @@ acquisition both read. It's rotated at 100MB (5 generations, compressed) via
 \`/etc/logrotate.d/asterisk\`; unrotated it reached 1.4GB in three days on a
 publicly reachable box.
 
+## Standalone backup/restore
+
+This directory is self-contained — dialplan, pjsip devices, voicemail
+messages, recordings, \`.env\` (including its coturn credential), and
+\`docker-compose.yml\` all live under \`${EA_DIR}\`. \`asterisk-standalone-backup.sh\`
+(written into this directory at install time) tars the whole thing up
+independent of Kopia or any other backup service in this repo — useful for
+a one-off snapshot before a risky change, or to move this PBX to a new host
+without setting up the full backup stack first.
+
+\`\`\`bash
+sudo ${EA_DIR}/asterisk-standalone-backup.sh backup [output-dir]
+# writes ~/asterisk-backups/asterisk-backup-<timestamp>.tar.gz by default
+# (deliberately outside ~/docker/, so a Kopia backup of this box doesn't
+# also end up backing up a backup-of-itself on every run)
+
+sudo ${EA_DIR}/asterisk-standalone-backup.sh restore <archive.tar.gz>
+# moves the current install aside (timestamped, not deleted) and extracts
+# the archive in its place; rolls back automatically if extraction fails
+\`\`\`
+
+Both subcommands stop the container first (voicemail/spool are written to
+continuously — a live tar could capture a half-written file) and restart it
+after, and both require typing \`YES\` to confirm before touching anything.
+To migrate to a new host: run \`backup\` on the old one, copy the archive
+over, then run \`restore\` after a fresh \`sudo ./setup.sh asterisk\` install
+(or directly into an empty \`${EA_DIR}\`) on the new host.
+
 ## VLANs / other subnets
 
 \`.env\` → \`HAS_VLANS\`/\`VLAN_SUBNETS\` lists extra networks (space-separated
@@ -1639,6 +1828,7 @@ install_asterisk() {
                 _asterisk_refresh_vendor_files
                 _asterisk_write_compose "$ASTERISK_PROJECT" "$CONTAINER" "$ASTERISK_COTURN" "$_HAD_EMBEDDED_COTURN"
                 _asterisk_write_logrotate "$EA_DIR"
+                _asterisk_write_standalone_backup_script "$EA_DIR" "$CONTAINER"
                 _asterisk_patch_messaging_vendor_files "$EA_DIR"
                 _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
                 _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
@@ -1736,6 +1926,7 @@ install_asterisk() {
 
     _asterisk_refresh_vendor_files
     _asterisk_write_logrotate "$EA_DIR"
+    _asterisk_write_standalone_backup_script "$EA_DIR" "$CONTAINER"
     _asterisk_patch_messaging_vendor_files "$EA_DIR"
     _asterisk_write_messaging_dialplan "$EA_DIR/config/asterisk/messaging-dialplan.conf"
     _asterisk_ensure_live_messaging_include "$EA_DIR" "$CONTAINER"
