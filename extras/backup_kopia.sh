@@ -234,8 +234,14 @@ if [ -n "${DR_SYNC_HOST:-}" ]; then
     log "Syncing backup.conf + README to spare ($DR_SYNC_HOST:$_dr_path)..."
     _dr_files=("$CONF")
     [ -f "$HERE/README.md" ] && _dr_files+=("$HERE/README.md")
+    # rsync instead of scp: modern OpenSSH (9.0+) defaults scp to an
+    # SFTP-based transfer, and some remote-side setups (restricted shells,
+    # forced commands, older sshd) reject that with an immediate "Connection
+    # closed" while plain ssh exec and rsync's own protocol both still work
+    # fine over the same connection. Confirmed live: scp failing this way
+    # while `ssh "$DR_SYNC_HOST" true` succeeded, rsync doesn't hit it.
     if ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "mkdir -p '$_dr_path'" 2>"$_ERR" \
-        && scp -o BatchMode=yes -o ConnectTimeout=10 "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
+        && rsync -a -e 'ssh -o BatchMode=yes -o ConnectTimeout=10' "${_dr_files[@]}" "$DR_SYNC_HOST:$_dr_path/" 2>>"$_ERR" \
         && ssh -o BatchMode=yes -o ConnectTimeout=10 "$DR_SYNC_HOST" "chmod 600 '$_dr_path/backup.conf'" 2>>"$_ERR"; then
         log "OK spare sync ($DR_SYNC_HOST)"
     else
