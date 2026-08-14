@@ -688,14 +688,30 @@ install_backup() {
         echo "       - B2 shows the application key ONLY once — copy both values now,"
         echo "         you can't retrieve the key itself again afterward."
         echo ""
+        # Character counts are echoed after each field (never the value
+        # itself for the hidden one) so a failed paste is visible
+        # immediately instead of only surfacing as a generic "left blank"
+        # warning after all four prompts have already gone by — confirmed
+        # live: a paste into the hidden Application Key field can silently
+        # capture nothing depending on the terminal/SSH client, with no
+        # other symptom until this point.
         local B2_BUCKET="" B2_ENDPOINT="" B2_KEY_ID="" B2_APP_KEY=""
         prompt_text "  Bucket name:" "" B2_BUCKET
+        echo "    (${#B2_BUCKET} characters entered)"
         prompt_text "  Endpoint (e.g. s3.us-west-004.backblazeb2.com):" "" B2_ENDPOINT
+        echo "    (${#B2_ENDPOINT} characters entered)"
         prompt_text "  Application Key ID:" "" B2_KEY_ID
+        echo "    (${#B2_KEY_ID} characters entered)"
         read -rsp "  Application Key (input hidden): " B2_APP_KEY; echo
+        echo "    (${#B2_APP_KEY} characters entered)"
 
-        if [ -z "$B2_BUCKET" ] || [ -z "$B2_ENDPOINT" ] || [ -z "$B2_KEY_ID" ] || [ -z "$B2_APP_KEY" ]; then
-            log_warning "One or more fields left blank — skipping B2 setup this run."
+        local _B2_MISSING=""
+        [ -z "$B2_BUCKET" ]   && _B2_MISSING="${_B2_MISSING}Bucket name, "
+        [ -z "$B2_ENDPOINT" ] && _B2_MISSING="${_B2_MISSING}Endpoint, "
+        [ -z "$B2_KEY_ID" ]   && _B2_MISSING="${_B2_MISSING}Application Key ID, "
+        [ -z "$B2_APP_KEY" ]  && _B2_MISSING="${_B2_MISSING}Application Key, "
+        if [ -n "$_B2_MISSING" ]; then
+            log_warning "Left blank: ${_B2_MISSING%, } — skipping B2 setup this run."
         else
             log_info "Verifying B2 credentials (dry-run sync against the 'default' repo)..."
             local _b2_err
