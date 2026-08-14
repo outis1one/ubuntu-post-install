@@ -51,6 +51,20 @@ categorize_error() {
     fi
 }
 
+# Logs the raw stderr text a failure produced, truncated to a sane length.
+# categorize_error()'s bucket alone ("error — see system logs") used to be
+# the end of the trail for anything that didn't match one of its known
+# patterns — the actual message was in a mktemp'd file this script deletes
+# on exit (trap ... EXIT), so nothing was ever really "in system logs" to
+# go look at. This makes that claim true: the raw text now lands in the
+# same log stream (journal, when run via the systemd timer) as everything
+# else, surviving past the run that produced it.
+log_raw_error() {
+    local errfile="$1" raw
+    raw="$(tr '\n' ' ' < "$errfile" | head -c 500)"
+    [ -n "$raw" ] && log "  Raw error: $raw"
+}
+
 kp_for() {
     local dest="$1"; shift
     local cfg_var="DEST_${dest}_CONFIG" pw_var="DEST_${dest}_PASSWORD"
@@ -125,6 +139,7 @@ for svc_dir in "$DOCKER_DIR"/*/; do
         else
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: snapshot failed for $svc — $_reason"
+            log_raw_error "$_ERR"
             FAILED_SVCS+=("$svc: $_reason")
             rc=1
         fi
@@ -145,6 +160,7 @@ for svc_dir in "$DOCKER_DIR"/*/; do
         else
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: snapshot failed for $svc — $_reason"
+            log_raw_error "$_ERR"
             FAILED_SVCS+=("$svc: $_reason")
             rc=1
         fi
@@ -164,6 +180,7 @@ if [ "${REMOTE_TYPE:-none}" != "none" ] && [ -n "${REMOTE_TYPE:-}" ]; then
         if ! kp_for "$dest" repository sync-to "$REMOTE_TYPE" $REMOTE_ARGS 2>"$_ERR"; then
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: mirror failed for '$dest' — $_reason"
+            log_raw_error "$_ERR"
             FAILED_SVCS+=("mirror[$dest]: $_reason")
             rc=1
         fi
@@ -185,6 +202,7 @@ for mirror_name in ${EXTRA_MIRROR_NAMES:-}; do
         if ! kp_for "$dest" repository sync-to "$_mtype" $_margs 2>"$_ERR"; then
             _reason="$(categorize_error "$(cat "$_ERR")")"
             log "WARNING: mirror '$mirror_name' failed for '$dest' — $_reason"
+            log_raw_error "$_ERR"
             FAILED_SVCS+=("mirror[$mirror_name/$dest]: $_reason")
             rc=1
         fi
@@ -209,6 +227,7 @@ if [ -n "${DR_SYNC_HOST:-}" ]; then
     else
         _reason="$(categorize_error "$(cat "$_ERR")")"
         log "WARNING: spare sync failed — $_reason"
+        log_raw_error "$_ERR"
         FAILED_SVCS+=("spare-sync: $_reason")
         rc=1
     fi
