@@ -805,6 +805,41 @@ find_free_port() {
     eval "$_varname='$_port'"
 }
 
+# find_free_coturn_range MIN_VARNAME MAX_VARNAME RANGE_SIZE [START_PORT]
+# A coturn relay port range can't be collision-checked with port_in_use /
+# find_free_port the way a single fixed port can: coturn only opens ports
+# inside min-port..max-port on demand, per active TURN allocation, so an
+# idle range shows up as nothing listening either way — a live socket scan
+# can't tell two coturn CONFIGS apart. The only reliable check is reading
+# what range every other coturn-owning service on the box actually claims,
+# from its own .env (COTURN_MAX_PORT for the shared instance in
+# ~/docker/coturn/.env, TURN_MAX_PORT for every dedicated per-service coturn
+# — Asterisk's own, each Mattermost instance's, etc., each in that service's
+# own .env). Every service directory keeps its .env at the same top-level
+# path, so one glob covers all of them without needing to know which
+# services exist ahead of time.
+#
+# Writes a RANGE_SIZE-wide block starting safely past the highest claimed
+# max-port back into MIN_VARNAME/MAX_VARNAME. No other coturn on the box at
+# all (fresh install, nothing else uses TURN) leaves it at START_PORT — no
+# collision is possible yet, so there's nothing to shift away from.
+find_free_coturn_range() {
+    local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+    local _highest_max=$((_start - 1)) _f _found
+    for _f in "$DOCKER_DIR"/*/.env; do
+        [ -f "$_f" ] || continue
+        _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+        [[ "$_found" =~ ^[0-9]+$ ]] || continue
+        [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+    done
+    local _min=$_start
+    if [ "$_highest_max" -ge "$_start" ]; then
+        _min=$((_highest_max + 50))
+    fi
+    eval "$_min_varname='$_min'"
+    eval "$_max_varname='$((_min + _range_size))'"
+}
+
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
 # Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"]
 # UPSTREAM: container:port for caddy_net routing (e.g. "filebrowser:80"),
@@ -1003,119 +1038,3 @@ CADDY_BLOCK
     echo ""
 }
 
-# ── Shared coturn (TURN/STUN) wiring ──────────────────────────────────────────
-# Usage: ensure_coturn_user "<consumer-name>"
-#
-# Installs the shared coturn service (services/coturn.sh) if this is the
-# first service on the box that needs TURN, then registers (or reuses) a
-# dedicated long-term-credential user for the caller — one coturn instance,
-# one relay port range, shared by every consumer instead of each service
-# running its own and fighting over host ports (see services/coturn.sh's
-# header for why that used to be a real, confirmed-live problem).
-#
-# Out-params (not `local` — read them after the call returns), same
-# convention as configure_caddy_for_service's CADDY_SERVICE_* above:
-#   COTURN_HOST      host/IP TURN clients should connect to
-#   COTURN_PORT      coturn's listening port
-#   COTURN_USERNAME  this consumer's long-term-credential username
-#   COTURN_PASSWORD  this consumer's long-term-credential password
-# COTURN_HOST is left empty if coturn couldn't be installed or reached —
-# callers should treat that as "no TURN available" and degrade gracefully,
-# same as checking CADDY_SERVICE_CONFIGURED after configure_caddy_for_service.
-#
-# Credentials are cached per-consumer in coturn's own users/<name>.env so a
-# service re-running its own installer reuses the same one instead of
-# minting a new credential and orphaning the old one (which would silently
-# break already-configured clients still holding it).
-ensure_coturn_user() {
-    local _consumer="$1"
-    COTURN_HOST="" COTURN_PORT="" COTURN_USERNAME="" COTURN_PASSWORD=""
-
-    if [ ! -d "$DOCKER_DIR/coturn" ]; then
-        if declare -F install_coturn >/dev/null 2>&1; then
-            log_info "No shared coturn (TURN/STUN) server yet — setting one up for $_consumer..."
-            # install_coturn cd's into $DOCKER_DIR/coturn and never cd's back —
-            # the caller (e.g. asterisk.sh, already cd'd into its own install
-            # directory) would otherwise return here with the wrong cwd and go
-            # on to write ITS docker-compose.yml/.env into coturn's directory
-            # instead of its own. Confirmed live: this clobbered coturn's
-            # compose file and left the consumer's own directory without one,
-            # so its later `docker compose up --build` failed with "Dockerfile:
-            # no such file or directory" (no Dockerfile in coturn's directory).
-            local _caller_pwd
-            _caller_pwd="$(pwd)"
-            install_coturn
-            local _coturn_rc=$?
-            cd "$_caller_pwd" || true
-            [ "$_coturn_rc" -ne 0 ] && { log_warning "coturn setup failed — $_consumer will run without TURN."; return 1; }
-        else
-            log_warning "services/coturn.sh not loaded — $_consumer will run without TURN."
-            log_warning "Run: sudo ./setup.sh coturn"
-            return 1
-        fi
-    fi
-
-    if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would register coturn user '$_consumer'"
-        return 0
-    fi
-
-    local _env="$DOCKER_DIR/coturn/.env"
-    [ -f "$_env" ] || { log_warning "coturn installed but $_env missing — cannot register '$_consumer'."; return 1; }
-    local _realm _host _port
-    _realm="$(grep '^COTURN_REALM=' "$_env" | cut -d= -f2-)"
-    _host="$(grep '^COTURN_HOST=' "$_env" | cut -d= -f2-)"
-    _port="$(grep '^COTURN_PORT=' "$_env" | cut -d= -f2-)"; _port="${_port:-3478}"
-
-    local _userdir="$DOCKER_DIR/coturn/users"
-    local _userfile="$_userdir/${_consumer}.env"
-    mkdir -p "$_userdir"
-
-    if [ -f "$_userfile" ]; then
-        local _u _p
-        _u="$(grep '^COTURN_USER=' "$_userfile" | cut -d= -f2-)"
-        _p="$(grep '^COTURN_PASS=' "$_userfile" | cut -d= -f2-)"
-        COTURN_USERNAME="$_u" COTURN_PASSWORD="$_p"
-
-        # The cache file surviving doesn't mean the username still exists in
-        # coturn's own live database — confirmed live: a coturn
-        # container/volume recreated without preserving ./db wipes the
-        # database while this file (a separate directory) survives
-        # untouched, silently orphaning every consumer's credentials until
-        # something re-registers them. Without this check, re-running the
-        # consumer's installer (fresh or update) never re-registers anything
-        # since it only ever hits the else branch below on a MISSING cache
-        # file — a stale-but-present one looked identical to a healthy one.
-        # A real "user[realm]" line never contains a space; turnadmin -l's
-        # own startup log lines do (confirmed live, at least one coturn
-        # build writes them to stdout, not stderr), so filtering on that
-        # keeps this robust across builds without needing to match a
-        # specific log format.
-        local _db_users
-        _db_users="$(docker exec coturn turnadmin -l -b /var/lib/coturn/turndb 2>/dev/null | grep -v ' ' | sed -E 's/\[.*//' | awk 'NF')"
-        if ! grep -qx "$_u" <<< "$_db_users"; then
-            log_warning "coturn user '$_u' ($_consumer) has cached credentials but isn't in coturn's live database — re-registering with the same password."
-            if docker exec coturn turnadmin -a -u "$_u" -p "$_p" -r "$_realm" -b /var/lib/coturn/turndb >/dev/null 2>&1; then
-                log_success "Re-registered coturn user '$_u' for $_consumer"
-            else
-                log_warning "Could not re-register coturn user '$_u' for $_consumer — is the coturn container running?"
-            fi
-        fi
-    else
-        COTURN_USERNAME="$_consumer"
-        COTURN_PASSWORD="$(generate_password 24)"
-        if docker exec coturn turnadmin -a -u "$COTURN_USERNAME" -p "$COTURN_PASSWORD" \
-            -r "$_realm" -b /var/lib/coturn/turndb >/dev/null 2>&1; then
-            { echo "COTURN_USER=$COTURN_USERNAME"; echo "COTURN_PASS=$COTURN_PASSWORD"; } > "$_userfile"
-            chmod 600 "$_userfile"
-            log_success "Registered coturn user '$COTURN_USERNAME' for $_consumer"
-        else
-            log_warning "Could not register a coturn user for $_consumer — is the coturn container running?"
-            COTURN_USERNAME="" COTURN_PASSWORD=""
-            return 1
-        fi
-    fi
-
-    COTURN_HOST="$_host"
-    COTURN_PORT="$_port"
-}

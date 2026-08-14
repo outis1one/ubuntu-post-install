@@ -59,6 +59,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             eval "$_varname='$_port'"
         }
 
+        find_free_coturn_range() {
+            local _min_varname="$1" _max_varname="$2" _range_size="${3:-200}" _start="${4:-49152}"
+            local _highest_max=$((_start - 1)) _f _found
+            for _f in "$DOCKER_DIR"/*/.env; do
+                [ -f "$_f" ] || continue
+                _found="$(grep -E '^(COTURN|TURN)_MAX_PORT=' "$_f" 2>/dev/null | tail -1 | cut -d= -f2-)"
+                [[ "$_found" =~ ^[0-9]+$ ]] || continue
+                [ "$_found" -gt "$_highest_max" ] && _highest_max=$_found
+            done
+            local _min=$_start
+            [ "$_highest_max" -ge "$_start" ] && _min=$((_highest_max + 50))
+            eval "$_min_varname='$_min'"
+            eval "$_max_varname='$((_min + _range_size))'"
+        }
+
         # Match common.sh's eval-based pattern so local vars in install_* are set correctly
         prompt_text() {
             local _q="$1" _def="$2" _var="$3" _r
@@ -223,7 +238,7 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service mattermost utilities "Team messaging with voice/video calls (Mattermost; TURN via the shared coturn service); supports multiple isolated instances" 8065
+register_service mattermost utilities "Team messaging with voice/video calls (Mattermost; own dedicated coturn for TURN); supports multiple isolated instances" 8065
 
 install_mattermost() {
     require_docker || return 1
@@ -236,7 +251,6 @@ install_mattermost() {
     local INSTANCE_SUFFIX="" PROJECT="mattermost"
     local MM_CONTAINER="mattermost" DB_CONTAINER="mattermost-db"
     local WEB_PORT="8065" CALLS_UDP_PORT="8443"
-    local COTURN_CONSUMER="mattermost"
 
     if [ -d "$DIR" ]; then
         echo ""
@@ -265,7 +279,6 @@ install_mattermost() {
             PROJECT="mattermost-$_suffix"
             MM_CONTAINER="mattermost-$_suffix"
             DB_CONTAINER="mattermost-$_suffix-db"
-            COTURN_CONSUMER="mattermost-$_suffix"
             log_info "New instance: $DIR"
         fi
     fi
@@ -283,8 +296,8 @@ install_mattermost() {
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
         echo "[DRY-RUN] Would write .env with DB and Mattermost secrets"
         echo "[DRY-RUN] Would create data/ logs/ config/ plugins/ db/ subdirectories"
-        echo "[DRY-RUN] Would register a TURN user with the shared coturn service for '$COTURN_CONSUMER'"
-        echo "[DRY-RUN]   (falling back to a dedicated coturn if the shared service is unavailable)"
+        echo "[DRY-RUN] Would run this instance's own dedicated coturn container for TURN, with a relay"
+        echo "[DRY-RUN]   port range picked to avoid colliding with any other coturn already on the box"
         echo "[DRY-RUN] Would open UFW ports ${WEB_PORT}/tcp, ${CALLS_UDP_PORT}/udp"
         return 0
     fi
@@ -301,16 +314,11 @@ install_mattermost() {
                 return 0
                 ;;
             fresh)
-                if [ "$_HAD_EMBEDDED_COTURN" = true ]; then
-                    echo ""
-                    log_warning "This install has its own dedicated coturn. Continuing may switch it to"
-                    log_warning "the shared coturn service — the Calls plugin's TURN config in System"
-                    log_warning "Console will need updating to the new credentials afterward (see below)."
-                fi
                 echo ""
                 log_warning "Full reinstall stops the existing containers and re-runs every prompt"
-                log_warning "below from scratch. The TURN credential registered with the shared"
-                log_warning "coturn service is reused as-is — no need to touch coturn for this."
+                log_warning "below from scratch, including generating a fresh dedicated coturn"
+                log_warning "container with new TURN credentials — the Calls plugin's TURN config in"
+                log_warning "System Console will need updating afterward (see below)."
                 local _WIPE_MM_DATA=""
                 prompt_yn "  Also delete stored data (Postgres database, uploaded files, config, plugins)? (y/n):" "n" _WIPE_MM_DATA
 
@@ -421,84 +429,49 @@ networks:
 "
     fi
 
-    # ── TURN: shared coturn preferred, dedicated coturn as fallback ─────────
-    # See services/coturn.sh's header for why one shared TURN server beats
-    # every service (Asterisk, each Mattermost instance, ...) running its
-    # own and fighting over host relay ports.
+    # ── TURN: always this instance's own dedicated coturn ───────────────────
+    # There is no shared coturn service in this repo anymore (see
+    # attic/coturn.sh for why it was retired) — every instance runs its own.
+    # find_free_coturn_range (below) is what makes that safe: it checks
+    # every coturn-owning service's .env on the box and picks a relay range
+    # that can't collide with any of them.
     local USE_EMBEDDED_COTURN=true
     local TURN_HOST_VAL="" TURN_PORT_VAL="" TURN_USERNAME_VAL="" TURN_PASSWORD_VAL=""
 
-    if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" = true ]; then
-        USE_EMBEDDED_COTURN=true   # preserve exactly — never switch on update
-    else
-        ensure_coturn_user "$COTURN_CONSUMER"
-        if [ -n "${COTURN_HOST:-}" ]; then
-            USE_EMBEDDED_COTURN=false
-            TURN_HOST_VAL="$COTURN_HOST"; TURN_PORT_VAL="$COTURN_PORT"
-            TURN_USERNAME_VAL="$COTURN_USERNAME"; TURN_PASSWORD_VAL="$COTURN_PASSWORD"
-            log_success "Using the shared coturn service — TURN username '$COTURN_USERNAME'."
-        else
-            log_info "Shared coturn unavailable — this instance will run its own dedicated coturn."
-        fi
+    # A pre-existing instance with no embedded coturn block predates this
+    # repo's dedicated-coturn-only model — it's still pointed at a shared
+    # coturn container this repo no longer installs or manages. Leave it
+    # running as-is (update never touches .env anyway) rather than trying
+    # to heal a registration against a service that no longer exists here.
+    if [ "$MODE" = "update" ] && [ "$_HAD_EMBEDDED_COTURN" != true ]; then
+        USE_EMBEDDED_COTURN=false
+        log_info "This instance still points at a shared coturn service, which this repo no longer installs or manages. It will keep working as long as that coturn container keeps running. Run a full reinstall (not update) to migrate to a dedicated coturn."
     fi
     [ -n "$MM_SECRET" ] || MM_SECRET=$(generate_password 48)
 
-    # Each embedded-coturn instance (this Mattermost falls back to its own
-    # dedicated coturn when the shared one isn't available) needs its own
-    # listening port and relay range, or two instances both on embedded
-    # coturn collide on identical fixed numbers — confirmed live for the
-    # Asterisk-vs-Mattermost case this same offset scheme now also fixes
-    # (see the git history on this block). A relay range can't be found by
-    # scanning port-by-port like find_free_port does for a single port
-    # (CLAUDE.md's port-collision-avoidance section is explicit about this
-    # for large ranges) — so instead each instance gets an integer "slot"
-    # or the next one already used elsewhere, and a wide-enough width
-    # (200, matching this range's existing size) keeps slots from
-    # overlapping each other. base 3479/49253 is right after Asterisk's own
-    # embedded-coturn numbers (3478/49152-49252) so slot 0 doesn't collide
-    # with Asterisk either.
-    #
-    # The slot is assigned once (the smallest integer not already claimed
-    # by another mattermost*/.env on this box) and cached in THIS
-    # instance's own .env as EMBEDDED_COTURN_SLOT, so re-running this same
-    # instance's installer (update or full reinstall) always reads the
-    # same slot back instead of potentially reassigning it — reassignment
-    # would silently move an already-configured instance's TURN port out
-    # from under it.
-    local EMBEDDED_COTURN_SLOT=""
-    [ -f "$DIR/.env" ] && EMBEDDED_COTURN_SLOT="$(grep '^EMBEDDED_COTURN_SLOT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
-    if [ -z "$EMBEDDED_COTURN_SLOT" ]; then
-        # Assigning a NEW slot — also live-verify the candidate control port
-        # and relay-range boundaries aren't already bound by something this
-        # box's own .env files don't know about (a manually-run process, an
-        # unrelated service). An already-cached slot (the branch above) is
-        # trusted as-is and never re-verified — that's what "stable across
-        # re-runs" means; a live process squatting on an already-assigned
-        # slot's port is a conflict to report, not silently route around by
-        # moving an already-configured instance. Can't scan the full
-        # 200-port relay range port-by-port (CLAUDE.md's
-        # port-collision-avoidance section covers why large ranges use an
-        # offset instead of scanning) — checking the control port plus the
-        # relay range's own two boundary ports is the practical middle
-        # ground between "no live check at all" and a full range scan.
-        local _used_slots _cand _p _min _max
-        _used_slots="$(grep -h '^EMBEDDED_COTURN_SLOT=' "$DOCKER_DIR"/mattermost*/.env 2>/dev/null | cut -d= -f2-)"
-        _cand=0
-        while true; do
-            _p=$((3479 + _cand)); _min=$((49253 + _cand * 200)); _max=$((_min + 199))
-            if echo "$_used_slots" | grep -qx "$_cand" \
-               || port_in_use "$_p" || port_in_use "$_p" udp \
-               || port_in_use "$_min" udp || port_in_use "$_max" udp; then
-                _cand=$((_cand + 1))
-                continue
-            fi
-            break
-        done
-        EMBEDDED_COTURN_SLOT="$_cand"
+    # A dedicated coturn here running alongside Asterisk's own, a sibling
+    # Mattermost instance's own, or a legacy shared instance still running is
+    # the same pre-merge relay-port collision this repo's coturn history
+    # warns about (confirmed live: two independent coturns' default ranges
+    # used to overlap by ~100 UDP ports). find_free_coturn_range (lib/common.sh) checks every coturn-
+    # owning service's .env on the box and picks a range starting safely past
+    # whatever's already claimed; the historical 49153-49352 default only
+    # survives when nothing else on the box claims a range at all.
+    local MM_COTURN_MIN_PORT=49153 MM_COTURN_MAX_PORT=49352
+    if [ "$USE_EMBEDDED_COTURN" = true ] && [ "$MODE" != "update" ]; then
+        find_free_coturn_range MM_COTURN_MIN_PORT MM_COTURN_MAX_PORT 200 49153
+        [[ "$MM_COTURN_MIN_PORT" != 49153 ]] && \
+            log_info "Dedicated coturn relay range shifted to ${MM_COTURN_MIN_PORT}-${MM_COTURN_MAX_PORT} to stay clear of another coturn already on this box."
+    elif [ "$MODE" = "update" ] && [ -f "$DIR/.env" ]; then
+        # Preserve whatever range this instance was already using — an update
+        # must never silently move it (a live coturn container restarting on
+        # a different port range would break in-flight/repeat Calls sessions).
+        local _existing_min _existing_max
+        _existing_min="$(grep -E '^TURN_MIN_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        _existing_max="$(grep -E '^TURN_MAX_PORT=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [[ "$_existing_min" =~ ^[0-9]+$ ]] && MM_COTURN_MIN_PORT="$_existing_min"
+        [[ "$_existing_max" =~ ^[0-9]+$ ]] && MM_COTURN_MAX_PORT="$_existing_max"
     fi
-    local _MM_COTURN_PORT=$((3479 + EMBEDDED_COTURN_SLOT))
-    local _MM_COTURN_MIN=$((49253 + EMBEDDED_COTURN_SLOT * 200))
-    local _MM_COTURN_MAX=$((_MM_COTURN_MIN + 199))
 
     local _COTURN_SERVICE=""
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
@@ -510,14 +483,14 @@ networks:
     user: root
     command:
       - -n
-      - --listening-port=${_MM_COTURN_PORT}
+      - --listening-port=3479
       - --listening-ip=0.0.0.0
       - --fingerprint
       - --use-auth-secret
       - --static-auth-secret=\${COTURN_SECRET}
       - --realm=\${MM_REALM:-localhost}
-      - --min-port=${_MM_COTURN_MIN}
-      - --max-port=${_MM_COTURN_MAX}
+      - --min-port=${MM_COTURN_MIN_PORT}
+      - --max-port=${MM_COTURN_MAX_PORT}
       - --no-tls
       - --no-dtls
       - --no-cli
@@ -601,12 +574,12 @@ TURN_HOST=$TURN_HOST_VAL
 TURN_PORT=$TURN_PORT_VAL
 TURN_USERNAME=$TURN_USERNAME_VAL
 TURN_PASSWORD=$TURN_PASSWORD_VAL
-# This instance's embedded-coturn port slot (see the comment above the
-# EMBEDDED_COTURN_SLOT assignment in mattermost.sh) — read back on every
-# re-run so it never gets reassigned out from under an already-running
-# instance. Reserved even when USE_EMBEDDED_COTURN is currently false, in
-# case this instance ever falls back to its own coturn later.
-EMBEDDED_COTURN_SLOT=$EMBEDDED_COTURN_SLOT
+# This instance's OWN coturn relay range -- only set when it runs a dedicated
+# coturn above. Left blank when using the shared coturn service, so other
+# services' find_free_coturn_range (lib/common.sh) scan correctly skips this
+# file instead of treating a range this instance doesn't actually own as claimed.
+TURN_MIN_PORT=$( [ "$USE_EMBEDDED_COTURN" = true ] && echo "$MM_COTURN_MIN_PORT" )
+TURN_MAX_PORT=$( [ "$USE_EMBEDDED_COTURN" = true ] && echo "$MM_COTURN_MAX_PORT" )
 EOF
     chmod 600 .env
 
@@ -629,10 +602,12 @@ EOF
         ufw allow "${WEB_PORT}/tcp" comment "Mattermost${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         ufw allow "${CALLS_UDP_PORT}/udp" comment "Mattermost Calls RTC${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
         if [ "$USE_EMBEDDED_COTURN" = true ]; then
-            ufw allow "${_MM_COTURN_PORT}/udp"; ufw allow "${_MM_COTURN_PORT}/tcp"
-            ufw allow "${_MM_COTURN_MIN}:${_MM_COTURN_MAX}/udp" comment "Mattermost coturn relay${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}"
+            ufw allow 3479/udp; ufw allow 3479/tcp
+            ufw allow "${MM_COTURN_MIN_PORT}:${MM_COTURN_MAX_PORT}/udp" comment "Mattermost coturn relay"
         fi
-        # Shared coturn opens its own ports once, at its own install time.
+        # A legacy instance still on a shared coturn (USE_EMBEDDED_COTURN=false
+        # above) has nothing to open here — that coturn's ports were opened
+        # once, at its own install time, whenever that was.
     fi
 
     echo ""
@@ -648,9 +623,9 @@ EOF
     # cannot run at the same time as --lt-cred-mech on one instance).
     local _ICE_JSON _turn_config_md
     if [ "$USE_EMBEDDED_COTURN" = true ]; then
-        _ICE_JSON="[{\"urls\":[\"turn:${SITE_DOMAIN:-YOUR_IP}:${_MM_COTURN_PORT}?transport=udp\"],\"username\":\"static\",\"credential\":\"see COTURN_SECRET below — this dedicated coturn uses use-auth-secret/HMAC, not a fixed credential\"}]"
+        _ICE_JSON="[{\"urls\":[\"turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\"],\"username\":\"static\",\"credential\":\"see COTURN_SECRET below — this dedicated coturn uses use-auth-secret/HMAC, not a fixed credential\"}]"
         _turn_config_md="This instance runs its own dedicated coturn (HMAC/REST-API auth):
-- TURN Server URI: \`turn:${SITE_DOMAIN:-YOUR_IP}:${_MM_COTURN_PORT}?transport=udp\`
+- TURN Server URI: \`turn:${SITE_DOMAIN:-YOUR_IP}:3479?transport=udp\`
 - System Console → Plugins → Calls → **TURN Static Auth Secret**: value of \`COTURN_SECRET\` in \`.env\`"
     else
         _ICE_JSON="[{\"urls\":[\"turn:${TURN_HOST_VAL}:${TURN_PORT_VAL}?transport=udp\"],\"username\":\"${TURN_USERNAME_VAL}\",\"credential\":\"${TURN_PASSWORD_VAL}\"}]"
