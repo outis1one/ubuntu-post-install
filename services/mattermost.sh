@@ -518,6 +518,28 @@ ${_CADDY_NET_BLOCK}    healthcheck:
       timeout: 5s
       retries: 5
 
+  # Fixes ownership on the bind-mounted volumes below to the fixed UID/GID
+  # (2000) mattermost/mattermost-team-edition runs as, before the mattermost
+  # service starts — every time, not just at install time. Confirmed live:
+  # importing data from another host (e.g. a PikaPods migration) can leave
+  # these owned by whatever UID did the copy instead of 2000, and the
+  # container doesn't fix this itself on start the way postgres's official
+  # image does — it just fails every file write with "permission denied"
+  # until someone notices and runs chown by hand. This removes the "by
+  # hand" part permanently: runs on every `docker compose up`, including a
+  # plain host reboot, so ownership drift from any future cause self-heals
+  # without needing this installer re-run again.
+  mattermost-fix-perms:
+    image: busybox:latest
+    container_name: ${MM_CONTAINER}-fix-perms
+    command: sh -c "chown -R 2000:2000 /data /logs /config /plugins"
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./config:/config
+      - ./plugins:/plugins
+    restart: "no"
+
   mattermost:
     image: mattermost/mattermost-team-edition:latest
     container_name: ${MM_CONTAINER}
@@ -527,6 +549,8 @@ ${_CADDY_NET_BLOCK}    healthcheck:
     depends_on:
       db:
         condition: service_healthy
+      mattermost-fix-perms:
+        condition: service_completed_successfully
     volumes:
       - ./data:/mattermost/data
       - ./logs:/mattermost/logs
@@ -732,6 +756,15 @@ MD
 # default). If you have a custom-format pg_dump instead, use `pg_restore`
 # in place of the `psql < dump` step below.
 #
+# Adminer's plain-text export has two confirmed bugs of its own — unquoted
+# enum-label DEFAULTs, and boolean columns serialized as bare 0/1 instead
+# of true/false — either of which makes the import below fail outright.
+# extras/fix_pikapods_dump.py patches both; run it on the dump BEFORE this
+# script if psql reports errors on CREATE TYPE/CREATE TABLE or boolean
+# columns:
+#   python3 fix_pikapods_dump.py input.sql output.sql
+#
+
 # IMPORTANT: point the files argument at the SUBDIRECTORY that holds
 # Mattermost's own file storage inside whatever you downloaded via SFTP
 # (commonly named `data`), not the whole SFTP root — PikaPods' exact
@@ -739,7 +772,7 @@ MD
 # before running.
 #
 # Usage:
-#   ./migrate-from-pikapods.sh <path-to-sql-dump> <path-to-files-dir>
+#   sudo ./migrate-from-pikapods.sh <path-to-sql-dump> <path-to-files-dir>
 ################################################################################
 
 MIGRATE_HEAD
@@ -754,13 +787,18 @@ MIGRATE_VARS
 
             cat >> "$DIR/migrate-from-pikapods.sh" << 'MIGRATE_BODY'
 set -uo pipefail
+
+# Needed for the chown to UID 2000 near the end (an ordinary user generally
+# can't chown files to an arbitrary UID that isn't their own).
+[ "${EUID:-$(id -u)}" -eq 0 ] || { echo "Run as root: sudo $0 ..."; exit 1; }
+
 cd "$PROJECT_DIR" || exit 1
 
 SQL_DUMP="${1:-}"
 FILES_DIR="${2:-}"
 
 if [ -z "$SQL_DUMP" ] || [ -z "$FILES_DIR" ]; then
-    echo "Usage: $0 <path-to-sql-dump> <path-to-files-dir>"
+    echo "Usage: sudo $0 <path-to-sql-dump> <path-to-files-dir>"
     exit 1
 fi
 [ -f "$SQL_DUMP" ]  || { echo "SQL dump not found: $SQL_DUMP"; exit 1; }
@@ -806,6 +844,14 @@ fi
 echo "Copying files into ./data..."
 mkdir -p ./data
 rsync -a "$FILES_DIR"/ ./data/ 2>/dev/null || cp -a "$FILES_DIR"/. ./data/
+
+# mattermost/mattermost-team-edition runs as fixed UID/GID 2000 — an SFTP'd
+# copy from elsewhere lands owned by whoever ran this script instead, and
+# every file write then fails with "permission denied" until this is
+# fixed. Confirmed live: this is what broke image/file uploads with a
+# client-side "stream closed" error after a migration.
+echo "Fixing ownership on imported files (mattermost image expects UID/GID 2000)..."
+chown -R 2000:2000 ./data
 
 echo "Starting Mattermost..."
 docker compose up -d
