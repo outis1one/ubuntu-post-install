@@ -174,11 +174,16 @@ install_garage() {
     find_free_port RPC_PORT "$RPC_PORT"
     find_free_port ADMIN_PORT "$ADMIN_PORT"
 
+    # Suggested defaults are generated fresh at runtime, not fixed strings
+    # baked into this script — same reasoning as not hardcoding what a
+    # remote reader (services/backup.sh) should expect the name to be:
+    # this is the operator's name to pick, not this repo's.
     local BUCKET_NAME="" KEY_NAME=""
-    prompt_text "  Bucket name:" "kopia-backup" BUCKET_NAME
-    BUCKET_NAME="${BUCKET_NAME:-kopia-backup}"
-    prompt_text "  Access key name:" "kopia" KEY_NAME
-    KEY_NAME="${KEY_NAME:-kopia}"
+    local _default_bucket="kopia-$(date +%s)" _default_key="key-$(date +%s)"
+    prompt_text "  Bucket name:" "$_default_bucket" BUCKET_NAME
+    BUCKET_NAME="${BUCKET_NAME:-$_default_bucket}"
+    prompt_text "  Access key name:" "$_default_key" KEY_NAME
+    KEY_NAME="${KEY_NAME:-$_default_key}"
 
     mkdir -p "$DIR"/{data,meta}
     ensure_docker_dir_ownership "$DIR"
@@ -232,6 +237,11 @@ COMPOSE
 
     cat > .env << ENV
 TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
+
+# Read directly (over SSH) by another box's services/backup.sh when adding
+# this instance as a Kopia sync-to s3 mirror target — keep this key name
+# stable, other scripts depend on it.
+GARAGE_S3_API_PORT=${S3_API_PORT}
 ENV
     chmod 600 .env
 

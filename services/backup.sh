@@ -932,8 +932,19 @@ install_backup() {
     echo ""
     local _ADD_SFTP_MIRROR=""
     local _sftp_default_host="${DR_SYNC_HOST:-}"
-    prompt_yn "  Add a direct SFTP mirror to another box$( [ -n "$_sftp_default_host" ] && echo " (e.g. $_sftp_default_host, same as the DR-spare above)")? (y/n):" "n" _ADD_SFTP_MIRROR
+    prompt_yn "  Add a direct mirror to another box$( [ -n "$_sftp_default_host" ] && echo " (e.g. $_sftp_default_host, same as the DR-spare above)")? (y/n):" "n" _ADD_SFTP_MIRROR
     if [[ "$_ADD_SFTP_MIRROR" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "    1) SFTP — Kopia's own SFTP backend, syncs straight to a directory"
+        echo "    2) S3 (Garage) — a Garage instance already running on that box"
+        echo "       (services/garage.sh) — reuses Kopia's S3 backend, the same one"
+        echo "       already proven reliable for the Backblaze B2 mirror above,"
+        echo "       instead of Kopia's less-exercised SFTP backend"
+        echo ""
+        local _MIRROR_TYPE_CHOICE=""
+        prompt_text "  Mirror type [1]:" "1" _MIRROR_TYPE_CHOICE
+        _MIRROR_TYPE_CHOICE="${_MIRROR_TYPE_CHOICE:-1}"
+
         local _SFTP_DEST=""
         prompt_text "  SSH destination, user@host (~/.ssh/config aliases work too):" "$_sftp_default_host" _SFTP_DEST
         if [ -z "$_SFTP_DEST" ]; then
@@ -966,57 +977,117 @@ install_backup() {
             # same Port line correctly.
             _SFTP_PORT="${_SFTP_PORT:-22}"
             log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME}:${_SFTP_PORT} for this mirror (resolved via ~/.ssh/config)."
-            # Suggest a subdirectory of the DR-spare's own path (if one is
-            # configured) rather than an unrelated default — reusing the
-            # same spare location the operator already picked, but in its
-            # own /kopia-data subdirectory so the actual repository data
-            # (Kopia's own blob-store files) doesn't end up visually mixed
-            # in with the two plain config files the DR-spare sync writes
-            # directly into DR_SYNC_PATH itself.
-            local _SFTP_PATH_DEFAULT="~/backups/kopia-mirror"
-            [ -n "${DR_SYNC_PATH:-}" ] && _SFTP_PATH_DEFAULT="${DR_SYNC_PATH%/}/kopia-data"
-            local _SFTP_PATH="" _MIRROR_NAME=""
-            prompt_text "  Remote path for the repo:" "$_SFTP_PATH_DEFAULT" _SFTP_PATH
-            _SFTP_PATH="${_SFTP_PATH:-$_SFTP_PATH_DEFAULT}"
-            prompt_text "  Short name for this mirror (letters/numbers/underscores):" "spare" _MIRROR_NAME
-            _MIRROR_NAME="${_MIRROR_NAME:-spare}"
+
+            local _MIRROR_NAME=""
+            prompt_text "  Short name for this mirror (letters/numbers/underscores):" "$( [ "$_MIRROR_TYPE_CHOICE" = "2" ] && echo garage || echo spare )" _MIRROR_NAME
+            _MIRROR_NAME="${_MIRROR_NAME:-$( [ "$_MIRROR_TYPE_CHOICE" = "2" ] && echo garage || echo spare )}"
             _MIRROR_NAME="${_MIRROR_NAME//[^a-zA-Z0-9_]/_}"
 
-            # sync-to sftp doesn't shell out to the system ssh client, so it
-            # needs an explicit key/known_hosts file rather than picking up
-            # whatever plain `ssh` already trusts automatically.
-            _backup_ensure_root_ssh_key "$_SFTP_DEST"
-            local _SFTP_KEYFILE="$_ROOT_SSH_KEYFILE"
-
-            if [ -z "$_SFTP_KEYFILE" ]; then
-                log_warning "  No SSH key available for root — can't add this mirror."
-            elif ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$_SFTP_DEST" true 2>/dev/null; then
+            # Both types need at least a working passwordless SSH connection
+            # to this box — SFTP because Kopia authenticates with a keyfile
+            # over that same connection; S3/Garage because that's how this
+            # script reads Garage's own credentials remotely (the actual S3
+            # dry-run below talks straight to Garage's S3 API port, no SSH
+            # involved in that part at all).
+            if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "$_SFTP_DEST" true 2>/dev/null; then
                 log_warning "  Couldn't SSH to $_SFTP_DEST without a password — not adding this"
                 log_warning "  mirror until that works: ssh-copy-id $_SFTP_DEST"
-            else
-                log_info "Verifying SFTP mirror (dry-run sync against the 'default' repo)..."
-                local _sftp_err
-                if _sftp_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
-                        --config-file="${DEST_CONFIGS[default]}" repository sync-to sftp \
-                        --host="$_SFTP_HOSTNAME" --port="$_SFTP_PORT" --username="$_SFTP_USER" --path="$_SFTP_PATH" \
-                        --keyfile="$_SFTP_KEYFILE" --known-hosts=/root/.ssh/known_hosts \
-                        --dry-run 2>&1)"; then
-                    EXTRA_MIRROR_TYPE["$_MIRROR_NAME"]="sftp"
-                    EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--host=$_SFTP_HOSTNAME --port=$_SFTP_PORT --username=$_SFTP_USER --path=$_SFTP_PATH --keyfile=$_SFTP_KEYFILE --known-hosts=/root/.ssh/known_hosts"
-                    # Reusing an existing mirror name reconfigures it (the
-                    # associative-array assignments above already do that)
-                    # without duplicating it in the space-separated name list.
-                    if [[ " $EXTRA_MIRROR_NAMES " != *" $_MIRROR_NAME "* ]]; then
-                        if [ -z "$EXTRA_MIRROR_NAMES" ]; then
-                            EXTRA_MIRROR_NAMES="$_MIRROR_NAME"
+            elif [ "$_MIRROR_TYPE_CHOICE" = "2" ]; then
+                # ── S3 (Garage) ──────────────────────────────────────────────
+                # Read the real bucket/key/port straight from the remote
+                # instance's own .env rather than asking the operator to
+                # retype them here — those values are generated once by
+                # services/garage.sh and never touched again on its own
+                # Update runs, so this is always reading the box's actual
+                # current configuration, not something baked in here.
+                local _garage_env
+                _garage_env="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$_SFTP_DEST" "cat ~/docker/garage/.env 2>/dev/null")"
+                if [ -z "$_garage_env" ]; then
+                    log_warning "  Garage isn't installed on $_SFTP_DEST yet — not adding this mirror."
+                    log_warning "  Install it there first, then re-run this installer:"
+                    log_warning "    sudo ./setup.sh garage   (or: sudo bash garage.sh, on a box without this repo)"
+                else
+                    local _g_bucket _g_key_id _g_key_secret _g_port
+                    _g_bucket="$(echo "$_garage_env" | sed -nE "s/^GARAGE_BUCKET='?([^']*)'?\$/\1/p")"
+                    _g_key_id="$(echo "$_garage_env" | sed -nE "s/^GARAGE_ACCESS_KEY_ID='?([^']*)'?\$/\1/p")"
+                    _g_key_secret="$(echo "$_garage_env" | sed -nE "s/^GARAGE_ACCESS_KEY_SECRET='?([^']*)'?\$/\1/p")"
+                    _g_port="$(echo "$_garage_env" | sed -nE "s/^GARAGE_S3_API_PORT=([0-9]+)\$/\1/p")"
+                    if [ -z "$_g_bucket" ] || [ -z "$_g_key_id" ] || [ -z "$_g_key_secret" ] || [ -z "$_g_port" ]; then
+                        log_warning "  Garage is installed on $_SFTP_DEST but its .env is missing something"
+                        log_warning "  expected — check ~/docker/garage/.env there. Not adding this mirror."
+                    else
+                        local _g_endpoint="${_SFTP_HOSTNAME}:${_g_port}"
+                        log_info "Verifying S3 (Garage) mirror at ${_g_endpoint}, bucket '$_g_bucket' (dry-run)..."
+                        local _s3_err
+                        if _s3_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
+                                --config-file="${DEST_CONFIGS[default]}" repository sync-to s3 \
+                                --bucket="$_g_bucket" --endpoint="$_g_endpoint" \
+                                --access-key="$_g_key_id" --secret-access-key="$_g_key_secret" \
+                                --disable-tls --dry-run 2>&1)"; then
+                            EXTRA_MIRROR_TYPE["$_MIRROR_NAME"]="s3"
+                            EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--bucket=$_g_bucket --endpoint=$_g_endpoint --access-key=$_g_key_id --secret-access-key=$_g_key_secret --disable-tls"
+                            if [[ " $EXTRA_MIRROR_NAMES " != *" $_MIRROR_NAME "* ]]; then
+                                if [ -z "$EXTRA_MIRROR_NAMES" ]; then
+                                    EXTRA_MIRROR_NAMES="$_MIRROR_NAME"
+                                else
+                                    EXTRA_MIRROR_NAMES="$EXTRA_MIRROR_NAMES $_MIRROR_NAME"
+                                fi
+                            fi
+                            log_success "  S3 (Garage) mirror '$_MIRROR_NAME' verified — will run after every backup."
                         else
-                            EXTRA_MIRROR_NAMES="$EXTRA_MIRROR_NAMES $_MIRROR_NAME"
+                            log_warning "  S3 (Garage) dry-run failed — not adding this mirror:"
+                            log_warning "  $_s3_err"
                         fi
                     fi
-                    log_success "  SFTP mirror '$_MIRROR_NAME' verified — will run after every backup."
+                fi
+            else
+                # ── SFTP ─────────────────────────────────────────────────────
+                # Suggest a subdirectory of the DR-spare's own path (if one is
+                # configured) rather than an unrelated default — reusing the
+                # same spare location the operator already picked, but in its
+                # own /kopia-data subdirectory so the actual repository data
+                # (Kopia's own blob-store files) doesn't end up visually mixed
+                # in with the two plain config files the DR-spare sync writes
+                # directly into DR_SYNC_PATH itself.
+                local _SFTP_PATH_DEFAULT="~/backups/kopia-mirror"
+                [ -n "${DR_SYNC_PATH:-}" ] && _SFTP_PATH_DEFAULT="${DR_SYNC_PATH%/}/kopia-data"
+                local _SFTP_PATH=""
+                prompt_text "  Remote path for the repo:" "$_SFTP_PATH_DEFAULT" _SFTP_PATH
+                _SFTP_PATH="${_SFTP_PATH:-$_SFTP_PATH_DEFAULT}"
+
+                # sync-to sftp doesn't shell out to the system ssh client, so
+                # it needs an explicit key/known_hosts file rather than
+                # picking up whatever plain `ssh` already trusts automatically.
+                _backup_ensure_root_ssh_key "$_SFTP_DEST"
+                local _SFTP_KEYFILE="$_ROOT_SSH_KEYFILE"
+
+                if [ -z "$_SFTP_KEYFILE" ]; then
+                    log_warning "  No SSH key available for root — can't add this mirror."
                 else
-                    log_warning "  SFTP dry-run failed — not adding this mirror:"
-                    log_warning "  $_sftp_err"
+                    log_info "Verifying SFTP mirror (dry-run sync against the 'default' repo)..."
+                    local _sftp_err
+                    if _sftp_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
+                            --config-file="${DEST_CONFIGS[default]}" repository sync-to sftp \
+                            --host="$_SFTP_HOSTNAME" --port="$_SFTP_PORT" --username="$_SFTP_USER" --path="$_SFTP_PATH" \
+                            --keyfile="$_SFTP_KEYFILE" --known-hosts=/root/.ssh/known_hosts \
+                            --dry-run 2>&1)"; then
+                        EXTRA_MIRROR_TYPE["$_MIRROR_NAME"]="sftp"
+                        EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--host=$_SFTP_HOSTNAME --port=$_SFTP_PORT --username=$_SFTP_USER --path=$_SFTP_PATH --keyfile=$_SFTP_KEYFILE --known-hosts=/root/.ssh/known_hosts"
+                        # Reusing an existing mirror name reconfigures it (the
+                        # associative-array assignments above already do that)
+                        # without duplicating it in the space-separated name list.
+                        if [[ " $EXTRA_MIRROR_NAMES " != *" $_MIRROR_NAME "* ]]; then
+                            if [ -z "$EXTRA_MIRROR_NAMES" ]; then
+                                EXTRA_MIRROR_NAMES="$_MIRROR_NAME"
+                            else
+                                EXTRA_MIRROR_NAMES="$EXTRA_MIRROR_NAMES $_MIRROR_NAME"
+                            fi
+                        fi
+                        log_success "  SFTP mirror '$_MIRROR_NAME' verified — will run after every backup."
+                    else
+                        log_warning "  SFTP dry-run failed — not adding this mirror:"
+                        log_warning "  $_sftp_err"
+                    fi
                 fi
             fi
         fi
