@@ -9,7 +9,17 @@
 # Ported from ubuntu-post-install-24.04-crowdsec.sh (# ---- WG-EASY ----).
 # Own ~/docker/wg-easy/ with a standalone docker-compose.yml + .env.
 # Requires cap_add: NET_ADMIN + SYS_MODULE and ip_forward sysctl.
-# Forward UDP 51820 on your router to this server for external VPN access.
+# Forward UDP 51830 on your router to this server for external VPN access
+# (default — scanned/moved at install time if already taken; see below).
+#
+# Default port deliberately isn't WireGuard's conventional 51820: Netbird's
+# own WireGuard listener also defaults to exactly 51820, and this is the
+# one service in this repo where two completely independent tools (this
+# repo's own wg-easy and a separately-installed Netbird) are both likely to
+# reach for the same hardcoded upstream default with no scanning of their
+# own on Netbird's side. Starting one port family away avoids that
+# collision in the common case; the scan below still moves both further if
+# even the new default is somehow already taken.
 
 # ── Standalone bootstrap ──────────────────────────────────────────────────────
 # Detected when the script is executed directly rather than sourced by setup.sh.
@@ -207,13 +217,13 @@ CBLOCK
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
-register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy); peers mesh through this hub automatically, with a script to sync SSH aliases" 51821
+register_service wg-easy utilities "WireGuard VPN with web management UI (wg-easy); peers mesh through this hub automatically, with a script to sync SSH aliases" 51831
 
 install_wg-easy() {
     require_docker || return 1
 
     local WGEASY_DIR="$DOCKER_DIR/wg-easy"
-    local WEB_PORT="51821" VPN_PORT="51820"
+    local WEB_PORT="51831" VPN_PORT="51830"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] wg-easy would:"
@@ -221,7 +231,7 @@ install_wg-easy() {
         echo "  - Auto-detect public IP for WG_HOST"
         echo "  - Generate a random web UI password"
         echo "  - Pin WG_DEFAULT_ADDRESS=10.8.0.x (subnet 10.8.0.0/24)"
-        echo "  - Expose port 51821 (web UI) + 51820/udp (VPN), both auto-scanned if occupied"
+        echo "  - Expose port 51831 (web UI) + 51830/udp (VPN), both auto-scanned if occupied"
         echo "  - Require router port-forward: UDP <VPN port> → this server"
         echo "  - Offer a Caddy reverse proxy and to start the container"
         echo "  - Offer to also allow SSH from the VPN subnet (additive, doesn't remove public SSH)"
@@ -232,7 +242,7 @@ install_wg-easy() {
     # Scan for free host ports, moving both together — a plain install
     # shouldn't silently claim a port another already-running service holds.
     # Whatever VPN_PORT ends up as is what needs forwarding on the router
-    # (the messaging below reflects the final value, not the 51820 default).
+    # (the messaging below reflects the final value, not the 51830 default).
     # See CLAUDE.md's "Port collision avoidance" section.
     while port_in_use "$WEB_PORT" || port_in_use "$VPN_PORT" udp; do
         WEB_PORT=$((WEB_PORT + 1))
