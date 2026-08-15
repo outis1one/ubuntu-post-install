@@ -277,8 +277,15 @@ ENV
     local _key_out
     _key_out="$(docker exec garage /garage key create "$KEY_NAME" 2>&1)"
     local ACCESS_KEY_ID ACCESS_KEY_SECRET
-    ACCESS_KEY_ID="$(echo "$_key_out" | awk -F': ' '/^Key ID:/{print $2}')"
-    ACCESS_KEY_SECRET="$(echo "$_key_out" | awk -F': ' '/^Secret key:/{print $2}')"
+    # Garage's real CLI output pads labels with extra spaces for column
+    # alignment (e.g. "Key ID:              GKxxxx", not just "Key ID: GKxxxx")
+    # — a fixed ": " separator leaves that padding stuck to the value.
+    # ':[[:space:]]+' as a regex field separator consumes ALL of it,
+    # however many spaces there actually are. Confirmed live: the fixed
+    # single-space version left leading spaces baked into .env, which
+    # would have broken S3 auth (access keys have to match exactly).
+    ACCESS_KEY_ID="$(echo "$_key_out" | awk -F':[[:space:]]+' '/^Key ID:/{print $2}')"
+    ACCESS_KEY_SECRET="$(echo "$_key_out" | awk -F':[[:space:]]+' '/^Secret key:/{print $2}')"
 
     if [ -z "$ACCESS_KEY_ID" ] || [ -z "$ACCESS_KEY_SECRET" ]; then
         log_error "Couldn't parse the access key from 'garage key create' output:"
