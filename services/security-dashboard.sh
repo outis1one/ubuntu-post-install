@@ -3036,10 +3036,30 @@ def ea_device_sipnetic_string(extension):
     """Sipnetic's own documented "account string" QR-scan format
     (https://www.sipnetic.com/qr-codes): semicolon-separated key=value pairs,
     n=display name, u=username, d=domain/IP (no port), p=password,
-    dt=default transport (0=UDP, 1=TCP, 2=TLS). Unlike
+    dt=default transport (0=UDP, 1=TCP, 2=TLS), st=STUN/TURN server. Unlike
     ea_device_provisioning()'s deliberately generic plain-text file, this one
     IS a verified, documented format for one specific app, built from the
     exact same ea_device_details() data.
+
+    st is intentionally set to an explicit turn:user:pass@host URI whenever
+    coturn is configured, rather than left unset -- leaving it out doesn't
+    mean "no TURN", it means Sipnetic falls back to its own default/built-in
+    STUN server instead of the coturn instance Asterisk itself is actually
+    using, which is silently wrong rather than absent. This is the same
+    TURN_SERVER/TURN_USERNAME/TURN_PASSWORD ea_device_details() already
+    reads from the Asterisk .env (see ea_connection_defaults()) -- whichever
+    coturn Asterisk is actually configured against.
+
+    The host is deliberately stripped of its port before going into st.
+    Sipnetic's own doc for this field is explicit that the value is a
+    "hostname or IP address without port", and its own worked example is
+    `st=turn:user:password@turn.mydomain.com;` -- no port anywhere, even
+    in the URI form. Confirmed live: appending :3478 (matching the doc's
+    generic URI-with-credentials description, which doesn't actually show a
+    port example) gets silently truncated by the app -- the FQDN came
+    through, the port after it did not. coturn's listening port in this
+    repo is always the STUN/TURN-conventional 3478, which is what a
+    portless address implies anyway, so dropping it costs nothing.
 
     A literal ';' in any field must be doubled per that same doc page --
     generated passwords are alnum-only (_ea_generate_password) so this only
@@ -3053,10 +3073,19 @@ def ea_device_sipnetic_string(extension):
 
     host = d["server"] or ""
     dt = "2" if d["transport"] == "TLS" else "0"
-    return "n=%s;u=%s;d=%s;p=%s;dt=%s;" % (
-        esc_field(d["name"] or d["extension"]), esc_field(d["extension"]),
-        esc_field(host), esc_field(d["password"]), dt,
-    )
+    fields = [
+        "n=%s" % esc_field(d["name"] or d["extension"]),
+        "u=%s" % esc_field(d["extension"]),
+        "d=%s" % esc_field(host),
+        "p=%s" % esc_field(d["password"]),
+        "dt=%s" % dt,
+    ]
+    if d.get("turn_server") and d.get("turn_username") and d.get("turn_password"):
+        turn_host = d["turn_server"].rsplit(":", 1)[0]
+        fields.append("st=%s" % esc_field(
+            "turn:%s:%s@%s" % (d["turn_username"], d["turn_password"], turn_host)
+        ))
+    return ";".join(fields) + ";"
 
 
 def _ea_edit_device_block(extension, mutate):
@@ -3612,7 +3641,14 @@ INDEX_HTML = """<!doctype html>
   }
   nav button:hover { color: var(--text); }
   nav button.active { color: var(--text); border-bottom-color: var(--accent); }
-  main { padding: var(--sp-6); max-width: 1180px; margin: 0 auto; }
+  /* 1180 was too narrow for the Extensions table specifically (Ext, Name,
+     Mobile, Status, Transport, PSTN, Whitelist, Messaging, Voicemail, plus
+     the row-action column) -- ten columns including a dropdown and a free-text
+     whitelist field forced .table-wrap's horizontal scrollbar even on a normal
+     desktop viewport. 1600 gives every tab's tables room without it; narrow
+     viewports still fall back to that same scrollbar (.table-wrap already
+     handles it), this only raises the ceiling for wide ones. */
+  main { padding: var(--sp-6); max-width: 1600px; margin: 0 auto; }
 
   /* ── Cards ────────────────────────────────────────────────────────────── */
   .card {
@@ -3803,6 +3839,48 @@ INDEX_HTML = """<!doctype html>
   .toast.err { border-left-color: var(--danger); }
   .toast.ok { border-left-color: var(--ok); }
   @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  /* ── QR modal ─────────────────────────────────────────────────────────── */
+  /* Above #toasts (z-index 60) since a toast firing while the modal is open
+     (e.g. a save from another tab action) should still be visible on top. */
+  #qr-modal-overlay {
+    position: fixed; inset: 0; z-index: 70;
+    background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center;
+    padding: var(--sp-4);
+  }
+  #qr-modal-overlay.show { display: flex; }
+  /* Sized to the QR frame's own 192px, not this -- the caption text below it
+     (TURN credentials warning included) wrapped down to a couple of
+     characters per line at that width. 320px gives it room to breathe while
+     staying well short of the surrounding card. */
+  .qr-modal {
+    position: relative; width: 320px; max-width: calc(100vw - 2 * var(--sp-4));
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: var(--sp-4);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column; align-items: center; gap: var(--sp-2);
+  }
+  .qr-modal-close {
+    position: absolute; top: var(--sp-2); right: var(--sp-2);
+    background: none; border: none; color: var(--text-faint); cursor: pointer;
+    font-size: 1.3rem; line-height: 1; padding: 0.2rem 0.4rem; border-radius: var(--radius-sm);
+  }
+  .qr-modal-close:hover { color: var(--danger); background: rgba(255,107,107,0.1); }
+  /* qrcode.js draws modules edge-to-edge with no margin of its own -- the
+     rendered image's own content ran right to its edge (verified against
+     the raw generated PNG: the code region covered all but ~1px of it).
+     Real camera scanners need an actual light quiet zone around the code
+     per the QR spec, not the modal's dark theme background touching the
+     modules directly -- this was reported as unreadable by both Sipnetic
+     and Linphone before this fix. 192px/20px = 2in outer frame, ~4-module
+     white border on each side, sized generously since exact module count
+     varies with the encoded string length. */
+  #qr-modal-canvas {
+    width: 192px; height: 192px; box-sizing: border-box;
+    background: #fff; padding: 20px; border-radius: var(--radius-sm);
+  }
+  #qr-modal-canvas img, #qr-modal-canvas canvas { width: 100%; height: 100%; display: block; }
 
   /* The one-time device password must not auto-dismiss like a toast does. */
   .callout {
@@ -4033,7 +4111,7 @@ INDEX_HTML = """<!doctype html>
           <p class="muted"><b>Ring</b> dials every member at once — first to answer gets the call, everyone else stops ringing. <b>Page</b> tells Asterisk to signal auto-answer to every member via SIP headers, for devices that honor it, turning the same simultaneous dial into a one-way intercom-style broadcast instead.</p>
           <p class="muted">You don't need <b>Page</b> just to mix an auto-answering device with normally-ringing phones in the same group, though — auto-answer is really a property of the device's own SIP client configuration, not something Asterisk enforces per member. Confirmed against baresip's own source: it decides purely from its account's local <code>answermode</code> setting and never looks at any auto-answer signal on the incoming call, so a device configured to auto-answer (e.g. a dedicated intercom/kiosk running <code>baresip</code> in Answer Mode: Auto) picks up <i>everything</i> routed to it instantly and unconditionally, while ordinary phones in the same plain <b>Ring</b> group just keep ringing until a person answers — no extra setting needed here for that mix.</p>
           <p class="muted">For a dedicated always-on auto-answer device (a wall-mounted intercom, a paging station), Easy Asterisk — the vendor project this installer builds on — has a built-in <code>baresip</code>-based kiosk client for exactly that. It installs on a separate small Linux machine (an old PC, a Raspberry Pi), not this Asterisk server itself: <a href="/download/kiosk-client-installer.sh" download>download the installer script</a>, then see <code>docs/kiosk-paging-setup.md</code> in this repo for the full walkthrough.</p>
-          <p class="muted">For a phone or tablet running Sipnetic instead, each extension's own detail panel below (Extensions tab → click a row → "Sipnetic QR code") can generate a scan-to-configure code — no dedicated kiosk hardware needed for that one.</p>
+          <p class="muted">For a phone or tablet running Sipnetic instead, each extension's own detail panel below (Extensions tab → click a row → "Click here for a QR code") can generate a scan-to-configure code — no dedicated kiosk hardware needed for that one.</p>
         </details>
         <div class="row" style="margin-bottom:var(--sp-2)">
           <input type="text" id="ea-room-ext" placeholder="Extension, e.g. 500" style="width:9rem">
@@ -4106,6 +4184,14 @@ INDEX_HTML = """<!doctype html>
   </div>
 </main>
 <div id="toasts"></div>
+<div id="qr-modal-overlay" onclick="if (event.target === this) closeSipneticQr()">
+  <div class="qr-modal">
+    <button class="qr-modal-close" onclick="closeSipneticQr()" aria-label="Close">&times;</button>
+    <div id="qr-modal-canvas"></div>
+    <p class="muted" style="margin:var(--sp-2) 0 0; font-size:0.8rem; width:100%">Scan with Sipnetic (Add Account → Scan QR Code) to auto-fill this extension's SIP and TURN settings.</p>
+    <p class="muted" style="margin:0; font-size:0.75rem; width:100%">Contains the extension's password and TURN credentials in plain text — treat the image like the password itself.</p>
+  </div>
+</div>
 <script>
 // Embedded verbatim (license header preserved below) for the Sipnetic
 // QR-provisioning feature -- self-contained, no CDN dependency, same
@@ -5525,10 +5611,9 @@ async function showEaDeviceDetails(ext) {
         </button>
         <button class="action" onclick="resetEaPassword('${esc(d.extension)}')">Reset password</button>
         <a class="action" style="text-decoration:none" href="/api/ea-device-provisioning?ext=${encodeURIComponent(d.extension)}" download>Download settings</a>
-        <button class="action" onclick="toggleSipneticQr('${esc(d.extension)}')">Sipnetic QR code</button>
+        <button class="action" onclick="showSipneticQr('${esc(d.extension)}')">Click here for a QR code</button>
         <button class="action" onclick="closeEaDeviceDetails()">Close</button>
       </div>
-      <div id="sipnetic-qr-box" style="display:none"></div>
       ${d.env_error ? `<p class="muted" style="margin:var(--sp-2) 0 0; color:var(--warn)">${esc(d.env_error)}</p>` : ""}
       <p class="muted" style="margin:var(--sp-2) 0 0">A phone that never registers is most often the transport above: an extension
       written LAN-only while the phone dials in over TLS from outside. If the Security Log shows nothing at all for it, the traffic
@@ -5543,33 +5628,45 @@ async function showEaDeviceDetails(ext) {
 // qr-codes) -- scan-to-configure, built server-side from the same data the
 // details panel already shows. Rendered client-side with the embedded
 // qrcode.js at the top of this script block so nothing here needs a CDN or
-// a new Python dependency.
-async function toggleSipneticQr(ext) {
-  const box = document.getElementById("sipnetic-qr-box");
-  if (!box) return;
-  if (box.style.display !== "none" && box.dataset.ext === ext) {
-    box.style.display = "none";
-    box.innerHTML = "";
-    return;
-  }
+// a new Python dependency. Shown in a small popup (#qr-modal-overlay, ~2in
+// square) rather than inline -- it contains the extension's password in
+// plain text, so it should be glanced at and dismissed, not left sitting
+// open in the page.
+async function showSipneticQr(ext) {
+  const overlay = document.getElementById("qr-modal-overlay");
+  const canvas = document.getElementById("qr-modal-canvas");
+  if (!overlay || !canvas) return;
   const res = await fetch("/api/ea-device-qr?ext=" + encodeURIComponent(ext));
   if (!res.ok) { toast("No QR data for extension " + ext, "err"); return; }
   const data = await res.json();
-  box.dataset.ext = ext;
-  box.innerHTML = `
-    <div class="row" style="align-items:flex-start; gap:var(--sp-3); margin-top:var(--sp-3)">
-      <div id="sipnetic-qr-canvas"></div>
-      <div style="flex:1">
-        <p class="muted" style="margin-top:0">Scan with Sipnetic (Add Account → Scan QR Code) to auto-fill this extension's SIP settings.</p>
-        <p class="muted">Contains this extension's password in plain text — treat the image like the password itself.</p>
-        <code style="word-break:break-all; display:block; margin-top:var(--sp-1)">${esc(data.account_string)}</code>
-      </div>
-    </div>`;
-  box.style.display = "";
-  new QRCode(document.getElementById("sipnetic-qr-canvas"), {
-    text: data.account_string, width: 180, height: 180,
+  canvas.innerHTML = "";
+  new QRCode(canvas, {
+    // Rendered at 3x the on-screen size (456, not 152) then scaled back down
+    // by the #qr-modal-canvas img/canvas{width:100%} CSS rule -- the physical
+    // footprint doesn't change, but the extra resolution gives the browser's
+    // downscaling real anti-aliasing to work with instead of the blocky
+    // 1px-per-module edges qrcode.js draws natively. Verified with a headless
+    // render + OpenCV decode: since the st= TURN field was added, the account
+    // string is long enough to need a denser QR (more modules in the same
+    // frame) that a real camera reads far more reliably at this resolution
+    // than at 1:1. 152 = the 192px frame's content box after its 20px white
+    // quiet-zone padding on each side (192 - 2*20) -- keep the *displayed*
+    // size (via CSS, not this) in sync with #qr-modal-canvas if that changes.
+    text: data.account_string, width: 456, height: 456,
     correctLevel: QRCode.CorrectLevel.M,
   });
+  overlay.classList.add("show");
+  document.addEventListener("keydown", qrModalEscHandler);
+}
+
+function closeSipneticQr() {
+  const overlay = document.getElementById("qr-modal-overlay");
+  if (overlay) overlay.classList.remove("show");
+  document.removeEventListener("keydown", qrModalEscHandler);
+}
+
+function qrModalEscHandler(e) {
+  if (e.key === "Escape") closeSipneticQr();
 }
 
 async function setEaTransport(ext, connType) {

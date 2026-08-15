@@ -172,8 +172,9 @@ fi
 # Anveo-style ICE-enabled endpoints. Asterisk caches its OWN TURN_* values
 # in its .env at the point it was configured — testing with those (not
 # re-deriving fresh credentials) proves what Asterisk is actually set up
-# to use, not just that the shared coturn instance works in general (that
-# broader, multi-consumer check is tools/coturn-test-check.sh's job). ─────────
+# to use. Every current install runs its own dedicated coturn; a box that
+# still points at a legacy shared coturn instance predates that (see
+# attic/coturn.sh) and can be spot-checked with attic/coturn-test-check.sh. ─────────
 section "coturn (TURN relay for Asterisk)"
 
 ASTERISK_ENV="$EA_DIR/.env"
@@ -197,11 +198,11 @@ else
     if grep -q '^  coturn:' "$EA_DIR/docker-compose.yml" 2>/dev/null; then
         COTURN_CONTAINER="easy-asterisk-coturn"
         [[ "$CONTAINER" == *-do ]] && COTURN_CONTAINER="easy-asterisk-do-coturn"
-        ok "Using an embedded, per-Asterisk coturn ($COTURN_CONTAINER) — not the shared"
-        ok "instance, so tools/coturn-test-check.sh won't see this one; tested separately below."
+        ok "Using an embedded, per-Asterisk coturn ($COTURN_CONTAINER); tested separately below."
     else
         COTURN_CONTAINER="coturn"
-        ok "Using the shared coturn instance (also covered by tools/coturn-test-check.sh)"
+        ok "Using a legacy shared coturn instance (this repo no longer installs this shape —"
+        ok "see attic/coturn.sh; also covered by attic/coturn-test-check.sh)"
     fi
 
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$COTURN_CONTAINER"; then
@@ -210,7 +211,8 @@ else
         warn "turnutils_uclient not found in $COTURN_CONTAINER — skipping live allocation test"
     else
         # Plain UDP only — no -t/-T (TCP/TLS) flags. coturn is started with
-        # --no-tls --no-dtls (services/coturn.sh), so requesting an
+        # --no-tls --no-dtls (services/asterisk.sh's embedded coturn, and
+        # attic/coturn.sh's legacy shared one — same flags either way), so requesting an
         # encrypted/TCP transport here just fails the allocation outright
         # against a server that never offered one, misreporting a config
         # problem that doesn't exist. Confirmed live: this was the actual
@@ -220,7 +222,7 @@ else
         # turnutils_uclient also refuses to run at all without either -e
         # <peer> or -y ("Either -e peer_address or -y must be specified",
         # confirmed live). -e needs an actual reachable, non-loopback peer
-        # to relay through — services/coturn.sh never sets
+        # to relay through — this repo's coturn containers never set
         # --allow-loopback-peers, so -e 127.0.0.1 gets rejected with
         # "channel bind: error 403 (Forbidden IP)" (also confirmed live,
         # against a real local coturn instance built to test this exact

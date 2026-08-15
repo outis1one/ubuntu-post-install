@@ -134,6 +134,15 @@ mkdir -p "$CONFIG_DIR"
 
 # Determine TURN/STUN server address
 turn_server="${TURN_SERVER:-${DOMAIN_NAME:-$local_ip}:${TURN_PORT:-3478}}"
+# TURN_SERVER may be set (e.g. carried over in .env from an older install)
+# to a bare host with no port — the fallback above only appends one when
+# TURN_SERVER is unset/empty entirely. Append it here too so every client
+# that reads this config (Sipnetic QR export, the web admin's own display)
+# always gets a host:port it can actually dial, not a host that silently
+# depends on the client guessing the default port.
+if [[ -n "$TURN_SERVER" && "$TURN_SERVER" != *:* ]]; then
+    turn_server="${TURN_SERVER}:${TURN_PORT:-3478}"
+fi
 
 cat > "$CONFIG_FILE" << EOF
 # Easy Asterisk Configuration (Docker) - $(date)

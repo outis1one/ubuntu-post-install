@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# attic/coturn-test-check.sh — RETIRED along with attic/coturn.sh (formerly
+# services/coturn.sh). This tool only makes sense against a shared coturn
+# instance, which this repo no longer offers — see attic/coturn.sh's header
+# for what replaced it (each service gets its own dedicated coturn now).
+# Kept for reference alongside it, not actively maintained.
+#
 # tools/coturn-test-check.sh — Health-check for the shared coturn (TURN/STUN)
 # instance services/coturn.sh sets up, and every consumer registered against
 # it (Asterisk, one or more Mattermost instances, anything else added via

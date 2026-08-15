@@ -31,10 +31,16 @@ Rules of thumb:
   `ensure_swapfile()` unconditionally, which offers a 2GB swapfile any time
   RAM is ≤4096MB and none exists yet (`services/asterisk.sh` also calls it
   directly for the standalone-run case, so it's covered either way).
-- Sharing one `coturn` instance (`services/coturn.sh`) instead of letting
-  each WebRTC-capable service (Asterisk, Mattermost) embed its own saves a
-  container per consumer and — more importantly — avoids relay-port
-  collisions between them.
+- **Historical note, no longer applicable:** this doc's Tier 2/3 plans below
+  were sized around one shared `coturn` instance instead of each WebRTC-
+  capable service (Asterisk, Mattermost) embedding its own — it saved a
+  container per consumer and avoided relay-port collisions between them.
+  That shared-coturn service has since been retired from this repo (see
+  `attic/coturn.sh`); every service now runs its own dedicated coturn, and
+  `lib/common.sh`'s `find_free_coturn_range()` avoids the same relay-port
+  collisions by scanning each coturn-owning service's `.env` instead. Budget
+  a coturn container per WebRTC-capable service/instance, not one shared
+  ~40MB line, when re-planning a box from scratch.
 
 ## Tier 1 — ~1 vCPU / 1GB RAM / 25GB SSD
 
@@ -43,7 +49,7 @@ Example: DigitalOcean Basic, $6/mo.
 This is tight enough that Docker's own daemon overhead is already a
 meaningful fraction of the box. **Pick one purpose, not a stack:**
 
-- **Option A — Asterisk only.** Asterisk + the shared coturn service fits
+- **Option A — Asterisk only.** Asterisk + its own dedicated coturn fits
   comfortably per this repo's own droplet-sizing notes (`services/asterisk.sh`
   README section) — a swapfile is added automatically (RAM ≤4GB, see above),
   and this plan is "fine for a couple of extensions and light personal use."
