@@ -947,13 +947,25 @@ install_backup() {
             # instead of failing later with the alias name as a literal,
             # unresolvable hostname. Falls back to the plain @-split if
             # `ssh -G` can't resolve it (e.g. no matching Host block).
-            local _ssh_g _SFTP_USER _SFTP_HOSTNAME
+            local _ssh_g _SFTP_USER _SFTP_HOSTNAME _SFTP_PORT
             _ssh_g="$(ssh -G "$_SFTP_DEST" 2>/dev/null)"
             _SFTP_USER="$(echo "$_ssh_g" | awk '/^user /{print $2; exit}')"
             _SFTP_HOSTNAME="$(echo "$_ssh_g" | awk '/^hostname /{print $2; exit}')"
+            _SFTP_PORT="$(echo "$_ssh_g" | awk '/^port /{print $2; exit}')"
             [ -z "$_SFTP_USER" ] && _SFTP_USER="${_SFTP_DEST%%@*}"
             [ -z "$_SFTP_HOSTNAME" ] && _SFTP_HOSTNAME="${_SFTP_DEST#*@}"
-            log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME} for this mirror (resolved via ~/.ssh/config)."
+            # Kopia's sftp storage defaults to port 22 same as ssh(1) would,
+            # but it never reads ~/.ssh/config to get there — a `Port` line
+            # in a Host block (the common case for anything reachable from
+            # the internet, to cut down on scanner noise) is exactly the
+            # kind of thing that silently vanishes without this. Confirmed
+            # live: this produced "server unexpectedly closed connection:
+            # unexpected EOF" — Kopia connecting to the real host on the
+            # WRONG port, not a credentials or host-key problem, while plain
+            # `ssh main` kept working fine throughout since it reads that
+            # same Port line correctly.
+            _SFTP_PORT="${_SFTP_PORT:-22}"
+            log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME}:${_SFTP_PORT} for this mirror (resolved via ~/.ssh/config)."
             local _SFTP_PATH="" _MIRROR_NAME=""
             prompt_text "  Remote path for the repo:" "~/backups/kopia-mirror" _SFTP_PATH
             _SFTP_PATH="${_SFTP_PATH:-~/backups/kopia-mirror}"
@@ -977,11 +989,11 @@ install_backup() {
                 local _sftp_err
                 if _sftp_err="$(env KOPIA_PASSWORD="${DEST_PASSWORDS[default]}" "$KOPIA_BIN" \
                         --config-file="${DEST_CONFIGS[default]}" repository sync-to sftp \
-                        --host="$_SFTP_HOSTNAME" --username="$_SFTP_USER" --path="$_SFTP_PATH" \
+                        --host="$_SFTP_HOSTNAME" --port="$_SFTP_PORT" --username="$_SFTP_USER" --path="$_SFTP_PATH" \
                         --keyfile="$_SFTP_KEYFILE" --known-hosts=/root/.ssh/known_hosts \
                         --dry-run 2>&1)"; then
                     EXTRA_MIRROR_TYPE["$_MIRROR_NAME"]="sftp"
-                    EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--host=$_SFTP_HOSTNAME --username=$_SFTP_USER --path=$_SFTP_PATH --keyfile=$_SFTP_KEYFILE --known-hosts=/root/.ssh/known_hosts"
+                    EXTRA_MIRROR_ARGS["$_MIRROR_NAME"]="--host=$_SFTP_HOSTNAME --port=$_SFTP_PORT --username=$_SFTP_USER --path=$_SFTP_PATH --keyfile=$_SFTP_KEYFILE --known-hosts=/root/.ssh/known_hosts"
                     # Reusing an existing mirror name reconfigures it (the
                     # associative-array assignments above already do that)
                     # without duplicating it in the space-separated name list.
