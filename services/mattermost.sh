@@ -781,6 +781,15 @@ MD
 # default). If you have a custom-format pg_dump instead, use `pg_restore`
 # in place of the `psql < dump` step below.
 #
+# Adminer's plain-text export has two confirmed bugs of its own — unquoted
+# enum-label DEFAULTs, and boolean columns serialized as bare 0/1 instead
+# of true/false — either of which makes the import below fail outright.
+# extras/fix_pikapods_dump.py patches both; run it on the dump BEFORE this
+# script if psql reports errors on CREATE TYPE/CREATE TABLE or boolean
+# columns:
+#   python3 fix_pikapods_dump.py input.sql output.sql
+#
+
 # IMPORTANT: point the files argument at the SUBDIRECTORY that holds
 # Mattermost's own file storage inside whatever you downloaded via SFTP
 # (commonly named `data`), not the whole SFTP root — PikaPods' exact
