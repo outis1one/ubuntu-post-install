@@ -146,6 +146,24 @@ install_garage() {
         case "$MODE" in
             update)
                 log_info "Refreshing the Garage image only — existing data, config, and keys are left as-is."
+                # .env fields added to this script after someone's initial
+                # install (GARAGE_S3_API_PORT, added so services/backup.sh
+                # can read it remotely) never get backfilled by Update on
+                # their own — Update deliberately never touches .env, and
+                # the only other path (fresh reinstall) is destructive to
+                # this service's actual bucket/key. Backfill missing keys
+                # here instead, so a schema addition never forces that
+                # tradeoff. Read the real port from docker-compose.yml
+                # itself (the heredoc that wrote it bakes the scanned port
+                # in as a literal) rather than re-scanning or re-prompting.
+                if [[ -f "$DIR/.env" ]] && ! grep -q '^GARAGE_S3_API_PORT=' "$DIR/.env"; then
+                    local _existing_port
+                    _existing_port="$(grep -oE '"[0-9]+:[0-9]+"' "$DIR/docker-compose.yml" 2>/dev/null | head -1 | tr -d '"' | cut -d: -f1)"
+                    if [ -n "$_existing_port" ]; then
+                        echo "GARAGE_S3_API_PORT=${_existing_port}" >> "$DIR/.env"
+                        log_info "Backfilled GARAGE_S3_API_PORT=${_existing_port} into .env (added in a newer version of this script; services/backup.sh needs it to read this instance remotely)."
+                    fi
+                fi
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Garage image refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
@@ -266,20 +284,71 @@ ENV
         return 1
     fi
 
-    local NODE_ID
+    local NODE_ID _status_out
     # `garage status` output is a title line, then a column-header line
     # ("ID Hostname Address ..."), then the actual node row — NR==3, not
     # NR==2 (which would just grab the literal string "ID" off the header).
-    NODE_ID="$(docker exec garage /garage status 2>/dev/null | awk 'NR==3{print $1}')"
+    _status_out="$(docker exec garage /garage status 2>/dev/null)"
+    NODE_ID="$(echo "$_status_out" | awk 'NR==3{print $1}')"
     if [ -z "$NODE_ID" ]; then
         log_error "Couldn't read this node's ID from 'garage status' — check: docker exec garage /garage status"
         return 1
     fi
 
-    log_info "Assigning single-node cluster layout..."
-    docker exec garage /garage layout assign -z dc1 -c 1G "$NODE_ID" >/dev/null \
-        && docker exec garage /garage layout apply --version 1 >/dev/null \
-        || { log_error "Cluster layout init failed — check: docker exec garage /garage layout show"; return 1; }
+    # A "Full reinstall" of this service deliberately does NOT wipe ./data
+    # or ./meta — that's real backup-mirror data (Kopia's sync-to s3
+    # target), and losing it silently on a reinstall would be far worse
+    # than the alternative. That means the on-disk metadata from an
+    # earlier install can already have a layout committed, and Garage
+    # requires each `layout apply --version N` to be exactly
+    # previous_version + 1 — reapplying a hardcoded "1" against a node
+    # that already has one fails with "Invalid new layout version".
+    # `garage status` marks a node with no committed role as
+    # "NO ROLE ASSIGNED"; only run the one-time layout assign/apply when
+    # that's actually the case; otherwise this node is already part of an
+    # applied layout (e.g. a fresh reinstall reusing prior ./meta) and
+    # touching layout state again is both unnecessary and unsafe.
+    if echo "$_status_out" | grep -q "NO ROLE ASSIGNED"; then
+        log_info "Assigning single-node cluster layout..."
+        docker exec garage /garage layout assign -z dc1 -c 1G "$NODE_ID" >/dev/null \
+            && docker exec garage /garage layout apply --version 1 >/dev/null \
+            || { log_error "Cluster layout init failed — check: docker exec garage /garage layout show"; return 1; }
+    else
+        log_info "Cluster layout already applied (existing ./meta from an earlier install) — skipping layout init."
+
+        # Same reasoning as above: existing ./meta can also mean an
+        # existing bucket + key from that earlier install are still
+        # sitting in Garage's storage, holding real data. .env was
+        # already overwritten by this same reinstall (the docker-compose.yml/
+        # .env heredocs above run unconditionally on the fresh path), so
+        # nothing on disk still points at them — creating a new
+        # bucket/key below would leave that old data orphaned rather than
+        # lost outright, but silently. Surface it and let the operator
+        # choose instead of doing that automatically.
+        local _existing_buckets
+        _existing_buckets="$(docker exec garage /garage bucket list 2>/dev/null | tail -n +2)"
+        if [ -n "$(echo "$_existing_buckets" | tr -d '[:space:]')" ]; then
+            echo ""
+            log_warning "  Found existing bucket(s) already in this Garage instance's storage"
+            log_warning "  (left over from before this reinstall — never auto-deleted):"
+            echo "$_existing_buckets" | sed 's/^/    /'
+            echo ""
+            log_warning "  Continuing will create a NEW bucket '$BUCKET_NAME' / key '$KEY_NAME' and"
+            log_warning "  point .env at those instead. Anything already in a bucket above stays in"
+            log_warning "  Garage's storage but this install will no longer have a key that can read"
+            log_warning "  it. Ctrl-C now if you meant to keep using one of the buckets above."
+            local _cont_new_bucket=""
+            prompt_yn "  Create a new bucket/key anyway? (y/n):" "n" _cont_new_bucket
+            if [[ ! "$_cont_new_bucket" =~ ^[Yy]$ ]]; then
+                log_info "Stopping here — no new bucket/key created, existing ones left untouched."
+                log_info "(To reconnect this install to an existing bucket instead: docker exec garage"
+                log_info " /garage key create <name>, then /garage bucket allow --read --write --owner"
+                log_info " <bucket> --key <name>, then add GARAGE_BUCKET/GARAGE_ACCESS_KEY_ID/"
+                log_info " GARAGE_ACCESS_KEY_SECRET to $DIR/.env by hand.)"
+                return 1
+            fi
+        fi
+    fi
 
     log_info "Creating bucket and access key..."
     docker exec garage /garage bucket create "$BUCKET_NAME" >/dev/null 2>&1
