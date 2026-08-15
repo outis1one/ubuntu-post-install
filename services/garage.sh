@@ -134,7 +134,7 @@ install_garage() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with garage.toml + docker-compose.yml + .env"
         echo "[DRY-RUN] Would auto-scan for free S3 API / RPC / admin ports"
-        echo "[DRY-RUN] Would generate an RPC secret and persist it (never regenerated on update)"
+        echo "[DRY-RUN] Would generate an RPC secret and an admin API token, persisted (never regenerated on update)"
         echo "[DRY-RUN] Would run the one-time cluster init: layout assign/apply, bucket create, key create"
         echo "[DRY-RUN] Would print the endpoint/bucket/access-key/secret for Kopia's sync-to s3"
         return 0
@@ -146,6 +146,7 @@ install_garage() {
         case "$MODE" in
             update)
                 log_info "Refreshing the Garage image only — existing data, config, and keys are left as-is."
+                local _GARAGE_NEEDS_RESTART_FOR_ADMIN_TOKEN=0
                 # .env fields added to this script after someone's initial
                 # install (GARAGE_S3_API_PORT, added so services/backup.sh
                 # can read it remotely) never get backfilled by Update on
@@ -164,9 +165,42 @@ install_garage() {
                         log_info "Backfilled GARAGE_S3_API_PORT=${_existing_port} into .env (added in a newer version of this script; services/backup.sh needs it to read this instance remotely)."
                     fi
                 fi
+                if [[ -f "$DIR/.env" ]] && ! grep -q '^GARAGE_ADMIN_PORT=' "$DIR/.env"; then
+                    local _existing_admin_port
+                    _existing_admin_port="$(grep -oE '"[0-9]+:[0-9]+"' "$DIR/docker-compose.yml" 2>/dev/null | sed -n 3p | tr -d '"' | cut -d: -f1)"
+                    if [ -n "$_existing_admin_port" ]; then
+                        echo "GARAGE_ADMIN_PORT=${_existing_admin_port}" >> "$DIR/.env"
+                        log_info "Backfilled GARAGE_ADMIN_PORT=${_existing_admin_port} into .env."
+                    fi
+                fi
+                # Older installs' garage.toml predates admin_token, meaning
+                # this instance's admin API (bucket/key management, object
+                # listing — published to the host, not just the internal
+                # Docker network) has been running with no authentication
+                # at all. Add one now rather than leaving it open — nothing
+                # in this repo talked to that API before services/
+                # garage-webui.sh, so there's no existing authenticated
+                # caller this could break.
+                if [[ -f "$DIR/garage.toml" ]] && ! grep -q '^admin_token' "$DIR/garage.toml"; then
+                    local _new_admin_token
+                    _new_admin_token="$(openssl rand -base64 32)"
+                    printf 'admin_token = "%s"\n' "$_new_admin_token" >> "$DIR/garage.toml"
+                    if grep -q '^GARAGE_ADMIN_TOKEN=' "$DIR/.env"; then
+                        sed -i "s#^GARAGE_ADMIN_TOKEN=.*#GARAGE_ADMIN_TOKEN='${_new_admin_token}'#" "$DIR/.env"
+                    else
+                        echo "GARAGE_ADMIN_TOKEN='${_new_admin_token}'" >> "$DIR/.env"
+                    fi
+                    log_info "Garage's admin API had no auth token — added one and will restart to apply it."
+                    _GARAGE_NEEDS_RESTART_FOR_ADMIN_TOKEN=1
+                fi
                 ( cd "$DIR" && docker compose pull && docker compose up -d ) \
                     && log_success "Garage image refreshed" \
                     || log_warning "Refresh failed — check: docker compose -f $DIR/docker-compose.yml logs"
+                if [ "${_GARAGE_NEEDS_RESTART_FOR_ADMIN_TOKEN:-0}" = 1 ]; then
+                    ( cd "$DIR" && docker compose restart garage ) \
+                        && log_success "Admin API now requires GARAGE_ADMIN_TOKEN from .env." \
+                        || log_warning "Restart failed — apply the new admin_token manually: docker compose -f $DIR/docker-compose.yml restart garage"
+                fi
                 return 0
                 ;;
             cancel)
@@ -213,6 +247,15 @@ install_garage() {
     local RPC_SECRET
     RPC_SECRET="$(openssl rand -hex 32)"
 
+    # Without admin_token, Garage's admin API (bucket/key management,
+    # metrics, object listing) is open to anyone who can reach ADMIN_PORT
+    # — and that port is published to the host, not just the internal
+    # Docker network. Nothing in this repo talked to that API before, so
+    # this went unnoticed; services/garage-webui.sh is the first consumer,
+    # so it's the point this needed locking down.
+    local ADMIN_TOKEN
+    ADMIN_TOKEN="$(openssl rand -base64 32)"
+
     cat > garage.toml << TOML
 metadata_dir = "/meta"
 data_dir = "/data"
@@ -231,6 +274,7 @@ root_domain = ".s3.garage.localhost"
 
 [admin]
 api_bind_addr = "[::]:${ADMIN_PORT}"
+admin_token = "${ADMIN_TOKEN}"
 TOML
 
     cat > docker-compose.yml << COMPOSE
@@ -260,6 +304,11 @@ TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
 # this instance as a Kopia sync-to s3 mirror target — keep this key name
 # stable, other scripts depend on it.
 GARAGE_S3_API_PORT=${S3_API_PORT}
+
+# Read by services/garage-webui.sh (same host only — never sent over SSH)
+# to reach this instance's admin API for its bucket/object browser.
+GARAGE_ADMIN_PORT=${ADMIN_PORT}
+GARAGE_ADMIN_TOKEN='${ADMIN_TOKEN}'
 ENV
     chmod 600 .env
 
