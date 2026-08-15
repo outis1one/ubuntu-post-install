@@ -966,9 +966,18 @@ install_backup() {
             # same Port line correctly.
             _SFTP_PORT="${_SFTP_PORT:-22}"
             log_info "  Using ${_SFTP_USER}@${_SFTP_HOSTNAME}:${_SFTP_PORT} for this mirror (resolved via ~/.ssh/config)."
+            # Suggest a subdirectory of the DR-spare's own path (if one is
+            # configured) rather than an unrelated default — reusing the
+            # same spare location the operator already picked, but in its
+            # own /kopia-data subdirectory so the actual repository data
+            # (Kopia's own blob-store files) doesn't end up visually mixed
+            # in with the two plain config files the DR-spare sync writes
+            # directly into DR_SYNC_PATH itself.
+            local _SFTP_PATH_DEFAULT="~/backups/kopia-mirror"
+            [ -n "${DR_SYNC_PATH:-}" ] && _SFTP_PATH_DEFAULT="${DR_SYNC_PATH%/}/kopia-data"
             local _SFTP_PATH="" _MIRROR_NAME=""
-            prompt_text "  Remote path for the repo:" "~/backups/kopia-mirror" _SFTP_PATH
-            _SFTP_PATH="${_SFTP_PATH:-~/backups/kopia-mirror}"
+            prompt_text "  Remote path for the repo:" "$_SFTP_PATH_DEFAULT" _SFTP_PATH
+            _SFTP_PATH="${_SFTP_PATH:-$_SFTP_PATH_DEFAULT}"
             prompt_text "  Short name for this mirror (letters/numbers/underscores):" "spare" _MIRROR_NAME
             _MIRROR_NAME="${_MIRROR_NAME:-spare}"
             _MIRROR_NAME="${_MIRROR_NAME//[^a-zA-Z0-9_]/_}"
