@@ -788,7 +788,7 @@ MD
 # before running.
 #
 # Usage:
-#   ./migrate-from-pikapods.sh <path-to-sql-dump> <path-to-files-dir>
+#   sudo ./migrate-from-pikapods.sh <path-to-sql-dump> <path-to-files-dir>
 ################################################################################
 
 MIGRATE_HEAD
@@ -803,13 +803,18 @@ MIGRATE_VARS
 
             cat >> "$DIR/migrate-from-pikapods.sh" << 'MIGRATE_BODY'
 set -uo pipefail
+
+# Needed for the chown to UID 2000 near the end (an ordinary user generally
+# can't chown files to an arbitrary UID that isn't their own).
+[ "${EUID:-$(id -u)}" -eq 0 ] || { echo "Run as root: sudo $0 ..."; exit 1; }
+
 cd "$PROJECT_DIR" || exit 1
 
 SQL_DUMP="${1:-}"
 FILES_DIR="${2:-}"
 
 if [ -z "$SQL_DUMP" ] || [ -z "$FILES_DIR" ]; then
-    echo "Usage: $0 <path-to-sql-dump> <path-to-files-dir>"
+    echo "Usage: sudo $0 <path-to-sql-dump> <path-to-files-dir>"
     exit 1
 fi
 [ -f "$SQL_DUMP" ]  || { echo "SQL dump not found: $SQL_DUMP"; exit 1; }
@@ -855,6 +860,14 @@ fi
 echo "Copying files into ./data..."
 mkdir -p ./data
 rsync -a "$FILES_DIR"/ ./data/ 2>/dev/null || cp -a "$FILES_DIR"/. ./data/
+
+# mattermost/mattermost-team-edition runs as fixed UID/GID 2000 — an SFTP'd
+# copy from elsewhere lands owned by whoever ran this script instead, and
+# every file write then fails with "permission denied" until this is
+# fixed. Confirmed live: this is what broke image/file uploads with a
+# client-side "stream closed" error after a migration.
+echo "Fixing ownership on imported files (mattermost image expects UID/GID 2000)..."
+chown -R 2000:2000 ./data
 
 echo "Starting Mattermost..."
 docker compose up -d
