@@ -174,11 +174,16 @@ install_garage() {
     find_free_port RPC_PORT "$RPC_PORT"
     find_free_port ADMIN_PORT "$ADMIN_PORT"
 
+    # Suggested defaults are generated fresh at runtime, not fixed strings
+    # baked into this script — same reasoning as not hardcoding what a
+    # remote reader (services/backup.sh) should expect the name to be:
+    # this is the operator's name to pick, not this repo's.
     local BUCKET_NAME="" KEY_NAME=""
-    prompt_text "  Bucket name:" "kopia-backup" BUCKET_NAME
-    BUCKET_NAME="${BUCKET_NAME:-kopia-backup}"
-    prompt_text "  Access key name:" "kopia" KEY_NAME
-    KEY_NAME="${KEY_NAME:-kopia}"
+    local _default_bucket="kopia-$(date +%s)" _default_key="key-$(date +%s)"
+    prompt_text "  Bucket name:" "$_default_bucket" BUCKET_NAME
+    BUCKET_NAME="${BUCKET_NAME:-$_default_bucket}"
+    prompt_text "  Access key name:" "$_default_key" KEY_NAME
+    KEY_NAME="${KEY_NAME:-$_default_key}"
 
     mkdir -p "$DIR"/{data,meta}
     ensure_docker_dir_ownership "$DIR"
@@ -232,6 +237,11 @@ COMPOSE
 
     cat > .env << ENV
 TZ=${SITE_TZ:-$(cat /etc/timezone 2>/dev/null || echo UTC)}
+
+# Read directly (over SSH) by another box's services/backup.sh when adding
+# this instance as a Kopia sync-to s3 mirror target — keep this key name
+# stable, other scripts depend on it.
+GARAGE_S3_API_PORT=${S3_API_PORT}
 ENV
     chmod 600 .env
 
@@ -277,8 +287,15 @@ ENV
     local _key_out
     _key_out="$(docker exec garage /garage key create "$KEY_NAME" 2>&1)"
     local ACCESS_KEY_ID ACCESS_KEY_SECRET
-    ACCESS_KEY_ID="$(echo "$_key_out" | awk -F': ' '/^Key ID:/{print $2}')"
-    ACCESS_KEY_SECRET="$(echo "$_key_out" | awk -F': ' '/^Secret key:/{print $2}')"
+    # Garage's real CLI output pads labels with extra spaces for column
+    # alignment (e.g. "Key ID:              GKxxxx", not just "Key ID: GKxxxx")
+    # — a fixed ": " separator leaves that padding stuck to the value.
+    # ':[[:space:]]+' as a regex field separator consumes ALL of it,
+    # however many spaces there actually are. Confirmed live: the fixed
+    # single-space version left leading spaces baked into .env, which
+    # would have broken S3 auth (access keys have to match exactly).
+    ACCESS_KEY_ID="$(echo "$_key_out" | awk -F':[[:space:]]+' '/^Key ID:/{print $2}')"
+    ACCESS_KEY_SECRET="$(echo "$_key_out" | awk -F':[[:space:]]+' '/^Secret key:/{print $2}')"
 
     if [ -z "$ACCESS_KEY_ID" ] || [ -z "$ACCESS_KEY_SECRET" ]; then
         log_error "Couldn't parse the access key from 'garage key create' output:"
