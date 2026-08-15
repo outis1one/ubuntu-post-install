@@ -545,6 +545,28 @@ ${_CADDY_NET_BLOCK}    healthcheck:
       timeout: 5s
       retries: 5
 
+  # Fixes ownership on the bind-mounted volumes below to the fixed UID/GID
+  # (2000) mattermost/mattermost-team-edition runs as, before the mattermost
+  # service starts — every time, not just at install time. Confirmed live:
+  # importing data from another host (e.g. a PikaPods migration) can leave
+  # these owned by whatever UID did the copy instead of 2000, and the
+  # container doesn't fix this itself on start the way postgres's official
+  # image does — it just fails every file write with "permission denied"
+  # until someone notices and runs chown by hand. This removes the "by
+  # hand" part permanently: runs on every `docker compose up`, including a
+  # plain host reboot, so ownership drift from any future cause self-heals
+  # without needing this installer re-run again.
+  mattermost-fix-perms:
+    image: busybox:latest
+    container_name: ${MM_CONTAINER}-fix-perms
+    command: sh -c "chown -R 2000:2000 /data /logs /config /plugins"
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./config:/config
+      - ./plugins:/plugins
+    restart: "no"
+
   mattermost:
     image: mattermost/mattermost-team-edition:latest
     container_name: ${MM_CONTAINER}
@@ -554,6 +576,8 @@ ${_CADDY_NET_BLOCK}    healthcheck:
     depends_on:
       db:
         condition: service_healthy
+      mattermost-fix-perms:
+        condition: service_completed_successfully
     volumes:
       - ./data:/mattermost/data
       - ./logs:/mattermost/logs
