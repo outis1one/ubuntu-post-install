@@ -582,13 +582,87 @@ case "$cmd" in
         mv "$HERE" "$ASIDE"
 
         echo "Extracting $ARCHIVE -> $PARENT_DIR ..."
-        if tar -xzf "$ARCHIVE" -C "$PARENT_DIR"; then
+        # Extract into a scratch staging dir first rather than straight into
+        # $PARENT_DIR — an archive's own top-level directory name reflects
+        # whichever layout produced it (see _asterisk_resolve_layout: plain
+        # "asterisk"/"easy-asterisk" vs droplet "asterisk-digital-ocean"/
+        # "easy-asterisk-do"), which can differ from THIS box's layout (e.g.
+        # restoring a droplet backup onto a fresh non-droplet IONOS install).
+        # Landing it under the archive's own name instead of $HERE would
+        # leave two Asterisk directories on disk and confuse every service
+        # that resolves the layout by directory/container name (security-
+        # dashboard, pstn-trunk, CrowdSec's Asterisk acquisition, Caddy).
+        STAGING="$(mktemp -d)"
+        if tar -xzf "$ARCHIVE" -C "$STAGING"; then
+            EXTRACTED_DIR="$(find "$STAGING" -mindepth 1 -maxdepth 1 -type d | head -1)"
+            if [ -z "$EXTRACTED_DIR" ]; then
+                echo "Archive didn't contain a top-level directory — rolling back."
+                rm -rf "$STAGING"
+                mv "$ASIDE" "$HERE"
+                exit 1
+            fi
+
+            # If the archive came from the other layout, its docker-
+            # compose.yml still names the OLD project/container(s) — fix
+            # those to match THIS box's own layout before it lands at $HERE.
+            # $CONTAINER is this run's own correct value (baked in at
+            # generation time); everything else derives from it the same
+            # way _asterisk_resolve_layout's two known layouts do.
+            ARCHIVED_COMPOSE="$EXTRACTED_DIR/docker-compose.yml"
+            if [ -f "$ARCHIVED_COMPOSE" ]; then
+                ARCHIVED_CONTAINER="$(grep -m1 'container_name:' "$ARCHIVED_COMPOSE" | awk '{print $2}')"
+                if [ -n "$ARCHIVED_CONTAINER" ] && [ "$ARCHIVED_CONTAINER" != "$CONTAINER" ]; then
+                    echo "Archive is from a different Asterisk layout ($ARCHIVED_CONTAINER) than"
+                    echo "this box ($CONTAINER) — updating docker-compose.yml to match this box."
+                    ARCHIVED_COTURN="${ARCHIVED_CONTAINER}-coturn"
+                    NEW_COTURN="${CONTAINER}-coturn"
+                    sed -i "s/name: ${ARCHIVED_CONTAINER#easy-}\$/name: ${CONTAINER#easy-}/; \
+                            s/container_name: ${ARCHIVED_CONTAINER}\$/container_name: ${CONTAINER}/; \
+                            s/container_name: ${ARCHIVED_COTURN}\$/container_name: ${NEW_COTURN}/" \
+                        "$ARCHIVED_COMPOSE"
+                fi
+            fi
+
+            rm -rf "${HERE:?}"
+            mv "$EXTRACTED_DIR" "$HERE"
+            rm -rf "$STAGING"
             echo "Extracted."
         else
             echo "Extraction failed — rolling back to the pre-restore install."
-            rm -rf "${PARENT_DIR:?}/$BASE_NAME"
+            rm -rf "$STAGING"
             mv "$ASIDE" "$HERE"
             exit 1
+        fi
+
+        # pjsip.conf bakes external_media_address/external_signaling_address
+        # in as literal IPs (easy-asterisk writes them at first container
+        # start, not this repo) — restoring an archive from a DIFFERENT box
+        # verbatim leaves the OLD box's IP in place, breaking RTP media (and
+        # likely SIP signaling) on THIS box even though the dialplan itself
+        # comes back fine. Detect the mismatch and patch it automatically —
+        # this is the whole reason "restore" onto a new host exists, so a
+        # stale IP left behind would defeat the point every single time.
+        PJSIP_CONF="$HERE/config/asterisk/pjsip.conf"
+        if [ -f "$PJSIP_CONF" ]; then
+            OLD_EXT_IP="$(grep -m1 '^external_signaling_address=' "$PJSIP_CONF" | cut -d= -f2)"
+            NEW_EXT_IP="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
+            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+            if [ -n "$OLD_EXT_IP" ] && [ -n "$NEW_EXT_IP" ] && [ "$OLD_EXT_IP" != "$NEW_EXT_IP" ]; then
+                echo "This archive's SIP config was for a different box's public IP"
+                echo "($OLD_EXT_IP) — this box's is $NEW_EXT_IP. Updating"
+                echo "external_media_address/external_signaling_address so RTP/SIP work here."
+                # Fixed-string match/replace, restricted to config + .env —
+                # never spool/logs/lib, which hold voicemail/recording audio
+                # that a text substitution would corrupt.
+                ESC_OLD_IP="${OLD_EXT_IP//./\\.}"
+                grep -rlF "$OLD_EXT_IP" "$HERE/config" "$HERE/.env" 2>/dev/null | while read -r _f; do
+                    sed -i "s/$ESC_OLD_IP/$NEW_EXT_IP/g" "$_f"
+                done
+                echo "Updated. If this PBX uses VLANs/extra subnets, re-check them:"
+                echo "  docker exec -it $CONTAINER easy-asterisk   # Server Settings -> Configure VLAN/VPN Subnets"
+            fi
         fi
 
         chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HERE"
@@ -986,6 +1060,41 @@ review=yes
 operator=no
 
 [default]
+EOF
+}
+
+# The easy-asterisk image ships app_voicemail.so, app_voicemail_imap.so, and
+# app_voicemail_odbc.so all autoloading by default — three alternative
+# storage backends for the SAME application (VoiceMail, VoiceMailMain,
+# VM_INFO, etc.), which collide registering those names against each other
+# on every single Asterisk start. Confirmed live: this box's own log on
+# every restart shows "Already have an application 'VoiceMail'" (and every
+# sibling app/function) followed by "app_voicemail.c:15897 load_module:
+# Failure registering applications, functions or tests" — app_voicemail
+# never actually finishes loading, on every install using this script, not
+# something specific to one box or one extension. This repo only ever uses
+# the plain file-based backend (voicemail.conf's [default] mailboxes,
+# written above), so noload the other two — modules.conf lands in the same
+# already-bind-mounted config/asterisk directory, no new volume needed.
+# Regenerated on every install/update (unlike voicemail.conf) since it
+# carries no per-install state of its own.
+_asterisk_write_modules_conf() {
+    local FILE="$1"
+    cat > "$FILE" << 'EOF'
+; services/asterisk.sh — regenerated on every install/update; edit there,
+; not here directly.
+;
+; app_voicemail_imap/_odbc are alternative voicemail storage backends this
+; repo never configures (no IMAP/ODBC settings are ever written) — loading
+; them alongside the plain file-based app_voicemail.so makes all three
+; collide registering the same application/function names, and
+; app_voicemail.so is the one that ends up losing that race and failing to
+; load at all. noload the two unused backends so the one actually
+; configured (file-based, via voicemail.conf) loads cleanly.
+[modules]
+autoload=yes
+noload => app_voicemail_imap.so
+noload => app_voicemail_odbc.so
 EOF
 }
 
@@ -1705,6 +1814,30 @@ To migrate to a new host: run \`backup\` on the old one, copy the archive
 over, then run \`restore\` after a fresh \`sudo ./setup.sh asterisk\` install
 (or directly into an empty \`${EA_DIR}\`) on the new host.
 
+\`restore\` also detects and fixes the one thing that doesn't travel between
+boxes on its own: \`pjsip.conf\`'s \`external_media_address\`/
+\`external_signaling_address\` are literal IPs, baked in by easy-asterisk at
+first container start — restoring an archive from a different box verbatim
+would otherwise leave the OLD box's IP in place, breaking RTP media (and
+likely SIP registration) even though the dialplan itself comes back fine.
+\`restore\` compares the archive's IP against this host's own (same
+DO-metadata → ifconfig.me → \`hostname -I\` detection this script's own
+install uses) and, if they differ, rewrites every occurrence across
+\`config/\` and \`.env\` — never \`spool/\`/\`logs/\`/\`lib/\`, which hold voicemail
+and recording audio a text substitution would corrupt. A same-host restore
+(rolling back a config mistake, no IP change) leaves everything untouched.
+
+\`restore\` also handles moving between the two layouts this repo supports
+(see \`_asterisk_resolve_layout\` — plain \`asterisk\`/\`easy-asterisk\` vs.
+DigitalOcean-droplet \`asterisk-digital-ocean\`/\`easy-asterisk-do\`). An
+archive's own directory name and \`docker-compose.yml\` reflect whichever
+layout produced it; restoring a droplet backup onto a fresh non-droplet
+install (or vice versa) rewrites \`docker-compose.yml\`'s project/container/
+coturn-container names to match THIS box's layout and lands the data at
+this box's own directory — never leaving a second, wrongly-named directory
+behind that would confuse every service that resolves Asterisk's layout
+(Security Dashboard, PSTN trunk, CrowdSec's Asterisk acquisition, Caddy).
+
 ## VLANs / other subnets
 
 \`.env\` → \`HAS_VLANS\`/\`VLAN_SUBNETS\` lists extra networks (space-separated
@@ -1923,9 +2056,10 @@ install_asterisk() {
                 _asterisk_patch_voicemail_vendor_files "$EA_DIR"
                 _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
                 _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+                _asterisk_write_modules_conf "$EA_DIR/config/asterisk/modules.conf"
                 _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf" "$EA_DIR/config/asterisk/modules.conf"
 
                 log_info "Rebuilding and restarting containers..."
                 if docker compose up -d --build --force-recreate; then
@@ -2018,9 +2152,10 @@ install_asterisk() {
     _asterisk_patch_voicemail_vendor_files "$EA_DIR"
     _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
     _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+    _asterisk_write_modules_conf "$EA_DIR/config/asterisk/modules.conf"
     _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf" "$EA_DIR/config/asterisk/modules.conf"
 
     # ── Domain / networking mode ──────────────────────────────────────────────
     # A public cloud box is always reachable from anywhere, so there's no
