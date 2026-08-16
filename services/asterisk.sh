@@ -582,11 +582,54 @@ case "$cmd" in
         mv "$HERE" "$ASIDE"
 
         echo "Extracting $ARCHIVE -> $PARENT_DIR ..."
-        if tar -xzf "$ARCHIVE" -C "$PARENT_DIR"; then
+        # Extract into a scratch staging dir first rather than straight into
+        # $PARENT_DIR — an archive's own top-level directory name reflects
+        # whichever layout produced it (see _asterisk_resolve_layout: plain
+        # "asterisk"/"easy-asterisk" vs droplet "asterisk-digital-ocean"/
+        # "easy-asterisk-do"), which can differ from THIS box's layout (e.g.
+        # restoring a droplet backup onto a fresh non-droplet IONOS install).
+        # Landing it under the archive's own name instead of $HERE would
+        # leave two Asterisk directories on disk and confuse every service
+        # that resolves the layout by directory/container name (security-
+        # dashboard, pstn-trunk, CrowdSec's Asterisk acquisition, Caddy).
+        STAGING="$(mktemp -d)"
+        if tar -xzf "$ARCHIVE" -C "$STAGING"; then
+            EXTRACTED_DIR="$(find "$STAGING" -mindepth 1 -maxdepth 1 -type d | head -1)"
+            if [ -z "$EXTRACTED_DIR" ]; then
+                echo "Archive didn't contain a top-level directory — rolling back."
+                rm -rf "$STAGING"
+                mv "$ASIDE" "$HERE"
+                exit 1
+            fi
+
+            # If the archive came from the other layout, its docker-
+            # compose.yml still names the OLD project/container(s) — fix
+            # those to match THIS box's own layout before it lands at $HERE.
+            # $CONTAINER is this run's own correct value (baked in at
+            # generation time); everything else derives from it the same
+            # way _asterisk_resolve_layout's two known layouts do.
+            ARCHIVED_COMPOSE="$EXTRACTED_DIR/docker-compose.yml"
+            if [ -f "$ARCHIVED_COMPOSE" ]; then
+                ARCHIVED_CONTAINER="$(grep -m1 'container_name:' "$ARCHIVED_COMPOSE" | awk '{print $2}')"
+                if [ -n "$ARCHIVED_CONTAINER" ] && [ "$ARCHIVED_CONTAINER" != "$CONTAINER" ]; then
+                    echo "Archive is from a different Asterisk layout ($ARCHIVED_CONTAINER) than"
+                    echo "this box ($CONTAINER) — updating docker-compose.yml to match this box."
+                    ARCHIVED_COTURN="${ARCHIVED_CONTAINER}-coturn"
+                    NEW_COTURN="${CONTAINER}-coturn"
+                    sed -i "s/name: ${ARCHIVED_CONTAINER#easy-}\$/name: ${CONTAINER#easy-}/; \
+                            s/container_name: ${ARCHIVED_CONTAINER}\$/container_name: ${CONTAINER}/; \
+                            s/container_name: ${ARCHIVED_COTURN}\$/container_name: ${NEW_COTURN}/" \
+                        "$ARCHIVED_COMPOSE"
+                fi
+            fi
+
+            rm -rf "${HERE:?}"
+            mv "$EXTRACTED_DIR" "$HERE"
+            rm -rf "$STAGING"
             echo "Extracted."
         else
             echo "Extraction failed — rolling back to the pre-restore install."
-            rm -rf "${PARENT_DIR:?}/$BASE_NAME"
+            rm -rf "$STAGING"
             mv "$ASIDE" "$HERE"
             exit 1
         fi
@@ -1748,6 +1791,17 @@ install uses) and, if they differ, rewrites every occurrence across
 \`config/\` and \`.env\` — never \`spool/\`/\`logs/\`/\`lib/\`, which hold voicemail
 and recording audio a text substitution would corrupt. A same-host restore
 (rolling back a config mistake, no IP change) leaves everything untouched.
+
+\`restore\` also handles moving between the two layouts this repo supports
+(see \`_asterisk_resolve_layout\` — plain \`asterisk\`/\`easy-asterisk\` vs.
+DigitalOcean-droplet \`asterisk-digital-ocean\`/\`easy-asterisk-do\`). An
+archive's own directory name and \`docker-compose.yml\` reflect whichever
+layout produced it; restoring a droplet backup onto a fresh non-droplet
+install (or vice versa) rewrites \`docker-compose.yml\`'s project/container/
+coturn-container names to match THIS box's layout and lands the data at
+this box's own directory — never leaving a second, wrongly-named directory
+behind that would confuse every service that resolves Asterisk's layout
+(Security Dashboard, PSTN trunk, CrowdSec's Asterisk acquisition, Caddy).
 
 ## VLANs / other subnets
 
