@@ -1186,7 +1186,21 @@ ASN_FILTER_RE = re.compile(r"ASNNumber in \[([^\]]*)\]\)")
 ID_RE = re.compile(r"^\d+$")
 ASN_RE = re.compile(r"^\d+$")
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-DEVICE_MARKER_RE = re.compile(r"^; === Device: (.+?)(?:\s*\[AA:(?:yes|no)\])?\s*\((.+?)\)\s*===\s*$")
+# Actual generated order (see device_config's "%s (%s) %s===" template
+# further down this file) is NAME, then "(category)", then an optional
+# "[AA:yes/no]" tag -- in that order. This regex previously expected the AA
+# tag BEFORE the category parens, which never matches a real device comment
+# and made list_extensions() return [] for every device on every box,
+# regardless of migration history. Confirmed live: /api/pstn-permissions
+# returned {"extensions": []} on a completely fresh install with one
+# extension configured, which is why the Extensions tab's Messaging/
+# Voicemail checkboxes always render unchecked (the JS falls back to an
+# all-default row when nothing comes back from that endpoint) even though
+# pstn-permissions.conf itself has the correct messaging=yes/voicemail=yes
+# written to disk. ea_list_devices() and _ea_rename_device_category() parse
+# the same comment via string-splitting instead of a single regex and were
+# never affected -- this file was the only broken parser.
+DEVICE_MARKER_RE = re.compile(r"^; === Device: (.+?)\s*\(([^)]*)\)\s*(?:\[AA:(?:yes|no)\]\s*)?===\s*$")
 EXT_HEADER_RE = re.compile(r"^\[(\d+)\]")
 EXTEN_RE = re.compile(r"^\d+$")
 TIER_RE = re.compile(r"^(internal|restricted|full)$")
