@@ -15,13 +15,29 @@
 #   sudo ./dr_bringup.sh --dry-run       show what would happen, touch nothing
 #   sudo ./dr_bringup.sh --no-start      restore only, skip docker compose up -d
 #
-# Reads backup.conf from the same directory. On the spare box this file
-# won't exist yet on its own — copy it over from the primary box first (it
-# holds the repository paths/passwords needed to connect):
+# Reads backup.conf from the same directory (or wherever $BACKUP_CONF
+# points — see below). On the spare box this file won't exist yet on its
+# own — copy it over from the primary box first (it holds the repository
+# paths/passwords needed to connect):
 #   scp primary:~/docker/backup/backup.conf ~/docker/backup/backup.conf
 # If the destination repo is a local path shared with the primary (e.g. the
 # spare box IS the box the primary's REMOTE_TYPE=sftp mirror targets),
-# nothing else is needed — the repo data is already there.
+# nothing else is needed — the repo data is already there. Otherwise this
+# also tries REMOTE_TYPE/REMOTE_ARGS (the offsite Backblaze/S3 mirror, if
+# configured) as a restore source — the only one reachable from a genuinely
+# new box (e.g. migrating to different hardware/a different provider).
+#
+# Migrating to a brand-new box that will keep running this repo's own
+# backup.sh going forward: don't just scp the old box's backup.conf over
+# the new box's own (that would replace its freshly-configured local repo
+# with the old box's, which doesn't exist on this box). Instead:
+#   sudo ./setup.sh backup                 # sets up this box's own backups,
+#                                           # and deploys this script
+#   scp old-box:~/docker/backup/backup.conf ~/docker/backup/backup-source.conf
+#   sudo BACKUP_CONF=~/docker/backup/backup-source.conf \
+#       ~/docker/backup/dr_bringup.sh --list      # preview first
+#   sudo BACKUP_CONF=~/docker/backup/backup-source.conf \
+#       ~/docker/backup/dr_bringup.sh             # then actually restore
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,6 +102,34 @@ k_for() {
 # landed (relevant if a service was ever reassigned between destinations).
 read -ra _DEST_ARR <<< "$DEST_NAMES"
 declare -a SRC_PATH_LIST=() SRC_DEST_LIST=() SRC_SNAP_LIST=()
+
+# DEST_NAMES entries are always LOCAL filesystem repos (services/backup.sh
+# creates them with `repository create filesystem --path=...`) — meaning
+# they only exist on whichever box originally ran the backup. On a genuinely
+# new box (migrating to different hardware/provider, not restoring onto the
+# same DR-spare the offsite mirror already targets), none of them will
+# connect, and without this block there would be nothing left to restore
+# from at all. REMOTE_TYPE/REMOTE_ARGS (the offsite Backblaze/S3 mirror) is
+# reachable from anywhere, so try it too, as a same-shaped destination named
+# "offsite" — reusing DEST_default_PASSWORD since sync-to always mirrors
+# that exact same encrypted repo, so there's no separate password to ask
+# for. Connect once into a fresh local config file scoped to this DR run
+# (no pre-existing config for it the way the local DEST_NAMES entries have).
+if [ -n "${REMOTE_TYPE:-}" ] && [ "$REMOTE_TYPE" != "none" ] && [ -n "${DEST_default_PASSWORD:-}" ]; then
+    OFFSITE_CFG="/etc/kopia-backup/dr-offsite.config"
+    mkdir -p "$(dirname "$OFFSITE_CFG")" /var/cache/kopia-backup
+    # shellcheck disable=SC2086
+    if env KOPIA_PASSWORD="$DEST_default_PASSWORD" "$KOPIA" --config-file="$OFFSITE_CFG" repository status >/dev/null 2>&1 \
+        || env KOPIA_PASSWORD="$DEST_default_PASSWORD" "$KOPIA" --config-file="$OFFSITE_CFG" \
+              --cache-directory=/var/cache/kopia-backup repository connect $REMOTE_TYPE $REMOTE_ARGS >/dev/null 2>&1; then
+        DEST_offsite_CONFIG="$OFFSITE_CFG"
+        DEST_offsite_PASSWORD="$DEST_default_PASSWORD"
+        _DEST_ARR+=("offsite")
+        info "Connected to the offsite mirror ($REMOTE_TYPE) as an additional restore source ('offsite')."
+    else
+        warn "Could not connect to the offsite mirror ($REMOTE_TYPE) as a restore source — check REMOTE_TYPE/REMOTE_ARGS in $CONF."
+    fi
+fi
 
 for dest in "${_DEST_ARR[@]}"; do
     if ! k_for "$dest" repository status >/dev/null 2>&1; then
