@@ -591,6 +591,37 @@ case "$cmd" in
             exit 1
         fi
 
+        # pjsip.conf bakes external_media_address/external_signaling_address
+        # in as literal IPs (easy-asterisk writes them at first container
+        # start, not this repo) — restoring an archive from a DIFFERENT box
+        # verbatim leaves the OLD box's IP in place, breaking RTP media (and
+        # likely SIP signaling) on THIS box even though the dialplan itself
+        # comes back fine. Detect the mismatch and patch it automatically —
+        # this is the whole reason "restore" onto a new host exists, so a
+        # stale IP left behind would defeat the point every single time.
+        PJSIP_CONF="$HERE/config/asterisk/pjsip.conf"
+        if [ -f "$PJSIP_CONF" ]; then
+            OLD_EXT_IP="$(grep -m1 '^external_signaling_address=' "$PJSIP_CONF" | cut -d= -f2)"
+            NEW_EXT_IP="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
+            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+            if [ -n "$OLD_EXT_IP" ] && [ -n "$NEW_EXT_IP" ] && [ "$OLD_EXT_IP" != "$NEW_EXT_IP" ]; then
+                echo "This archive's SIP config was for a different box's public IP"
+                echo "($OLD_EXT_IP) — this box's is $NEW_EXT_IP. Updating"
+                echo "external_media_address/external_signaling_address so RTP/SIP work here."
+                # Fixed-string match/replace, restricted to config + .env —
+                # never spool/logs/lib, which hold voicemail/recording audio
+                # that a text substitution would corrupt.
+                ESC_OLD_IP="${OLD_EXT_IP//./\\.}"
+                grep -rlF "$OLD_EXT_IP" "$HERE/config" "$HERE/.env" 2>/dev/null | while read -r _f; do
+                    sed -i "s/$ESC_OLD_IP/$NEW_EXT_IP/g" "$_f"
+                done
+                echo "Updated. If this PBX uses VLANs/extra subnets, re-check them:"
+                echo "  docker exec -it $CONTAINER easy-asterisk   # Server Settings -> Configure VLAN/VPN Subnets"
+            fi
+        fi
+
         chown -R "$ACTUAL_USER:$ACTUAL_USER" "$HERE"
 
         if [ "$WAS_RUNNING" = true ]; then
@@ -1704,6 +1735,19 @@ after, and both require typing \`YES\` to confirm before touching anything.
 To migrate to a new host: run \`backup\` on the old one, copy the archive
 over, then run \`restore\` after a fresh \`sudo ./setup.sh asterisk\` install
 (or directly into an empty \`${EA_DIR}\`) on the new host.
+
+\`restore\` also detects and fixes the one thing that doesn't travel between
+boxes on its own: \`pjsip.conf\`'s \`external_media_address\`/
+\`external_signaling_address\` are literal IPs, baked in by easy-asterisk at
+first container start — restoring an archive from a different box verbatim
+would otherwise leave the OLD box's IP in place, breaking RTP media (and
+likely SIP registration) even though the dialplan itself comes back fine.
+\`restore\` compares the archive's IP against this host's own (same
+DO-metadata → ifconfig.me → \`hostname -I\` detection this script's own
+install uses) and, if they differ, rewrites every occurrence across
+\`config/\` and \`.env\` — never \`spool/\`/\`logs/\`/\`lib/\`, which hold voicemail
+and recording audio a text substitution would corrupt. A same-host restore
+(rolling back a config mistake, no IP change) leaves everything untouched.
 
 ## VLANs / other subnets
 
