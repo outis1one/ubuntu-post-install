@@ -1063,6 +1063,41 @@ operator=no
 EOF
 }
 
+# The easy-asterisk image ships app_voicemail.so, app_voicemail_imap.so, and
+# app_voicemail_odbc.so all autoloading by default — three alternative
+# storage backends for the SAME application (VoiceMail, VoiceMailMain,
+# VM_INFO, etc.), which collide registering those names against each other
+# on every single Asterisk start. Confirmed live: this box's own log on
+# every restart shows "Already have an application 'VoiceMail'" (and every
+# sibling app/function) followed by "app_voicemail.c:15897 load_module:
+# Failure registering applications, functions or tests" — app_voicemail
+# never actually finishes loading, on every install using this script, not
+# something specific to one box or one extension. This repo only ever uses
+# the plain file-based backend (voicemail.conf's [default] mailboxes,
+# written above), so noload the other two — modules.conf lands in the same
+# already-bind-mounted config/asterisk directory, no new volume needed.
+# Regenerated on every install/update (unlike voicemail.conf) since it
+# carries no per-install state of its own.
+_asterisk_write_modules_conf() {
+    local FILE="$1"
+    cat > "$FILE" << 'EOF'
+; services/asterisk.sh — regenerated on every install/update; edit there,
+; not here directly.
+;
+; app_voicemail_imap/_odbc are alternative voicemail storage backends this
+; repo never configures (no IMAP/ODBC settings are ever written) — loading
+; them alongside the plain file-based app_voicemail.so makes all three
+; collide registering the same application/function names, and
+; app_voicemail.so is the one that ends up losing that race and failing to
+; load at all. noload the two unused backends so the one actually
+; configured (file-based, via voicemail.conf) loads cleanly.
+[modules]
+autoload=yes
+noload => app_voicemail_imap.so
+noload => app_voicemail_odbc.so
+EOF
+}
+
 # Same anchor-position reasoning as _asterisk_patch_messaging_vendor_files:
 # Same anchor as messaging's own patch (see the comment above
 # _asterisk_patch_messaging_vendor_files for the live-confirmed reasoning):
@@ -2021,9 +2056,10 @@ install_asterisk() {
                 _asterisk_patch_voicemail_vendor_files "$EA_DIR"
                 _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
                 _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+                _asterisk_write_modules_conf "$EA_DIR/config/asterisk/modules.conf"
                 _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+                chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf" "$EA_DIR/config/asterisk/modules.conf"
 
                 log_info "Rebuilding and restarting containers..."
                 if docker compose up -d --build --force-recreate; then
@@ -2116,9 +2152,10 @@ install_asterisk() {
     _asterisk_patch_voicemail_vendor_files "$EA_DIR"
     _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
     _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
+    _asterisk_write_modules_conf "$EA_DIR/config/asterisk/modules.conf"
     _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
-    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
+    chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf" "$EA_DIR/config/asterisk/modules.conf"
 
     # ── Domain / networking mode ──────────────────────────────────────────────
     # A public cloud box is always reachable from anywhere, so there's no
