@@ -159,7 +159,8 @@ _gitea_prompt_token() {
 # SQLite DB then fails with "attempt to write a readonly database" — the
 # directory holding the DB file is owned by root, not the UID 1000 process
 # trying to write it. Confirmed live. Chown everything else as normal in
-# $DIR; leave data/ for the container to manage.
+# $DIR; leave data/ (and the Actions runner's own runner-data/, same reason)
+# for their respective containers to manage.
 _gitea_fix_ownership() {
     local _dir="$1"
     [ "$DRY_RUN" = true ] && return 0
@@ -167,7 +168,9 @@ _gitea_fix_ownership() {
     local _entry
     for _entry in "$_dir"/*; do
         [ -e "$_entry" ] || continue
-        [ "$(basename "$_entry")" = "data" ] && continue
+        case "$(basename "$_entry")" in
+            data|runner-data) continue ;;
+        esac
         chown -R "$ACTUAL_USER:$ACTUAL_USER" "$_entry" 2>/dev/null || true
     done
 }
@@ -233,6 +236,71 @@ _gitea_offer_authelia_sso() {
         log_warning "  Discovery URL:  $_discovery_url"
         log_warning "  (The Client Secret above is shown once — it isn't stored in plaintext anywhere.)"
     fi
+}
+
+# Offers to enable Gitea Actions (Gitea's own CI, largely GitHub-Actions-
+# workflow-compatible) with a local runner — mainly useful as a fallback so
+# .gitea/workflows/*.yml can still run something like a GitHub Actions build
+# if GitHub itself is ever unreachable, since this Gitea is otherwise just a
+# passive pull mirror. Off by default; opt-in on fresh installs and Update
+# reruns alike (idempotent — a rerun after it's already set up just no-ops).
+#
+# The runner (gitea/act_runner) polls Gitea for jobs and needs the host's
+# Docker socket to launch a fresh container per job — same pattern this repo
+# already uses for portainer/watchtower/uptimekuma/beszel/traccar's autoheal,
+# not something new to this file. Worth knowing: that's root-equivalent
+# access to this host, standard for any CI runner, not unique to Gitea's.
+_gitea_offer_actions_runner() {
+    local DIR="$1"
+
+    grep -q '^  act_runner:$' "$DIR/docker-compose.yml" 2>/dev/null && return 0
+
+    echo ""
+    local USE_ACTIONS=""
+    prompt_yn "  Enable Gitea Actions (CI) with a local runner — runs .gitea/workflows/*.yml the same way GitHub Actions runs .github/workflows/*.yml, useful as a fallback if GitHub is ever unreachable? (y/n):" "n" USE_ACTIONS
+    [[ "$USE_ACTIONS" =~ ^[Yy]$ ]] || return 0
+
+    if ! grep -q 'GITEA__actions__ENABLED' "$DIR/docker-compose.yml"; then
+        log_info "Enabling Gitea Actions..."
+        sed -i '/GITEA__security__INSTALL_LOCK=true/a\      - GITEA__actions__ENABLED=true\n      - GITEA__actions__DEFAULT_ACTIONS_URL=github' "$DIR/docker-compose.yml"
+        (cd "$DIR" && docker compose up -d) \
+            && log_success "Actions enabled — Gitea restarted to apply." \
+            || { log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"; return 1; }
+    fi
+
+    log_info "Generating a runner registration token..."
+    local RUNNER_TOKEN=""
+    RUNNER_TOKEN="$(docker exec -u git gitea gitea actions generate-runner-token 2>/dev/null | tail -1)"
+    if [[ -z "$RUNNER_TOKEN" ]]; then
+        log_warning "Couldn't generate a runner token automatically (older Gitea image?). Generate one by hand:"
+        log_warning "  Gitea -> Site Administration -> Actions -> Runners -> Create new Runner"
+        log_warning "  then add an act_runner container yourself using that token — see"
+        log_warning "  https://docs.gitea.com/usage/actions/quickstart for the compose snippet."
+        return 1
+    fi
+
+    mkdir -p "$DIR/runner-data"
+    cat >> "$DIR/docker-compose.yml" << EOF
+
+  act_runner:
+    image: gitea/act_runner:latest
+    container_name: gitea-runner
+    restart: unless-stopped
+    environment:
+      - GITEA_INSTANCE_URL=http://gitea:3000
+      - GITEA_RUNNER_REGISTRATION_TOKEN=${RUNNER_TOKEN}
+      - GITEA_RUNNER_NAME=gitea-runner
+    volumes:
+      - ./runner-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - gitea
+EOF
+
+    _gitea_fix_ownership "$DIR"
+    (cd "$DIR" && docker compose up -d act_runner) \
+        && log_success "Actions runner started — .gitea/workflows/*.yml will now run automatically on push." \
+        || log_warning "Runner failed to start — check: docker compose -f $DIR/docker-compose.yml logs act_runner"
 }
 
 # ── Own systemd timer, not gitea-github-sync.sh's built-in --install-timer ──
@@ -371,6 +439,7 @@ install_gitea() {
         echo "[DRY-RUN]   to install a systemd timer for automatic sync, or print manual instructions"
         echo "[DRY-RUN] Would offer to run a sync now (dry-run preview or for real), off-schedule"
         echo "[DRY-RUN] Would offer \"Sign in with Authelia\" (OIDC) if Authelia is installed"
+        echo "[DRY-RUN] Would offer to enable Gitea Actions (CI) with a local act_runner container"
         echo "[DRY-RUN] Would write $DIR/README.md"
         return 0
     fi
@@ -398,6 +467,7 @@ install_gitea() {
                     || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
                 _gitea_run_sync_direction_step "$DIR"
                 _gitea_offer_authelia_sso "$DIR"
+                _gitea_offer_actions_runner "$DIR"
                 log_success "Existing .env (tokens) and web/SSH ports were left untouched."
                 return 0
                 ;;
@@ -567,6 +637,7 @@ ENV
     configure_caddy_for_service "Gitea" "host.docker.internal:${WEB_PORT}" "git"
 
     _gitea_offer_authelia_sso "$DIR"
+    _gitea_offer_actions_runner "$DIR"
 
     write_readme "$DIR" << MD
 # Gitea
@@ -607,6 +678,18 @@ fine — this doesn't touch tokens or anything else) and answer yes to
 on Gitea's own login page. Local admin login keeps working exactly as
 before — this is additive, not a replacement. Managed in Gitea under
 Site Administration -> Authentication Sources (source name: \`authelia\`).
+
+## Gitea Actions (CI) — optional local runner
+
+Re-run \`sudo ./setup.sh gitea\` (Update mode is fine) and answer yes to
+"Enable Gitea Actions?" to run \`.gitea/workflows/*.yml\` here the same way
+GitHub Actions runs \`.github/workflows/*.yml\` — mainly useful as a fallback
+so builds still work if GitHub is ever unreachable. Adds an \`act_runner\`
+container (\`docker compose ps\` will show \`gitea-runner\`) that polls this
+Gitea instance for jobs and launches a fresh container per job using this
+host's own Docker socket — same pattern already used by this repo's
+portainer/watchtower/uptimekuma services, not something new. Manage runners
+under Site Administration -> Actions -> Runners.
 
 ## Manage
 
