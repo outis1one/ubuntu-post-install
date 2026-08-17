@@ -773,6 +773,12 @@ __ALERT_DENY_PERSONAL_LINE__
  same => n,Busy(15)
  same => n,Hangup()
 
+; Falls to the owner's own voicemail (${PSTN_PERSONAL_OWNER}@default, the
+; same mailbox *97/*98<ext> use) on anything but ANSWER, gated by that
+; extension's own voicemail=yes/no flag in pstn-permissions.conf. Unambiguous
+; here since a personal DID has exactly one owning extension — unlike the
+; shared ring-group and group-owned personal DID paths above, which can't
+; pick a single mailbox this same way and are left as-is (Hangup() only).
 exten => pstn_personal_ring,1,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limits,max_inbound)})
  same => n,Set(PSTN_MAX_IN=${IF($["${PSTN_MAX_IN}" = ""]?10:${PSTN_MAX_IN})})
  same => n,GotoIf($[${GROUP_COUNT(pstn-in)} >= ${PSTN_MAX_IN}]?pstn_in_busy,1)
@@ -781,7 +787,12 @@ exten => pstn_personal_ring,1,Set(PSTN_MAX_IN=${AST_CONFIG(pstn-limits.conf,limi
  same => n,Dial(PJSIP/${PSTN_PERSONAL_OWNER},20)
  same => n,Set(PSTN_DUR=$[${EPOCH} - ${PSTN_START}])
  same => n,System(printf '%s|in|%s|%s|%s\n' "${PSTN_START}" "${CALLERID(num)}" "${PSTN_DID_CALLED}" "${PSTN_DUR}" >> /var/log/asterisk/pstn-trunk-calls.log)
- same => n,Hangup()
+ same => n,GotoIf($["${DIALSTATUS}" = "ANSWER"]?pstn_personal_ring_end,1)
+ same => n,Set(PSTN_VM_OK=${AST_CONFIG(pstn-permissions.conf,${PSTN_PERSONAL_OWNER},voicemail)})
+ same => n,GotoIf($["${PSTN_VM_OK}" != "yes"]?pstn_personal_ring_end,1)
+ same => n,VoiceMail(${PSTN_PERSONAL_OWNER}@default,u)
+
+exten => pstn_personal_ring_end,1,Hangup()
 EOF
 
     if [[ -n "$NTFY_URL" ]]; then
