@@ -225,24 +225,29 @@ install_authelia() {
         echo ""
         echo "    1) Add another protected domain to this instance (non-destructive —"
         echo "       one Authelia+Redis, multiple independent apex domains/logins)"
-        echo "    2) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
+        echo "    2) Add a new user (creates a users.yml entry + password hash)"
+        echo "    3) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
         echo "       Vaultwarden, or any other app with its own \"Enable OpenID\" setting)"
-        echo "    3) Reconfigure from scratch (regenerates secrets/users — breaks"
+        echo "    4) Reconfigure from scratch (regenerates secrets/users — breaks"
         echo "       existing sessions for every domain already on this instance)"
-        echo "    4) Leave as-is"
+        echo "    5) Leave as-is"
         echo ""
         local EXISTING_CHOICE=""
-        prompt_text "  Choice [1/2/3/4]:" "4" EXISTING_CHOICE
+        prompt_text "  Choice [1/2/3/4/5]:" "5" EXISTING_CHOICE
         case "$EXISTING_CHOICE" in
             1)
                 add_authelia_domain
                 return 0
                 ;;
             2)
-                _authelia_add_oidc_client
+                add_authelia_user
                 return 0
                 ;;
             3)
+                _authelia_add_oidc_client
+                return 0
+                ;;
+            4)
                 : # fall through to the full reinstall flow below
                 ;;
             *)
@@ -563,12 +568,21 @@ docker compose down         # stop
 ## Users
 - Login with the **username** (not email). Admin user: \`${AUTHELIA_ADMIN_USER}\`.
 - Tell users to click **Forgot Password** on first login to set their own
-  password (Authelia emails a reset link via SMTP).
-- Add a user: copy a block in \`config/users.yml\`, change username/email/
-  displayname, generate a hash, then \`docker compose restart authelia\`:
+  password (Authelia emails a reset link via SMTP), or use Authelia's own
+  Settings page once logged in — that works even without SMTP configured.
+- **Add a user:** re-run this installer (\`sudo ./setup.sh authelia\` or
+  \`sudo bash authelia.sh\`) and choose **"Add a new user"** from the menu —
+  it prompts for username/email/display name, generates the password hash,
+  writes the \`users.yml\` block, and restarts Authelia for you.
+- To add one by hand instead: copy a block in \`config/users.yml\`, change
+  username/email/displayname, generate a hash, then
+  \`docker compose restart authelia\`:
 \`\`\`
 docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate argon2 --password 'thepassword'
 \`\`\`
+- Any user added this way can log into every OIDC app already registered on
+  this instance (see "Letting other apps log in via Authelia" above) — access
+  isn't scoped per-app by default, it's shared across the whole instance.
 
 ## Notes
 - Authelia listens on 9091 **internally only** (no published port) and is
@@ -695,6 +709,97 @@ CADDY_AUTH_BLOCK2
     echo "    }"
     echo "  Same users/passwords work across every domain on this instance —"
     echo "  it's one shared user database, just separate sessions per domain."
+    echo ""
+}
+
+# Adds a new user to an EXISTING Authelia instance's users.yml — the scripted
+# version of the manual "generate a hash, paste a users.yml block, restart"
+# steps this file's own generated README already documents. Non-destructive:
+# only inserts a new block under the existing "users:" key, never touches any
+# other user already there. Any user added here can authenticate against
+# every OIDC client already registered on this instance (see
+# _authelia_add_oidc_client below) — Authelia's authorization_policy controls
+# required auth strength (1FA/2FA), not which users may use a given client,
+# so there's no separate "grant access to this app" step needed.
+add_authelia_user() {
+    local AUTHELIA_DIR="$DOCKER_DIR/authelia"
+    local USERS_FILE="$AUTHELIA_DIR/config/users.yml"
+
+    if [ ! -f "$USERS_FILE" ]; then
+        log_warning "No users.yml found at $USERS_FILE — install Authelia first."
+        return 1
+    fi
+
+    echo ""
+    echo "  Add a new user to this Authelia instance."
+    echo "  They log in with their username (not email). A temporary password"
+    echo "  is generated below — if SMTP isn't working, hand it to them directly"
+    echo "  instead of relying on \"Forgot Password\"; they can set their own"
+    echo "  password afterward from Authelia's own Settings page (no email"
+    echo "  required for that), or via the reset email once SMTP works."
+    echo ""
+    local NEW_USERNAME="" NEW_DISPLAY="" NEW_EMAIL="" NEW_ADMIN=""
+    prompt_text "  Username (lowercase, no spaces):" "" NEW_USERNAME
+    NEW_USERNAME="$(echo "$NEW_USERNAME" | tr -cs 'a-z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
+    if [ -z "$NEW_USERNAME" ]; then
+        log_warning "No username entered — nothing to do."
+        return 0
+    fi
+    if grep -qE "^  ${NEW_USERNAME}:$" "$USERS_FILE" 2>/dev/null; then
+        log_warning "A user named '$NEW_USERNAME' already exists in $USERS_FILE — pick another username, or edit that entry by hand."
+        return 0
+    fi
+
+    prompt_text "  Display name:" "$NEW_USERNAME" NEW_DISPLAY
+    prompt_text "  Email:" "${NEW_USERNAME}@${SITE_DOMAIN:-example.com}" NEW_EMAIL
+    local NEW_ADMIN_YN=""
+    prompt_yn "  Grant admin group membership too? (y/n):" "n" NEW_ADMIN_YN
+
+    log_info "Generating temporary password + hash..."
+    local TEMP_PASS NEW_HASH
+    TEMP_PASS="$(generate_password 16)"
+    NEW_HASH=$(docker run --rm authelia/authelia:4.39.20 \
+        authelia crypto hash generate argon2 --password "$TEMP_PASS" 2>/dev/null \
+        | grep -oP '(?<=Digest: ).*')
+    if [ -z "$NEW_HASH" ]; then
+        log_warning "Couldn't generate the password hash automatically. Run manually, then add the"
+        log_warning "user to $USERS_FILE by hand:"
+        echo "    docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate argon2 --password 'temporary-password'"
+        return 1
+    fi
+
+    local GROUPS_BLOCK="      - users"
+    [[ "$NEW_ADMIN_YN" =~ ^[Yy]$ ]] && GROUPS_BLOCK="      - admins
+      - users"
+
+    local USER_BLOCK="  ${NEW_USERNAME}:
+    displayname: \"${NEW_DISPLAY}\"
+    email: ${NEW_EMAIL}
+    password: \"${NEW_HASH}\"
+    groups:
+${GROUPS_BLOCK}"
+
+    awk -v block="$USER_BLOCK" '
+        { print }
+        /^users:$/ && !done { print block; done=1 }
+    ' "$USERS_FILE" > "$USERS_FILE.tmp" && mv "$USERS_FILE.tmp" "$USERS_FILE"
+    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+    log_success "Added user '$NEW_USERNAME' to $USERS_FILE"
+
+    local RESTART_AUTH=""
+    prompt_yn "  Restart Authelia to apply the new user? (y/n):" "y" RESTART_AUTH
+    if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
+        (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Restart failed — check: docker compose logs authelia"
+    fi
+
+    echo ""
+    echo "  New user:      ${NEW_USERNAME}"
+    echo "  Temp password: ${TEMP_PASS}"
+    echo "  Give this to them directly (it's shown once, nothing stores it in"
+    echo "  plaintext). They can log in with it as-is, then change it from"
+    echo "  Authelia's own Settings page — no working SMTP required for that."
     echo ""
 }
 
