@@ -386,8 +386,16 @@ EOF
         # what was just entered rather than failing the whole install.
         if docker exec -u git gitea gitea admin user list 2>/dev/null | awk '{print $2}' | grep -qx "$GITEA_ADMIN_USER"; then
             _exists=true
+            # --must-change-password=false matters here: change-password
+            # defaults to setting that flag TRUE, which then makes Gitea
+            # reject every API call (including this script's own token-based
+            # calls) with 403 "You must change your password" until someone
+            # logs into the web UI and clears it by hand. Confirmed live —
+            # this silently broke the sync script on every retry against an
+            # already-existing account.
             docker exec -u git gitea gitea admin user change-password \
-                --username "$GITEA_ADMIN_USER" --password "$GITEA_ADMIN_PASS" &>/dev/null
+                --username "$GITEA_ADMIN_USER" --password "$GITEA_ADMIN_PASS" \
+                --must-change-password=false &>/dev/null
             _created=true
             break
         fi
