@@ -34,6 +34,22 @@ by the migration:
   file-read ACLs (new inodes from the extraction never had them) — now
   documented and the restore script prints a reminder to re-run
   `sudo ./setup.sh security-dashboard` afterward.
+- All outbound (and ring-group inbound) PSTN calls silently denied, every
+  time, with zero errors or warnings anywhere in the logs. Took an
+  extended live debugging session working through firewalls (IONOS's
+  separate Cloud Panel network firewall — a real, separate issue, but not
+  this one), Anveo's IP allowlists, and IONOS-vs-DigitalOcean network
+  theories before finding it: `asterisk.conf` needs `live_dangerously =
+  yes` under `[options]` for `AST_CONFIG()` to actually work — without it,
+  every `AST_CONFIG()` read (pstn-permissions.conf tiers, the PSTN
+  kill-switch) silently returns an empty string instead of erroring, so a
+  perfectly correct `tier_out = full` in pstn-permissions.conf still
+  evaluates as no permission. Not IONOS-specific at all — Easy Asterisk's
+  vendor default just ships without it, and the old DigitalOcean box
+  apparently had it set by hand at some point with no record of why. Now
+  fixed at the source: `_asterisk_ensure_live_dangerously()` in
+  `services/asterisk.sh`, called after every fresh install and every
+  "update" rebuild.
 
 Loose end: no code fix pending, just keep an eye out in case the
 registration bounce recurs (would point back at Sipnetic/coturn rather
