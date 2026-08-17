@@ -356,15 +356,20 @@ EOF
         log_success "Admin account created: $GITEA_ADMIN_USER"
     fi
 
+    # Token name includes a timestamp so a retry against an account that
+    # already has a "sync" token from an earlier partial run (see the
+    # already-exists branch above) never collides — Gitea rejects a second
+    # token with a name that's already taken for that user, which used to
+    # silently fall through to the manual-paste prompt below on every retry.
     local GITEA_TOKEN=""
     GITEA_TOKEN="$(docker exec -u git gitea gitea admin user generate-access-token \
-        --username "$GITEA_ADMIN_USER" --token-name sync \
+        --username "$GITEA_ADMIN_USER" --token-name "sync-$(date +%s)" \
         --scopes write:repository,write:user --raw 2>/dev/null)"
     if [[ -z "$GITEA_TOKEN" ]]; then
         log_warning "Automatic token generation didn't work (older Gitea image?) — generate one"
         log_warning "by hand: log into http://localhost:${WEB_PORT} as $GITEA_ADMIN_USER, then"
         log_warning "Settings -> Applications -> Generate New Token (repo + user write access)."
-        prompt_text "  Paste the Gitea token here:" "" GITEA_TOKEN
+        prompt_text "  Paste the GITEA token here (not the GitHub one — that's next):" "" GITEA_TOKEN
     fi
 
     # ── GitHub token ─────────────────────────────────────────────────────────
