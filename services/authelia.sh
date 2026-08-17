@@ -1190,12 +1190,32 @@ _authelia_ensure_oidc_provider() {
     log_success "OIDC provider enabled (signing key + HMAC secret generated)"
 }
 
-# Registers an OIDC client for another app to log in via Authelia — the
-# "Other" provider option in an app's own "Enable OpenID"/SSO dialog. Presets
-# below hand back the app's own known redirect URI path and the exact fields
-# to paste where; "Other/custom" covers anything not listed (the app's own
-# OIDC/SSO docs will say what redirect URI it expects).
-_authelia_add_oidc_client() {
+# Non-interactive core of _authelia_add_oidc_client() below — generates a
+# client secret, patches it into identity_providers.oidc.clients, and
+# (optionally) restarts Authelia. Fully self-contained (re-validates
+# everything itself rather than trusting a caller's state) so other
+# services can call it directly to register themselves as an OIDC client
+# without walking a human through this file's own menu — see
+# services/gitea.sh's "Sign in with Authelia" step for the reference caller.
+# Guard every cross-file call with `declare -F` per this repo's chaining
+# convention (services/gitea.sh does).
+#
+# Args: APP_NAME CLIENT_ID AUTH_POLICY RESTART_AUTH(y/n) <redirect_uri> [<redirect_uri> ...]
+# Out-params (not `local` — read them after the call returns):
+#   OIDC_CLIENT_SECRET_PLAIN   the plaintext secret. Shown once — Authelia's
+#                              config only ever stores the hash — so the
+#                              caller must capture and use/display it now.
+#   OIDC_AUTHELIA_DOMAIN       this Authelia instance's apex domain, for
+#                              building discovery/authorization/token URLs.
+# Returns 1 on failure (Authelia not installed, client ID already taken,
+# secret generation failed) with the reason already logged.
+_authelia_provision_oidc_client() {
+    local APP_NAME="$1" CLIENT_ID="$2" AUTH_POLICY="$3" RESTART_AUTH="$4"; shift 4
+    local -a REDIRECT_URIS=("$@")
+
+    OIDC_CLIENT_SECRET_PLAIN=""
+    OIDC_AUTHELIA_DOMAIN=""
+
     local AUTHELIA_DIR="$DOCKER_DIR/authelia"
     local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
 
@@ -1210,8 +1230,97 @@ _authelia_add_oidc_client() {
     # its own session.cookies (same structure install_authelia()/
     # add_authelia_domain() write), rather than asking again or assuming a
     # variable set earlier in this run is still in scope (this flow can be
+    # reached standalone from the "already exists" menu, or from another
+    # service entirely, with none of install_authelia()'s own locals ever
+    # having run this session).
+    OIDC_AUTHELIA_DOMAIN="$(awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' "$CONFIG_FILE")"
+    if [ -z "$OIDC_AUTHELIA_DOMAIN" ]; then
+        log_warning "Couldn't determine this Authelia instance's domain from $CONFIG_FILE — aborting."
+        return 1
+    fi
+
+    if grep -qF "client_id: '${CLIENT_ID}'" "$CONFIG_FILE" 2>/dev/null; then
+        log_warning "A client with ID '$CLIENT_ID' is already registered in $CONFIG_FILE."
+        return 1
+    fi
+
+    log_info "Generating client secret..."
+    local _hash_out CLIENT_SECRET_HASH
+    _hash_out="$(docker run --rm authelia/authelia:4.39.20 \
+        authelia crypto hash generate pbkdf2 --variant sha512 --random \
+        --random.length 72 --random.charset rfc3986 2>/dev/null)"
+    OIDC_CLIENT_SECRET_PLAIN="$(echo "$_hash_out" | sed -n 's/^Random Password: //p')"
+    CLIENT_SECRET_HASH="$(echo "$_hash_out" | sed -n 's/^Digest: //p')"
+    if [ -z "$OIDC_CLIENT_SECRET_PLAIN" ] || [ -z "$CLIENT_SECRET_HASH" ]; then
+        log_warning "Couldn't generate the client secret automatically. Run manually, then add the"
+        log_warning "client to $CONFIG_FILE's identity_providers.oidc.clients by hand:"
+        echo "    docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986"
+        OIDC_CLIENT_SECRET_PLAIN=""
+        return 1
+    fi
+
+    grep -q '^    clients: \[\]$' "$CONFIG_FILE" && sed -i 's/^    clients: \[\]$/    clients:/' "$CONFIG_FILE"
+
+    local REDIRECT_URIS_YAML
+    REDIRECT_URIS_YAML="$(printf "          - '%s'\n" "${REDIRECT_URIS[@]}")"
+    REDIRECT_URIS_YAML="${REDIRECT_URIS_YAML%$'\n'}"
+
+    local CLIENT_BLOCK="      - client_id: '${CLIENT_ID}'
+        client_name: '${APP_NAME}'
+        client_secret: '${CLIENT_SECRET_HASH}'
+        public: false
+        authorization_policy: '${AUTH_POLICY}'
+        redirect_uris:
+${REDIRECT_URIS_YAML}
+        scopes:
+          - 'openid'
+          - 'profile'
+          - 'email'
+        grant_types:
+          - 'authorization_code'
+        response_types:
+          - 'code'
+        response_modes:
+          - 'query'
+        userinfo_signed_response_alg: 'none'"
+
+    awk -v block="$CLIENT_BLOCK" '
+        { print }
+        /^    clients:$/ && !done { print block; done=1 }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+    chown 1000:1000 "$CONFIG_FILE" 2>/dev/null || true
+
+    if [[ "$RESTART_AUTH" =~ ^[Yy]$ ]]; then
+        (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Authelia restart failed — check: docker compose logs authelia"
+    fi
+    return 0
+}
+
+# Registers an OIDC client for another app to log in via Authelia — the
+# "Other" provider option in an app's own "Enable OpenID"/SSO dialog. Presets
+# below hand back the app's own known redirect URI path and the exact fields
+# to paste where; "Other/custom" covers anything not listed (the app's own
+# OIDC/SSO docs will say what redirect URI it expects). Interactive wrapper
+# around _authelia_provision_oidc_client() above, which does the actual work.
+_authelia_add_oidc_client() {
+    local AUTHELIA_DIR="$DOCKER_DIR/authelia"
+    local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warning "No configuration.yml found at $CONFIG_FILE — install Authelia first."
+        return 1
+    fi
+
+    # The apex domain this Authelia instance already serves — read back from
+    # its own session.cookies (same structure install_authelia()/
+    # add_authelia_domain() write), rather than asking again or assuming a
+    # variable set earlier in this run is still in scope (this flow can be
     # reached standalone from the "already exists" menu with none of
-    # install_authelia()'s own locals ever having run this session).
+    # install_authelia()'s own locals ever having run this session). Used
+    # below only to suggest a domain default — _authelia_provision_oidc_client
+    # re-derives its own copy independently.
     local AUTHELIA_DOMAIN
     AUTHELIA_DOMAIN="$(awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' "$CONFIG_FILE")"
     if [ -z "$AUTHELIA_DOMAIN" ]; then
@@ -1288,58 +1397,12 @@ _authelia_add_oidc_client() {
     prompt_yn "  Require two-factor for ${APP_NAME} logins too? (y/n):" "y" _2fa
     [[ "$_2fa" =~ ^[Yy]$ ]] || AUTH_POLICY="one_factor"
 
-    log_info "Generating client secret..."
-    local _hash_out CLIENT_SECRET_PLAIN CLIENT_SECRET_HASH
-    _hash_out="$(docker run --rm authelia/authelia:4.39.20 \
-        authelia crypto hash generate pbkdf2 --variant sha512 --random \
-        --random.length 72 --random.charset rfc3986 2>/dev/null)"
-    CLIENT_SECRET_PLAIN="$(echo "$_hash_out" | sed -n 's/^Random Password: //p')"
-    CLIENT_SECRET_HASH="$(echo "$_hash_out" | sed -n 's/^Digest: //p')"
-    if [ -z "$CLIENT_SECRET_PLAIN" ] || [ -z "$CLIENT_SECRET_HASH" ]; then
-        log_warning "Couldn't generate the client secret automatically. Run manually, then add the"
-        log_warning "client to $CONFIG_FILE's identity_providers.oidc.clients by hand:"
-        echo "    docker run --rm authelia/authelia:4.39.20 authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72 --random.charset rfc3986"
-        return 1
-    fi
-
-    grep -q '^    clients: \[\]$' "$CONFIG_FILE" && sed -i 's/^    clients: \[\]$/    clients:/' "$CONFIG_FILE"
-
-    local REDIRECT_URIS_YAML
-    REDIRECT_URIS_YAML="$(printf "          - '%s'\n" "${REDIRECT_URIS[@]}")"
-    REDIRECT_URIS_YAML="${REDIRECT_URIS_YAML%$'\n'}"
-
-    local CLIENT_BLOCK="      - client_id: '${CLIENT_ID}'
-        client_name: '${APP_NAME}'
-        client_secret: '${CLIENT_SECRET_HASH}'
-        public: false
-        authorization_policy: '${AUTH_POLICY}'
-        redirect_uris:
-${REDIRECT_URIS_YAML}
-        scopes:
-          - 'openid'
-          - 'profile'
-          - 'email'
-        grant_types:
-          - 'authorization_code'
-        response_types:
-          - 'code'
-        response_modes:
-          - 'query'
-        userinfo_signed_response_alg: 'none'"
-
-    awk -v block="$CLIENT_BLOCK" '
-        { print }
-        /^    clients:$/ && !done { print block; done=1 }
-    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-    chown 1000:1000 "$CONFIG_FILE" 2>/dev/null || true
-
     local RESTART_AUTH=""
     prompt_yn "  Restart Authelia to apply? (y/n):" "y" RESTART_AUTH
-    if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
-        (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
-            && log_success "Authelia restarted" \
-            || log_warning "Restart failed — check: docker compose logs authelia"
-    fi
+
+    _authelia_provision_oidc_client "$APP_NAME" "$CLIENT_ID" "$AUTH_POLICY" "$RESTART_AUTH" "${REDIRECT_URIS[@]}" \
+        || return 1
+    local CLIENT_SECRET_PLAIN="$OIDC_CLIENT_SECRET_PLAIN"
 
     echo ""
     echo "  ${APP_NAME} is registered. Paste these into its OpenID/SSO settings"

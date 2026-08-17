@@ -369,7 +369,26 @@ collision.)
 **Has built-in auth — no Authelia needed:**
 `emby`, `jellyfin`, `audiobookshelf`, `immich`, `mealie`, `actualbudget`,
 `homeassistant`, `portainer`, `meshcentral`, `traccar`, `uptimekuma`,
-`filebrowser`, `wg-easy`, `ntfy` (configurable)
+`filebrowser`, `wg-easy`, `ntfy` (configurable), `gitea`
+
+**Native OIDC login as an addition, not a Caddy gate — `gitea`'s pattern.**
+Some apps with their own built-in login *also* have their own "add an
+OAuth2/OIDC provider" setting — a genuinely different integration from
+both the forward_auth gate above and the "Enable OpenID" client-registration
+flow below. `services/gitea.sh`'s `_gitea_offer_authelia_sso()` is the
+reference: if Authelia is installed, offers to register Gitea as an OIDC
+client (via `services/authelia.sh`'s `_authelia_provision_oidc_client()` —
+the same non-interactive, out-param-returning core that
+`_authelia_add_oidc_client()`'s menu flow uses) and then runs `gitea admin
+auth add-oauth` itself to add Authelia as an authentication source — no
+manual web-UI copy-paste on either side, matching this repo's "no manual
+wizard" philosophy elsewhere in gitea.sh (admin account/token creation).
+Local login keeps working unchanged; this only adds an extra button on the
+existing login page. Reuse `_authelia_provision_oidc_client()` (guarded by
+`declare -F`, same convention as chaining into another service's
+`install_<name>()`) for any future service with its own native OIDC field,
+instead of duplicating Authelia's client-secret-generation/config-patching
+logic again.
 
 **No built-in auth — should be protected:**
 `magicmirror`, `wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`,
