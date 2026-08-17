@@ -228,7 +228,8 @@ install_gitea() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml (gitea/gitea:latest)"
         echo "[DRY-RUN] Would scan for free host ports (web + SSH) to avoid collisions"
-        echo "[DRY-RUN] Would auto-create a Gitea admin account and API token (no manual web wizard)"
+        echo "[DRY-RUN] Would prompt for a Gitea admin username/password, then create that account"
+        echo "[DRY-RUN]   and an API token once the container is ready (no manual web wizard)"
         echo "[DRY-RUN] Would prompt for a GitHub token and copy in gitea-github-sync.sh"
         echo "[DRY-RUN] Would ask sync direction (GitHub->Gitea / Gitea->GitHub / both) and whether"
         echo "[DRY-RUN]   to install a systemd timer for automatic sync, or print manual instructions"
@@ -307,32 +308,53 @@ EOF
         && log_success "Gitea container started." \
         || { log_error "docker compose up failed — check: docker compose -f $DIR/docker-compose.yml logs"; return 1; }
 
-    # ── Wait for Gitea to actually be ready before touching its CLI ────────
-    log_info "Waiting for Gitea to finish starting..."
-    local _tries=0 _ready=false
-    while [[ $_tries -lt 30 ]]; do
-        if docker exec gitea gitea admin user list &>/dev/null; then
-            _ready=true
+    # ── Admin credentials — asked up front so a slow first boot doesn't need
+    # a second manual pass; these get used the moment Gitea's CLI is ready.
+    echo ""
+    local GITEA_ADMIN_USER=""
+    prompt_text "  Gitea admin username [$ACTUAL_USER]:" "$ACTUAL_USER" GITEA_ADMIN_USER
+    local _GEN_PASS GITEA_ADMIN_PASS=""
+    _GEN_PASS="$(generate_password 24)"
+    prompt_text "  Gitea admin password [$_GEN_PASS]:" "$_GEN_PASS" GITEA_ADMIN_PASS
+
+    # ── Wait for Gitea to actually be ready, then create the account. One
+    # retry loop instead of a separate readiness probe: first boot (SQLite
+    # init) can take well over a minute on slower disks, and folding account
+    # creation into the same loop means a slow-but-eventually-successful boot
+    # doesn't dead-end the install the way a fixed 60s probe used to.
+    log_info "Waiting for Gitea to finish starting (first boot can take a minute or two)..."
+    local _tries=0 _created=false _exists=false
+    while [[ $_tries -lt 60 ]]; do
+        if docker exec -u git gitea gitea admin user create --admin \
+            --username "$GITEA_ADMIN_USER" --password "$GITEA_ADMIN_PASS" \
+            --email "${GITEA_ADMIN_USER}@localhost" --must-change-password=false \
+            &>/dev/null; then
+            _created=true
+            break
+        fi
+        # Gitea is up but this username already exists (e.g. retry after an
+        # earlier partial run) — treat as success and sync the password to
+        # what was just entered rather than failing the whole install.
+        if docker exec -u git gitea gitea admin user list 2>/dev/null | awk '{print $2}' | grep -qx "$GITEA_ADMIN_USER"; then
+            _exists=true
+            docker exec -u git gitea gitea admin user change-password \
+                --username "$GITEA_ADMIN_USER" --password "$GITEA_ADMIN_PASS" &>/dev/null
+            _created=true
             break
         fi
         sleep 2
         _tries=$((_tries + 1))
     done
-    if [[ "$_ready" != true ]]; then
+    if [[ "$_created" != true ]]; then
         log_error "Gitea didn't come up in time — check: docker compose -f $DIR/docker-compose.yml logs"
+        log_error "Once it's healthy, just re-run 'sudo ./setup.sh gitea' to pick up from here."
         return 1
     fi
-
-    # ── Auto-create an admin account + API token — no manual web wizard ────
-    local GITEA_ADMIN_USER="$ACTUAL_USER"
-    local GITEA_ADMIN_PASS
-    GITEA_ADMIN_PASS="$(generate_password 24)"
-    docker exec -u git gitea gitea admin user create --admin \
-        --username "$GITEA_ADMIN_USER" --password "$GITEA_ADMIN_PASS" \
-        --email "${GITEA_ADMIN_USER}@localhost" --must-change-password=false \
-        &>/dev/null \
-        && log_success "Admin account created: $GITEA_ADMIN_USER" \
-        || { log_error "Failed to create the Gitea admin account — check: docker logs gitea"; return 1; }
+    if [[ "$_exists" == true ]]; then
+        log_success "Admin account already existed: $GITEA_ADMIN_USER (password updated to what you just entered)"
+    else
+        log_success "Admin account created: $GITEA_ADMIN_USER"
+    fi
 
     local GITEA_TOKEN=""
     GITEA_TOKEN="$(docker exec -u git gitea gitea admin user generate-access-token \
