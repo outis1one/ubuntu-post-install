@@ -704,6 +704,30 @@ case "$cmd" in
         echo "working directory followed the OLD directory when it got renamed"
         echo "aside). Run 'cd $HERE' again (or open a new shell) to see the"
         echo "restored files."
+
+        # The line above replaced $HERE's whole directory tree with a fresh
+        # extraction from the archive — every file in it is a brand-new
+        # inode, so any POSIX ACL grants the Security Dashboard holds on it
+        # (setfacl access to .env, config/, logs/, spool/ — see
+        # _secdash_grant_asterisk_access in services/security-dashboard.sh)
+        # went away with the old directory and were never on the new one to
+        # begin with. Confirmed live: this shows up as "No permission to
+        # read .../.env" in the dashboard's Extensions tab right after a
+        # restore, on a box where the dashboard was already installed and
+        # working fine before. It isn't a bug in the dashboard, and it isn't
+        # anything this restore script itself can safely fix from here (it
+        # runs standalone, with none of services/*.sh's functions or the
+        # dashboard's service-user name available to it) — the one working
+        # fix is re-running the dashboard's own installer, which regrants
+        # every ACL against whatever is on disk right now.
+        if systemctl list-unit-files 2>/dev/null | grep -q '^security-dashboard\.service'; then
+            echo ""
+            echo "The Security Dashboard is installed on this box. This restore replaced"
+            echo "every file under $HERE with fresh copies from the archive, which drops"
+            echo "the dashboard's file-read permissions on them (Extensions tab TURN/domain"
+            echo "details, etc.). Re-run to restore those:"
+            echo "  sudo ./setup.sh security-dashboard"
+        fi
         ;;
 
     *)
@@ -1832,6 +1856,19 @@ coturn-container names to match THIS box's layout and lands the data at
 this box's own directory — never leaving a second, wrongly-named directory
 behind that would confuse every service that resolves Asterisk's layout
 (Security Dashboard, PSTN trunk, CrowdSec's Asterisk acquisition, Caddy).
+
+If the Security Dashboard is installed, \`restore\` prints a reminder to
+re-run \`sudo ./setup.sh security-dashboard\` afterward. Every file under
+\`${EA_DIR}\` gets replaced with a fresh extraction from the archive — new
+inodes, none of which carry the dashboard's POSIX ACL grants (read access
+to \`.env\`, \`config/\`, \`logs/\`, \`spool/\` — see
+\`_secdash_grant_asterisk_access\` in \`services/security-dashboard.sh\`).
+Confirmed live: this shows up as "No permission to read .../.env" in the
+Extensions tab right after a restore, on a box where the dashboard was
+already working fine beforehand. Re-running the dashboard's own installer
+regrants everything against whatever's on disk now; this restore script
+can't do it itself since it runs standalone, with none of \`services/*.sh\`'s
+functions or the dashboard's service-user name available to it.
 
 ## VLANs / other subnets
 

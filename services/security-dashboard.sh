@@ -3999,6 +3999,7 @@ INDEX_HTML = """<!doctype html>
     <div class="card">
       <div class="card-head"><h3>Active bans</h3></div>
       <div class="card-body">
+        <input type="text" id="dec-search" placeholder="Search by IP, network/carrier, country, scenario..." style="width:24rem;margin-bottom:0.75rem">
         <div class="table-wrap">
           <table id="dec-table"><thead><tr>
             <th class="sortable" data-sort="value">IP/Range</th>
@@ -5060,8 +5061,20 @@ function decSortValue(d, key) {
   }
 }
 
+// Matches against every column shown in the table (IP/range, scenario,
+// carrier name/ASN, country, origin) rather than just the IP, since "search
+// by network/carrier" was asked for explicitly -- a phone's ISP/mobile
+// carrier name is often more memorable than its current IP.
+function decMatchesSearch(d, term) {
+  if (!term) return true;
+  const haystack = [d.value, d.scenario, d.as_number, d.as_name, d.country, d.origin]
+    .filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(term);
+}
+
 function renderDecisions() {
-  let rows = lastDecisions.slice();
+  const term = (document.getElementById("dec-search").value || "").trim().toLowerCase();
+  let rows = lastDecisions.filter(d => decMatchesSearch(d, term));
   if (decSort.key) {
     rows.sort((a, b) => {
       const av = decSortValue(a, decSort.key), bv = decSortValue(b, decSort.key);
@@ -5087,7 +5100,7 @@ function renderDecisions() {
       <button class="action" onclick="unban(${d.id})">Unban</button>
       ${d.as_number ? `<button class="action" onclick="exemptAsn('${esc(d.as_number)}')">Exempt ASN</button>` : ""}
     </td>
-  </tr>`).join("") || "<tr><td colspan=7 class=muted>No active bans.</td></tr>";
+  </tr>`).join("") || `<tr><td colspan=7 class=muted>${term ? "No bans match that search." : "No active bans."}</td></tr>`;
 }
 
 document.querySelectorAll("#dec-table th.sortable").forEach(th => {
@@ -5098,6 +5111,8 @@ document.querySelectorAll("#dec-table th.sortable").forEach(th => {
     renderDecisions();
   });
 });
+
+document.getElementById("dec-search").addEventListener("input", renderDecisions);
 
 async function loadDecisions() {
   const res = await fetch("/api/decisions");
