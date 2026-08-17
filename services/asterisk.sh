@@ -1155,6 +1155,58 @@ _asterisk_patch_voicemail_vendor_files() {
     log_success "Vendor generator functions patched for voicemail access codes."
 }
 
+# ── asterisk.conf: live_dangerously ─────────────────────────────────────────
+# pstn-trunk.sh's dialplan leans on AST_CONFIG() for everything permission-
+# related (pstn-permissions.conf tiers, pstn-trunk-killswitch.conf) — see
+# [intercom]'s outbound extension. AST_CONFIG() silently returns an empty
+# string, with no warning or error anywhere in the logs, unless asterisk.conf
+# has live_dangerously = yes under [options]. Easy Asterisk's own vendor
+# default ships without it, so every outbound (and inbound ring-group) call
+# gets denied with tier_out reading as blank — looking exactly like a
+# permissions problem even when pstn-permissions.conf is correct. Confirmed
+# live: this cost a multi-hour debugging session chasing firewalls, Anveo's
+# IP allowlists, and IONOS-vs-DigitalOcean theories before landing here — the
+# box had simply never had this one line set, on either provider by luck of
+# whatever manual setup happened before this repo tracked it.
+#
+# Idempotent and safe to call on every install/update: no-ops if already set,
+# only restarts the container if the file actually changed.
+_asterisk_ensure_live_dangerously() {
+    local EA_DIR="$1" CONTAINER_NAME="$2"
+    local CONF="$EA_DIR/config/asterisk/asterisk.conf"
+
+    # asterisk.conf is written by the container's own entrypoint on its
+    # first boot, not by this repo — give it a few seconds to appear right
+    # after a fresh `docker compose up` before giving up.
+    local _tries=0
+    while [[ ! -f "$CONF" && $_tries -lt 10 ]]; do
+        sleep 1
+        _tries=$((_tries + 1))
+    done
+    if [[ ! -f "$CONF" ]]; then
+        log_warning "asterisk.conf not found yet — couldn't check live_dangerously. Re-run this"
+        log_warning "installer (update mode) once the container has started, or set it by hand:"
+        log_warning "  docker exec $CONTAINER_NAME sh -c \"echo 'live_dangerously = yes' >> /etc/asterisk/asterisk.conf\" && docker restart $CONTAINER_NAME"
+        return 0
+    fi
+
+    grep -q '^live_dangerously[[:space:]]*=[[:space:]]*yes' "$CONF" && return 0
+
+    if grep -q '^live_dangerously' "$CONF"; then
+        sed -i 's/^live_dangerously.*/live_dangerously = yes/' "$CONF"
+    elif grep -q '^\[options\]' "$CONF"; then
+        sed -i '/^\[options\]/a live_dangerously = yes' "$CONF"
+    else
+        printf '\n[options]\nlive_dangerously = yes\n' >> "$CONF"
+    fi
+    log_success "Set live_dangerously = yes in asterisk.conf (required for PSTN permission/kill-switch checks to actually work)."
+
+    log_info "Restarting Asterisk to apply (this is a startup-time option, a reload won't pick it up)..."
+    docker restart "$CONTAINER_NAME" &>/dev/null \
+        && log_success "Restarted." \
+        || log_warning "Restart failed — check: docker logs $CONTAINER_NAME"
+}
+
 # Live-file counterpart to the vendor-template patch above, same reasoning
 # as _asterisk_ensure_live_messaging_include (Easy Asterisk's entrypoint
 # only regenerates extensions.conf if it's missing, so a box with existing
@@ -2095,6 +2147,7 @@ install_asterisk() {
                 log_info "Rebuilding and restarting containers..."
                 if docker compose up -d --build --force-recreate; then
                     log_success "Update complete — vendor files and docker-compose.yml refreshed."
+                    _asterisk_ensure_live_dangerously "$EA_DIR" "$CONTAINER"
                 else
                     log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
                 fi
@@ -2439,9 +2492,12 @@ ENV
     local START_NOW=""
     prompt_yn "Build and start Asterisk now? (y/n):" "y" START_NOW
     if [ "$START_NOW" = "y" ] || [ "$START_NOW" = "Y" ]; then
-        docker compose up -d --build \
-            && log_success "Easy Asterisk started" \
-            || log_warning "Start failed — check: docker compose logs"
+        if docker compose up -d --build; then
+            log_success "Easy Asterisk started"
+            _asterisk_ensure_live_dangerously "$EA_DIR" "$CONTAINER"
+        else
+            log_warning "Start failed — check: docker compose logs"
+        fi
     fi
 
     _asterisk_offer_dashboard_and_trunk "$EA_DIR"
