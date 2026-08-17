@@ -712,6 +712,45 @@ CADDY_AUTH_BLOCK2
     echo ""
 }
 
+# Picks "count" random characters from "charset" using an unbiased-enough
+# per-byte modulo draw from /dev/urandom. Not part of lib/common.sh's shared
+# generate_password (that one is deliberately alphanumeric-only — see its
+# paired validate_password, which rejects special characters outright, since
+# plenty of other services embed its output directly into .env/YAML/URLs
+# without escaping). This one is scoped to add_authelia_user()'s temp
+# password only, which is never written to disk in plaintext, so the wider
+# character set is safe here without becoming a repo-wide convention change.
+_authelia_rand_chars() {
+    local charset="$1" count="$2" out="" idx byte clen
+    clen=${#charset}
+    while [ "${#out}" -lt "$count" ]; do
+        byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' ')
+        idx=$(( byte % clen ))
+        out+="${charset:idx:1}"
+    done
+    printf '%s' "$out"
+}
+
+# 30 chars, at least 5 each of uppercase/digit/special, rest a random mix —
+# then shuffled so the guaranteed characters aren't clustered at the front.
+_authelia_gen_temp_password() {
+    local length=30 min_upper=5 min_digit=5 min_special=5
+    local upper_set="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local digit_set="0123456789"
+    local special_set='!@#%^&*()_+=-[]{}:,.?~'
+    local mixed_set="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789${special_set}"
+
+    local part_upper part_digit part_special part_rest
+    part_upper="$(_authelia_rand_chars "$upper_set" "$min_upper")"
+    part_digit="$(_authelia_rand_chars "$digit_set" "$min_digit")"
+    part_special="$(_authelia_rand_chars "$special_set" "$min_special")"
+    local rest_len=$(( length - min_upper - min_digit - min_special ))
+    part_rest="$(_authelia_rand_chars "$mixed_set" "$rest_len")"
+
+    printf '%s%s%s%s' "$part_upper" "$part_digit" "$part_special" "$part_rest" \
+        | fold -w1 | shuf | tr -d '\n'
+}
+
 # Adds a new user to an EXISTING Authelia instance's users.yml — the scripted
 # version of the manual "generate a hash, paste a users.yml block, restart"
 # steps this file's own generated README already documents. Non-destructive:
@@ -757,7 +796,7 @@ add_authelia_user() {
 
     log_info "Generating temporary password + hash..."
     local TEMP_PASS NEW_HASH
-    TEMP_PASS="$(generate_password 16)"
+    TEMP_PASS="$(_authelia_gen_temp_password)"
     NEW_HASH=$(docker run --rm authelia/authelia:4.39.20 \
         authelia crypto hash generate argon2 --password "$TEMP_PASS" 2>/dev/null \
         | grep -oP '(?<=Digest: ).*')
