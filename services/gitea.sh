@@ -172,6 +172,69 @@ _gitea_fix_ownership() {
     done
 }
 
+# Offers to add "Sign in with Authelia" (OpenID Connect) to Gitea's own
+# login page. This is a different thing from Caddy forward_auth, which this
+# service deliberately skips (see the Caddy call below) since Gitea already
+# has a solid built-in login — this adds Authelia as an *additional* OAuth2
+# login option on the same page, on top of that built-in login, not a
+# replacement for it. Nothing about local admin login changes.
+#
+# Fully automated on both sides, matching how the rest of this installer
+# avoids manual web wizards: registers Gitea as an OIDC client in Authelia
+# (services/authelia.sh's _authelia_provision_oidc_client), then adds the
+# resulting client as an authentication source in Gitea via its own CLI. If
+# either side isn't available (Authelia not installed, or the Gitea CLI
+# call fails for some reason — e.g. an older image without `admin auth
+# add-oauth`), falls back to printing the values for a two-minute manual
+# add in Gitea's Site Administration UI instead of losing the setup.
+_gitea_offer_authelia_sso() {
+    local DIR="$1"
+
+    [ -d "$DOCKER_DIR/authelia" ] || return 0
+    declare -F _authelia_provision_oidc_client >/dev/null 2>&1 || return 0
+
+    echo ""
+    local USE_SSO=""
+    prompt_yn "  Add \"Sign in with Authelia\" (OpenID Connect) to Gitea's login page? (y/n):" "n" USE_SSO
+    [[ "$USE_SSO" =~ ^[Yy]$ ]] || return 0
+
+    local _default_domain=""
+    [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ] && _default_domain="git.${SITE_DOMAIN}"
+    local GITEA_OIDC_DOMAIN=""
+    prompt_text "  Domain Gitea is reachable at [${_default_domain:-required}]:" "$_default_domain" GITEA_OIDC_DOMAIN
+    if [ -z "$GITEA_OIDC_DOMAIN" ]; then
+        log_warning "No domain entered — skipping Authelia SSO for Gitea."
+        return 0
+    fi
+
+    local _2fa="" AUTH_POLICY="two_factor"
+    prompt_yn "  Require two-factor for Gitea logins via Authelia too? (y/n):" "y" _2fa
+    [[ "$_2fa" =~ ^[Yy]$ ]] || AUTH_POLICY="one_factor"
+
+    if ! _authelia_provision_oidc_client "Gitea" "gitea" "$AUTH_POLICY" "y" \
+        "https://${GITEA_OIDC_DOMAIN}/user/oauth2/authelia/callback"; then
+        log_warning "Couldn't register Gitea as an OIDC client in Authelia — skipping SSO setup."
+        return 0
+    fi
+
+    local _discovery_url="https://auth.${OIDC_AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    log_info "Adding Authelia as an authentication source in Gitea..."
+    if docker exec -u git gitea gitea admin auth add-oauth \
+        --name authelia --provider openidConnect \
+        --key gitea --secret "$OIDC_CLIENT_SECRET_PLAIN" \
+        --auto-discover-url "$_discovery_url" &>/dev/null; then
+        log_success "\"Sign in with Authelia\" added to Gitea's login page — local admin login still works too."
+    else
+        log_warning "Couldn't add the auth source automatically. Add it by hand:"
+        log_warning "  Gitea -> Site Administration -> Authentication Sources -> Add Authentication Source"
+        log_warning "  Type: OAuth2, Provider: OpenID Connect, Name: authelia"
+        log_warning "  Client ID:      gitea"
+        log_warning "  Client Secret:  $OIDC_CLIENT_SECRET_PLAIN"
+        log_warning "  Discovery URL:  $_discovery_url"
+        log_warning "  (The Client Secret above is shown once — it isn't stored in plaintext anywhere.)"
+    fi
+}
+
 # ── Own systemd timer, not gitea-github-sync.sh's built-in --install-timer ──
 # The vendor script's own timer installer always runs the script bare (no
 # --pull-only/--push-only), i.e. always both directions — there's no way to
@@ -307,6 +370,7 @@ install_gitea() {
         echo "[DRY-RUN] Would ask sync direction (GitHub->Gitea / Gitea->GitHub / both) and whether"
         echo "[DRY-RUN]   to install a systemd timer for automatic sync, or print manual instructions"
         echo "[DRY-RUN] Would offer to run a sync now (dry-run preview or for real), off-schedule"
+        echo "[DRY-RUN] Would offer \"Sign in with Authelia\" (OIDC) if Authelia is installed"
         echo "[DRY-RUN] Would write $DIR/README.md"
         return 0
     fi
@@ -333,6 +397,7 @@ install_gitea() {
                     && log_success "Gitea refreshed and restarted." \
                     || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
                 _gitea_run_sync_direction_step "$DIR"
+                _gitea_offer_authelia_sso "$DIR"
                 log_success "Existing .env (tokens) and web/SSH ports were left untouched."
                 return 0
                 ;;
@@ -494,8 +559,14 @@ ENV
 
     _gitea_run_sync_direction_step "$DIR"
 
-    # ── Caddy (Gitea has its own built-in login — no Authelia needed) ──────
+    # ── Caddy — no forward_auth gate here. Gitea has its own built-in login,
+    # unlike the no-auth-at-all apps elsewhere in this repo that need Caddy
+    # to gate them via Authelia. Optional "Sign in with Authelia" (OIDC) is
+    # offered separately below, as an addition to Gitea's own login, not a
+    # replacement requiring Caddy involvement. ─────────────────────────────
     configure_caddy_for_service "Gitea" "host.docker.internal:${WEB_PORT}" "git"
+
+    _gitea_offer_authelia_sso "$DIR"
 
     write_readme "$DIR" << MD
 # Gitea
@@ -527,6 +598,15 @@ bash gitea-github-sync.sh                 # both directions
 Config (which repos, private/forks handling) lives at
 \`~/.config/gitea-github-sync/config\` — edit directly, or re-run
 \`bash gitea-github-sync.sh --init\` to redo it interactively.
+
+## Sign in with Authelia (optional)
+
+If Authelia is installed, re-run \`sudo ./setup.sh gitea\` (Update mode is
+fine — this doesn't touch tokens or anything else) and answer yes to
+"Add \"Sign in with Authelia\"?" to add it as an extra OAuth2 login option
+on Gitea's own login page. Local admin login keeps working exactly as
+before — this is additive, not a replacement. Managed in Gitea under
+Site Administration -> Authentication Sources (source name: \`authelia\`).
 
 ## Manage
 
