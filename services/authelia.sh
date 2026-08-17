@@ -226,14 +226,16 @@ install_authelia() {
         echo "    1) Add another protected domain to this instance (non-destructive —"
         echo "       one Authelia+Redis, multiple independent apex domains/logins)"
         echo "    2) Add a new user (creates a users.yml entry + password hash)"
-        echo "    3) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
+        echo "    3) Edit an existing user (email, password reset, 2FA reset/exempt,"
+        echo "       promote/demote admin)"
+        echo "    4) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
         echo "       Vaultwarden, or any other app with its own \"Enable OpenID\" setting)"
-        echo "    4) Reconfigure from scratch (regenerates secrets/users — breaks"
+        echo "    5) Reconfigure from scratch (regenerates secrets/users — breaks"
         echo "       existing sessions for every domain already on this instance)"
-        echo "    5) Leave as-is"
+        echo "    6) Leave as-is"
         echo ""
         local EXISTING_CHOICE=""
-        prompt_text "  Choice [1/2/3/4/5]:" "5" EXISTING_CHOICE
+        prompt_text "  Choice [1/2/3/4/5/6]:" "6" EXISTING_CHOICE
         case "$EXISTING_CHOICE" in
             1)
                 add_authelia_domain
@@ -244,10 +246,14 @@ install_authelia() {
                 return 0
                 ;;
             3)
-                _authelia_add_oidc_client
+                edit_authelia_user
                 return 0
                 ;;
             4)
+                _authelia_add_oidc_client
+                return 0
+                ;;
+            5)
                 : # fall through to the full reinstall flow below
                 ;;
             *)
@@ -840,6 +846,265 @@ ${GROUPS_BLOCK}"
     echo "  plaintext). They can log in with it as-is, then change it from"
     echo "  Authelia's own Settings page — no working SMTP required for that."
     echo ""
+}
+
+# ── edit_authelia_user() helpers ──────────────────────────────────────────────
+# All of these operate on a caller-supplied line range or file, never scan the
+# whole file themselves, so an edit to one user's block can't bleed into a
+# neighboring user (or, for the 2FA-exempt helpers, one user's exemption rule
+# can't be mistaken for another's — verified against multi-user/multi-domain
+# fixtures before this shipped, since a bad access_control edit here would
+# break every protected domain on the instance, not just this one user).
+
+_authelia_list_usernames() {
+    local users_file="$1"
+    awk '/^users:$/{f=1; next} f && /^  [A-Za-z0-9_-]+:$/{gsub(/^  /,""); gsub(/:$/,""); print}' "$users_file"
+}
+
+# Prints "<start_line> <end_line>" (1-indexed, inclusive) spanning just the
+# given user's block in users.yml.
+_authelia_user_line_range() {
+    local users_file="$1" username="$2"
+    awk -v user="$username" '
+        BEGIN{start=0; end=0}
+        /^  [A-Za-z0-9_-]+:$/ {
+            if (start>0 && end==0) { end=NR-1 }
+            if ($0 ~ "^  "user":$") { start=NR }
+        }
+        END {
+            if (start>0 && end==0) { end=NR }
+            print start, end
+        }
+    ' "$users_file"
+}
+
+# Replaces the first "    <field>: ..." line found within [start,end] with
+# "newline" verbatim (caller supplies correct quoting for that field).
+_authelia_set_user_field() {
+    local users_file="$1" start="$2" end="$3" field="$4" newline="$5"
+    awk -v s="$start" -v e="$end" -v field="$field" -v newline="$newline" '
+        NR>=s && NR<=e && $0 ~ "^    "field":" { print newline; next }
+        { print }
+    ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+}
+
+# enable=true adds "- admins" under this user's groups: (no-op if already
+# present); enable=false removes it. Scoped to [start,end] so it can't touch
+# another user's groups list.
+_authelia_toggle_admin() {
+    local users_file="$1" start="$2" end="$3" enable="$4"
+    if [ "$enable" = "true" ]; then
+        if ! sed -n "${start},${end}p" "$users_file" | grep -q '^      - admins$'; then
+            awk -v s="$start" -v e="$end" '
+                { print }
+                NR>=s && NR<=e && /^    groups:$/ { print "      - admins" }
+            ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+        fi
+    else
+        awk -v s="$start" -v e="$end" '
+            NR>=s && NR<=e && /^      - admins$/ { next }
+            { print }
+        ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+    fi
+}
+
+# action="exempt": inserts a "policy: one_factor / subject: user:<name>" rule
+# immediately before EVERY plain "policy: two_factor" catch-all domain rule in
+# configuration.yml (handles multi-domain instances from add_authelia_domain
+# automatically). action="restore": removes only this user's own such rules,
+# leaving any other user's exemptions and the catch-all rules untouched.
+# Caller is responsible for the idempotency check (only offer "exempt" in the
+# menu when not already exempt, and vice versa) — this helper doesn't dedupe.
+_authelia_set_2fa_exempt() {
+    local config_file="$1" username="$2" action="$3"
+    if [ "$action" = "exempt" ]; then
+        awk -v user="$username" '
+            { lines[NR]=$0 }
+            END {
+                for (i=1; i<=NR; i++) {
+                    if (lines[i] ~ /^    - domain:/ && lines[i+1] ~ /policy: two_factor/) {
+                        domain = lines[i]
+                        sub(/^    - domain: /, "", domain)
+                        print "    - domain: " domain
+                        print "      policy: one_factor"
+                        print "      subject: \"user:" user "\""
+                    }
+                    print lines[i]
+                }
+            }
+        ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    else
+        awk -v user="$username" '
+            { lines[NR]=$0 }
+            END {
+                for (i=1; i<=NR; i++) {
+                    if (lines[i] ~ /^    - domain:/ && lines[i+1] ~ /policy: one_factor/ && lines[i+2] ~ ("subject: \"user:" user "\"")) {
+                        i += 2
+                        continue
+                    }
+                    print lines[i]
+                }
+            }
+        ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    fi
+    chown 1000:1000 "$config_file" 2>/dev/null || true
+}
+
+# Interactive: pick an existing user from users.yml, then act on them —
+# edit email/display name, force a password reset, reset their 2FA device,
+# toggle whether they need 2FA at all, or toggle admin group membership.
+# Loops so multiple actions can be applied to the same user in one pass.
+edit_authelia_user() {
+    local AUTHELIA_DIR="$DOCKER_DIR/authelia"
+    local USERS_FILE="$AUTHELIA_DIR/config/users.yml"
+    local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
+
+    if [ ! -f "$USERS_FILE" ]; then
+        log_warning "No users.yml found at $USERS_FILE — install Authelia first."
+        return 1
+    fi
+
+    local -a USERNAMES
+    mapfile -t USERNAMES < <(_authelia_list_usernames "$USERS_FILE")
+    if [ "${#USERNAMES[@]}" -eq 0 ]; then
+        log_warning "No users found in $USERS_FILE."
+        return 0
+    fi
+
+    echo ""
+    echo "  Existing users:"
+    local i=1 u
+    for u in "${USERNAMES[@]}"; do
+        echo "    $i) $u"
+        i=$((i + 1))
+    done
+    echo ""
+    local SEL=""
+    prompt_text "  Select a user by number (blank to cancel):" "" SEL
+    if [ -z "$SEL" ] || ! [[ "$SEL" =~ ^[0-9]+$ ]] || [ "$SEL" -lt 1 ] || [ "$SEL" -gt "${#USERNAMES[@]}" ]; then
+        log_info "Cancelled."
+        return 0
+    fi
+    local TARGET="${USERNAMES[$((SEL - 1))]}"
+
+    local CONTINUE="y"
+    while [[ "$CONTINUE" =~ ^[Yy]$ ]]; do
+        local RANGE START END
+        RANGE="$(_authelia_user_line_range "$USERS_FILE" "$TARGET")"
+        START="${RANGE% *}"; END="${RANGE#* }"
+
+        local IS_ADMIN="no"
+        sed -n "${START},${END}p" "$USERS_FILE" | grep -q '^      - admins$' && IS_ADMIN="yes"
+        local IS_EXEMPT="no"
+        [ -f "$CONFIG_FILE" ] && grep -qF "subject: \"user:${TARGET}\"" "$CONFIG_FILE" && IS_EXEMPT="yes"
+
+        echo ""
+        echo "  Editing user: $TARGET   (admin: $IS_ADMIN, 2FA-exempt: $IS_EXEMPT)"
+        echo "    1) Edit email / display name"
+        echo "    2) Reset password"
+        echo "    3) Reset 2FA device (they register a new one on next login)"
+        if [ "$IS_EXEMPT" = "yes" ]; then
+            echo "    4) Restore the 2FA requirement for this user"
+        else
+            echo "    4) Exempt this user from 2FA (one_factor only — weakens their account)"
+        fi
+        if [ "$IS_ADMIN" = "yes" ]; then
+            echo "    5) Demote from admin"
+        else
+            echo "    5) Promote to admin"
+        fi
+        echo "    6) Done with this user"
+        echo ""
+        local ACTION=""
+        prompt_text "  Choice [1-6]:" "6" ACTION
+
+        case "$ACTION" in
+            1)
+                local CUR_EMAIL CUR_DISPLAY NEW_EMAIL NEW_DISPLAY
+                CUR_EMAIL="$(sed -n "${START},${END}p" "$USERS_FILE" | grep '^    email:' | sed 's/^    email: *//')"
+                CUR_DISPLAY="$(sed -n "${START},${END}p" "$USERS_FILE" | grep '^    displayname:' | sed 's/^    displayname: *//; s/^"//; s/"$//')"
+                prompt_text "  New email [$CUR_EMAIL]:" "$CUR_EMAIL" NEW_EMAIL
+                prompt_text "  New display name [$CUR_DISPLAY]:" "$CUR_DISPLAY" NEW_DISPLAY
+                _authelia_set_user_field "$USERS_FILE" "$START" "$END" "email" "    email: ${NEW_EMAIL}"
+                _authelia_set_user_field "$USERS_FILE" "$START" "$END" "displayname" "    displayname: \"${NEW_DISPLAY}\""
+                chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                log_success "Updated $TARGET's email/display name."
+                ;;
+            2)
+                log_info "Generating a new temporary password + hash..."
+                local NEW_TEMP_PASS NEW_HASH
+                NEW_TEMP_PASS="$(_authelia_gen_temp_password)"
+                NEW_HASH=$(docker run --rm authelia/authelia:4.39.20 \
+                    authelia crypto hash generate argon2 --password "$NEW_TEMP_PASS" 2>/dev/null \
+                    | grep -oP '(?<=Digest: ).*')
+                if [ -z "$NEW_HASH" ]; then
+                    log_warning "Couldn't generate the password hash automatically — nothing changed. Try again."
+                else
+                    _authelia_set_user_field "$USERS_FILE" "$START" "$END" "password" "    password: \"${NEW_HASH}\""
+                    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                    log_success "Password reset for $TARGET."
+                    echo "    New password: ${NEW_TEMP_PASS}"
+                    echo "    Give this to them directly — shown once, not stored in plaintext anywhere."
+                fi
+                ;;
+            3)
+                if docker ps --format '{{.Names}}' | grep -q '^authelia$'; then
+                    if docker exec authelia authelia storage user totp delete "$TARGET" --config /config/configuration.yml 2>/dev/null; then
+                        log_success "TOTP device reset for $TARGET — they'll register a new one on next login."
+                    else
+                        log_warning "No TOTP device found for $TARGET (or the delete failed) — check: docker compose logs authelia"
+                    fi
+                    echo "  WebAuthn devices (if any) aren't covered by this option — reset those manually with:"
+                    echo "    docker exec authelia authelia storage user webauthn delete --username $TARGET --config /config/configuration.yml"
+                else
+                    log_warning "Authelia isn't running — start it first: cd $AUTHELIA_DIR && docker compose up -d"
+                fi
+                ;;
+            4)
+                if [ "$IS_EXEMPT" = "yes" ]; then
+                    _authelia_set_2fa_exempt "$CONFIG_FILE" "$TARGET" "restore"
+                    log_success "Restored the two_factor requirement for $TARGET."
+                else
+                    local CONFIRM_EXEMPT=""
+                    prompt_yn "  $TARGET will be able to log in with just a password (no 2FA) on every domain this instance protects. Continue? (y/n):" "n" CONFIRM_EXEMPT
+                    if [[ "$CONFIRM_EXEMPT" =~ ^[Yy]$ ]]; then
+                        _authelia_set_2fa_exempt "$CONFIG_FILE" "$TARGET" "exempt"
+                        log_success "$TARGET no longer needs 2FA (one_factor only)."
+                    else
+                        log_info "Left as-is."
+                    fi
+                fi
+                ;;
+            5)
+                if [ "$IS_ADMIN" = "yes" ]; then
+                    _authelia_toggle_admin "$USERS_FILE" "$START" "$END" "false"
+                    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                    log_success "$TARGET demoted from admin."
+                else
+                    _authelia_toggle_admin "$USERS_FILE" "$START" "$END" "true"
+                    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                    log_success "$TARGET promoted to admin."
+                fi
+                ;;
+            *)
+                ACTION="6"
+                ;;
+        esac
+
+        if [[ "$ACTION" =~ ^[1245]$ ]]; then
+            local RESTART_AUTH=""
+            prompt_yn "  Restart Authelia to apply this change? (y/n):" "y" RESTART_AUTH
+            if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
+                (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+                    && log_success "Authelia restarted" \
+                    || log_warning "Restart failed — check: docker compose logs authelia"
+            fi
+            echo ""
+            prompt_yn "  Do something else with $TARGET? (y/n):" "n" CONTINUE
+        else
+            CONTINUE="n"
+        fi
+    done
 }
 
 # Enables Authelia's OIDC PROVIDER feature — a distinct thing from the
