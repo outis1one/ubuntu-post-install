@@ -87,6 +87,26 @@ _github_api() {
 
 _log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# On a failed API call, "check your token" is often wrong — it could just as
+# easily be the remote service down, an account locked behind a
+# must-change-password wall, or a network/DNS problem. Re-probe with -i so
+# the actual HTTP status and response body are visible, instead of leaving
+# the user to run curl by hand to find out which one it actually was.
+_probe_and_report() {
+    local _what="$1" _url="$2"; shift 2
+    local _tmp _code _body
+    _tmp="$(mktemp)"
+    _code="$(curl -sS -o "$_tmp" -w '%{http_code}' "$@" "$_url" 2>/dev/null)"
+    _body="$(cat "$_tmp" 2>/dev/null)"
+    rm -f "$_tmp"
+    if [[ -z "$_code" || "$_code" == "000" ]]; then
+        warn "  $_what: no HTTP response at all — network/DNS problem reaching $_url, not a credentials problem."
+    else
+        warn "  $_what responded: HTTP $_code"
+        [[ -n "$_body" ]] && warn "  ${_body:0:300}"
+    fi
+}
+
 # ── config management ──────────────────────────────────────────────────────
 load_config() {
     mkdir -p "$CONFIG_DIR" "$WORK_DIR"
@@ -155,12 +175,22 @@ do_init() {
     # Discover usernames
     info "Detecting GitHub user..."
     GITHUB_USER=$(_github_api GET /user | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null) \
-        || { err "Failed to reach GitHub API. Check GITHUB_TOKEN."; exit 1; }
+        || {
+            err "Failed to reach GitHub API. Check GITHUB_TOKEN."
+            _probe_and_report "GitHub" "https://api.github.com/user" \
+                -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json"
+            exit 1
+        }
     ok "GitHub user: $GITHUB_USER"
 
     info "Detecting Gitea user..."
     GITEA_USER=$(_gitea_api GET /user | python3 -c "import sys,json; print(json.load(sys.stdin)['login'])" 2>/dev/null) \
-        || { err "Failed to reach Gitea API. Check GITEA_TOKEN and GITEA_URL ($GITEA_URL)."; exit 1; }
+        || {
+            err "Failed to reach Gitea API. Check GITEA_TOKEN and GITEA_URL ($GITEA_URL)."
+            _probe_and_report "Gitea" "$GITEA_URL/api/v1/user" \
+                -H "Authorization: token $GITEA_TOKEN"
+            exit 1
+        }
     ok "Gitea user: $GITEA_USER"
 
     # Ask about sync scope
@@ -351,9 +381,9 @@ do_sync() {
             [[ -n "$SINGLE_REPO" && "$name" != "$SINGLE_REPO" ]] && continue
             is_excluded "$name" && continue
             if sync_github_to_gitea "$name" "$url" "$priv"; then
-                ((pull_count++))
+                pull_count=$((pull_count + 1))
             else
-                ((fail_count++))
+                fail_count=$((fail_count + 1))
             fi
         done < <(get_github_repos)
     fi
@@ -372,9 +402,9 @@ do_sync() {
                 continue
             fi
             if sync_gitea_to_github "$name" "$url" "$priv"; then
-                ((push_count++))
+                push_count=$((push_count + 1))
             else
-                ((fail_count++))
+                fail_count=$((fail_count + 1))
             fi
         done < <(get_gitea_repos)
     fi
