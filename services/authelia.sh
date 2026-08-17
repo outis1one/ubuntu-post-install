@@ -573,9 +573,13 @@ docker compose down         # stop
 
 ## Users
 - Login with the **username** (not email). Admin user: \`${AUTHELIA_ADMIN_USER}\`.
-- Tell users to click **Forgot Password** on first login to set their own
-  password (Authelia emails a reset link via SMTP), or use Authelia's own
-  Settings page once logged in — that works even without SMTP configured.
+- Both self-service paths need working SMTP: **Forgot Password** on the login
+  screen emails a reset link, and even the in-portal **Settings → Change
+  Password** page (for an already-logged-in user) sends a one-time code to
+  their email to confirm the change — confirmed live, it is not a
+  no-email path despite Authelia describing it as an in-session action.
+  If SMTP isn't working yet, use the admin-side reset instead (next line),
+  which never touches email.
 - **Add a user:** re-run this installer (\`sudo ./setup.sh authelia\` or
   \`sudo bash authelia.sh\`) and choose **"Add a new user"** from the menu —
   it prompts for username/email/display name, generates the password hash,
@@ -778,10 +782,10 @@ add_authelia_user() {
     echo ""
     echo "  Add a new user to this Authelia instance."
     echo "  They log in with their username (not email). A temporary password"
-    echo "  is generated below — if SMTP isn't working, hand it to them directly"
-    echo "  instead of relying on \"Forgot Password\"; they can set their own"
-    echo "  password afterward from Authelia's own Settings page (no email"
-    echo "  required for that), or via the reset email once SMTP works."
+    echo "  is generated below — hand it to them directly. \"Forgot Password\""
+    echo "  and Authelia's own Settings → Change Password both require working"
+    echo "  SMTP (both email a one-time code), so until that's fixed, use this"
+    echo "  menu's \"Edit an existing user\" → \"Reset password\" for future resets."
     echo ""
     local NEW_USERNAME="" NEW_DISPLAY="" NEW_EMAIL="" NEW_ADMIN=""
     prompt_text "  Username (lowercase, no spaces):" "" NEW_USERNAME
@@ -843,8 +847,11 @@ ${GROUPS_BLOCK}"
     echo "  New user:      ${NEW_USERNAME}"
     echo "  Temp password: ${TEMP_PASS}"
     echo "  Give this to them directly (it's shown once, nothing stores it in"
-    echo "  plaintext). They can log in with it as-is, then change it from"
-    echo "  Authelia's own Settings page — no working SMTP required for that."
+    echo "  plaintext). They can log in with it as-is and keep using it, or"
+    echo "  change it themselves from Authelia's Settings page — but that page"
+    echo "  emails a one-time code to confirm the change, so it needs working"
+    echo "  SMTP. Without SMTP, use this menu's \"Edit an existing user\" →"
+    echo "  \"Reset password\" instead — that one never touches email."
     echo ""
 }
 
