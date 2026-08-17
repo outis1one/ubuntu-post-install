@@ -147,6 +147,31 @@ _gitea_prompt_token() {
     eval "$_varname='$_val'"
 }
 
+# Gitea's container always runs internally as UID 1000 (USER_UID/USER_GID in
+# the compose file below are fixed, independent of whoever's running this
+# installer) — the official image chowns /data to that UID on its own at
+# startup. A plain ensure_docker_dir_ownership call fights that: it's a
+# recursive chown of the whole service directory to $ACTUAL_USER, which on
+# a box where the installer runs as root directly (ACTUAL_USER=root) resets
+# the live data/ back to UID 0. If the container doesn't happen to restart
+# right after (e.g. Update mode against an already-running container, which
+# just no-ops), nothing ever re-fixes it, and every write to Gitea's own
+# SQLite DB then fails with "attempt to write a readonly database" — the
+# directory holding the DB file is owned by root, not the UID 1000 process
+# trying to write it. Confirmed live. Chown everything else as normal in
+# $DIR; leave data/ for the container to manage.
+_gitea_fix_ownership() {
+    local _dir="$1"
+    [ "$DRY_RUN" = true ] && return 0
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$_dir" 2>/dev/null || true
+    local _entry
+    for _entry in "$_dir"/*; do
+        [ -e "$_entry" ] || continue
+        [ "$(basename "$_entry")" = "data" ] && continue
+        chown -R "$ACTUAL_USER:$ACTUAL_USER" "$_entry" 2>/dev/null || true
+    done
+}
+
 # ── Own systemd timer, not gitea-github-sync.sh's built-in --install-timer ──
 # The vendor script's own timer installer always runs the script bare (no
 # --pull-only/--push-only), i.e. always both directions — there's no way to
@@ -303,7 +328,7 @@ install_gitea() {
             update)
                 cp -f "$SYNC_SRC" "$DIR/gitea-github-sync.sh"
                 chmod +x "$DIR/gitea-github-sync.sh"
-                ensure_docker_dir_ownership "$DIR"
+                _gitea_fix_ownership "$DIR"
                 (cd "$DIR" && docker compose up -d) \
                     && log_success "Gitea refreshed and restarted." \
                     || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
@@ -320,7 +345,7 @@ install_gitea() {
     fi
 
     mkdir -p "$DIR"
-    ensure_docker_dir_ownership "$DIR"
+    _gitea_fix_ownership "$DIR"
     cd "$DIR" || return 1
 
     # ── Port scan — web (default 3001->3000) and SSH (default 2222->22) ────
@@ -352,7 +377,7 @@ services:
       - GITEA__security__INSTALL_LOCK=true
 EOF
 
-    ensure_docker_dir_ownership "$DIR"
+    _gitea_fix_ownership "$DIR"
     docker compose up -d \
         && log_success "Gitea container started." \
         || { log_error "docker compose up failed — check: docker compose -f $DIR/docker-compose.yml logs"; return 1; }
