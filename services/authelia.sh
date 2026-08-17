@@ -1224,15 +1224,23 @@ _authelia_add_oidc_client() {
     echo ""
     echo "    1) ActualBudget"
     echo "    2) Vaultwarden"
-    echo "    3) Other / custom app"
+    echo "    3) Immich (needs multiple redirect URIs — web login, account-linking,"
+    echo "       and the mobile app's custom-scheme callback — all registered here)"
+    echo "    4) Other / custom app"
     echo ""
     local APP_CHOICE=""
-    prompt_text "  Choice [1/2/3]:" "3" APP_CHOICE
+    prompt_text "  Choice [1/2/3/4]:" "4" APP_CHOICE
 
-    local APP_NAME="" CLIENT_ID="" REDIRECT_PATH=""
+    local APP_NAME="" CLIENT_ID=""
+    local -a REDIRECT_PATHS=() EXTRA_REDIRECT_URIS=()
     case "$APP_CHOICE" in
-        1) APP_NAME="ActualBudget"; CLIENT_ID="actualbudget"; REDIRECT_PATH="/openid/callback" ;;
-        2) APP_NAME="Vaultwarden";  CLIENT_ID="vaultwarden";  REDIRECT_PATH="/identity/connect/oidc-signin" ;;
+        1) APP_NAME="ActualBudget"; CLIENT_ID="actualbudget"; REDIRECT_PATHS=("/openid/callback") ;;
+        2) APP_NAME="Vaultwarden";  CLIENT_ID="vaultwarden";  REDIRECT_PATHS=("/identity/connect/oidc-signin") ;;
+        3)
+            APP_NAME="Immich"; CLIENT_ID="immich"
+            REDIRECT_PATHS=("/auth/login" "/user-settings")
+            EXTRA_REDIRECT_URIS=("app.immich:///oauth-callback")
+            ;;
         *)
             prompt_text "  App name (for your reference):" "" APP_NAME
             [ -z "$APP_NAME" ] && { log_warning "No app name entered — nothing to do."; return 0; }
@@ -1240,10 +1248,12 @@ _authelia_add_oidc_client() {
             prompt_text "  Client ID [${CLIENT_ID}]:" "$CLIENT_ID" CLIENT_ID
             echo "  Check ${APP_NAME}'s own OIDC/SSO docs for its exact redirect URI path"
             echo "  (often something like /oauth/callback, /auth/callback, /sso/callback)."
-            prompt_text "  Redirect URI path (starting with /):" "" REDIRECT_PATH
+            local _redirect_path=""
+            prompt_text "  Redirect URI path (starting with /):" "" _redirect_path
+            [ -n "$_redirect_path" ] && REDIRECT_PATHS=("$_redirect_path")
             ;;
     esac
-    if [ -z "$CLIENT_ID" ] || [ -z "$REDIRECT_PATH" ]; then
+    if [ -z "$CLIENT_ID" ] || { [ "${#REDIRECT_PATHS[@]}" -eq 0 ] && [ "${#EXTRA_REDIRECT_URIS[@]}" -eq 0 ]; }; then
         log_warning "Missing client ID or redirect path — nothing to do."
         return 0
     fi
@@ -1261,7 +1271,18 @@ _authelia_add_oidc_client() {
         log_warning "No domain entered — nothing to do."
         return 0
     fi
-    local REDIRECT_URI="https://${APP_DOMAIN}${REDIRECT_PATH}"
+
+    # Domain-relative paths (web login, account-linking, ...) plus any
+    # already-complete URIs that aren't domain-based (Immich's mobile app
+    # custom-scheme callback isn't reached over https at all).
+    local -a REDIRECT_URIS=()
+    local _p
+    for _p in "${REDIRECT_PATHS[@]}"; do
+        REDIRECT_URIS+=("https://${APP_DOMAIN}${_p}")
+    done
+    for _p in "${EXTRA_REDIRECT_URIS[@]}"; do
+        REDIRECT_URIS+=("$_p")
+    done
 
     local _2fa="" AUTH_POLICY="two_factor"
     prompt_yn "  Require two-factor for ${APP_NAME} logins too? (y/n):" "y" _2fa
@@ -1283,13 +1304,17 @@ _authelia_add_oidc_client() {
 
     grep -q '^    clients: \[\]$' "$CONFIG_FILE" && sed -i 's/^    clients: \[\]$/    clients:/' "$CONFIG_FILE"
 
+    local REDIRECT_URIS_YAML
+    REDIRECT_URIS_YAML="$(printf "          - '%s'\n" "${REDIRECT_URIS[@]}")"
+    REDIRECT_URIS_YAML="${REDIRECT_URIS_YAML%$'\n'}"
+
     local CLIENT_BLOCK="      - client_id: '${CLIENT_ID}'
         client_name: '${APP_NAME}'
         client_secret: '${CLIENT_SECRET_HASH}'
         public: false
         authorization_policy: '${AUTH_POLICY}'
         redirect_uris:
-          - '${REDIRECT_URI}'
+${REDIRECT_URIS_YAML}
         scopes:
           - 'openid'
           - 'profile'
@@ -1347,6 +1372,22 @@ _authelia_add_oidc_client() {
             echo "  Enabling SSO changes Vaultwarden's login flow for everyone on this"
             echo "  instance — see Vaultwarden's own SSO docs before turning this on for"
             echo "  a vault other people already use."
+            echo ""
+            ;;
+        3)
+            echo "  Immich → Administration → Settings → OAuth Authentication:"
+            echo "    Issuer URL:     https://auth.${AUTHELIA_DOMAIN}"
+            echo "      (Immich appends /.well-known/openid-configuration itself — paste"
+            echo "      just the base URL above, not the full Discovery URL from earlier.)"
+            echo "    Client ID:      ${CLIENT_ID}"
+            echo "    Client Secret:  ${CLIENT_SECRET_PLAIN}"
+            echo "    Scope:          openid email profile"
+            echo "  Enable OAuth login on that same settings page, then check its other"
+            echo "  toggles there (auto-register new accounts, storage label claim, etc.)"
+            echo "  — those are Immich-side choices this script doesn't set for you."
+            echo "  Three redirect URIs were registered above: the web login, the"
+            echo "  account-linking page, and the mobile app's callback — all needed"
+            echo "  for OAuth to work in both the browser and the Immich mobile app."
             echo ""
             ;;
     esac
