@@ -372,7 +372,23 @@ collision.)
 `filebrowser`, `wg-easy`, `ntfy` (configurable)
 
 **No built-in auth — should be protected:**
-`magicmirror`, `wolf-pair`, `js99er`, `sky-cam`
+`magicmirror`, `wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`,
+`paintplus`, `stirling-pdf`, `wolf` (web UI). Each of these prompts
+"Protect X with Authelia SSO? (y/n)" and passes `import authelia` as
+`configure_caddy_for_service`'s extra block when accepted.
+
+`security-dashboard` is Authelia-protected unconditionally (not asked —
+baked into its own Caddy block, since it exposes Asterisk/CrowdSec
+data). `asterisk` offers the same protection for its web admin, with a
+choice between a local `import authelia` and a remote `forward_auth` (see
+the remote-Authelia note earlier in this file).
+
+`sky-cam` was previously listed here but has no Caddy integration or web
+login of any kind — it's a non-Docker batch/cron script that renders
+timelapse videos and posts them to Mattermost, so there's nothing on it
+for Authelia to protect. Removed from this list; if it grows a web UI in
+the future, add it back and wire up the same prompt other services here
+use.
 
 For services without built-in auth, prompt the user before calling
 `configure_caddy_for_service` and pass `import authelia` as the extra block
