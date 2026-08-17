@@ -127,6 +127,26 @@ _gitea_sync_vendor_src() {
     echo "$(cd "$_self_dir/.." && pwd)/vendor/ai-stack/gitea-github-sync.sh"
 }
 
+# Prompt for a token with retries — pasted tokens over SSH sometimes race the
+# prompt (the terminal delivers the paste a beat after an already-submitted
+# empty line, so the token shows up echoed on the *next* line instead of
+# being read). A single empty answer used to be taken as "no token", silently
+# — this gives it up to 3 tries before actually giving up, and strips
+# whitespace in case the paste carried a stray leading/trailing newline.
+_gitea_prompt_token() {
+    local _question="$1" _varname="$2"
+    local _max=1 _tries=0 _val=""
+    [ "$UNATTENDED" != true ] && _max=3
+    while [[ $_tries -lt $_max ]]; do
+        prompt_text "$_question" "" _val
+        _val="$(printf '%s' "$_val" | tr -d '[:space:]')"
+        [[ -n "$_val" ]] && break
+        _tries=$((_tries + 1))
+        [[ $_tries -lt $_max ]] && log_warning "  Nothing came through — if you pasted it, try again (a paste can race the prompt over SSH)."
+    done
+    eval "$_varname='$_val'"
+}
+
 # ── Own systemd timer, not gitea-github-sync.sh's built-in --install-timer ──
 # The vendor script's own timer installer always runs the script bare (no
 # --pull-only/--push-only), i.e. always both directions — there's no way to
@@ -398,7 +418,7 @@ EOF
         log_warning "Automatic token generation didn't work (older Gitea image?) — generate one"
         log_warning "by hand: log into http://localhost:${WEB_PORT} as $GITEA_ADMIN_USER, then"
         log_warning "Settings -> Applications -> Generate New Token (repo + user write access)."
-        prompt_text "  Paste the GITEA token here (not the GitHub one — that's next):" "" GITEA_TOKEN
+        _gitea_prompt_token "  Paste the GITEA token here (not the GitHub one — that's next):" GITEA_TOKEN
     fi
 
     # ── GitHub token ─────────────────────────────────────────────────────────
@@ -407,7 +427,7 @@ EOF
     log_info "REST API too, which SSH can't do). Generate one at https://github.com/settings/tokens"
     log_info "with 'repo' scope if you don't already have one handy."
     local GITHUB_TOKEN=""
-    prompt_text "  GitHub token:" "" GITHUB_TOKEN
+    _gitea_prompt_token "  GitHub token:" GITHUB_TOKEN
     if [[ -z "$GITHUB_TOKEN" ]]; then
         log_warning "No GitHub token entered — Gitea itself is still up, but the sync script won't"
         log_warning "work until you add one to $DIR/.env and re-run this installer (update mode)."
