@@ -381,9 +381,9 @@ do_sync() {
             [[ -n "$SINGLE_REPO" && "$name" != "$SINGLE_REPO" ]] && continue
             is_excluded "$name" && continue
             if sync_github_to_gitea "$name" "$url" "$priv"; then
-                ((pull_count++))
+                pull_count=$((pull_count + 1))
             else
-                ((fail_count++))
+                fail_count=$((fail_count + 1))
             fi
         done < <(get_github_repos)
     fi
@@ -402,9 +402,9 @@ do_sync() {
                 continue
             fi
             if sync_gitea_to_github "$name" "$url" "$priv"; then
-                ((push_count++))
+                push_count=$((push_count + 1))
             else
-                ((fail_count++))
+                fail_count=$((fail_count + 1))
             fi
         done < <(get_gitea_repos)
     fi
