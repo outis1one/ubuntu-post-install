@@ -294,6 +294,7 @@ install_mattermost() {
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $DIR with docker-compose.yml"
+        echo "[DRY-RUN] Would prompt whether to disable the Threads feature (collapsed reply threads)"
         echo "[DRY-RUN] Would write .env with DB and Mattermost secrets"
         echo "[DRY-RUN] Would create data/ logs/ config/ plugins/ db/ subdirectories"
         echo "[DRY-RUN] Would run this instance's own dedicated coturn container for TURN, with a relay"
@@ -405,6 +406,23 @@ install_mattermost() {
     local CONFIGURED_SITEURL=""
     prompt_text "Mattermost site URL [$SITE_URL]:" "$SITE_URL" CONFIGURED_SITEURL
     [[ -n "$CONFIGURED_SITEURL" ]] && SITE_URL="$CONFIGURED_SITEURL"
+
+    # ── Threads (Collapsed Reply Threads) ───────────────────────────────────
+    # Only asked on a fresh/new install — an update run reads the existing
+    # choice back from .env instead of re-prompting, same reasoning as
+    # WEB_PORT/CALLS_UDP_PORT above: this is a live setting some installs
+    # will have deliberately changed post-install via System Console, and an
+    # update run silently reverting that on every rerun would be surprising.
+    local MM_COLLAPSED_THREADS_VAL="default_on"
+    if [ "$MODE" = "update" ] && [ -f "$DIR/.env" ]; then
+        local _existing_threads
+        _existing_threads="$(grep '^MM_SERVICESETTINGS_COLLAPSEDTHREADS=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+        [ -n "$_existing_threads" ] && MM_COLLAPSED_THREADS_VAL="$_existing_threads"
+    else
+        local _DISABLE_THREADS=""
+        prompt_yn "Disable the Threads feature (collapsed reply threads)? (y/n):" "n" _DISABLE_THREADS
+        [[ "$_DISABLE_THREADS" =~ ^[Yy]$ ]] && MM_COLLAPSED_THREADS_VAL="disabled"
+    fi
 
     # Mirrors configure_caddy_for_service's own mode resolution (lib/common.sh):
     # explicit CADDY_MODE from the site config wins, then a local ~/docker/caddy,
@@ -586,6 +604,8 @@ MM_SERVICESETTINGS_LISTENADDRESS=:${WEB_PORT}
 MM_SERVICESETTINGS_ENABLELOCALMODE=true
 MM_FILESETTINGS_DRIVERNAME=local
 MM_PLUGINSETTINGS_ENABLE=true
+# Threads (collapsed reply threads): default_on | default_off | always_on | disabled
+MM_SERVICESETTINGS_COLLAPSEDTHREADS=$MM_COLLAPSED_THREADS_VAL
 
 # ── TURN/STUN (Calls plugin) ─────────────────────────────────
 $( [ "$USE_EMBEDDED_COTURN" = true ] \
@@ -711,6 +731,15 @@ not a hard boundary — it doesn't hide DM channels that already exist, and a
 user in multiple teams can still DM anyone across all of them, not just the
 team currently open. If you need real isolation between groups rather than
 a tidier picker, that means separate Mattermost instances, not this setting.
+
+## Threads (collapsed reply threads)
+$( [ "$MM_COLLAPSED_THREADS_VAL" = "disabled" ] \
+    && echo "Disabled at install time — replies show inline in the channel instead of a separate Threads view." \
+    || echo "Enabled (\`$MM_COLLAPSED_THREADS_VAL\`) — replies open in a separate Threads view/panel." )
+Change later at **System Console → Site Configuration → Posts → Collapsed
+Reply Threads**, or by editing \`MM_SERVICESETTINGS_COLLAPSEDTHREADS\` in
+\`.env\` (\`disabled\` to turn Threads off, \`default_on\` for the normal
+behavior) and running \`docker compose up -d\` to apply it.
 
 ## Voice/Video Calls (Calls plugin)
 Port ${CALLS_UDP_PORT}/udp must be open on your router/firewall.
