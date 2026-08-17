@@ -216,6 +216,34 @@ _gitea_run_sync_direction_step() {
         log_info "  cd $DIR && bash gitea-github-sync.sh $FLAG"
         [[ -z "$FLAG" ]] && log_info "  (no flag needed for both directions)"
     fi
+
+    # ── Run it now, off the timer — lets you confirm tokens/config are
+    # actually correct right here instead of waiting for the first
+    # scheduled run (or a manual invocation later) to find out.
+    echo ""
+    echo "  Run a sync now?"
+    echo "    1) Dry-run preview only (--list) — shows what would sync, no changes"
+    echo "    2) Run for real now ($DIR_DESC)"
+    echo "    3) Skip — don't run anything now"
+    local _RUN_DEFAULT="1"
+    [ "$UNATTENDED" = true ] && _RUN_DEFAULT="3"
+    local _RUN_NOW=""
+    prompt_text "  Choice [$_RUN_DEFAULT]:" "$_RUN_DEFAULT" _RUN_NOW
+    case "$_RUN_NOW" in
+        2)
+            log_info "Running sync now ($DIR_DESC)..."
+            sudo -u "$ACTUAL_USER" env HOME="$ACTUAL_HOME" SYNC_ENV="$DIR/.env" \
+                bash "$DIR/gitea-github-sync.sh" $FLAG \
+                && log_success "Sync run complete." \
+                || log_warning "Sync run failed — check the output above, or ~/.config/gitea-github-sync/sync.log"
+            ;;
+        3) log_info "Skipped — run it later with the commands above." ;;
+        *)
+            log_info "Dry-run preview (--list)..."
+            sudo -u "$ACTUAL_USER" env HOME="$ACTUAL_HOME" SYNC_ENV="$DIR/.env" \
+                bash "$DIR/gitea-github-sync.sh" --list
+            ;;
+    esac
 }
 
 install_gitea() {
@@ -233,6 +261,7 @@ install_gitea() {
         echo "[DRY-RUN] Would prompt for a GitHub token and copy in gitea-github-sync.sh"
         echo "[DRY-RUN] Would ask sync direction (GitHub->Gitea / Gitea->GitHub / both) and whether"
         echo "[DRY-RUN]   to install a systemd timer for automatic sync, or print manual instructions"
+        echo "[DRY-RUN] Would offer to run a sync now (dry-run preview or for real), off-schedule"
         echo "[DRY-RUN] Would write $DIR/README.md"
         return 0
     fi
