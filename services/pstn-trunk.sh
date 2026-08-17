@@ -1974,11 +1974,27 @@ install_pstn-trunk() {
                         log_error "reinstall, or fix $SETTINGS_FILE by hand first."
                         return 1
                     fi
+                    # CONTAINER_NAME was already correctly (re-)detected above from
+                    # $ASTERISK_KIND — which layout's docker-compose.yml actually
+                    # exists on this box right now — but the source just clobbered
+                    # it with whatever was saved in the settings file, which can be
+                    # stale. Confirmed live: a box migrated from a DigitalOcean
+                    # droplet (where this file correctly saved CONTAINER_NAME=
+                    # easy-asterisk-do) to a plain/home install kept that droplet-era
+                    # value forever after, since _pstn_apply_settings below re-saves
+                    # whatever it's given right back into this same file — every
+                    # "update" reloaded/restarted a container that no longer existed
+                    # instead of the real one, leaving the actually-running Asterisk
+                    # never picking up dialplan changes at all. Re-assert the fresh
+                    # detection here, discarding the sourced value, so it can't drift
+                    # from reality and self-heals the persisted file too.
+                    CONTAINER_NAME="easy-asterisk"
+                    [[ "$ASTERISK_KIND" == "asterisk-digital-ocean" ]] && CONTAINER_NAME="easy-asterisk-do"
                     _pstn_check_killswitch_clear "$ASTERISK_DIR"
                     _pstn_apply_settings "$EA_DIR" "$ASTERISK_DIR" \
                         "$TRUNK_SERVER" "${TRUNK_SERVER_IPS:-}" "$TRUNK_DID" \
                         "${RING_EXTS:-}" "${NTFY_URL:-}" "${RATE_PER_MIN:-0.01}" \
-                        "${MONTH_THRESHOLD:-10}" "${BURST_THRESHOLD:-10}" "${PROVIDER_NAME:-unknown}" "${MAX_MONTHLY_SPEND:-0}" "${CONTAINER_NAME:-easy-asterisk-do}" || return 1
+                        "${MONTH_THRESHOLD:-10}" "${BURST_THRESHOLD:-10}" "${PROVIDER_NAME:-unknown}" "${MAX_MONTHLY_SPEND:-0}" "$CONTAINER_NAME" || return 1
                     # No container restart here — _pstn_ensure_live_includes's
                     # module/dialplan reload below already applies everything
                     # _pstn_apply_settings just wrote (trunk pjsip/dialplan
@@ -1997,7 +2013,7 @@ install_pstn-trunk() {
                     # Always asked, every run, update mode included — see
                     # _pstn_run_international_step's own comment for why.
                     _pstn_run_international_step "$ASTERISK_DIR"
-                    _pstn_print_sms_over_sip_info "$EA_DIR" "${CONTAINER_NAME:-easy-asterisk-do}"
+                    _pstn_print_sms_over_sip_info "$EA_DIR" "$CONTAINER_NAME"
                     return 0
                 else
                     log_warning "No $SETTINGS_FILE found (pre-dates this settings-file version) — falling back to a fresh install (every prompt below)."
