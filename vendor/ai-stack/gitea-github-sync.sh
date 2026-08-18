@@ -267,16 +267,25 @@ sync_github_to_gitea() {
     local repo_name="${full_name#*/}"
     local local_path="$WORK_DIR/$full_name"
 
-    # Clone or fetch from GitHub
+    # Clone or fetch from GitHub. Fetch pins the refspec explicitly
+    # (+refs/heads/*:refs/heads/*, the same mapping a fresh `git clone --bare`
+    # sets up) rather than trusting `--all` plus whatever remote.origin.fetch
+    # already happens to be configured — confirmed live: a bare clone whose
+    # refspec had drifted kept "successfully" fetching into a ref this script
+    # never reads (refs/remotes/origin/*), leaving refs/heads/* — and
+    # therefore what actually gets mirrored to Gitea — silently stuck on an
+    # old commit indefinitely, with no error at any step. Also no longer
+    # silencing stderr: a real auth/network failure should be visible in the
+    # log, not just "Failed to fetch" with no reason why.
     if [[ -d "$local_path" ]]; then
         info "Fetching $full_name from GitHub..."
-        git -C "$local_path" fetch --all --prune --quiet 2>/dev/null || {
+        git -C "$local_path" fetch origin '+refs/heads/*:refs/heads/*' --prune --quiet || {
             err "Failed to fetch $full_name"; return 1; }
     else
         info "Cloning $full_name from GitHub..."
         mkdir -p "$(dirname "$local_path")"
         local auth_url="${clone_url/https:\/\//https:\/\/$GITHUB_TOKEN@}"
-        git clone --bare --quiet "$auth_url" "$local_path" 2>/dev/null || {
+        git clone --bare --quiet "$auth_url" "$local_path" || {
             err "Failed to clone $full_name"; return 1; }
     fi
 
@@ -295,7 +304,7 @@ sync_github_to_gitea() {
     gitea_push_url="${gitea_push_url/http:\/\//http:\/\/$GITEA_USER:$GITEA_TOKEN@}"
     gitea_push_url="$gitea_push_url/$GITEA_USER/$repo_name.git"
 
-    git -C "$local_path" push --mirror "$gitea_push_url" --quiet 2>/dev/null || {
+    git -C "$local_path" push --mirror "$gitea_push_url" --quiet || {
         err "Failed to push $full_name to Gitea"; return 1; }
     ok "GitHub → Gitea: $full_name"
     _log "PULL $full_name OK"
@@ -311,14 +320,16 @@ sync_gitea_to_github() {
     local gitea_auth_url="${clone_url/https:\/\//https:\/\/$GITEA_USER:$GITEA_TOKEN@}"
     gitea_auth_url="${gitea_auth_url/http:\/\//http:\/\/$GITEA_USER:$GITEA_TOKEN@}"
 
+    # See the matching comment in sync_github_to_gitea() above — same
+    # explicit-refspec, visible-stderr fix, same reason.
     if [[ -d "$local_path" ]]; then
         info "Fetching $full_name from Gitea..."
-        git -C "$local_path" fetch --all --prune --quiet 2>/dev/null || {
+        git -C "$local_path" fetch origin '+refs/heads/*:refs/heads/*' --prune --quiet || {
             err "Failed to fetch $full_name from Gitea"; return 1; }
     else
         info "Cloning $full_name from Gitea..."
         mkdir -p "$(dirname "$local_path")"
-        git clone --bare --quiet "$gitea_auth_url" "$local_path" 2>/dev/null || {
+        git clone --bare --quiet "$gitea_auth_url" "$local_path" || {
             err "Failed to clone $full_name from Gitea"; return 1; }
     fi
 
@@ -334,7 +345,7 @@ sync_gitea_to_github() {
 
     # Push to GitHub
     local github_push_url="https://$GITHUB_TOKEN@github.com/$GITHUB_USER/$repo_name.git"
-    git -C "$local_path" push --mirror "$github_push_url" --quiet 2>/dev/null || {
+    git -C "$local_path" push --mirror "$github_push_url" --quiet || {
         err "Failed to push $full_name to GitHub"; return 1; }
     ok "Gitea → GitHub: $full_name"
     _log "PUSH $full_name OK"
