@@ -476,22 +476,45 @@ configure_caddy_for_service "MagicMirror" "8081" "mirror" "$EXTRA_BLOCK"
 ```
 
 **Authelia "stay logged in" / kiosk mode:**
-Edit `~/docker/authelia/config/configuration.yml` and set a long
-`remember_me_duration`. Users then check "Remember me" once on login and
-the session persists through reboots (Redis stores the session in a volume):
+`install_authelia()` already writes `remember_me: 7d` into
+`configuration.yml` at install time — the checkbox is on the login form
+from day one, this is only about how long checking it actually lasts.
+To change the duration later, use the menu instead of hand-editing the
+file: re-run `sudo ./setup.sh authelia` against an existing install and
+pick **"Change 'remember me' session duration"** (`_authelia_set_remember_me()`
+in `services/authelia.sh`) — prompts for a new duration (`12h`, `7d`,
+`1M`, `1y`, or `-1` to disable Remember Me entirely) and restarts.
+Sessions persist through reboots regardless of duration (Redis stores
+session state in a volume).
+
+**The config key is `remember_me`, not `remember_me_duration`.** Authelia
+renamed it in 4.38; this repo pins `4.39.20`. A stale `remember_me_duration`
+key doesn't error, Authelia just silently ignores it — confirmed against
+Authelia's own docs/changelog after this file's own example used the old
+name for a while without anyone noticing, since nothing here actually
+reads it back to verify the write took effect. If you ever do need to
+touch this by hand instead of the menu option, the current schema is:
 
 ```yaml
 session:
   secret: 'your-existing-secret'
-  remember_me_duration: 1y     # add or update this line
   expiration: 1h
   inactivity: 5m
+  remember_me: 1y
   cookies:
     - domain: 'example.com'
       authelia_url: 'https://auth.example.com'
 ```
 
-After editing: `docker compose -f ~/docker/authelia/docker-compose.yml restart`
+**This only covers Authelia's own session.** A native-OIDC app
+(`gitea`/`mealie`/`actualbudget`) issues its own separate session/token
+after logging in via Authelia, with its own independent expiry — a long
+`remember_me` makes re-authenticating to Authelia itself instant/silent
+whenever that app's own session expires and bounces you back through the
+OIDC flow, but it doesn't stop that app's session from expiring on its
+own schedule. If a native-OIDC app logs users out sooner than expected,
+that app's own session-length setting (if it exposes one) is the other
+thing to check, not this one.
 
 ## Non-Docker services
 

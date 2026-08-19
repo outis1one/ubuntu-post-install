@@ -233,10 +233,11 @@ install_authelia() {
         echo "    5) Reconfigure from scratch (regenerates secrets/users — breaks"
         echo "       existing sessions for every domain already on this instance)"
         echo "    6) Show who has universal vs. service-scoped access"
-        echo "    7) Leave as-is"
+        echo "    7) Change \"Remember me\" session duration (stay logged in longer)"
+        echo "    8) Leave as-is"
         echo ""
         local EXISTING_CHOICE=""
-        prompt_text "  Choice [1/2/3/4/5/6/7]:" "7" EXISTING_CHOICE
+        prompt_text "  Choice [1/2/3/4/5/6/7/8]:" "8" EXISTING_CHOICE
         case "$EXISTING_CHOICE" in
             1)
                 add_authelia_domain
@@ -259,6 +260,10 @@ install_authelia() {
                 ;;
             6)
                 _authelia_report_access_scope
+                return 0
+                ;;
+            7)
+                _authelia_set_remember_me
                 return 0
                 ;;
             *)
@@ -1164,6 +1169,64 @@ _authelia_report_access_scope() {
             && log_success "Authelia restarted" \
             || log_warning "Restart failed — check: docker compose logs authelia"
     fi
+}
+
+# Changes how long an Authelia session lasts when a user checks "Remember
+# me" at login — the actual mechanism behind "log in once, don't get asked
+# again for a long time" for every domain this instance protects.
+#
+# The config key is `remember_me` (plain, under session:), NOT
+# `remember_me_duration` — that name was retired in Authelia 4.38, this
+# repo pins 4.39.20. Confirmed against Authelia's own docs/changelog
+# before writing this; an easy mistake since older guidance (including an
+# earlier version of this very file's own README section) uses the old
+# name, which Authelia would just silently ignore rather than error on.
+#
+# This only controls AUTHELIA's own session — it does not touch how long
+# a native-OIDC app's (Gitea/Mealie/ActualBudget) own session/token lasts
+# after logging in via Authelia. A long remember_me makes re-authenticating
+# to Authelia itself instant/silent whenever one of those apps' own
+# session expires and sends you back through the OIDC flow, but doesn't
+# stop that app's own session from expiring on its own separate schedule.
+_authelia_set_remember_me() {
+    local config_file="$DOCKER_DIR/authelia/config/configuration.yml"
+    [ -f "$config_file" ] || { log_warning "No configuration.yml found — install Authelia first."; return 1; }
+
+    local current
+    current="$(grep -E '^  remember_me:' "$config_file" | awk '{print $2}' | tr -d "'\"")"
+    echo ""
+    echo "  Current \"remember me\" duration: ${current:-not set}"
+    echo "  How long a session lasts when someone checks \"Remember me\" at login —"
+    echo "  applies to every domain this Authelia instance protects."
+    echo "  Examples: 12h, 7d, 1M (month), 1y. Set to -1 to disable Remember Me entirely."
+    local new_duration=""
+    prompt_text "  New duration [${current:-7d}]:" "${current:-7d}" new_duration
+    if [ -z "$new_duration" ] || [ "$new_duration" = "$current" ]; then
+        log_info "No change made."
+        return 0
+    fi
+
+    if grep -qE '^  remember_me:' "$config_file"; then
+        sed -i "s/^  remember_me:.*/  remember_me: '${new_duration}'/" "$config_file"
+    else
+        sed -i "/^session:\$/a\\  remember_me: '${new_duration}'" "$config_file"
+    fi
+    chown 1000:1000 "$config_file" 2>/dev/null || true
+    log_success "\"Remember me\" duration set to ${new_duration}."
+
+    local restart_auth=""
+    prompt_yn "  Restart Authelia to apply? (y/n):" "y" restart_auth
+    if [[ "$restart_auth" =~ ^[Yy]$ ]]; then
+        (cd "$DOCKER_DIR/authelia" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Restart failed — check: docker compose logs authelia"
+    fi
+
+    echo ""
+    log_info "Takes effect for NEW logins where \"Remember me\" is checked at Authelia's"
+    log_info "login page — existing sessions keep whatever expiration they already had."
+    log_info "The checkbox itself is already on the login form by default; this only"
+    log_info "changes how long checking it actually keeps you signed in."
 }
 
 # action="exempt": inserts a "policy: one_factor / subject: user:<name>" rule
