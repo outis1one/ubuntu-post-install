@@ -232,10 +232,11 @@ install_authelia() {
         echo "       Vaultwarden, or any other app with its own \"Enable OpenID\" setting)"
         echo "    5) Reconfigure from scratch (regenerates secrets/users — breaks"
         echo "       existing sessions for every domain already on this instance)"
-        echo "    6) Leave as-is"
+        echo "    6) Show who has universal vs. service-scoped access"
+        echo "    7) Leave as-is"
         echo ""
         local EXISTING_CHOICE=""
-        prompt_text "  Choice [1/2/3/4/5/6]:" "6" EXISTING_CHOICE
+        prompt_text "  Choice [1/2/3/4/5/6/7]:" "7" EXISTING_CHOICE
         case "$EXISTING_CHOICE" in
             1)
                 add_authelia_domain
@@ -255,6 +256,10 @@ install_authelia() {
                 ;;
             5)
                 : # fall through to the full reinstall flow below
+                ;;
+            6)
+                _authelia_report_access_scope
+                return 0
                 ;;
             *)
                 echo "  Keeping existing Authelia. (Edit config/users.yml then: cd $AUTHELIA_DIR && docker compose restart authelia)"
@@ -912,6 +917,252 @@ _authelia_toggle_admin() {
             NR>=s && NR<=e && /^      - admins$/ { next }
             { print }
         ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+    fi
+}
+
+# Same shape as _authelia_toggle_admin but for an arbitrary group name —
+# used to scope a user's access to a single service (see
+# _authelia_scope_access below) rather than the fixed "admins" group.
+_authelia_toggle_group() {
+    local users_file="$1" start="$2" end="$3" group="$4" enable="$5"
+    if [ "$enable" = "true" ]; then
+        if ! sed -n "${start},${end}p" "$users_file" | grep -qF "      - ${group}"; then
+            awk -v s="$start" -v e="$end" -v grp="      - ${group}" '
+                { print }
+                NR>=s && NR<=e && /^    groups:$/ { print grp }
+            ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+        fi
+    else
+        awk -v s="$start" -v e="$end" -v grpline="      - ${group}" '
+            NR>=s && NR<=e && $0==grpline { next }
+            { print }
+        ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+    fi
+}
+
+# Non-interactive core of add_authelia_user() below — no prompts, takes
+# everything as args, generates a temp password + hash, and writes the user
+# block directly into an arbitrary extra group (not just "users"). Used by
+# _authelia_scope_access() to create users on the fly when someone lists a
+# username that doesn't exist yet. Deliberately a separate function rather
+# than a refactor of add_authelia_user() itself — that one's already in
+# regular use via the interactive menu and this repo's convention is to
+# extract a non-interactive core only when a second caller actually needs
+# it (see _authelia_provision_oidc_client for the same reasoning), which
+# keeps this addition low-risk to the existing, working function.
+#
+# Args: USERNAME DISPLAY EMAIL GROUP
+# Out-param (not `local`): AUTHELIA_NEW_USER_TEMP_PASSWORD
+# Returns 1 if the user already exists or hash generation fails.
+_authelia_create_user_noninteractive() {
+    local username="$1" display="$2" email="$3" group="$4"
+    local users_file="$DOCKER_DIR/authelia/config/users.yml"
+
+    AUTHELIA_NEW_USER_TEMP_PASSWORD=""
+
+    if grep -qE "^  ${username}:$" "$users_file" 2>/dev/null; then
+        log_warning "'$username' already exists in $users_file."
+        return 1
+    fi
+
+    local temp_pass new_hash
+    temp_pass="$(_authelia_gen_temp_password)"
+    new_hash=$(docker run --rm authelia/authelia:4.39.20 \
+        authelia crypto hash generate argon2 --password "$temp_pass" 2>/dev/null \
+        | grep -oP '(?<=Digest: ).*')
+    if [ -z "$new_hash" ]; then
+        log_warning "Couldn't generate a password hash for '$username' automatically."
+        return 1
+    fi
+
+    local user_block="  ${username}:
+    displayname: \"${display}\"
+    email: ${email}
+    password: \"${new_hash}\"
+    groups:
+      - ${group}"
+
+    awk -v block="$user_block" '
+        { print }
+        /^users:$/ && !done { print block; done=1 }
+    ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+    chown 1000:1000 "$users_file" 2>/dev/null || true
+
+    AUTHELIA_NEW_USER_TEMP_PASSWORD="$temp_pass"
+    log_success "Created user '$username' (group: $group)"
+    return 0
+}
+
+# Reusable by ANY service, after it's already been protected by Authelia —
+# forward_auth gate or native OIDC alike, since this only cares about the
+# domain, not the gating mechanism. Asks whether access to $DOMAIN should be
+# open to any Authelia user (today's only behavior, before this existed) or
+# scoped to a specific list. If scoped: creates a dedicated group named
+# "<service_id>-only", adds every listed username to it (creating any that
+# don't exist yet via _authelia_create_user_noninteractive), and inserts two
+# access_control rules ABOVE the general catch-all — allow this group on
+# $DOMAIN, deny this group on every other protected domain on the instance —
+# so members can reach ONLY this one domain. Idempotent: reruns against a
+# domain that's already scoped just report the existing group instead of
+# duplicating rules.
+#
+# Args: SERVICE_ID DOMAIN
+_authelia_scope_access() {
+    local service_id="$1" domain="$2"
+    local authelia_dir="$DOCKER_DIR/authelia"
+    local config_file="$authelia_dir/config/configuration.yml"
+    local users_file="$authelia_dir/config/users.yml"
+
+    [ -f "$config_file" ] || return 0
+
+    local group="${service_id}-only"
+
+    if grep -qF "subject: \"group:${group}\"" "$config_file" 2>/dev/null; then
+        log_info "Access to $domain is already scoped to group '$group'."
+        log_info "Manage its members via this menu's \"Edit an existing user\" (toggle their groups by hand in users.yml), or the universal-access report below."
+        return 0
+    fi
+
+    echo ""
+    echo "  Who should be able to reach $domain via Authelia?"
+    echo "    1) Any Authelia user (default — same access as everything else)"
+    echo "    2) Specific users only"
+    local scope_choice=""
+    prompt_text "  Choice [1/2]:" "1" scope_choice
+    [ "$scope_choice" = "2" ] || return 0
+
+    echo "  Usernames who should have access (space-separated). Anyone listed"
+    echo "  who doesn't already have an Authelia account gets one created —"
+    echo "  you'll get their temporary password to hand over."
+    local raw_users=""
+    prompt_text "  Usernames:" "" raw_users
+    local -a usernames
+    read -ra usernames <<< "$raw_users"
+    if [ "${#usernames[@]}" -eq 0 ]; then
+        log_warning "No usernames entered — leaving $domain open to all Authelia users."
+        return 0
+    fi
+
+    local u start_end start end
+    for u in "${usernames[@]}"; do
+        u="$(echo "$u" | tr -cs 'a-z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
+        [ -z "$u" ] && continue
+        if grep -qE "^  ${u}:$" "$users_file" 2>/dev/null; then
+            start_end="$(_authelia_user_line_range "$users_file" "$u")"
+            start="${start_end% *}"; end="${start_end#* }"
+            _authelia_toggle_group "$users_file" "$start" "$end" "$group" "true"
+            log_success "Added '$u' to group '$group'"
+        else
+            local email_default="${u}@${SITE_DOMAIN:-example.com}"
+            if _authelia_create_user_noninteractive "$u" "$u" "$email_default" "$group"; then
+                echo "    Temp password for '$u': $AUTHELIA_NEW_USER_TEMP_PASSWORD"
+            fi
+        fi
+    done
+
+    # Two rules, both above the general catch-all: allow this group on the
+    # target domain, deny this group on every other protected domain. Order
+    # matters — Authelia takes the first matching rule, so both must land
+    # before access_control's existing "*.${AUTHELIA_DOMAIN}" catch-all.
+    local authelia_domain
+    authelia_domain="$(awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' "$config_file")"
+    local scope_rules="    - domain: \"${domain}\"
+      subject: \"group:${group}\"
+      policy: two_factor
+    - domain: \"*.${authelia_domain}\"
+      subject: \"group:${group}\"
+      policy: deny"
+
+    awk -v block="$scope_rules" '
+        /^  rules:$/ && !done { print; print block; done=1; next }
+        { print }
+    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    chown 1000:1000 "$config_file" 2>/dev/null || true
+
+    local restart_auth=""
+    prompt_yn "  Restart Authelia to apply this scoping? (y/n):" "y" restart_auth
+    if [[ "$restart_auth" =~ ^[Yy]$ ]]; then
+        (cd "$authelia_dir" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted — $domain is now restricted to group '$group'." \
+            || log_warning "Restart failed — check: docker compose logs authelia"
+    fi
+}
+
+# Reporting/management: lists which users have "universal" access (every
+# protected domain — anyone not locked into a "<service>-only" group) versus
+# which are scoped to specific services, then offers to promote a scoped
+# user to universal by removing them from all their "-only" groups. Doesn't
+# touch access_control.rules at all — universal access is just the absence
+# of a restricting group, so "promoting" someone is purely a users.yml edit.
+_authelia_report_access_scope() {
+    local users_file="$DOCKER_DIR/authelia/config/users.yml"
+    [ -f "$users_file" ] || { log_warning "No users.yml found — install Authelia first."; return 1; }
+
+    local -a all_users
+    mapfile -t all_users < <(_authelia_list_usernames "$users_file")
+    if [ "${#all_users[@]}" -eq 0 ]; then
+        log_warning "No users found in $users_file."
+        return 0
+    fi
+
+    echo ""
+    echo "  Universal access (every protected domain):"
+    local -a universal=() restricted=()
+    local u start_end start end groups_in_range
+    for u in "${all_users[@]}"; do
+        start_end="$(_authelia_user_line_range "$users_file" "$u")"
+        start="${start_end% *}"; end="${start_end#* }"
+        groups_in_range="$(sed -n "${start},${end}p" "$users_file" | grep -oE '\- [a-z0-9_-]+-only$' | sed 's/^- //')"
+        if [ -z "$groups_in_range" ]; then
+            universal+=("$u")
+            echo "    - $u"
+        else
+            restricted+=("$u ($(echo "$groups_in_range" | tr '\n' ',' | sed 's/,$//'))")
+        fi
+    done
+    [ "${#universal[@]}" -eq 0 ] && echo "    (none)"
+
+    echo ""
+    echo "  Scoped to specific services only:"
+    if [ "${#restricted[@]}" -eq 0 ]; then
+        echo "    (none)"
+    else
+        printf '    - %s\n' "${restricted[@]}"
+    fi
+
+    echo ""
+    local promote=""
+    prompt_yn "  Promote a scoped user to universal access? (y/n):" "n" promote
+    [[ "$promote" =~ ^[Yy]$ ]] || return 0
+
+    local target=""
+    prompt_text "  Username to promote:" "" target
+    [ -z "$target" ] && return 0
+    if ! grep -qE "^  ${target}:$" "$users_file" 2>/dev/null; then
+        log_warning "'$target' not found in $users_file."
+        return 0
+    fi
+
+    start_end="$(_authelia_user_line_range "$users_file" "$target")"
+    start="${start_end% *}"; end="${start_end#* }"
+    local -a target_groups
+    mapfile -t target_groups < <(sed -n "${start},${end}p" "$users_file" | grep -oE '\- [a-z0-9_-]+-only$' | sed 's/^- //')
+    if [ "${#target_groups[@]}" -eq 0 ]; then
+        log_info "'$target' already has universal access."
+        return 0
+    fi
+    local g
+    for g in "${target_groups[@]}"; do
+        _authelia_toggle_group "$users_file" "$start" "$end" "$g" "false"
+    done
+    log_success "'$target' removed from: ${target_groups[*]} — now has universal access."
+
+    local restart_auth=""
+    prompt_yn "  Restart Authelia to apply? (y/n):" "y" restart_auth
+    if [[ "$restart_auth" =~ ^[Yy]$ ]]; then
+        (cd "$DOCKER_DIR/authelia" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Restart failed — check: docker compose logs authelia"
     fi
 }
 

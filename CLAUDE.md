@@ -390,6 +390,45 @@ existing login page. Reuse `_authelia_provision_oidc_client()` (guarded by
 instead of duplicating Authelia's client-secret-generation/config-patching
 logic again.
 
+**Scoping a domain to specific users instead of every Authelia user.**
+By default, any domain with an `access_control` rule at all is reachable by
+every Authelia user (the existing catch-all `*.${AUTHELIA_DOMAIN}` rule).
+`services/authelia.sh`'s `_authelia_scope_access(SERVICE_ID, DOMAIN)` is a
+generic, reusable opt-in on top of that — call it right after *any* service
+finishes being protected by Authelia, forward_auth gate or native OIDC
+alike (it only cares about the domain, not the gating mechanism; see
+`_gitea_offer_authelia_sso()` for the reference caller). Asks whether
+access should stay universal or be scoped to specific usernames; if scoped,
+creates a dedicated `<service_id>-only` group, adds every listed username
+to it (creating accounts on the fly via
+`_authelia_create_user_noninteractive()` for names that don't exist yet,
+printing their temp password), and inserts two rules *above* the general
+catch-all — allow that group on this domain, deny that group on every
+other protected domain. Idempotent: reruns against an already-scoped
+domain just report the existing group instead of duplicating rules.
+Guard every cross-file call with `declare -F`, same convention as the OIDC
+helper above — a service can run standalone with authelia.sh never sourced.
+
+`_authelia_report_access_scope()` (menu option 6 on an existing Authelia
+install) is the read side: lists who has universal access versus who's
+scoped to which service(s), and offers to promote a scoped user back to
+universal by removing them from their `-only` group(s) — a pure users.yml
+edit, since universal access is just the *absence* of a restricting group,
+not a rule of its own.
+
+Only `services/gitea.sh` calls `_authelia_scope_access()` so far (the
+reference integration). The other services that already offer a plain
+"Protect X with Authelia SSO?" prompt (`magicmirror`, `wolf-pair`,
+`js99er`, `drum-rhythm-game`, `iopaint`, `paintplus`, `stirling-pdf`,
+`wolf`) are natural, mechanical follow-ups — each just needs one added
+call to `_authelia_scope_access` after its existing
+`configure_caddy_for_service` step, once Gitea's integration has been
+confirmed working live. Extending *native* OIDC support (the pattern
+above, not just scoping) to the "has built-in auth" services beyond Gitea
+needs verifying per service first — not every app in that list actually
+has its own OAuth2/OIDC provider field, so don't assume one exists without
+checking that service's real settings.
+
 **No built-in auth — should be protected:**
 `magicmirror`, `wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`,
 `paintplus`, `stirling-pdf`, `wolf` (web UI). Each of these prompts
