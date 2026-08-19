@@ -416,18 +416,31 @@ universal by removing them from their `-only` group(s) — a pure users.yml
 edit, since universal access is just the *absence* of a restricting group,
 not a rule of its own.
 
-Only `services/gitea.sh` calls `_authelia_scope_access()` so far (the
-reference integration). The other services that already offer a plain
-"Protect X with Authelia SSO?" prompt (`magicmirror`, `wolf-pair`,
-`js99er`, `drum-rhythm-game`, `iopaint`, `paintplus`, `stirling-pdf`,
-`wolf`) are natural, mechanical follow-ups — each just needs one added
-call to `_authelia_scope_access` after its existing
+`services/gitea.sh`, `services/mealie.sh`, and `services/actualbudget.sh`
+call `_authelia_scope_access()` so far. The other services that already
+offer a plain "Protect X with Authelia SSO?" prompt (`magicmirror`,
+`wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`, `paintplus`,
+`stirling-pdf`, `wolf`) are natural, mechanical follow-ups — each just
+needs one added call to `_authelia_scope_access` after its existing
 `configure_caddy_for_service` step, once Gitea's integration has been
-confirmed working live. Extending *native* OIDC support (the pattern
-above, not just scoping) to the "has built-in auth" services beyond Gitea
-needs verifying per service first — not every app in that list actually
-has its own OAuth2/OIDC provider field, so don't assume one exists without
-checking that service's real settings.
+confirmed working live.
+
+**Native OIDC support across the "has built-in auth" list — checked
+against each app's real docs (2026-08), not assumed.** Don't extend this
+pattern to a service without checking its own current settings first —
+two of the ones below turned out to need actual verification to get
+right (Portainer, ntfy), not general familiarity with the product:
+
+| Service | Native OIDC? | Notes |
+|---|---|---|
+| `mealie` | Yes — wired up | Pure env vars (`OIDC_AUTH_ENABLED`, `OIDC_CLIENT_ID/SECRET`, `OIDC_CONFIGURATION_URL`), see `_mealie_offer_authelia_oidc()`. Redirect URI is `<BASE_URL>/login`. Needs a `--forwarded-allow-ips` entrypoint override when Caddy-fronted, or the generated redirect URI comes out `http://` even when actually served over `https://` — see the function's own comment. |
+| `actualbudget` | Yes — wired up | Pure env vars (`ACTUAL_OPENID_DISCOVERY_URL`, `ACTUAL_OPENID_CLIENT_ID/SECRET`, `ACTUAL_OPENID_SERVER_HOSTNAME`), see `_actualbudget_offer_authelia_oidc()`. Redirect path `/openid/callback` (matches the existing preset in `_authelia_add_oidc_client()`'s menu). First OIDC login becomes the server owner if none is set yet — Actual's own behavior. |
+| `immich` | Yes, not yet wired up | Real OAuth2/OIDC settings under Administration → Settings, backed by a `system-config` API (GET/PUT) — confirmed the API exists, but didn't confirm the exact request payload shape needed to set OAuth fields specifically. Needs one more verification pass against the live OpenAPI spec before automating; don't guess the payload. |
+| `jellyfin` | Only via a third-party plugin | No official native OIDC. Community plugins exist (`jellyfin-plugin-sso`, `jellyfin-plugin-oidc`) but are web-UI-only — native mobile/desktop Jellyfin clients can't use them. A bigger lift than an env-var toggle (plugin install via Jellyfin's own plugin repo system); hold off until that's worth doing deliberately. |
+| `homeassistant` | Only via a third-party HACS integration | No native core OIDC as of 2026 (open community discussion asking for it, not shipped). `hass-oidc-auth`/`hass-openid` exist as HACS-installed integrations — same "bigger lift" caveat as Jellyfin. |
+| `portainer` | No (CE) | OAuth/OIDC is a **Business Edition** feature — this repo installs `portainer-ce` (confirmed in `services/portainer.sh`), which doesn't have it. CE's documented path is fronting it with `oauth2-proxy`, i.e. no different from the forward_auth pattern any no-built-in-auth service already uses — not "native OIDC" in the sense this section means. |
+| `ntfy` | No | Checked ntfy's own config docs directly — no `auth-oauth2-*` keys exist. Only basic auth + access tokens + ACLs. (Worth a re-check on a future ntfy release if this matters to you — this class of feature does get added to self-hosted tools over time.) |
+| `emby`, `audiobookshelf`, `meshcentral`, `traccar`, `uptimekuma`, `filebrowser`, `wg-easy` | Not individually re-verified | High-confidence no, based on general familiarity with each product rather than a fresh doc check this pass (unlike everything above, which was actually checked and in two cases contradicted assumption). Verify before wiring any of these in, the same way the checked ones were — don't extrapolate from this table's pattern.
 
 **No built-in auth — should be protected:**
 `magicmirror`, `wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`,
