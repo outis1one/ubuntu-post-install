@@ -1230,6 +1230,75 @@ _asterisk_ensure_live_voicemail_include() {
     docker exec "$CONTAINER_NAME" asterisk -rx "dialplan reload" &>/dev/null || true
 }
 
+# ── pjsip.conf: [transport-tls] keep_alive_interval ─────────────────────────
+# Mitigation for WiFi/LAN SIP clients (e.g. Sipnetic on Android) dropping
+# their TLS registration every few seconds on some hosts but not others —
+# confirmed live on an IONOS VPS (never reproduced on a DigitalOcean droplet
+# running the identical stack, and never over mobile data on either
+# provider), with OPNsense's own firewall/IDS logs confirmed clean during a
+# live disconnect and CrowdSec/packet-loss both ruled out first. Leading
+# theory: an idle-connection timeout somewhere in IONOS's own network
+# virtualization layer, below anything client-side tools can see. PJSIP's
+# `keep_alive_interval` sends a lightweight double-CRLF over the transport's
+# TLS connection on a timer, which is the standard fix for exactly this
+# class of "idle SIP/TLS connection gets silently dropped" symptom.
+#
+# This is a *transport* option, not an endpoint/AOR option — `qualify_frequency`
+# (already set globally) is an endpoint-level OPTIONS ping that re-establishes
+# a dropped connection, it doesn't stop the drop from happening in the first
+# place. `rtp_keepalive` (mobile devices) is unrelated: RTP media keepalive
+# during an active call, not SIP signaling connection keepalive while idle.
+_asterisk_patch_keepalive_vendor_files() {
+    local EA_DIR="$1"
+    local ENTRYPOINT="$EA_DIR/docker/entrypoint.sh"
+    local EASY1="$EA_DIR/easy-asterisk.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+    local f
+
+    for f in "$ENTRYPOINT" "$EASY1" "$EASY2"; do
+        [[ -f "$f" ]] || continue
+        if ! grep -q '^protocol=tls$' "$f"; then
+            log_warning "$(basename "$f"): '[transport-tls]' anchor not found — vendor template changed upstream."
+            log_warning "  Add 'keep_alive_interval=15' manually inside [transport-tls] in this file's pjsip.conf heredoc."
+            continue
+        fi
+        grep -q '^keep_alive_interval=' "$f" || sed -i '/^protocol=tls$/a keep_alive_interval=15' "$f"
+    done
+
+    log_success "Vendor generator functions patched for TLS transport keepalive."
+}
+
+# Live-file counterpart to the vendor-template patch above, same reasoning
+# as _asterisk_ensure_live_voicemail_include (Easy Asterisk's entrypoint
+# only regenerates pjsip.conf if it's missing, so a box with existing
+# devices never picks up the vendor patch on a plain restart). Unlike
+# extensions.conf/voicemail.conf, `pjsip reload` does not pick up changes to
+# a transport object — PJSIP transports are bound at module load, not
+# reloadable via sorcery like endpoints/AORs are — so this restarts the
+# container rather than issuing a reload, same as _asterisk_ensure_live_dangerously.
+_asterisk_ensure_live_keepalive() {
+    local EA_DIR="$1" CONTAINER_NAME="$2"
+    local CONF_LIVE="$EA_DIR/config/asterisk/pjsip.conf"
+    [[ -f "$CONF_LIVE" ]] || return 0
+    if ! grep -q '^\[transport-tls\]$' "$CONF_LIVE"; then
+        log_warning "Couldn't find '[transport-tls]' in the live pjsip.conf — add"
+        log_warning "'keep_alive_interval=15' manually inside that section, then: docker restart ${CONTAINER_NAME}"
+        return 0
+    fi
+    grep -q '^keep_alive_interval=' "$CONF_LIVE" && return 0
+
+    sed -i '/^\[transport-tls\]$/,/^\[/{/^protocol=tls$/a keep_alive_interval=15
+}' "$CONF_LIVE"
+    log_success "Patched keep_alive_interval=15 into the live pjsip.conf's [transport-tls] transport."
+
+    log_info "Restarting Asterisk to apply (transport options aren't picked up by a reload)..."
+    docker restart "$CONTAINER_NAME" &>/dev/null \
+        && log_success "Restarted." \
+        || log_warning "Restart failed — check: docker logs $CONTAINER_NAME"
+}
+
 _asterisk_remove_presence_timer() {
     systemctl disable --now asterisk-presence-alert.timer 2>/dev/null || true
     rm -f /etc/systemd/system/asterisk-presence-alert.timer /etc/systemd/system/asterisk-presence-alert.service
@@ -2141,6 +2210,7 @@ install_asterisk() {
                 _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
                 _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
                 _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
+                _asterisk_patch_keepalive_vendor_files "$EA_DIR"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
 
@@ -2148,6 +2218,7 @@ install_asterisk() {
                 if docker compose up -d --build --force-recreate; then
                     log_success "Update complete — vendor files and docker-compose.yml refreshed."
                     _asterisk_ensure_live_dangerously "$EA_DIR" "$CONTAINER"
+                    _asterisk_ensure_live_keepalive "$EA_DIR" "$CONTAINER"
                 else
                     log_warning "docker compose up failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
                 fi
@@ -2237,6 +2308,7 @@ install_asterisk() {
     _asterisk_write_voicemail_dialplan "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
     _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
     _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
+    _asterisk_patch_keepalive_vendor_files "$EA_DIR"
     ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
     chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
 
@@ -2495,6 +2567,7 @@ ENV
         if docker compose up -d --build; then
             log_success "Easy Asterisk started"
             _asterisk_ensure_live_dangerously "$EA_DIR" "$CONTAINER"
+            _asterisk_ensure_live_keepalive "$EA_DIR" "$CONTAINER"
         else
             log_warning "Start failed — check: docker compose logs"
         fi
