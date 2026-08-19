@@ -1441,6 +1441,30 @@ _authelia_ensure_oidc_provider() {
     log_success "OIDC provider enabled (signing key + HMAC secret generated)"
 }
 
+# Deletes one OIDC client block (matched by client_id) from
+# identity_providers.oidc.clients in configuration.yml. Used by
+# _authelia_provision_oidc_client below to make re-registering a client_id
+# idempotent instead of a dead end — see that function's own comment on
+# why a stale registration is safe to just replace. A client block starts
+# at its own "      - client_id: '<id>'" line (6-space indent) and runs
+# until either the next such line or a line indented less than 6 spaces
+# (end of the clients list) — deleting stops exactly there so a sibling
+# client's block, or whatever config section follows, is untouched.
+_authelia_remove_oidc_client() {
+    local config_file="$1" client_id="$2"
+    awk -v target="'${client_id}'" '
+        {
+            if ($0 ~ /^      - client_id: /) {
+                skip = ($0 ~ target) ? 1 : 0
+            } else if (skip && $0 !~ /^      /) {
+                skip = 0
+            }
+            if (!skip) print
+        }
+    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
+    chown 1000:1000 "$config_file" 2>/dev/null || true
+}
+
 # Non-interactive core of _authelia_add_oidc_client() below — generates a
 # client secret, patches it into identity_providers.oidc.clients, and
 # (optionally) restarts Authelia. Fully self-contained (re-validates
@@ -1458,8 +1482,10 @@ _authelia_ensure_oidc_provider() {
 #                              caller must capture and use/display it now.
 #   OIDC_AUTHELIA_DOMAIN       this Authelia instance's apex domain, for
 #                              building discovery/authorization/token URLs.
-# Returns 1 on failure (Authelia not installed, client ID already taken,
-# secret generation failed) with the reason already logged.
+# Returns 1 on failure (Authelia not installed, domain undeterminable,
+# secret generation failed) with the reason already logged. A client_id
+# that's already registered is NOT a failure — it gets replaced (see the
+# comment at that check below).
 _authelia_provision_oidc_client() {
     local APP_NAME="$1" CLIENT_ID="$2" AUTH_POLICY="$3" RESTART_AUTH="$4"; shift 4
     local -a REDIRECT_URIS=("$@")
@@ -1490,9 +1516,19 @@ _authelia_provision_oidc_client() {
         return 1
     fi
 
+    # A stale registration (e.g. from the interactive "Register an app" menu
+    # run previously without ever finishing — its plaintext secret was shown
+    # once and is gone, so the registration is dead weight either way) would
+    # otherwise permanently block this exact service's automated SSO offer
+    # with nothing but a warning. Confirmed live: this is what happened to
+    # ActualBudget the first time its own offer ran, against a client_id the
+    # menu had already registered in an earlier session. Safe to just
+    # replace — every automated caller here uses a fixed, service-specific
+    # client_id, so a collision means "this same service, already
+    # registered" rather than someone else's app using the same ID.
     if grep -qF "client_id: '${CLIENT_ID}'" "$CONFIG_FILE" 2>/dev/null; then
-        log_warning "A client with ID '$CLIENT_ID' is already registered in $CONFIG_FILE."
-        return 1
+        log_warning "A client with ID '$CLIENT_ID' is already registered — replacing it with a fresh one (its old secret was never recoverable anyway)."
+        _authelia_remove_oidc_client "$CONFIG_FILE" "$CLIENT_ID"
     fi
 
     log_info "Generating client secret..."
