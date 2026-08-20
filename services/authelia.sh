@@ -1324,28 +1324,66 @@ edit_authelia_user() {
         return 1
     fi
 
-    local -a USERNAMES
-    mapfile -t USERNAMES < <(_authelia_list_usernames "$USERS_FILE")
-    if [ "${#USERNAMES[@]}" -eq 0 ]; then
-        log_warning "No users found in $USERS_FILE."
-        return 0
-    fi
+    # Outer loop: pick one or more users by number, act on each in turn (via
+    # _authelia_manage_one_user below), then ask whether to go again — so
+    # deleting/editing several users doesn't require re-running the whole
+    # script and re-navigating this menu from scratch for every single one.
+    local KEEP_GOING="y"
+    while [[ "$KEEP_GOING" =~ ^[Yy]$ ]]; do
+        local -a USERNAMES
+        mapfile -t USERNAMES < <(_authelia_list_usernames "$USERS_FILE")
+        if [ "${#USERNAMES[@]}" -eq 0 ]; then
+            log_warning "No users left in $USERS_FILE."
+            return 0
+        fi
 
-    echo ""
-    echo "  Existing users:"
-    local i=1 u
-    for u in "${USERNAMES[@]}"; do
-        echo "    $i) $u"
-        i=$((i + 1))
+        echo ""
+        echo "  Existing users:"
+        local i
+        for i in "${!USERNAMES[@]}"; do
+            echo "    $((i + 1))) ${USERNAMES[$i]}"
+        done
+        echo ""
+        echo "  Select one or more by number (space-separated, e.g. \"2 4\"),"
+        echo "  blank to cancel."
+        local SEL=""
+        prompt_text "  User number(s):" "" SEL
+        if [ -z "$SEL" ]; then
+            log_info "Cancelled."
+            return 0
+        fi
+
+        local -a SEL_TOKENS TARGETS=()
+        read -ra SEL_TOKENS <<< "$SEL"
+        local tok
+        for tok in "${SEL_TOKENS[@]}"; do
+            if [[ "$tok" =~ ^[0-9]+$ ]] && [ "$tok" -ge 1 ] && [ "$tok" -le "${#USERNAMES[@]}" ]; then
+                TARGETS+=("${USERNAMES[$((tok - 1))]}")
+            else
+                log_warning "Skipping invalid selection: $tok"
+            fi
+        done
+
+        local TARGET
+        for TARGET in "${TARGETS[@]}"; do
+            # A user picked earlier in this same batch may have just been
+            # deleted (or this number was picked twice) — re-check before
+            # acting instead of operating on a now-stale line range.
+            grep -qE "^  ${TARGET}:$" "$USERS_FILE" 2>/dev/null || { log_info "'$TARGET' no longer exists — skipping."; continue; }
+            _authelia_manage_one_user "$TARGET" "$USERS_FILE" "$CONFIG_FILE" "$AUTHELIA_DIR"
+        done
+
+        echo ""
+        prompt_yn "  Manage more users? (y/n):" "n" KEEP_GOING
     done
-    echo ""
-    local SEL=""
-    prompt_text "  Select a user by number (blank to cancel):" "" SEL
-    if [ -z "$SEL" ] || ! [[ "$SEL" =~ ^[0-9]+$ ]] || [ "$SEL" -lt 1 ] || [ "$SEL" -gt "${#USERNAMES[@]}" ]; then
-        log_info "Cancelled."
-        return 0
-    fi
-    local TARGET="${USERNAMES[$((SEL - 1))]}"
+}
+
+# Per-user action menu (edit/reset-password/2FA/admin/service-access/delete),
+# extracted out of edit_authelia_user() so its caller can drive it once per
+# selected user across a multi-user batch instead of only ever handling one
+# user per script invocation.
+_authelia_manage_one_user() {
+    local TARGET="$1" USERS_FILE="$2" CONFIG_FILE="$3" AUTHELIA_DIR="$4"
 
     local CONTINUE="y"
     while [[ "$CONTINUE" =~ ^[Yy]$ ]]; do
