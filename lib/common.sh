@@ -856,6 +856,7 @@ configure_caddy_for_service() {
     # already the only intended way in, instead of leaving both routes open.
     CADDY_SERVICE_CONFIGURED=false
     CADDY_SERVICE_MODE=""
+    CADDY_SERVICE_DOMAIN=""
 
     # Derive the proxy upstream and a port number for display messages.
     # Plain number  → host.docker.internal:PORT  (host-network or legacy
@@ -916,6 +917,15 @@ configure_caddy_for_service() {
     if [ -z "$SERVICE_DOMAIN" ]; then
         echo "  ⚠ No domain provided, skipping Caddy configuration."; return 0
     fi
+    # Set as soon as we know a domain was actually accepted — every path below
+    # this point that returns 0 without configuring Caddy is a genuine failure
+    # (write/reload error), not "no domain chosen", so leaving this set is
+    # correct: the caller can tell CADDY_SERVICE_CONFIGURED apart from whether
+    # a domain was entered at all. Callers that pre-compute their own default
+    # URL/domain before calling this (e.g. services/mealie.sh's BASE_URL) need
+    # this to reconcile against whatever the user actually typed here, which
+    # can differ from that pre-computed default.
+    CADDY_SERVICE_DOMAIN="$SERVICE_DOMAIN"
 
     # Build the site block — upstream differs by mode
     local _BLOCK_UPSTREAM="$_UPSTREAM"
