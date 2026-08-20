@@ -390,6 +390,58 @@ existing login page. Reuse `_authelia_provision_oidc_client()` (guarded by
 instead of duplicating Authelia's client-secret-generation/config-patching
 logic again.
 
+**Scoping a domain to specific users instead of every Authelia user.**
+By default, any domain with an `access_control` rule at all is reachable by
+every Authelia user (the existing catch-all `*.${AUTHELIA_DOMAIN}` rule).
+`services/authelia.sh`'s `_authelia_scope_access(SERVICE_ID, DOMAIN)` is a
+generic, reusable opt-in on top of that — call it right after *any* service
+finishes being protected by Authelia, forward_auth gate or native OIDC
+alike (it only cares about the domain, not the gating mechanism; see
+`_gitea_offer_authelia_sso()` for the reference caller). Asks whether
+access should stay universal or be scoped to specific usernames; if scoped,
+creates a dedicated `<service_id>-only` group, adds every listed username
+to it (creating accounts on the fly via
+`_authelia_create_user_noninteractive()` for names that don't exist yet,
+printing their temp password), and inserts two rules *above* the general
+catch-all — allow that group on this domain, deny that group on every
+other protected domain. Idempotent: reruns against an already-scoped
+domain just report the existing group instead of duplicating rules.
+Guard every cross-file call with `declare -F`, same convention as the OIDC
+helper above — a service can run standalone with authelia.sh never sourced.
+
+`_authelia_report_access_scope()` (menu option 6 on an existing Authelia
+install) is the read side: lists who has universal access versus who's
+scoped to which service(s), and offers to promote a scoped user back to
+universal by removing them from their `-only` group(s) — a pure users.yml
+edit, since universal access is just the *absence* of a restricting group,
+not a rule of its own.
+
+`services/gitea.sh`, `services/mealie.sh`, and `services/actualbudget.sh`
+call `_authelia_scope_access()` so far. The other services that already
+offer a plain "Protect X with Authelia SSO?" prompt (`magicmirror`,
+`wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`, `paintplus`,
+`stirling-pdf`, `wolf`) are natural, mechanical follow-ups — each just
+needs one added call to `_authelia_scope_access` after its existing
+`configure_caddy_for_service` step, once Gitea's integration has been
+confirmed working live.
+
+**Native OIDC support across the "has built-in auth" list — checked
+against each app's real docs (2026-08), not assumed.** Don't extend this
+pattern to a service without checking its own current settings first —
+two of the ones below turned out to need actual verification to get
+right (Portainer, ntfy), not general familiarity with the product:
+
+| Service | Native OIDC? | Notes |
+|---|---|---|
+| `mealie` | Yes — wired up | Pure env vars (`OIDC_AUTH_ENABLED`, `OIDC_CLIENT_ID/SECRET`, `OIDC_CONFIGURATION_URL`), see `_mealie_offer_authelia_oidc()`. Redirect URI is `<BASE_URL>/login`. Needs a `--forwarded-allow-ips` entrypoint override when Caddy-fronted, or the generated redirect URI comes out `http://` even when actually served over `https://` — see the function's own comment. |
+| `actualbudget` | Yes — wired up | Pure env vars (`ACTUAL_OPENID_DISCOVERY_URL`, `ACTUAL_OPENID_CLIENT_ID/SECRET`, `ACTUAL_OPENID_SERVER_HOSTNAME`), see `_actualbudget_offer_authelia_oidc()`. Redirect path `/openid/callback` (matches the existing preset in `_authelia_add_oidc_client()`'s menu). First OIDC login becomes the server owner if none is set yet — Actual's own behavior. |
+| `immich` | Yes, not yet wired up | Real OAuth2/OIDC settings under Administration → Settings, backed by a `system-config` API (GET/PUT) — confirmed the API exists, but didn't confirm the exact request payload shape needed to set OAuth fields specifically. Needs one more verification pass against the live OpenAPI spec before automating; don't guess the payload. |
+| `jellyfin` | Only via a third-party plugin | No official native OIDC. Community plugins exist (`jellyfin-plugin-sso`, `jellyfin-plugin-oidc`) but are web-UI-only — native mobile/desktop Jellyfin clients can't use them. A bigger lift than an env-var toggle (plugin install via Jellyfin's own plugin repo system); hold off until that's worth doing deliberately. |
+| `homeassistant` | Only via a third-party HACS integration | No native core OIDC as of 2026 (open community discussion asking for it, not shipped). `hass-oidc-auth`/`hass-openid` exist as HACS-installed integrations — same "bigger lift" caveat as Jellyfin. |
+| `portainer` | No (CE) | OAuth/OIDC is a **Business Edition** feature — this repo installs `portainer-ce` (confirmed in `services/portainer.sh`), which doesn't have it. CE's documented path is fronting it with `oauth2-proxy`, i.e. no different from the forward_auth pattern any no-built-in-auth service already uses — not "native OIDC" in the sense this section means. |
+| `ntfy` | No | Checked ntfy's own config docs directly — no `auth-oauth2-*` keys exist. Only basic auth + access tokens + ACLs. (Worth a re-check on a future ntfy release if this matters to you — this class of feature does get added to self-hosted tools over time.) |
+| `emby`, `audiobookshelf`, `meshcentral`, `traccar`, `uptimekuma`, `filebrowser`, `wg-easy` | Not individually re-verified | High-confidence no, based on general familiarity with each product rather than a fresh doc check this pass (unlike everything above, which was actually checked and in two cases contradicted assumption). Verify before wiring any of these in, the same way the checked ones were — don't extrapolate from this table's pattern.
+
 **No built-in auth — should be protected:**
 `magicmirror`, `wolf-pair`, `js99er`, `drum-rhythm-game`, `iopaint`,
 `paintplus`, `stirling-pdf`, `wolf` (web UI). Each of these prompts
@@ -424,22 +476,45 @@ configure_caddy_for_service "MagicMirror" "8081" "mirror" "$EXTRA_BLOCK"
 ```
 
 **Authelia "stay logged in" / kiosk mode:**
-Edit `~/docker/authelia/config/configuration.yml` and set a long
-`remember_me_duration`. Users then check "Remember me" once on login and
-the session persists through reboots (Redis stores the session in a volume):
+`install_authelia()` already writes `remember_me: 7d` into
+`configuration.yml` at install time — the checkbox is on the login form
+from day one, this is only about how long checking it actually lasts.
+To change the duration later, use the menu instead of hand-editing the
+file: re-run `sudo ./setup.sh authelia` against an existing install and
+pick **"Change 'remember me' session duration"** (`_authelia_set_remember_me()`
+in `services/authelia.sh`) — prompts for a new duration (`12h`, `7d`,
+`1M`, `1y`, or `-1` to disable Remember Me entirely) and restarts.
+Sessions persist through reboots regardless of duration (Redis stores
+session state in a volume).
+
+**The config key is `remember_me`, not `remember_me_duration`.** Authelia
+renamed it in 4.38; this repo pins `4.39.20`. A stale `remember_me_duration`
+key doesn't error, Authelia just silently ignores it — confirmed against
+Authelia's own docs/changelog after this file's own example used the old
+name for a while without anyone noticing, since nothing here actually
+reads it back to verify the write took effect. If you ever do need to
+touch this by hand instead of the menu option, the current schema is:
 
 ```yaml
 session:
   secret: 'your-existing-secret'
-  remember_me_duration: 1y     # add or update this line
   expiration: 1h
   inactivity: 5m
+  remember_me: 1y
   cookies:
     - domain: 'example.com'
       authelia_url: 'https://auth.example.com'
 ```
 
-After editing: `docker compose -f ~/docker/authelia/docker-compose.yml restart`
+**This only covers Authelia's own session.** A native-OIDC app
+(`gitea`/`mealie`/`actualbudget`) issues its own separate session/token
+after logging in via Authelia, with its own independent expiry — a long
+`remember_me` makes re-authenticating to Authelia itself instant/silent
+whenever that app's own session expires and bounces you back through the
+OIDC flow, but it doesn't stop that app's session from expiring on its
+own schedule. If a native-OIDC app logs users out sooner than expected,
+that app's own session-length setting (if it exposes one) is the other
+thing to check, not this one.
 
 ## Non-Docker services
 

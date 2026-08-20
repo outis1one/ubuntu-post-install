@@ -236,6 +236,8 @@ _gitea_offer_authelia_sso() {
         log_warning "  Discovery URL:  $_discovery_url"
         log_warning "  (The Client Secret above is shown once — it isn't stored in plaintext anywhere.)"
     fi
+
+    declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "gitea" "$GITEA_OIDC_DOMAIN"
 }
 
 # Offers to enable Gitea Actions (Gitea's own CI, largely GitHub-Actions-

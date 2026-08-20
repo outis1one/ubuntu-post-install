@@ -198,6 +198,83 @@ fi
 
 register_service mealie utilities "Recipe manager & meal planner (Mealie)" 9925
 
+# Offers to add "Sign in with Authelia" (OpenID Connect) to Mealie's own
+# login page — same additive pattern as services/gitea.sh's
+# _gitea_offer_authelia_sso (local login keeps working unchanged), but
+# Mealie's OIDC support is entirely environment-variable driven — no CLI
+# equivalent to Gitea's `admin auth add-oauth` needed. Confirmed against
+# Mealie's own OIDC docs: OIDC_AUTH_ENABLED, OIDC_CLIENT_ID,
+# OIDC_CLIENT_SECRET, OIDC_CONFIGURATION_URL, OIDC_SIGNUP_ENABLED, appended
+# straight into the .env file this installer already writes and reads via
+# `env_file: .env` — no docker-compose.yml regeneration needed for that part.
+#
+# Reads BASE_URL back from the existing .env rather than taking it as an
+# arg, so this works identically whether called right after a fresh
+# install (where the URL was just computed) or from an Update rerun
+# (where it wasn't recomputed this run, but is already on disk).
+#
+# Args: DIR CONTAINER
+_mealie_offer_authelia_oidc() {
+    local DIR="$1" CONTAINER="$2"
+
+    [ -d "$DOCKER_DIR/authelia" ] || return 0
+    declare -F _authelia_provision_oidc_client >/dev/null 2>&1 || return 0
+    grep -q '^OIDC_AUTH_ENABLED=' "$DIR/.env" 2>/dev/null && return 0
+
+    local BASE_URL
+    BASE_URL="$(grep '^BASE_URL=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
+    if [ -z "$BASE_URL" ]; then
+        log_warning "Couldn't find BASE_URL in $DIR/.env — skipping Authelia SSO offer for Mealie."
+        return 0
+    fi
+
+    echo ""
+    local USE_SSO=""
+    prompt_yn "  Add \"Sign in with Authelia\" (OpenID Connect) to Mealie's login page? (y/n):" "n" USE_SSO
+    [[ "$USE_SSO" =~ ^[Yy]$ ]] || return 0
+
+    local _2fa="" AUTH_POLICY="two_factor"
+    prompt_yn "  Require two-factor for Mealie logins via Authelia too? (y/n):" "y" _2fa
+    [[ "$_2fa" =~ ^[Yy]$ ]] || AUTH_POLICY="one_factor"
+
+    if ! _authelia_provision_oidc_client "Mealie" "mealie" "$AUTH_POLICY" "y" "${BASE_URL}/login"; then
+        log_warning "Couldn't register Mealie as an OIDC client in Authelia — skipping SSO setup."
+        return 0
+    fi
+
+    local _discovery_url="https://auth.${OIDC_AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    cat >> "$DIR/.env" << ENV
+
+# Written by services/mealie.sh's Authelia SSO step — adds "Sign in with
+# Authelia" alongside local login; local accounts keep working unchanged.
+OIDC_AUTH_ENABLED=true
+OIDC_SIGNUP_ENABLED=true
+OIDC_CLIENT_ID=mealie
+OIDC_CLIENT_SECRET=$OIDC_CLIENT_SECRET_PLAIN
+OIDC_CONFIGURATION_URL=$_discovery_url
+OIDC_PROVIDER_NAME=Authelia
+ENV
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$DIR/.env" 2>/dev/null || true
+
+    # Mealie's OIDC redirect URI generation trusts X-Forwarded-* only from
+    # explicitly allowed IPs — without this, a Caddy-fronted instance
+    # generates an http:// redirect URI even when actually served over
+    # https://, which Authelia/any OIDC provider rejects as a scheme
+    # mismatch. Confirmed against Mealie's own reverse-proxy docs/issue
+    # tracker. Only needed (and only added) when Caddy is actually
+    # fronting this instance — BASE_URL itself tells us that (it's only
+    # ever https:// when a real domain + Caddy were configured).
+    if [[ "$BASE_URL" == https://* ]] && ! grep -q '^    entrypoint:' "$DIR/docker-compose.yml"; then
+        sed -i "/container_name: ${CONTAINER}\$/a\\    entrypoint: [\"uvicorn\", \"mealie.app:app\", \"--host\", \"0.0.0.0\", \"--port\", \"9000\", \"--forwarded-allow-ips=*\"]" "$DIR/docker-compose.yml"
+    fi
+
+    (cd "$DIR" && docker compose up -d) \
+        && log_success "\"Sign in with Authelia\" added to Mealie — local login still works too." \
+        || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
+
+    declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "mealie" "${BASE_URL#*://}"
+}
+
 install_mealie() {
     require_docker || return 1
 
@@ -217,6 +294,7 @@ install_mealie() {
         echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Default login: changeme@email.com / MyPassword (change immediately)"
         echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "  - Offer \"Sign in with Authelia\" (OIDC) if Authelia is installed"
         return 0
     fi
 
@@ -259,6 +337,7 @@ install_mealie() {
                         ( cd "$MEALIE_DIR" && docker compose pull && docker compose up -d ) \
                             && log_success "Mealie image refreshed" \
                             || log_warning "Refresh failed — check: docker compose -f $MEALIE_DIR/docker-compose.yml logs"
+                        declare -F _mealie_offer_authelia_oidc >/dev/null 2>&1 && _mealie_offer_authelia_oidc "$MEALIE_DIR" "$CONTAINER"
                         return 0
                         ;;
                     cancel)
@@ -351,6 +430,8 @@ MEALIE_ENV
     log_success "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $MEALIE_DIR (port $WEB_PORT)"
 
     configure_caddy_for_service "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:9000" "recipes${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
+
+    declare -F _mealie_offer_authelia_oidc >/dev/null 2>&1 && _mealie_offer_authelia_oidc "$MEALIE_DIR" "$CONTAINER"
 
     write_readme "$MEALIE_DIR" << MD
 # Mealie${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}

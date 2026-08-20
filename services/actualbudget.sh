@@ -198,6 +198,73 @@ fi
 
 register_service actualbudget utilities "Open-source personal finance & budgeting (Actual Budget)" 5006
 
+# Offers to add "Sign in with Authelia" (OpenID Connect) to Actual Budget's
+# own login page — same additive pattern as services/gitea.sh's
+# _gitea_offer_authelia_sso, entirely environment-variable driven like
+# services/mealie.sh's equivalent. Confirmed against Actual Budget's own
+# OIDC docs: ACTUAL_OPENID_DISCOVERY_URL, ACTUAL_OPENID_CLIENT_ID,
+# ACTUAL_OPENID_CLIENT_SECRET, ACTUAL_OPENID_SERVER_HOSTNAME, appended
+# into the .env file this installer already writes and reads via
+# `env_file: .env`. Redirect path (/openid/callback) matches the preset
+# already used by services/authelia.sh's own "Register an app" menu for
+# this same app, so both stay consistent with each other.
+#
+# No stored BASE_URL to read back here (unlike Mealie) — Actual Budget's
+# compose/.env never records the public URL, so this asks for the domain
+# directly instead, same as services/gitea.sh's SSO offer does.
+#
+# Args: DIR
+_actualbudget_offer_authelia_oidc() {
+    local DIR="$1"
+
+    [ -d "$DOCKER_DIR/authelia" ] || return 0
+    declare -F _authelia_provision_oidc_client >/dev/null 2>&1 || return 0
+    grep -q '^ACTUAL_OPENID_DISCOVERY_URL=' "$DIR/.env" 2>/dev/null && return 0
+
+    echo ""
+    local USE_SSO=""
+    prompt_yn "  Add \"Sign in with Authelia\" (OpenID Connect) to Actual Budget's login page? (y/n):" "n" USE_SSO
+    [[ "$USE_SSO" =~ ^[Yy]$ ]] || return 0
+
+    local _default_domain=""
+    [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ] && _default_domain="budget.${SITE_DOMAIN}"
+    local AB_OIDC_DOMAIN=""
+    prompt_text "  Domain Actual Budget is reachable at [${_default_domain:-required}]:" "$_default_domain" AB_OIDC_DOMAIN
+    if [ -z "$AB_OIDC_DOMAIN" ]; then
+        log_warning "No domain entered — skipping Authelia SSO for Actual Budget."
+        return 0
+    fi
+
+    local _2fa="" AUTH_POLICY="two_factor"
+    prompt_yn "  Require two-factor for Actual Budget logins via Authelia too? (y/n):" "y" _2fa
+    [[ "$_2fa" =~ ^[Yy]$ ]] || AUTH_POLICY="one_factor"
+
+    if ! _authelia_provision_oidc_client "ActualBudget" "actualbudget" "$AUTH_POLICY" "y" \
+        "https://${AB_OIDC_DOMAIN}/openid/callback"; then
+        log_warning "Couldn't register Actual Budget as an OIDC client in Authelia — skipping SSO setup."
+        return 0
+    fi
+
+    local _discovery_url="https://auth.${OIDC_AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    cat >> "$DIR/.env" << ENV
+
+# Written by services/actualbudget.sh's Authelia SSO step. The first OIDC
+# login becomes the Actual Budget server owner if no owner is set yet —
+# that's Actual Budget's own behavior, not something this script controls.
+ACTUAL_OPENID_DISCOVERY_URL=$_discovery_url
+ACTUAL_OPENID_CLIENT_ID=actualbudget
+ACTUAL_OPENID_CLIENT_SECRET=$OIDC_CLIENT_SECRET_PLAIN
+ACTUAL_OPENID_SERVER_HOSTNAME=https://${AB_OIDC_DOMAIN}
+ENV
+    chown "$ACTUAL_USER:$ACTUAL_USER" "$DIR/.env" 2>/dev/null || true
+
+    (cd "$DIR" && docker compose up -d) \
+        && log_success "\"Sign in with Authelia\" added to Actual Budget — local login still works too." \
+        || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
+
+    declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "actualbudget" "$AB_OIDC_DOMAIN"
+}
+
 install_actualbudget() {
     require_docker || return 1
 
@@ -216,6 +283,7 @@ install_actualbudget() {
         echo "  - Create \$DOCKER_DIR/actualbudget(-<name>) with docker-compose.yml (data/)"
         echo "  - Auto-scan for a free host port if this is an additional instance"
         echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "  - Offer \"Sign in with Authelia\" (OIDC) if Authelia is installed"
         return 0
     fi
 
@@ -258,6 +326,7 @@ install_actualbudget() {
                         ( cd "$AB_DIR" && docker compose pull && docker compose up -d ) \
                             && log_success "Actual Budget image refreshed" \
                             || log_warning "Refresh failed — check: docker compose -f $AB_DIR/docker-compose.yml logs"
+                        declare -F _actualbudget_offer_authelia_oidc >/dev/null 2>&1 && _actualbudget_offer_authelia_oidc "$AB_DIR"
                         return 0
                         ;;
                     cancel)
@@ -332,6 +401,8 @@ AB_ENV
     log_success "Actual Budget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} configured at $AB_DIR (port $WEB_PORT)"
 
     configure_caddy_for_service "ActualBudget${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:5006" "budget${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
+
+    declare -F _actualbudget_offer_authelia_oidc >/dev/null 2>&1 && _actualbudget_offer_authelia_oidc "$AB_DIR"
 
     write_readme "$AB_DIR" << MD
 # Actual Budget${INSTANCE_SUFFIX:+ — $INSTANCE_SUFFIX}
