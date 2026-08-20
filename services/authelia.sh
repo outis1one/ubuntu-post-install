@@ -1741,11 +1741,24 @@ _authelia_provision_oidc_client() {
     # line-anchored awk pattern below fail to match at all, not just leave a
     # stray \r in the captured value: "  cookies:\r" doesn't match
     # /^  cookies:$/ since $ anchors end-of-string and the \r is still part
-    # of it. Confirmed live: this exact case produced a "line 12: unexpected
-    # character '/' in variable name" failure in Mealie's .env once a
-    # \r-tainted authelia_url value got concatenated with more text after
-    # it — Docker Compose's env parser treats a bare \r as a line break too.
-    OIDC_AUTHELIA_DOMAIN="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}')"
+    # of it. Also strip a leading/trailing quote character: these fields are
+    # unquoted in every value this repo's own scripts write, but YAML makes
+    # quoting optional and a hand-edited config can add single or double
+    # quotes around the value. awk's `print $2`/`print $3` is a naive
+    # whitespace-split token grab that doesn't know about YAML quoting, so a
+    # quoted value comes back WITH the literal quote characters still
+    # attached. Confirmed live: this is what actually caused a "line 12:
+    # unexpected character '/' in variable name" failure in Mealie's
+    # .env — an authelia_url value hand-edited to
+    # `authelia_url: 'https://authelia.example.com'` got captured as the
+    # literal string including both single quotes, so the generated
+    # discovery URL came out `'https://authelia.example.com'/.well-known/...`
+    # — Docker Compose's env parser closed the quoted value at that
+    # embedded closing quote and choked on everything after it as a new,
+    # invalid token. (The earlier \r-stripping guards a different,
+    # also-real failure mode — a CRLF-tainted line failing to match these
+    # anchored patterns at all — not this one; both are needed.)
+    OIDC_AUTHELIA_DOMAIN="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' | sed "s/^[\"']//; s/[\"']\$//")"
     if [ -z "$OIDC_AUTHELIA_DOMAIN" ]; then
         log_warning "Couldn't determine this Authelia instance's domain from $CONFIG_FILE — aborting."
         return 1
@@ -1755,7 +1768,7 @@ _authelia_provision_oidc_client() {
     # "auth." prefix — see the OIDC_AUTHELIA_PORTAL_URL out-param comment
     # above for why this can't be hardcoded. Falls back to the "auth."
     # default only if parsing somehow comes up empty.
-    OIDC_AUTHELIA_PORTAL_URL="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /authelia_url:/{print $2; exit}')"
+    OIDC_AUTHELIA_PORTAL_URL="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /authelia_url:/{print $2; exit}' | sed "s/^[\"']//; s/[\"']\$//")"
     [ -z "$OIDC_AUTHELIA_PORTAL_URL" ] && OIDC_AUTHELIA_PORTAL_URL="https://auth.${OIDC_AUTHELIA_DOMAIN}"
 
     # A stale registration (e.g. from the interactive "Register an app" menu
@@ -1851,7 +1864,7 @@ _authelia_add_oidc_client() {
     # below only to suggest a domain default — _authelia_provision_oidc_client
     # re-derives its own copy independently.
     local AUTHELIA_DOMAIN
-    AUTHELIA_DOMAIN="$(awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' "$CONFIG_FILE")"
+    AUTHELIA_DOMAIN="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' | sed "s/^[\"']//; s/[\"']\$//")"
     if [ -z "$AUTHELIA_DOMAIN" ]; then
         log_warning "Couldn't determine this Authelia instance's domain from $CONFIG_FILE — aborting."
         return 1
