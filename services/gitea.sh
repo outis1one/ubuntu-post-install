@@ -220,7 +220,7 @@ _gitea_offer_authelia_sso() {
         return 0
     fi
 
-    local _discovery_url="https://auth.${OIDC_AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    local _discovery_url="${OIDC_AUTHELIA_PORTAL_URL}/.well-known/openid-configuration"
     log_info "Adding Authelia as an authentication source in Gitea..."
     if docker exec -u git gitea gitea admin auth add-oauth \
         --name authelia --provider openidConnect \

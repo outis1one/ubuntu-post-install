@@ -1694,6 +1694,19 @@ _authelia_remove_oidc_client() {
 #                              caller must capture and use/display it now.
 #   OIDC_AUTHELIA_DOMAIN       this Authelia instance's apex domain, for
 #                              building discovery/authorization/token URLs.
+#   OIDC_AUTHELIA_PORTAL_URL   the actual login-portal base URL (e.g.
+#                              https://auth.example.com) — read back from this
+#                              instance's own config rather than assumed,
+#                              since the portal subdomain isn't always "auth."
+#                              (install_authelia()/add_authelia_domain() both
+#                              default to it, but it's plain text in
+#                              configuration.yml and gets hand-edited on some
+#                              boxes — e.g. a dedicated VPS instance renamed
+#                              to "authelia." to avoid colliding with another
+#                              instance's "auth." on a different machine).
+#                              Use this, not a hardcoded "https://auth.$domain",
+#                              when building a discovery/redirect URL for a
+#                              native-OIDC app.
 # Returns 1 on failure (Authelia not installed, domain undeterminable,
 # secret generation failed) with the reason already logged. A client_id
 # that's already registered is NOT a failure — it gets replaced (see the
@@ -1704,6 +1717,7 @@ _authelia_provision_oidc_client() {
 
     OIDC_CLIENT_SECRET_PLAIN=""
     OIDC_AUTHELIA_DOMAIN=""
+    OIDC_AUTHELIA_PORTAL_URL=""
 
     local AUTHELIA_DIR="$DOCKER_DIR/authelia"
     local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
@@ -1727,6 +1741,13 @@ _authelia_provision_oidc_client() {
         log_warning "Couldn't determine this Authelia instance's domain from $CONFIG_FILE — aborting."
         return 1
     fi
+
+    # Read the real portal URL back from config instead of assuming the
+    # "auth." prefix — see the OIDC_AUTHELIA_PORTAL_URL out-param comment
+    # above for why this can't be hardcoded. Falls back to the "auth."
+    # default only if parsing somehow comes up empty.
+    OIDC_AUTHELIA_PORTAL_URL="$(awk '/^  cookies:$/{f=1; next} f && /authelia_url:/{print $2; exit}' "$CONFIG_FILE")"
+    [ -z "$OIDC_AUTHELIA_PORTAL_URL" ] && OIDC_AUTHELIA_PORTAL_URL="https://auth.${OIDC_AUTHELIA_DOMAIN}"
 
     # A stale registration (e.g. from the interactive "Register an app" menu
     # run previously without ever finishing — its plaintext secret was shown
