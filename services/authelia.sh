@@ -226,8 +226,8 @@ install_authelia() {
         echo "    1) Add another protected domain to this instance (non-destructive —"
         echo "       one Authelia+Redis, multiple independent apex domains/logins)"
         echo "    2) Add a new user (creates a users.yml entry + password hash)"
-        echo "    3) Edit an existing user (email, password reset, 2FA reset/exempt,"
-        echo "       promote/demote admin)"
+        echo "    3) Manage an existing user (email, password reset, 2FA reset/exempt,"
+        echo "       promote/demote admin, per-service access, delete)"
         echo "    4) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
         echo "       Vaultwarden, or any other app with its own \"Enable OpenID\" setting)"
         echo "    5) Reconfigure from scratch (regenerates secrets/users — breaks"
@@ -799,7 +799,7 @@ add_authelia_user() {
     echo ""
     local NEW_USERNAME="" NEW_DISPLAY="" NEW_EMAIL="" NEW_ADMIN=""
     prompt_text "  Username (lowercase, no spaces):" "" NEW_USERNAME
-    NEW_USERNAME="$(echo "$NEW_USERNAME" | tr -cs 'a-z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
+    NEW_USERNAME="$(echo "$NEW_USERNAME" | tr -cs 'a-zA-Z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
     if [ -z "$NEW_USERNAME" ]; then
         log_warning "No username entered — nothing to do."
         return 0
@@ -923,6 +923,24 @@ _authelia_toggle_admin() {
             { print }
         ' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
     fi
+}
+
+# Deletes a user's whole block (their [start,end] line range, as returned by
+# _authelia_user_line_range) from users.yml. Doesn't touch access_control.rules
+# or any "<service>-only" group definition elsewhere — deleting the user's own
+# block is enough, since group membership only ever lived inside it.
+_authelia_delete_user_block() {
+    local users_file="$1" start="$2" end="$3"
+    awk -v s="$start" -v e="$end" 'NR<s || NR>e' "$users_file" > "$users_file.tmp" && mv "$users_file.tmp" "$users_file"
+}
+
+# Every "<service>-only" group that exists anywhere in users.yml, deduplicated —
+# i.e. every service someone has already scoped access to via
+# _authelia_scope_access. Used to offer a numbered pick-list instead of asking
+# for a group name to be typed.
+_authelia_list_scoped_groups() {
+    local users_file="$1"
+    grep -oE '^      - [a-zA-Z0-9_-]+-only$' "$users_file" 2>/dev/null | sed 's/^      - //' | sort -u
 }
 
 # Same shape as _authelia_toggle_admin but for an arbitrary group name —
@@ -1071,7 +1089,7 @@ _authelia_scope_access() {
 
     local u start_end start end
     for u in "${usernames[@]}"; do
-        u="$(echo "$u" | tr -cs 'a-z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
+        u="$(echo "$u" | tr -cs 'a-zA-Z0-9_-' '-' | sed 's/^-*//;s/-*$//')"
         [ -z "$u" ] && continue
         if grep -qE "^  ${u}:$" "$users_file" 2>/dev/null; then
             start_end="$(_authelia_user_line_range "$users_file" "$u")"
@@ -1331,7 +1349,7 @@ edit_authelia_user() {
 
     local CONTINUE="y"
     while [[ "$CONTINUE" =~ ^[Yy]$ ]]; do
-        local RANGE START END
+        local RANGE START END DELETED=0
         RANGE="$(_authelia_user_line_range "$USERS_FILE" "$TARGET")"
         START="${RANGE% *}"; END="${RANGE#* }"
 
@@ -1355,10 +1373,12 @@ edit_authelia_user() {
         else
             echo "    5) Promote to admin"
         fi
-        echo "    6) Done with this user"
+        echo "    6) Promote to (or remove from) a specific service's access group"
+        echo "    7) Delete this user"
+        echo "    8) Done with this user"
         echo ""
         local ACTION=""
-        prompt_text "  Choice [1-6]:" "6" ACTION
+        prompt_text "  Choice [1-8]:" "8" ACTION
 
         case "$ACTION" in
             1)
@@ -1428,12 +1448,82 @@ edit_authelia_user() {
                     log_success "$TARGET promoted to admin."
                 fi
                 ;;
+            6)
+                local -a SCOPED_GROUPS
+                mapfile -t SCOPED_GROUPS < <(_authelia_list_scoped_groups "$USERS_FILE")
+                if [ "${#SCOPED_GROUPS[@]}" -eq 0 ]; then
+                    log_info "No service-scoped access groups exist yet — every protected domain is currently open to any Authelia user. A service gets a scoped group when it's first protected with Authelia SSO and \"Specific users only\" is chosen."
+                    ACTION=""
+                else
+                    echo ""
+                    echo "  Service-scoped access groups (* = $TARGET is currently a member):"
+                    local gi grp member
+                    for gi in "${!SCOPED_GROUPS[@]}"; do
+                        grp="${SCOPED_GROUPS[$gi]}"
+                        member=" "
+                        sed -n "${START},${END}p" "$USERS_FILE" | grep -qF "      - ${grp}" && member="*"
+                        echo "    $((gi + 1))) [${member}] ${grp%-only}"
+                    done
+                    echo ""
+                    echo "  Pick by number (space-separated) to toggle — a member gets removed,"
+                    echo "  a non-member gets added. Blank to leave unchanged."
+                    local TOGGLE_SEL=""
+                    prompt_text "  Numbers:" "" TOGGLE_SEL
+                    local -a TOGGLE_TOKENS
+                    read -ra TOGGLE_TOKENS <<< "$TOGGLE_SEL"
+                    local tk tidx tgrp t_start t_end t_range is_member
+                    for tk in "${TOGGLE_TOKENS[@]}"; do
+                        [[ "$tk" =~ ^[0-9]+$ ]] || continue
+                        [ "$tk" -ge 1 ] && [ "$tk" -le "${#SCOPED_GROUPS[@]}" ] || continue
+                        tidx=$((tk - 1))
+                        tgrp="${SCOPED_GROUPS[$tidx]}"
+                        # Re-resolve the user's line range before every toggle — a prior
+                        # toggle in this same loop shifts every line after it, so reusing
+                        # the outer START/END here would drift after the first change.
+                        t_range="$(_authelia_user_line_range "$USERS_FILE" "$TARGET")"
+                        t_start="${t_range% *}"; t_end="${t_range#* }"
+                        is_member="false"
+                        sed -n "${t_start},${t_end}p" "$USERS_FILE" | grep -qF "      - ${tgrp}" && is_member="true"
+                        if [ "$is_member" = "true" ]; then
+                            _authelia_toggle_group "$USERS_FILE" "$t_start" "$t_end" "$tgrp" "false"
+                            log_success "Removed $TARGET from '${tgrp}' (${tgrp%-only})"
+                        else
+                            _authelia_toggle_group "$USERS_FILE" "$t_start" "$t_end" "$tgrp" "true"
+                            log_success "Added $TARGET to '${tgrp}' (${tgrp%-only})"
+                        fi
+                    done
+                    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                fi
+                ;;
+            7)
+                echo ""
+                log_warning "This permanently removes '$TARGET' from $USERS_FILE — they won't be able to log in again until re-added."
+                local CONFIRM_DELETE=""
+                prompt_yn "  Delete user '$TARGET'? (y/n):" "n" CONFIRM_DELETE
+                if [[ "$CONFIRM_DELETE" =~ ^[Yy]$ ]]; then
+                    _authelia_delete_user_block "$USERS_FILE" "$START" "$END"
+                    chown 1000:1000 "$USERS_FILE" 2>/dev/null || true
+                    log_success "Deleted user '$TARGET'."
+                    DELETED=1
+                else
+                    log_info "Left as-is."
+                fi
+                ;;
             *)
-                ACTION="6"
+                ACTION="8"
                 ;;
         esac
 
-        if [[ "$ACTION" =~ ^[1245]$ ]]; then
+        if [ "$DELETED" = "1" ]; then
+            local RESTART_AUTH=""
+            prompt_yn "  Restart Authelia to apply this change? (y/n):" "y" RESTART_AUTH
+            if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
+                (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+                    && log_success "Authelia restarted" \
+                    || log_warning "Restart failed — check: docker compose logs authelia"
+            fi
+            CONTINUE="n"
+        elif [[ "$ACTION" =~ ^[12456]$ ]]; then
             local RESTART_AUTH=""
             prompt_yn "  Restart Authelia to apply this change? (y/n):" "y" RESTART_AUTH
             if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
