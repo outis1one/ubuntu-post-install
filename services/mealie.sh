@@ -253,7 +253,7 @@ _mealie_offer_authelia_oidc() {
         return 0
     fi
 
-    local _discovery_url="https://auth.${OIDC_AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    local _discovery_url="${OIDC_AUTHELIA_PORTAL_URL}/.well-known/openid-configuration"
     cat >> "$DIR/.env" << ENV
 
 # Written by services/mealie.sh's Authelia SSO step — adds "Sign in with
