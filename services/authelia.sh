@@ -1038,24 +1038,36 @@ _authelia_scope_access() {
 
     local -a existing_users
     mapfile -t existing_users < <(_authelia_list_usernames "$users_file")
+    local i
     if [ "${#existing_users[@]}" -gt 0 ]; then
-        echo "  Existing Authelia users: ${existing_users[*]}"
+        echo "  Existing Authelia users:"
+        for i in "${!existing_users[@]}"; do
+            echo "    $((i + 1))) ${existing_users[$i]}"
+        done
+        echo "  Pick by number (space-separated), and/or type new usernames directly"
+        echo "  to create them — mix freely, e.g. \"1 3 newperson\"."
     else
-        echo "  No existing Authelia users yet — anyone you list below gets created fresh."
+        echo "  No existing Authelia users yet — type usernames below to create them fresh."
     fi
-    echo "  Usernames who should have access (space-separated). Anyone listed"
-    echo "  who doesn't already have an Authelia account gets one created —"
-    echo "  you'll get their temporary password to hand over. Typos against an"
-    echo "  existing name above create a new, separate account instead of"
-    echo "  matching it, so copy from that list rather than retyping from memory."
+    echo "  Anyone typed (not picked by number) who doesn't already have an"
+    echo "  Authelia account gets one created — you'll get their temporary"
+    echo "  password to hand over."
     local raw_users=""
-    prompt_text "  Usernames:" "" raw_users
-    local -a usernames
-    read -ra usernames <<< "$raw_users"
-    if [ "${#usernames[@]}" -eq 0 ]; then
+    prompt_text "  Usernames/numbers:" "" raw_users
+    local -a raw_tokens usernames
+    read -ra raw_tokens <<< "$raw_users"
+    if [ "${#raw_tokens[@]}" -eq 0 ]; then
         log_warning "No usernames entered — leaving $domain open to all Authelia users."
         return 0
     fi
+    local t
+    for t in "${raw_tokens[@]}"; do
+        if [[ "$t" =~ ^[0-9]+$ ]] && [ "$t" -ge 1 ] && [ "$t" -le "${#existing_users[@]}" ]; then
+            usernames+=("${existing_users[$((t - 1))]}")
+        else
+            usernames+=("$t")
+        fi
+    done
 
     local u start_end start end
     for u in "${usernames[@]}"; do

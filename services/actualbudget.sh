@@ -219,7 +219,20 @@ _actualbudget_offer_authelia_oidc() {
 
     [ -d "$DOCKER_DIR/authelia" ] || return 0
     declare -F _authelia_provision_oidc_client >/dev/null 2>&1 || return 0
-    grep -q '^ACTUAL_OPENID_DISCOVERY_URL=' "$DIR/.env" 2>/dev/null && return 0
+
+    # Confirmed live: a silent skip here (just `return 0`, no output) looked
+    # indistinguishable from the whole SSO step not running at all — a rerun
+    # against an .env that already had these vars (even from an earlier
+    # attempt that didn't fully complete) produced zero output, no prompt,
+    # nothing. Always say something instead, and offer to redo it.
+    if grep -q '^ACTUAL_OPENID_DISCOVERY_URL=' "$DIR/.env" 2>/dev/null; then
+        echo ""
+        log_info "Authelia SSO is already configured for Actual Budget (ACTUAL_OPENID_* already set in $DIR/.env)."
+        local RECONFIGURE=""
+        prompt_yn "  Reconfigure it (registers a fresh Authelia client + secret)? (y/n):" "n" RECONFIGURE
+        [[ "$RECONFIGURE" =~ ^[Yy]$ ]] || return 0
+        sed -i '/^ACTUAL_OPENID_/d' "$DIR/.env"
+    fi
 
     echo ""
     local USE_SSO=""
