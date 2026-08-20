@@ -255,7 +255,11 @@ _gitea_offer_authelia_sso() {
 _gitea_offer_actions_runner() {
     local DIR="$1"
 
-    grep -q '^  act_runner:$' "$DIR/docker-compose.yml" 2>/dev/null && return 0
+    if grep -q '^  act_runner:$' "$DIR/docker-compose.yml" 2>/dev/null; then
+        log_info "Gitea Actions runner is already set up (act_runner service already in docker-compose.yml) — skipping."
+        log_info "Check its status: docker compose -f $DIR/docker-compose.yml ps act_runner"
+        return 0
+    fi
 
     echo ""
     local USE_ACTIONS=""

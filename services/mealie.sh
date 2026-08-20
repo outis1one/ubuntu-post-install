@@ -219,7 +219,18 @@ _mealie_offer_authelia_oidc() {
 
     [ -d "$DOCKER_DIR/authelia" ] || return 0
     declare -F _authelia_provision_oidc_client >/dev/null 2>&1 || return 0
-    grep -q '^OIDC_AUTH_ENABLED=' "$DIR/.env" 2>/dev/null && return 0
+
+    # Same reasoning as the equivalent check in services/actualbudget.sh: a
+    # silent `return 0` here is indistinguishable from this step not
+    # running at all. Always say something, and offer to redo it.
+    if grep -q '^OIDC_AUTH_ENABLED=' "$DIR/.env" 2>/dev/null; then
+        echo ""
+        log_info "Authelia SSO is already configured for Mealie (OIDC_* already set in $DIR/.env)."
+        local RECONFIGURE=""
+        prompt_yn "  Reconfigure it (registers a fresh Authelia client + secret)? (y/n):" "n" RECONFIGURE
+        [[ "$RECONFIGURE" =~ ^[Yy]$ ]] || return 0
+        sed -i '/^OIDC_/d' "$DIR/.env"
+    fi
 
     local BASE_URL
     BASE_URL="$(grep '^BASE_URL=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)"
