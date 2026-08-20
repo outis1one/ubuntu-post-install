@@ -1736,7 +1736,16 @@ _authelia_provision_oidc_client() {
     # reached standalone from the "already exists" menu, or from another
     # service entirely, with none of install_authelia()'s own locals ever
     # having run this session).
-    OIDC_AUTHELIA_DOMAIN="$(awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}' "$CONFIG_FILE")"
+    # tr -d '\r' first, not after — a CRLF-tainted config (e.g. a line
+    # hand-edited by something that saves Windows line endings) makes every
+    # line-anchored awk pattern below fail to match at all, not just leave a
+    # stray \r in the captured value: "  cookies:\r" doesn't match
+    # /^  cookies:$/ since $ anchors end-of-string and the \r is still part
+    # of it. Confirmed live: this exact case produced a "line 12: unexpected
+    # character '/' in variable name" failure in Mealie's .env once a
+    # \r-tainted authelia_url value got concatenated with more text after
+    # it — Docker Compose's env parser treats a bare \r as a line break too.
+    OIDC_AUTHELIA_DOMAIN="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /domain:/{print $3; exit}')"
     if [ -z "$OIDC_AUTHELIA_DOMAIN" ]; then
         log_warning "Couldn't determine this Authelia instance's domain from $CONFIG_FILE — aborting."
         return 1
@@ -1746,7 +1755,7 @@ _authelia_provision_oidc_client() {
     # "auth." prefix — see the OIDC_AUTHELIA_PORTAL_URL out-param comment
     # above for why this can't be hardcoded. Falls back to the "auth."
     # default only if parsing somehow comes up empty.
-    OIDC_AUTHELIA_PORTAL_URL="$(awk '/^  cookies:$/{f=1; next} f && /authelia_url:/{print $2; exit}' "$CONFIG_FILE")"
+    OIDC_AUTHELIA_PORTAL_URL="$(tr -d '\r' < "$CONFIG_FILE" | awk '/^  cookies:$/{f=1; next} f && /authelia_url:/{print $2; exit}')"
     [ -z "$OIDC_AUTHELIA_PORTAL_URL" ] && OIDC_AUTHELIA_PORTAL_URL="https://auth.${OIDC_AUTHELIA_DOMAIN}"
 
     # A stale registration (e.g. from the interactive "Register an app" menu
