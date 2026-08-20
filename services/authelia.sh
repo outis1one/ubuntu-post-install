@@ -1036,9 +1036,18 @@ _authelia_scope_access() {
     prompt_text "  Choice [1/2]:" "1" scope_choice
     [ "$scope_choice" = "2" ] || return 0
 
+    local -a existing_users
+    mapfile -t existing_users < <(_authelia_list_usernames "$users_file")
+    if [ "${#existing_users[@]}" -gt 0 ]; then
+        echo "  Existing Authelia users: ${existing_users[*]}"
+    else
+        echo "  No existing Authelia users yet — anyone you list below gets created fresh."
+    fi
     echo "  Usernames who should have access (space-separated). Anyone listed"
     echo "  who doesn't already have an Authelia account gets one created —"
-    echo "  you'll get their temporary password to hand over."
+    echo "  you'll get their temporary password to hand over. Typos against an"
+    echo "  existing name above create a new, separate account instead of"
+    echo "  matching it, so copy from that list rather than retyping from memory."
     local raw_users=""
     prompt_text "  Usernames:" "" raw_users
     local -a usernames
