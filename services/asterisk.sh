@@ -1975,12 +1975,30 @@ _asterisk_run_stack_health_check() {
     # upstream (lib/common.sh) checks the Caddyfile directly instead, and a
     # found gap points at that service's own reinstall rather than trying
     # to script a fix here for config this file doesn't own.
+    #
+    # This box's local Caddyfile is the only thing checkable from here —
+    # any of these three can instead be fronted by a Caddy (and Authelia)
+    # on a completely different box, the same remote-Caddy pattern
+    # sms-inbound.sh and ntfy.sh's own installers already support (see
+    # CADDY_MODE/CADDY_REMOTE_HOST in the site config). "Not found in the
+    # local Caddyfile" only COUNTS as an issue when the site is actually
+    # configured for local Caddy — the same resolution those installers use.
+    # In remote (or no-Caddy) mode it's expected, not broken: reported
+    # informationally, with no fix offered, since guessing wrong here would
+    # add a redundant/conflicting local block for something deliberately
+    # fronted elsewhere.
+    local _SITE_CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_SITE_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _SITE_CADDY_MODE="local"
+    [ "$_SITE_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _SITE_CADDY_MODE="remote"
+
     if declare -F caddy_domain_for_upstream >/dev/null 2>&1; then
         if [[ -f /opt/security-dashboard/app.py ]]; then
             local _SD_DOMAIN
             _SD_DOMAIN="$(caddy_domain_for_upstream "host.docker.internal:8092")"
             if [[ -n "$_SD_DOMAIN" ]]; then
                 log_success "✓ Security Dashboard: Caddy serving it at ${_SD_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— Security Dashboard: no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
             else
                 ISSUES_FOUND=$((ISSUES_FOUND + 1))
                 log_warning "✗ Security Dashboard is installed, but Caddy has no site block for it."
@@ -2004,6 +2022,8 @@ _asterisk_run_stack_health_check() {
                 log_warning "  Re-run 'sudo ./setup.sh sms-inbound' and choose \"f) Full reinstall\" to be asked for it (needs DNS pointed here first)."
             elif [[ -n "$(caddy_domain_for_upstream "host.docker.internal:${SMS_RELAY_PORT}")" ]]; then
                 log_success "✓ sms-inbound: Caddy serving the webhook at ${SMS_RELAY_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— sms-inbound: no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
             else
                 ISSUES_FOUND=$((ISSUES_FOUND + 1))
                 log_warning "✗ sms-inbound has a domain set (${SMS_RELAY_DOMAIN}), but Caddy has no site block for it."
@@ -2020,6 +2040,8 @@ _asterisk_run_stack_health_check() {
             _NTFY_DOMAIN="$(caddy_domain_for_upstream "${_ntfy_container}:80")"
             if [[ -n "$_NTFY_DOMAIN" ]]; then
                 log_success "✓ ntfy (${_ntfy_container}): Caddy serving it at ${_NTFY_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— ntfy (${_ntfy_container}): no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
             else
                 ISSUES_FOUND=$((ISSUES_FOUND + 1))
                 log_warning "✗ ntfy (${_ntfy_container}) is installed, but Caddy has no site block for it."
