@@ -35,6 +35,7 @@ install_ai-stack() {
         echo "[DRY-RUN] Would optionally collect cloud LLM provider keys (Groq/DeepInfra/OpenAI/OpenRouter)"
         echo "[DRY-RUN] Would run the app installer local-ai-setup.sh (Docker/NVIDIA toolkit, VRAM-aware models, generates compose/.env, starts stack, registers systemd 'local-ai')"
         echo "[DRY-RUN] Would offer an optional vision-capable model to pull (moondream/llava/qwen2.5vl/llama3.2-vision) via the generated pull-models.sh"
+        echo "[DRY-RUN] Would offer to stop optional services not wanted (Gitea/Portainer/Kiwix/InvokeAI/ComfyUI/Aider) after the full stack starts"
         echo "[DRY-RUN] Would wire cloud providers into Open WebUI (OPENAI_API_BASE_URLS) preserving the local RAG connection"
         echo "[DRY-RUN] Would write gpu-mode.sh and optionally enable the GPU switcher (one small GPU shared by Ollama and InvokeAI/ComfyUI)"
         echo "[DRY-RUN] Would attach Open WebUI to caddy_net and configure Caddy (open-webui:8080, host port 3000)"
@@ -134,6 +135,82 @@ install_ai-stack() {
     # fails with "Permission denied" on any file the first root-run created,
     # e.g. requirements.txt.
     ensure_docker_dir_ownership "$AS_DIR"
+
+    # ── Optional services — not everyone wants the whole stack running ────────
+    # local-ai-setup.sh above always generates and starts every service in the
+    # stack unconditionally — Ollama/Open WebUI/ChromaDB/RAG/MCP (the core) plus
+    # Gitea, Portainer, Kiwix, InvokeAI, ComfyUI, and Aider. Several of those
+    # are genuinely optional depending on the box — e.g. Gitea when you already
+    # run git elsewhere, or Portainer when you manage Docker some other way.
+    # Rather than make local-ai-setup.sh's own compose generation conditional
+    # (risky: it's vendored upstream code, and other services reference these
+    # by container name/network in ways that would need auditing one by one),
+    # just stop the ones not wanted after the fact — images are already pulled
+    # either way, and `docker compose up -d <name>` brings any of them back
+    # later with no reinstall needed. User feedback: wanted this choice instead
+    # of always getting the full stack.
+    if [ "$INSTALLER_RAN" = true ]; then
+        echo ""
+        log_info "The full stack is running. Some of these are genuinely optional —"
+        log_info "stop the ones you don't need (start any of them again later with"
+        log_info "'docker compose up -d <service>', no reinstall required):"
+        echo ""
+        echo "    1) Gitea         — skip if you already run git elsewhere"
+        echo "    2) Portainer     — skip if you manage Docker some other way"
+        echo "    3) Kiwix         — offline Wikipedia/docs server"
+        echo "    4) InvokeAI      — image generation (SD/SDXL/Flux)"
+        echo "    5) ComfyUI       — image generation (node-based)"
+        echo "    6) Aider         — AI pair-programming CLI"
+        echo "    7) RAG/MCP stack — ChromaDB + rag-server + mcp-server, for Open WebUI's"
+        echo "                       RAG tab and MCP tool-calling. Skip if you don't use"
+        echo "                       those — plain Ollama chat in Open WebUI (and anything"
+        echo "                       else, like Mealie, talking to Ollama directly) works"
+        echo "                       fine without this; only that one tab needs it."
+        echo ""
+        local STOP_CHOICES=""
+        prompt_text "Stop which of these? (space-separated numbers, blank to keep everything running):" "" STOP_CHOICES
+        local _s _svc
+        declare -a _TO_STOP=()
+        local _stopping_kiwix=false
+        for _s in $STOP_CHOICES; do
+            case "$_s" in
+                1) _TO_STOP+=("gitea") ;;
+                2) _TO_STOP+=("portainer") ;;
+                3) _TO_STOP+=("kiwix"); _stopping_kiwix=true ;;
+                4) _TO_STOP+=("invokeai") ;;
+                5) _TO_STOP+=("comfyui") ;;
+                6) _TO_STOP+=("aider") ;;
+                # Bundled, not three separate numbers: mcp-server depends_on
+                # rag-server which depends_on chromadb, so stopping only one
+                # of the three leaves the others running against a dead
+                # dependency instead of a clean, fully-stopped chain.
+                7) _TO_STOP+=("mcp-server" "rag-server" "chromadb") ;;
+                *) log_warning "Ignoring unknown choice '$_s'"; continue ;;
+            esac
+        done
+        # mcp-server also depends_on kiwix (not just rag-server) — stopping
+        # kiwix without also stopping mcp-server leaves it running against a
+        # dependency that's down, the same inconsistent state option 7 above
+        # is written to avoid. Cascade automatically rather than trust the
+        # user to notice the same rule applies here too.
+        if [ "$_stopping_kiwix" = true ] && [[ ! " ${_TO_STOP[*]} " == *" mcp-server "* ]]; then
+            log_info "Kiwix is also a dependency of mcp-server — stopping that too."
+            _TO_STOP+=("mcp-server")
+        fi
+        if [ ${#_TO_STOP[@]} -gt 0 ]; then
+            # Dedupe in case option 7 and the kiwix cascade both added mcp-server.
+            local -a _TO_STOP_UNIQUE=()
+            local _seen=" "
+            for _svc in "${_TO_STOP[@]}"; do
+                [[ "$_seen" == *" $_svc "* ]] && continue
+                _TO_STOP_UNIQUE+=("$_svc")
+                _seen+="$_svc "
+            done
+            (cd "$AS_DIR" && docker compose stop "${_TO_STOP_UNIQUE[@]}") \
+                && log_success "Stopped: ${_TO_STOP_UNIQUE[*]} (images still pulled — bring any back with: docker compose up -d <name>)" \
+                || log_warning "Couldn't stop one or more services — check: docker compose ps"
+        fi
+    fi
 
     # ── Wire cloud providers into the generated compose ───────────────────────
     if [ ${#CLOUD_NAMES[@]} -gt 0 ] && [ -f "$AS_DIR/docker-compose.yml" ]; then
