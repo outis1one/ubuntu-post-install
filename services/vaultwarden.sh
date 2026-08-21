@@ -225,6 +225,22 @@ register_service vaultwarden utilities "Bitwarden-compatible password manager (V
 # live. Called right before every `docker compose up` this file does, not
 # just at install time, so it self-heals regardless of how the box got into
 # this state.
+# Vaultwarden requires DOMAIN to include an http(s):// scheme — a bare
+# hostname crash-loops the container. Called at the same two sites as
+# _vaultwarden_fix_smtp_halfstate() below, so a box whose .env got a
+# scheme-less DOMAIN written before this fix existed (or hand-edited since)
+# self-heals on its next start instead of staying stuck forever.
+_vaultwarden_fix_domain_scheme() {
+    local env_file="$1"
+    [ -f "$env_file" ] || return 0
+    local domain
+    domain="$(grep '^DOMAIN=' "$env_file" 2>/dev/null | cut -d= -f2-)"
+    if [ -n "$domain" ] && [[ "$domain" != http://* && "$domain" != https://* ]]; then
+        log_warning "DOMAIN in $env_file is missing an http(s):// scheme ('$domain') — Vaultwarden requires one to start. Adding https:// automatically."
+        sed -i "s#^DOMAIN=.*#DOMAIN=https://${domain}#" "$env_file"
+    fi
+}
+
 _vaultwarden_fix_smtp_halfstate() {
     local env_file="$1"
     [ -f "$env_file" ] || return 0
@@ -298,6 +314,7 @@ install_vaultwarden() {
                 case "$MODE" in
                     update)
                         log_info "Refreshing the Vaultwarden image only — existing config, port, and Caddy setup are left as-is."
+                        _vaultwarden_fix_domain_scheme "$VW_DIR/.env"
                         _vaultwarden_fix_smtp_halfstate "$VW_DIR/.env"
                         ( cd "$VW_DIR" && docker compose pull && docker compose up -d ) \
                             && log_success "Vaultwarden image refreshed" \
@@ -336,6 +353,15 @@ install_vaultwarden() {
     local DEFAULT_DOMAIN="https://vault${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}.${SITE_DOMAIN:-example.com}"
     prompt_text "Vaultwarden public URL (e.g. https://vault.example.com):" "$DEFAULT_DOMAIN" VW_DOMAIN
     [ -z "$VW_DOMAIN" ] && VW_DOMAIN="$DEFAULT_DOMAIN"
+    # Vaultwarden requires DOMAIN to include a URL scheme — a bare hostname
+    # (typing "vault.example.com" instead of "https://vault.example.com" at
+    # the prompt above, easy to do despite the example text showing the
+    # scheme) crash-loops the container with no clear startup error.
+    # Confirmed live. Normalize rather than trust free-form input.
+    if [[ "$VW_DOMAIN" != http://* && "$VW_DOMAIN" != https://* ]]; then
+        log_warning "No http(s):// scheme on '$VW_DOMAIN' — Vaultwarden requires one. Prefixing with https://."
+        VW_DOMAIN="https://$VW_DOMAIN"
+    fi
 
     echo ""
     echo "  SMTP (optional) — for password-reset and invite emails."
@@ -487,6 +513,7 @@ MD
     local START_VW=""
     prompt_yn "Start Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} now? (y/n):" "y" START_VW
     if [ "$START_VW" = "y" ] || [ "$START_VW" = "Y" ]; then
+        _vaultwarden_fix_domain_scheme "$VW_DIR/.env"
         _vaultwarden_fix_smtp_halfstate "$VW_DIR/.env"
         docker compose up -d \
             && log_success "Vaultwarden${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)} started" \
