@@ -68,12 +68,13 @@ install_ai-stack() {
     log_info "  2) DeepInfra   Cheapest host for open models, zero-retention. Key: https://deepinfra.com/dash/api_keys"
     log_info "  3) OpenAI      GPT-5.x, o-series, gpt-image. Key: https://platform.openai.com/api-keys"
     log_info "  4) OpenRouter  One key, 300+ models. Key: https://openrouter.ai/keys"
+    log_info "  0) Skip — stay fully local"
     echo ""
-    log_info "  Example: '1 2' wires Groq + DeepInfra. Leave blank to stay fully local."
+    log_info "  Example: '1 2' wires Groq + DeepInfra."
     echo ""
 
     local CLOUD_CHOICES=""
-    prompt_text "Cloud providers to add []:" "" CLOUD_CHOICES
+    prompt_text "Cloud providers to add (0 or blank = skip, stay fully local):" "" CLOUD_CHOICES
 
     # Parallel arrays: display name, OpenAI-compatible base URL, and entered key
     declare -a CLOUD_NAMES=() CLOUD_URLS=() CLOUD_KEYS=()
@@ -81,6 +82,7 @@ install_ai-stack() {
     for _c in $CLOUD_CHOICES; do
         _cname="" ; _curl=""
         case "$_c" in
+            0) continue ;;
             1) _cname="Groq";       _curl="https://api.groq.com/openai/v1" ;;
             2) _cname="DeepInfra";  _curl="https://api.deepinfra.com/v1/openai" ;;
             3) _cname="OpenAI";     _curl="https://api.openai.com/v1" ;;
