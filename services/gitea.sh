@@ -240,6 +240,92 @@ _gitea_offer_authelia_sso() {
     declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "gitea" "$GITEA_OIDC_DOMAIN"
 }
 
+# Offers Gitea's OTHER Authelia integration — not the OIDC button above, but
+# ENABLE_REVERSE_PROXY_AUTHENTICATION: Gitea auto-logs in as whatever user
+# name arrives in a trusted header, no click and no separate Gitea session
+# to expire on its own schedule. This is genuinely stronger than the OIDC
+# button (which still shows a login page, just with an extra option on it)
+# and matches the pattern services/frigate.sh uses — except Gitea's own
+# login form stays available as a fallback for anyone NOT arriving from a
+# trusted source, so there's no "native login disabled with nothing gating
+# it" failure mode to guard against here the way Frigate's had.
+#
+# The security boundary is REVERSE_PROXY_TRUSTED_PROXIES, not a shared
+# secret: Gitea only honors the identity header from source IPs inside that
+# range. Gitea's own Docker image shipped this wildcarded (GHSA-f75j-4cw6-
+# rmx4 — any IP could set X-WEBAUTH-USER and log in as anyone), so this is
+# always computed from caddy_net's real subnet (same lookup
+# ufw_allow_from_caddy_net uses) and refuses to enable the feature at all if
+# that can't be determined — never falls back to a permissive default.
+#
+# Requires Gitea to actually be reachable from an address inside that range,
+# which means joining caddy_net like every other locally-Caddy-fronted
+# service in this repo (Gitea currently reaches Caddy via its published
+# host port instead — host.docker.internal upstream — because it predates
+# this feature). Local Caddy only: a remote Caddy machine's source address
+# isn't a stable, narrowly-scopeable range the way caddy_net's bridge subnet
+# is, so this skips remote mode rather than guess at a trust range worth
+# getting wrong.
+_gitea_offer_reverse_proxy_auth() {
+    local DIR="$1"
+
+    [ -d "$DOCKER_DIR/authelia" ] || return 0
+    [ -d "$DOCKER_DIR/caddy" ] || return 0
+
+    if grep -q 'ENABLE_REVERSE_PROXY_AUTHENTICATION=true' "$DIR/docker-compose.yml" 2>/dev/null; then
+        log_info "Gitea's zero-click Authelia login (reverse-proxy auth) is already enabled — skipping."
+        return 0
+    fi
+
+    echo ""
+    local USE_RP=""
+    prompt_yn "  Skip Gitea's own login entirely for anyone arriving via Authelia — fully transparent, no click, no separate Gitea session to re-expire? Rewires Gitea onto Caddy's internal network (Caddy must be on this same machine). (y/n):" "n" USE_RP
+    [[ "$USE_RP" =~ ^[Yy]$ ]] || return 0
+
+    local _subnet
+    _subnet="$(docker network inspect "${SITE_CADDY_NET:-caddy_net}" \
+        --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null)"
+    if [ -z "$_subnet" ]; then
+        log_warning "Couldn't determine ${SITE_CADDY_NET:-caddy_net}'s subnet — refusing to enable"
+        log_warning "reverse-proxy auth without a scoped trust range. An unscoped default lets ANY"
+        log_warning "client impersonate ANY Gitea user via a spoofed header (this was a real Gitea"
+        log_warning "CVE — GHSA-f75j-4cw6-rmx4). Skipping."
+        return 1
+    fi
+
+    log_info "Wiring Gitea onto caddy_net and enabling reverse-proxy authentication..."
+    sed -i "/GITEA__security__INSTALL_LOCK=true/a\\      - GITEA__service__ENABLE_REVERSE_PROXY_AUTHENTICATION=true\\n      - GITEA__service__ENABLE_REVERSE_PROXY_AUTO_REGISTRATION=true\\n      - GITEA__service__ENABLE_REVERSE_PROXY_EMAIL=true\\n      - GITEA__security__REVERSE_PROXY_AUTHENTICATION_USER=Remote-User\\n      - GITEA__security__REVERSE_PROXY_AUTHENTICATION_EMAIL=Remote-Email\\n      - GITEA__security__REVERSE_PROXY_TRUSTED_PROXIES=${_subnet}" \
+        "$DIR/docker-compose.yml"
+    cat >> "$DIR/docker-compose.yml" << EOF
+    networks:
+      - caddy_net
+
+networks:
+  caddy_net:
+    external: true
+    name: ${SITE_CADDY_NET:-caddy_net}
+EOF
+
+    _gitea_fix_ownership "$DIR"
+    (cd "$DIR" && docker compose up -d) \
+        && log_success "Gitea restarted on caddy_net (trusted range: ${_subnet})." \
+        || { log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"; return 1; }
+
+    # Re-point Caddy at the container (gitea:3000, now reachable over
+    # caddy_net) instead of the host-published port, with the auth gate in
+    # front. This replaces the plain block set up earlier in this install —
+    # configure_caddy_for_service's own "already exists — overwrite?" prompt
+    # covers that; nothing here bypasses it.
+    configure_caddy_for_service "Gitea" "gitea:3000" "git" "    import authelia"
+    if [ "${CADDY_SERVICE_CONFIGURED:-false}" = true ]; then
+        log_success "Gitea now signs in transparently via Authelia at https://${CADDY_SERVICE_DOMAIN} — its own login page is still there for anyone reaching it another way."
+        declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "gitea" "$CADDY_SERVICE_DOMAIN"
+    else
+        log_warning "Caddy wasn't reconfigured — env vars are set, but nothing is routing Gitea through Authelia yet."
+        log_warning "Point Gitea's Caddy entry at gitea:3000 (not the old host.docker.internal upstream) with 'import authelia' in front, or just re-run this offer."
+    fi
+}
+
 # Offers to enable Gitea Actions (Gitea's own CI, largely GitHub-Actions-
 # workflow-compatible) with a local runner — mainly useful as a fallback so
 # .gitea/workflows/*.yml can still run something like a GitHub Actions build
@@ -445,6 +531,8 @@ install_gitea() {
         echo "[DRY-RUN]   to install a systemd timer for automatic sync, or print manual instructions"
         echo "[DRY-RUN] Would offer to run a sync now (dry-run preview or for real), off-schedule"
         echo "[DRY-RUN] Would offer \"Sign in with Authelia\" (OIDC) if Authelia is installed"
+        echo "[DRY-RUN] Would offer zero-click Authelia login (reverse-proxy auth) if Authelia"
+        echo "[DRY-RUN]   and local Caddy are both installed — rewires Gitea onto caddy_net"
         echo "[DRY-RUN] Would offer to enable Gitea Actions (CI) with a local act_runner container"
         echo "[DRY-RUN] Would write $DIR/README.md"
         return 0
@@ -473,6 +561,7 @@ install_gitea() {
                     || log_warning "Restart failed — check: docker compose -f $DIR/docker-compose.yml logs"
                 _gitea_run_sync_direction_step "$DIR"
                 _gitea_offer_authelia_sso "$DIR"
+                _gitea_offer_reverse_proxy_auth "$DIR"
                 _gitea_offer_actions_runner "$DIR"
                 log_success "Existing .env (tokens) and web/SSH ports were left untouched."
                 return 0
@@ -643,6 +732,7 @@ ENV
     configure_caddy_for_service "Gitea" "host.docker.internal:${WEB_PORT}" "git"
 
     _gitea_offer_authelia_sso "$DIR"
+    _gitea_offer_reverse_proxy_auth "$DIR"
     _gitea_offer_actions_runner "$DIR"
 
     write_readme "$DIR" << MD
@@ -684,6 +774,21 @@ fine — this doesn't touch tokens or anything else) and answer yes to
 on Gitea's own login page. Local admin login keeps working exactly as
 before — this is additive, not a replacement. Managed in Gitea under
 Site Administration -> Authentication Sources (source name: \`authelia\`).
+
+## Zero-click Authelia login (optional, stronger)
+
+A second, separate Authelia integration: instead of an extra button on
+Gitea's login page, Gitea auto-logs in as whoever Authelia says you are —
+no click, and no separate Gitea session that can expire on its own and
+force a re-login later. Re-run \`sudo ./setup.sh gitea\` (Update mode) and
+answer yes to the "Skip Gitea's own login entirely..." prompt. Requires
+Authelia and Caddy on this same machine — it moves Gitea onto Caddy's
+internal Docker network (\`caddy_net\`) and Gitea only trusts the identity
+header from that network's address range, not from the internet or from
+its own host-published port. Gitea's own login page keeps working for
+anyone who reaches it any other way (e.g. directly on its port). New
+users arriving this way get an ordinary (non-admin) Gitea account created
+automatically the first time they show up.
 
 ## Gitea Actions (CI) — optional local runner
 

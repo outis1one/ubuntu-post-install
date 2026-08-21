@@ -502,6 +502,56 @@ reinstall (from `.env` via `ENV_MAP`, the same array `_frigate_parse_existing`
 already builds) rather than rotating it and breaking the existing Caddy
 pairing.
 
+**`gitea` and `uptimekuma` — two more "disable/bypass built-in login,
+Authelia is the only gate" integrations, each with its own trust model.**
+Both are opt-in extras layered on top of the has-built-in-auth entries
+those services already had; neither replaces the existing behavior for
+anyone who doesn't ask for it.
+
+- `gitea`'s `_gitea_offer_reverse_proxy_auth()` is a *second*, stronger
+  Authelia integration alongside the OIDC "Sign in with Authelia" button
+  (`_gitea_offer_authelia_sso()`, unchanged): Gitea's own
+  `ENABLE_REVERSE_PROXY_AUTHENTICATION` mode auto-logs in as whatever
+  username arrives in a trusted header — no click, no separate Gitea
+  session with its own expiry. Unlike Frigate, Gitea's own login page
+  isn't disabled — it stays as a fallback for anyone not arriving through
+  the trusted path, so there's no "native login off with nothing gating
+  it" failure mode to guard against here. The trust boundary is
+  `REVERSE_PROXY_TRUSTED_PROXIES` (an IP range), not a shared secret —
+  Gitea's own Docker image has shipped this wildcarded before (a real CVE,
+  GHSA-f75j-4cw6-rmx4: any source IP could set `X-WEBAUTH-USER` and log in
+  as anyone), so this always computes the range from caddy_net's actual
+  subnet (`docker network inspect ... --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`,
+  the same lookup `ufw_allow_from_caddy_net` uses) and refuses to enable
+  the feature at all if that can't be determined — never falls back to a
+  permissive default. `REVERSE_PROXY_AUTHENTICATION_USER`/`_EMAIL` are set
+  to `Remote-User`/`Remote-Email` to match Authelia's `import authelia`
+  snippet's own `copy_headers` output directly, rather than renaming
+  headers in Caddy to match Gitea's own `X-WEBAUTH-USER` default. Gitea
+  currently reaches Caddy over its published host port
+  (`host.docker.internal:PORT`), not caddy_net, because it predates this
+  feature — enabling it rewires Gitea onto caddy_net (like every other
+  locally-Caddy-fronted service) and re-points Caddy's upstream at
+  `gitea:3000`, replacing the old site block via
+  `configure_caddy_for_service`'s own existing "already exists —
+  overwrite?" prompt. Local Caddy only; a remote Caddy machine's source
+  address isn't a stable, narrowly-scopeable range the way caddy_net's
+  bridge subnet is.
+- `uptimekuma`'s equivalent is much simpler: Uptime Kuma's `DISABLE_AUTH=true`
+  env var turns its own login off *completely*, with no IP-range or secret
+  check left at all — once set, anything that can reach its port is in, no
+  questions asked. That makes it the one of these three where getting the
+  ordering wrong is worst: `services/uptimekuma.sh` only ever sets
+  `DISABLE_AUTH=true` after `configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime" "    import authelia"`
+  confirms `CADDY_SERVICE_CONFIGURED` — the same never-disable-native-auth-
+  without-a-confirmed-gate rule Frigate follows. Uptime Kuma already joined
+  caddy_net unconditionally before this (see its own `_CADDY_NET_BLOCK`),
+  so no networking change was needed here, just the env var and the
+  Authelia-gated Caddy call happening earlier (before `docker-compose.yml`
+  is written) instead of the plain unconditional call this file already
+  had at the end — which now only runs as a fallback when the Authelia
+  path wasn't used or wasn't completed.
+
 For services without built-in auth, prompt the user before calling
 `configure_caddy_for_service` and pass `import authelia` as the extra block
 if Authelia is installed and the user wants SSO protection:
