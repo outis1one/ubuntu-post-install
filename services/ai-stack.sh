@@ -155,33 +155,59 @@ install_ai-stack() {
         log_info "stop the ones you don't need (start any of them again later with"
         log_info "'docker compose up -d <service>', no reinstall required):"
         echo ""
-        echo "    1) Gitea       — skip if you already run git elsewhere"
-        echo "    2) Portainer   — skip if you manage Docker some other way"
-        echo "    3) Kiwix       — offline Wikipedia/docs server"
-        echo "    4) InvokeAI    — image generation (SD/SDXL/Flux)"
-        echo "    5) ComfyUI     — image generation (node-based)"
-        echo "    6) Aider       — AI pair-programming CLI"
+        echo "    1) Gitea         — skip if you already run git elsewhere"
+        echo "    2) Portainer     — skip if you manage Docker some other way"
+        echo "    3) Kiwix         — offline Wikipedia/docs server"
+        echo "    4) InvokeAI      — image generation (SD/SDXL/Flux)"
+        echo "    5) ComfyUI       — image generation (node-based)"
+        echo "    6) Aider         — AI pair-programming CLI"
+        echo "    7) RAG/MCP stack — ChromaDB + rag-server + mcp-server, for Open WebUI's"
+        echo "                       RAG tab and MCP tool-calling. Skip if you don't use"
+        echo "                       those — plain Ollama chat in Open WebUI (and anything"
+        echo "                       else, like Mealie, talking to Ollama directly) works"
+        echo "                       fine without this; only that one tab needs it."
         echo ""
         local STOP_CHOICES=""
         prompt_text "Stop which of these? (space-separated numbers, blank to keep everything running):" "" STOP_CHOICES
         local _s _svc
         declare -a _TO_STOP=()
+        local _stopping_kiwix=false
         for _s in $STOP_CHOICES; do
-            _svc=""
             case "$_s" in
-                1) _svc="gitea" ;;
-                2) _svc="portainer" ;;
-                3) _svc="kiwix" ;;
-                4) _svc="invokeai" ;;
-                5) _svc="comfyui" ;;
-                6) _svc="aider" ;;
+                1) _TO_STOP+=("gitea") ;;
+                2) _TO_STOP+=("portainer") ;;
+                3) _TO_STOP+=("kiwix"); _stopping_kiwix=true ;;
+                4) _TO_STOP+=("invokeai") ;;
+                5) _TO_STOP+=("comfyui") ;;
+                6) _TO_STOP+=("aider") ;;
+                # Bundled, not three separate numbers: mcp-server depends_on
+                # rag-server which depends_on chromadb, so stopping only one
+                # of the three leaves the others running against a dead
+                # dependency instead of a clean, fully-stopped chain.
+                7) _TO_STOP+=("mcp-server" "rag-server" "chromadb") ;;
                 *) log_warning "Ignoring unknown choice '$_s'"; continue ;;
             esac
-            _TO_STOP+=("$_svc")
         done
+        # mcp-server also depends_on kiwix (not just rag-server) — stopping
+        # kiwix without also stopping mcp-server leaves it running against a
+        # dependency that's down, the same inconsistent state option 7 above
+        # is written to avoid. Cascade automatically rather than trust the
+        # user to notice the same rule applies here too.
+        if [ "$_stopping_kiwix" = true ] && [[ ! " ${_TO_STOP[*]} " == *" mcp-server "* ]]; then
+            log_info "Kiwix is also a dependency of mcp-server — stopping that too."
+            _TO_STOP+=("mcp-server")
+        fi
         if [ ${#_TO_STOP[@]} -gt 0 ]; then
-            (cd "$AS_DIR" && docker compose stop "${_TO_STOP[@]}") \
-                && log_success "Stopped: ${_TO_STOP[*]} (images still pulled — bring any back with: docker compose up -d <name>)" \
+            # Dedupe in case option 7 and the kiwix cascade both added mcp-server.
+            local -a _TO_STOP_UNIQUE=()
+            local _seen=" "
+            for _svc in "${_TO_STOP[@]}"; do
+                [[ "$_seen" == *" $_svc "* ]] && continue
+                _TO_STOP_UNIQUE+=("$_svc")
+                _seen+="$_svc "
+            done
+            (cd "$AS_DIR" && docker compose stop "${_TO_STOP_UNIQUE[@]}") \
+                && log_success "Stopped: ${_TO_STOP_UNIQUE[*]} (images still pulled — bring any back with: docker compose up -d <name>)" \
                 || log_warning "Couldn't stop one or more services — check: docker compose ps"
         fi
     fi
