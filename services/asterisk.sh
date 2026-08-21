@@ -2241,8 +2241,46 @@ install_asterisk() {
                 local _EXISTING_DOMAIN _EXISTING_PORT
                 _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
                 _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
+
+                # A domain was set at some point (DOMAIN_NAME in .env) but
+                # Caddy never ended up with a site block for it — declined
+                # at install time, DNS wasn't ready yet, or Caddy itself was
+                # reinstalled/reset since. "update" never re-asks the
+                # domain/networking/firewall questions (see this branch's
+                # own comment above), but leaving a configured-but-unwired
+                # domain broken forever with no way back short of a full
+                # reinstall (which rotates coturn/TURN credentials — see the
+                # "fresh" branch's own warning below) defeats the point of
+                # "update" being the safe, no-side-effects path.
+                # _asterisk_configure_caddy_public() only ever touches the
+                # Caddyfile and .env's WEB_ADMIN_AUTH_DISABLED line — never
+                # coturn, extensions, or anything a full reinstall would put
+                # at risk — so it's safe to offer here even though nothing
+                # else in "update" touches Caddy.
+                local _CADDY_JUST_CONFIGURED=false
+                if [[ -n "$_EXISTING_DOMAIN" ]] && [[ -d "$DOCKER_DIR/caddy" ]] \
+                   && ! grep -q "^${_EXISTING_DOMAIN}" "$DOCKER_DIR/caddy/Caddyfile" 2>/dev/null; then
+                    echo ""
+                    log_warning "DOMAIN_NAME (${_EXISTING_DOMAIN}) is set, but Caddy has no site"
+                    log_warning "block for it — nothing is actually serving that domain."
+                    local _FIX_CADDY=""
+                    prompt_yn "  Configure Caddy for ${_EXISTING_DOMAIN} now? (y/n):" "y" _FIX_CADDY
+                    if [[ "$_FIX_CADDY" =~ ^[Yy]$ ]]; then
+                        local _CURRENT_PUBLIC_IP=""
+                        _CURRENT_PUBLIC_IP="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
+                        [[ -z "$_CURRENT_PUBLIC_IP" ]] && _CURRENT_PUBLIC_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+                        [[ -z "$_CURRENT_PUBLIC_IP" ]] && _CURRENT_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+                        _asterisk_configure_caddy_public "$_EXISTING_DOMAIN" "${_EXISTING_PORT:-8081}" "$_CURRENT_PUBLIC_IP"
+                        _CADDY_JUST_CONFIGURED=true
+                    fi
+                fi
+
                 echo ""
-                log_success "Existing .env, firewall rules, and Caddy/Authelia config were left untouched."
+                if [[ "$_CADDY_JUST_CONFIGURED" == true ]]; then
+                    log_success "Existing .env and firewall rules were left untouched; Caddy was just configured above."
+                else
+                    log_success "Existing .env, firewall rules, and Caddy/Authelia config were left untouched."
+                fi
                 if [[ -n "$_EXISTING_DOMAIN" ]]; then
                     echo "  Web admin: https://${_EXISTING_DOMAIN}/"
                 else
