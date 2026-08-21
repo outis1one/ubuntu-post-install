@@ -596,7 +596,9 @@ services:
               capabilities: [gpu]
     healthcheck:
       test: ["CMD","ollama","list"]
-      interval: 30s; timeout: 10s; retries: 5
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -630,7 +632,9 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     healthcheck:
       test: ["CMD-SHELL","wget -qO- http://localhost:8000/api/v2/heartbeat || exit 1"]
-      interval: 15s; timeout: 5s; retries: 5
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   rag-server:
     image: python:3.11-slim
