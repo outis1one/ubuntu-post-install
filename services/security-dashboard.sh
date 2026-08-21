@@ -1956,6 +1956,79 @@ def ea_reload_voicemail():
     run_sudo(["docker", "exec", ASTERISK_EA_CONTAINER, "asterisk", "-rx", "module reload app_voicemail.so"])
 
 
+def _ea_endpoint_stanza_bounds(lines, ext):
+    """Line-index range (start, end-exclusive) of the `[ext]\\ntype=endpoint`
+    PJSIP stanza for one extension, or None if not found. pjsip.conf reuses
+    the same [ext] bracket name for three separate stanzas per device
+    (type=endpoint, type=auth, type=aor — see easy-asterisk-v0.10.0.sh's
+    add_device()), so matching on the bracket alone would land in the wrong
+    one; this only matches the occurrence immediately followed by
+    "type=endpoint", bounded by the next blank line or next [section] the
+    same way lib/common.sh's _remove_caddy_site_block is bounded for Caddy
+    blocks — never an unbounded scan past this one device's own stanza."""
+    target = "[%s]" % ext
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i].strip() == target and i + 1 < n and lines[i + 1].strip() == "type=endpoint":
+            j = i + 1
+            while j < n and lines[j].strip() != "" and not lines[j].strip().startswith("["):
+                j += 1
+            return i, j
+        i += 1
+    return None
+
+
+def _ea_set_endpoint_mailboxes(ext, enabled):
+    """Adds/updates (enabled) or removes (disabled) the extension's PJSIP
+    `mailboxes=` line, so a phone can actually SUBSCRIBE for MWI (the "new
+    voicemail" notice) on this extension.
+
+    Confirmed live: nothing anywhere in this repo or the vendored
+    easy-asterisk script ever sets this. add_device()'s own device_config
+    template (easy-asterisk-v0.10.0.sh) never writes it, and until this,
+    write_voicemail() below only ever touched voicemail.conf — so recording
+    a voicemail worked fine (voicemail.conf + the dialplan's VoiceMail()
+    call), but no phone ever actually subscribed to be told about it,
+    regardless of whether the voicemail flag was on. `mailboxes=<ext>@default`
+    matches the "default" context name voicemail.conf's [default] section
+    uses (see _asterisk_write_voicemail_conf in services/asterisk.sh) —
+    same context, just referenced from the endpoint side instead of the
+    dialplan side."""
+    path = _ea_pjsip_host_path()
+    if not path or not os.path.isfile(path):
+        return False, "No pjsip.conf found"
+    with open(path) as f:
+        lines = f.readlines()
+
+    bounds = _ea_endpoint_stanza_bounds(lines, ext)
+    if not bounds:
+        return False, "No PJSIP endpoint found for extension %s" % ext
+    start, end = bounds
+
+    existing_idx = None
+    for k in range(start, end):
+        if lines[k].lstrip().startswith("mailboxes="):
+            existing_idx = k
+            break
+
+    if enabled:
+        mailbox_line = "mailboxes=%s@default\n" % ext
+        if existing_idx is not None:
+            lines[existing_idx] = mailbox_line
+        else:
+            lines.insert(end, mailbox_line)
+    elif existing_idx is not None:
+        del lines[existing_idx]
+    else:
+        return True, ""
+
+    ok, err = ea_docker_write(EA_PJSIP_CONTAINER_PATH, "".join(lines))
+    if not ok:
+        return False, err
+    ea_reload_pjsip()
+    return True, ""
+
+
 def write_voicemail(ext, enabled):
     """Sets/clears the voicemail flag for one extension, then regenerates
     voicemail.conf and reloads app_voicemail so the change takes effect
@@ -1968,7 +2041,12 @@ def write_voicemail(ext, enabled):
     pstn-permissions.conf even after disabling — toggling it off and back on
     later reuses the same PIN instead of silently changing it on the user.
     Independent of pstn_installed() the same way messaging is: voicemail has
-    no PSTN/trunk dependency."""
+    no PSTN/trunk dependency.
+
+    Also wires up (or tears down) MWI via _ea_set_endpoint_mailboxes() — the
+    extension's PJSIP endpoint needs its own `mailboxes=` line for a phone
+    to ever be told about a new voicemail; voicemail.conf alone is only
+    enough for the recording itself, not the notification."""
     if not ASTERISK_CONFIG_DIR:
         return False, "No Asterisk install detected on this box"
     ext = str(ext).strip()
@@ -1990,6 +2068,11 @@ def write_voicemail(ext, enabled):
         return True, "Saved, but voicemail.conf couldn't be regenerated: %s" % err
 
     ea_reload_voicemail()
+
+    mok, merr = _ea_set_endpoint_mailboxes(ext, enabled)
+    if not mok:
+        return True, "Saved, but couldn't wire up the phone's voicemail notification (MWI): %s" % merr
+
     return True, "Saved"
 
 

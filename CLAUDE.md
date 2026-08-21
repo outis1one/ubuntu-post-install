@@ -191,13 +191,25 @@ pip_user_install PACKAGE...         # pip3 --user with --break-system-packages o
 ### Caddy reverse proxy
 
 ```bash
-configure_caddy_for_service "Display Name" "PORT" "default-subdomain" ["extra-block"]
+configure_caddy_for_service "Display Name" "PORT" "default-subdomain" ["extra-block"] ["reverse_proxy-extra"]
 ```
 
 Prompts the user for a domain, appends a site block to the Caddyfile, and
 reloads Caddy. No-ops silently if Caddy isn't installed. The fourth argument
-is an optional string inserted verbatim inside the Caddy site block (use it
-for `import authelia` or custom matchers).
+is an optional string inserted verbatim inside the Caddy site block, before
+`reverse_proxy` (use it for `import authelia` or custom matchers). The fifth
+argument is a different thing — an optional string inserted **inside** the
+`reverse_proxy` block itself, as sub-directives (e.g.
+`"        header_up X-Proxy-Secret abc123"`), for a backend that needs a
+header only `reverse_proxy`'s own `header_up` can set — the fourth
+argument's block runs *before* `reverse_proxy` and can't reach into it.
+`services/frigate.sh` is the reference caller: Frigate's `proxy` auth mode
+trusts `Remote-User`/`Remote-Groups` headers from Authelia's forward_auth,
+but only if a matching `X-Proxy-Secret` header is also present — otherwise
+those headers could be spoofed by a request that reaches Frigate's
+published host port directly, bypassing Caddy/Authelia entirely. Omit the
+fifth argument and the generated `reverse_proxy` line is the same bare form
+as before — every other caller is unaffected.
 
 The function places that block **before** `reverse_proxy` in the generated
 site block — don't reorder this. `forward_auth` (what `import authelia`
@@ -245,13 +257,18 @@ forward_auth https://auth.example.com {
 This only affects the remote-Authelia path — same-machine `authelia:9091`
 snippets (`services/authelia.sh`) are a single hop and don't need it.
 
-Sets two out-params (not `local` — read them after the call returns) so the
-caller can tell whether Caddy actually ended up fronting the service:
+Sets three out-params (not `local` — read them after the call returns) so
+the caller can tell whether Caddy actually ended up fronting the service:
 
 ```bash
 CADDY_SERVICE_CONFIGURED   # true/false
 CADDY_SERVICE_MODE         # "local" or "remote" (only meaningful if configured)
+CADDY_SERVICE_DOMAIN       # the domain actually configured (only meaningful if configured)
 ```
+
+`CADDY_SERVICE_DOMAIN` is what `_authelia_scope_access()` (see below) wants
+as its `DOMAIN` argument — read it right after the call instead of
+recomputing/guessing the domain a second time.
 
 Use this to skip opening a host firewall port for a service Caddy already
 fronts *locally* (it reaches the service over `host.docker.internal`, not
@@ -460,6 +477,80 @@ timelapse videos and posts them to Mattermost, so there's nothing on it
 for Authelia to protect. Removed from this list; if it grows a web UI in
 the future, add it back and wire up the same prompt other services here
 use.
+
+**`frigate` — a third pattern, neither of the two above.** Frigate *does*
+have built-in auth (username/password, `admin`/`viewer` roles, on by
+default) so it isn't "no built-in auth" — but unlike the has-built-in-auth
+list, that auth is designed to be handed off to an upstream proxy instead
+of just living alongside it. Frigate has its own `proxy` auth mode built
+specifically for Authelia/Authentik/oauth2_proxy/traefik-forward-auth:
+given trusted `Remote-User`/`Remote-Groups` headers it can skip its own
+login screen entirely (`auth.enabled: False`), rather than showing a
+second, independently-expiring login *after* Authelia's. `services/frigate.sh`
+wires this up: `import authelia` (fourth arg) plus a
+`header_up X-Proxy-Secret <secret>` (fifth arg, see
+`configure_caddy_for_service` above) into the reverse_proxy block, with
+the matching `proxy.auth_secret`/`header_map`/`default_role: admin` block
+written into `config/config.yml` — and only written at all once
+`CADDY_SERVICE_CONFIGURED` confirms Caddy actually ended up fronting the
+domain, so Frigate's own login is never disabled with nothing else in
+front of it. `default_role: admin` (default in this repo's install) means
+anyone who passes Authelia gets full access, same as the login it
+replaces; use `proxy.role_map`/Authelia groups instead if some users
+should be view-only. Reuses the same `FRIGATE_PROXY_AUTH_SECRET` on
+reinstall (from `.env` via `ENV_MAP`, the same array `_frigate_parse_existing`
+already builds) rather than rotating it and breaking the existing Caddy
+pairing.
+
+**`gitea` and `uptimekuma` — two more "disable/bypass built-in login,
+Authelia is the only gate" integrations, each with its own trust model.**
+Both are opt-in extras layered on top of the has-built-in-auth entries
+those services already had; neither replaces the existing behavior for
+anyone who doesn't ask for it.
+
+- `gitea`'s `_gitea_offer_reverse_proxy_auth()` is a *second*, stronger
+  Authelia integration alongside the OIDC "Sign in with Authelia" button
+  (`_gitea_offer_authelia_sso()`, unchanged): Gitea's own
+  `ENABLE_REVERSE_PROXY_AUTHENTICATION` mode auto-logs in as whatever
+  username arrives in a trusted header — no click, no separate Gitea
+  session with its own expiry. Unlike Frigate, Gitea's own login page
+  isn't disabled — it stays as a fallback for anyone not arriving through
+  the trusted path, so there's no "native login off with nothing gating
+  it" failure mode to guard against here. The trust boundary is
+  `REVERSE_PROXY_TRUSTED_PROXIES` (an IP range), not a shared secret —
+  Gitea's own Docker image has shipped this wildcarded before (a real CVE,
+  GHSA-f75j-4cw6-rmx4: any source IP could set `X-WEBAUTH-USER` and log in
+  as anyone), so this always computes the range from caddy_net's actual
+  subnet (`docker network inspect ... --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`,
+  the same lookup `ufw_allow_from_caddy_net` uses) and refuses to enable
+  the feature at all if that can't be determined — never falls back to a
+  permissive default. `REVERSE_PROXY_AUTHENTICATION_USER`/`_EMAIL` are set
+  to `Remote-User`/`Remote-Email` to match Authelia's `import authelia`
+  snippet's own `copy_headers` output directly, rather than renaming
+  headers in Caddy to match Gitea's own `X-WEBAUTH-USER` default. Gitea
+  currently reaches Caddy over its published host port
+  (`host.docker.internal:PORT`), not caddy_net, because it predates this
+  feature — enabling it rewires Gitea onto caddy_net (like every other
+  locally-Caddy-fronted service) and re-points Caddy's upstream at
+  `gitea:3000`, replacing the old site block via
+  `configure_caddy_for_service`'s own existing "already exists —
+  overwrite?" prompt. Local Caddy only; a remote Caddy machine's source
+  address isn't a stable, narrowly-scopeable range the way caddy_net's
+  bridge subnet is.
+- `uptimekuma`'s equivalent is much simpler: Uptime Kuma's `DISABLE_AUTH=true`
+  env var turns its own login off *completely*, with no IP-range or secret
+  check left at all — once set, anything that can reach its port is in, no
+  questions asked. That makes it the one of these three where getting the
+  ordering wrong is worst: `services/uptimekuma.sh` only ever sets
+  `DISABLE_AUTH=true` after `configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime" "    import authelia"`
+  confirms `CADDY_SERVICE_CONFIGURED` — the same never-disable-native-auth-
+  without-a-confirmed-gate rule Frigate follows. Uptime Kuma already joined
+  caddy_net unconditionally before this (see its own `_CADDY_NET_BLOCK`),
+  so no networking change was needed here, just the env var and the
+  Authelia-gated Caddy call happening earlier (before `docker-compose.yml`
+  is written) instead of the plain unconditional call this file already
+  had at the end — which now only runs as a fallback when the Authelia
+  path wasn't used or wasn't completed.
 
 For services without built-in auth, prompt the user before calling
 `configure_caddy_for_service` and pass `import authelia` as the extra block

@@ -206,6 +206,9 @@ install_uptimekuma() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would create $UPTIME_DIR"
         echo "[DRY-RUN] Would auto-scan for a free host port"
+        echo "[DRY-RUN] If Authelia is installed: would offer to protect Uptime Kuma with it —"
+        echo "[DRY-RUN]   sets DISABLE_AUTH=true (Kuma's own login off) only once Caddy's"
+        echo "[DRY-RUN]   'import authelia' gate is actually confirmed in front of it"
         return 0
     fi
 
@@ -241,6 +244,39 @@ networks:
 "
     fi
 
+    # Authelia SSO — decided (and, if accepted, wired into Caddy) before
+    # docker-compose.yml is written, so DISABLE_AUTH only ever gets set once
+    # Caddy's "import authelia" gate is actually confirmed in front of Kuma.
+    # Unlike Frigate/Gitea, Uptime Kuma with DISABLE_AUTH=true has NO
+    # internal check left at all — it's not IP-scoped (Gitea) or secret-
+    # pinned (Frigate), just fully open to whatever reaches its port, so
+    # this is the one place getting the ordering wrong is worst: a login-
+    # disabled Kuma with nothing gating it is wide open to anyone who can
+    # reach the port, not just spoofable.
+    local UPTIME_USE_AUTHELIA="n" UPTIME_ENV_BLOCK="" _uptime_caddy_done=false
+    if [ -d "$DOCKER_DIR/authelia" ]; then
+        echo ""
+        prompt_yn "Protect Uptime Kuma with Authelia SSO (disables Kuma's own login entirely)? (y/n):" "y" UPTIME_USE_AUTHELIA
+    fi
+
+    if [[ "$UPTIME_USE_AUTHELIA" =~ ^[Yy]$ ]]; then
+        configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime" "    import authelia"
+        if [ "${CADDY_SERVICE_CONFIGURED:-false}" = true ]; then
+            UPTIME_ENV_BLOCK="      - DISABLE_AUTH=true"
+            _uptime_caddy_done=true
+            declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "uptimekuma" "$CADDY_SERVICE_DOMAIN"
+        else
+            log_warning "Caddy wasn't configured — leaving Uptime Kuma's own login enabled (nothing else would be gating access)."
+        fi
+    fi
+
+    local UPTIME_ENV_SECTION=""
+    if [ -n "$UPTIME_ENV_BLOCK" ]; then
+        UPTIME_ENV_SECTION="    environment:
+${UPTIME_ENV_BLOCK}
+"
+    fi
+
     cat > docker-compose.yml << UPTIME_COMPOSE
 name: uptime-kuma
 
@@ -250,7 +286,7 @@ services:
     container_name: uptime-kuma
     hostname: uptime-kuma
     restart: unless-stopped
-    volumes:
+${UPTIME_ENV_SECTION}    volumes:
       - ./data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
@@ -282,6 +318,15 @@ Docker containers.
 If Caddy is installed, you can expose this via the prompt during install
 (see configure_caddy_for_service). Default subdomain: uptime.
 
+## Authelia SSO (optional)
+If Authelia is installed, the installer offers to protect Uptime Kuma with
+it instead of Kuma's own login — this sets \`DISABLE_AUTH=true\` (Kuma's own
+account/login screen goes away entirely) and puts Caddy's \`import authelia\`
+gate in front instead, so Authelia is the only thing checking who you are.
+This only gets set once Caddy confirms it's actually fronting the domain —
+never with nothing else gating access. Re-run \`sudo ./setup.sh uptimekuma\`
+to add or change this later.
+
 ## Manage
 \`\`\`
 cd $UPTIME_DIR
@@ -291,8 +336,11 @@ docker compose logs -f    # logs
 \`\`\`
 MD
 
-    # Configure Caddy reverse proxy before starting
-    configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime"
+    # Configure Caddy reverse proxy before starting (skip if the Authelia
+    # step above already did it)
+    if [ "$_uptime_caddy_done" != true ]; then
+        configure_caddy_for_service "Uptime Kuma" "uptime-kuma:3001" "uptime"
+    fi
 
     local START_UPTIME=""
     prompt_yn "Start Uptime Kuma now? (y/n):" "y" START_UPTIME

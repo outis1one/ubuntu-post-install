@@ -83,7 +83,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         }
 
         configure_caddy_for_service() {
-            local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}"
+            local _name="$1" _upstream="$2" _subdomain="$3" _extra="${4:-}" _rp_extra="${5:-}"
             local _caddy_dir="$DOCKER_DIR/caddy"
             local _caddyfile="$_caddy_dir/Caddyfile"
             local _display_port="${_upstream##*:}"
@@ -126,12 +126,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
                 _block_upstream="${CADDY_REMOTE_HOST}:${_display_port}"
             fi
 
+            local _rp_line="reverse_proxy ${_block_upstream}"
+            if [[ -n "$_rp_extra" ]]; then
+                _rp_line="reverse_proxy ${_block_upstream} {
+${_rp_extra}
+    }"
+            fi
+
             local _site_block
             _site_block="$(cat << CBLOCK
 
 # $_name
 ${_domain} {
-    reverse_proxy ${_block_upstream}
+    # Auth (if any) must come before reverse_proxy — see lib/common.sh's
+    # configure_caddy_for_service for why (reverse_proxy first would answer
+    # every request itself, making an auth block after it dead code).
+${_extra}
+    ${_rp_line}
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -144,7 +155,6 @@ ${_domain} {
         output file /var/log/caddy/${_domain}.log
         format json
     }
-${_extra}
 }
 CBLOCK
 )"
@@ -526,6 +536,10 @@ install_frigate() {
         echo "  - Prompt to add cameras interactively (RTSP creds go in .env)"
         echo "    or write a starter config.yml if none are added"
         echo "  - Offer a Caddy reverse proxy and to start the container"
+        echo "  - If Authelia is installed: offer to protect Frigate with it —"
+        echo "    disables Frigate's own login (auth.enabled: False) and pins a"
+        echo "    proxy.auth_secret/X-Proxy-Secret handshake so only Caddy can"
+        echo "    satisfy Frigate's proxy-auth trust"
         return 0
     fi
 
@@ -646,6 +660,51 @@ FRIGATE_COMPOSE
         mkdir -p config
         mkdir -p "$FRIGATE_MEDIA"
 
+        # Authelia SSO — decided (and, if accepted, wired into Caddy) before
+        # config.yml is written, so the auth block baked into config.yml only
+        # ever reflects a gate that's actually in place (never "native login
+        # disabled, but nothing put in front of it instead"). Frigate has its
+        # own built-in login (username/password) separate from Authelia's —
+        # left alone it would show *after* Authelia's forward_auth already
+        # gated the domain: a redundant second login, and worse, a second
+        # session that can expire independently and force a re-login on its
+        # own schedule regardless of Authelia's "remember me" duration. The
+        # proxy.auth_secret/X-Proxy-Secret handshake (pinned into the Caddy
+        # reverse_proxy block) stops that trust from being spoofed by a
+        # request that reaches Frigate's published host port directly,
+        # bypassing Caddy/Authelia entirely.
+        local FRIGATE_USE_AUTHELIA="n" FRIGATE_PROXY_SECRET="" AUTH_CONFIG_BLOCK=""
+        if [ -d "$DOCKER_DIR/authelia" ]; then
+            echo ""
+            prompt_yn "Protect Frigate with Authelia SSO (disables Frigate's own login)? (y/n):" "y" FRIGATE_USE_AUTHELIA
+        fi
+
+        if [[ "$FRIGATE_USE_AUTHELIA" =~ ^[Yy]$ ]]; then
+            FRIGATE_PROXY_SECRET="${ENV_MAP[FRIGATE_PROXY_AUTH_SECRET]:-$(generate_password 32)}"
+            configure_caddy_for_service "Frigate" "frigate:5000" "frigate" \
+                "    import authelia" \
+                "        header_up X-Proxy-Secret ${FRIGATE_PROXY_SECRET}"
+            if [ "${CADDY_SERVICE_CONFIGURED:-false}" = true ]; then
+                AUTH_CONFIG_BLOCK="auth:
+  enabled: False   # Authelia already gates the whole domain — its own login would be redundant
+
+proxy:
+  auth_secret: \"{FRIGATE_PROXY_AUTH_SECRET}\"   # must match the X-Proxy-Secret header Caddy sends
+  header_map:
+    user: remote-user
+    role: remote-groups
+  default_role: admin   # anyone who passes Authelia gets full access, same as the disabled local login did
+
+"
+                declare -F _authelia_scope_access >/dev/null 2>&1 && _authelia_scope_access "frigate" "$CADDY_SERVICE_DOMAIN"
+            else
+                log_warning "Caddy wasn't configured for Frigate — leaving Frigate's own login enabled (nothing else is gating access)."
+                FRIGATE_PROXY_SECRET=""
+            fi
+        else
+            configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
+        fi
+
         # Credentials/IPs go in .env as FRIGATE_* variables; Frigate substitutes
         # any {FRIGATE_VAR} placeholder in config.yml from its container env at
         # startup, so RTSP secrets never need to be typed into the YAML directly.
@@ -654,12 +713,12 @@ FRIGATE_COMPOSE
 
         if [ "${#CAM_NAME[@]}" -eq 0 ]; then
             # No cameras entered — write a starter config the operator edits by hand.
-            cat > config/config.yml << 'FRIGATE_CONFIG'
+            cat > config/config.yml << FRIGATE_CONFIG
 # Frigate Configuration — Docs: https://docs.frigate.video
 #
 # ⚠️  YOU MUST EDIT THIS FILE to add your cameras before starting Frigate.
 
-mqtt:
+${AUTH_CONFIG_BLOCK}mqtt:
   enabled: false   # Set to true and configure if you use Home Assistant
 
 cameras:
@@ -696,7 +755,7 @@ FRIGATE_CONFIG
 # RTSP credentials/IPs come from .env — Frigate substitutes {FRIGATE_VAR}
 # placeholders below from the container's environment at startup.
 
-mqtt:
+${AUTH_CONFIG_BLOCK}mqtt:
   enabled: false   # Set to true and configure if you use Home Assistant
 
 go2rtc:
@@ -724,6 +783,7 @@ FRIGATE_CONFIG
         cat > .env << FRIGATE_ENV
 FRIGATE_MEDIA=$FRIGATE_MEDIA
 CADDY_NET=$SITE_CADDY_NET
+FRIGATE_PROXY_AUTH_SECRET=$FRIGATE_PROXY_SECRET
 ${ENV_CAM_VARS}
 FRIGATE_ENV
         chmod 600 .env
@@ -732,7 +792,29 @@ FRIGATE_ENV
         chown -R "$ACTUAL_USER:$ACTUAL_USER" "$FRIGATE_MEDIA" 2>/dev/null || true
         log_success "Frigate configured at $FRIGATE_DIR"
 
-        configure_caddy_for_service "Frigate" "frigate:5000" "frigate"
+        local AUTH_README_SECTION=""
+        if [ -n "$AUTH_CONFIG_BLOCK" ]; then
+            AUTH_README_SECTION="
+## Authelia SSO
+Frigate's own login is disabled (\`auth.enabled: False\` in
+\`config/config.yml\`) — Authelia gates the whole domain instead via Caddy's
+\`import authelia\` plus a \`proxy.auth_secret\`/\`X-Proxy-Secret\` handshake
+(the secret lives in \`.env\` as \`FRIGATE_PROXY_AUTH_SECRET\`) so that trust
+can't be spoofed by a request that reaches Frigate's published port
+directly, bypassing Caddy.
+
+Everyone who passes Authelia gets full (admin) access to Frigate —
+adjust \`config/config.yml\`'s \`proxy.role_map\`/\`default_role\` plus
+Authelia's own group assignments if you want to give some users
+view-only access instead.
+
+To stop Authelia asking for a login again on repeat visits (e.g. from a
+phone) for as long as possible, increase its \"remember me\" session
+duration: \`sudo ./setup.sh authelia\` → \"Change 'remember me' session
+duration\" (this affects every domain that instance protects, not just
+Frigate).
+"
+        fi
 
         write_readme "$FRIGATE_DIR" << MD
 # Frigate NVR
@@ -746,7 +828,7 @@ security cameras. Detects people, cars, animals, and more.
 - Recordings: \`$FRIGATE_MEDIA\`
 - Config: \`config/config.yml\` — cameras configured during install (${#CAM_NAME[@]} total)
 - Credentials: \`.env\` — RTSP user/pass/IP per camera as FRIGATE_* variables
-
+${AUTH_README_SECTION}
 ## Manage
 \`\`\`bash
 cd $FRIGATE_DIR

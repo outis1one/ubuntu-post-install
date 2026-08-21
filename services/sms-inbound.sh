@@ -629,17 +629,11 @@ CBLOCK
 
 _sms_write_readme() {
     local _url="$1" _relay_domain="$2"
-    write_readme "$SMS_APP_DIR" << MD
-# Inbound SMS → Sipnetic (via AMI)
 
-Gets SMS sent to one of your PSTN DIDs delivered into Asterisk as a SIP
-MESSAGE, landing in Sipnetic the same way internal texting already does —
-not a push notification, a real message in the softphone.
-
-## The URL to paste into your DID provider
-
-In the provider portal, open the DID's SMS settings and paste this into the
-"Forward to URL" field (on Anveo: Phone Numbers → the DID → SMS tab, tick
+    local _url_section
+    if [ -n "$_url" ]; then
+        _url_section="In the provider portal, open the DID's SMS settings and paste this into the
+\"Forward to URL\" field (on Anveo: Phone Numbers → the DID → SMS tab, tick
 the checkbox, paste, press SAVE — RETURN discards):
 
 \`\`\`
@@ -652,7 +646,21 @@ query parameters; with the message last, everything after it can be read back
 verbatim.
 
 Treat this URL like a password — anyone holding it can trigger a message
-delivery into your Asterisk.
+delivery into your Asterisk."
+    else
+        _url_section="**Not set up yet — no public domain was entered.** Re-run \`sudo ./setup.sh sms-inbound\` and choose \"Full reinstall\" once DNS for the webhook's domain points at this box; nothing here works until then."
+    fi
+
+    write_readme "$SMS_APP_DIR" << MD
+# Inbound SMS → Sipnetic (via AMI)
+
+Gets SMS sent to one of your PSTN DIDs delivered into Asterisk as a SIP
+MESSAGE, landing in Sipnetic the same way internal texting already does —
+not a push notification, a real message in the softphone.
+
+## The URL to paste into your DID provider
+
+${_url_section}
 
 ## How delivery is decided
 
@@ -770,8 +778,24 @@ install_sms-inbound() {
                     && log_success "Relay refreshed and restarted." \
                     || log_warning "Restart failed — check: journalctl -u sms-inbound -n 50"
                 echo ""
-                log_success "Settings, Caddy and firewall rules were left untouched."
-                echo "  Provider URL: ${SMS_FORWARD_URL}"
+                # A missing/placeholder domain here means an earlier run was
+                # left with no real webhook URL (RELAY_DOMAIN entered blank,
+                # or DNS wasn't ready yet) — "update" mode never re-prompts
+                # for the domain (by design, same as every other service's
+                # non-destructive update path), so silently repeating that
+                # broken URL forever, looking like nothing is wrong, is worse
+                # than saying so plainly. Confirmed live: this is exactly
+                # what a DID provider like Anveo rejects — "<your-domain>"
+                # isn't a resolvable hostname.
+                if [[ -z "${SMS_RELAY_DOMAIN:-}" || "${SMS_FORWARD_URL:-}" == *"<your-domain>"* ]]; then
+                    log_warning "No real webhook domain was ever set for this install — the stored"
+                    log_warning "provider URL is a placeholder, not something a DID provider can use."
+                    log_warning "Re-run 'sudo ./setup.sh sms-inbound' and choose \"2) Full reinstall\""
+                    log_warning "to be asked for the domain again (needs DNS pointed at this box first)."
+                else
+                    log_success "Settings, Caddy and firewall rules were left untouched."
+                    echo "  Provider URL: ${SMS_FORWARD_URL}"
+                fi
                 echo ""
                 return 0
                 ;;
@@ -898,7 +922,14 @@ install_sms-inbound() {
         ensure_ufw_enabled
     fi
 
-    local FORWARD_URL="https://${RELAY_DOMAIN:-<your-domain>}/sms/${RELAY_TOKEN}?from=\$[from]\$&to=\$[to]\$&message=\$[message]\$"
+    # Empty (not a "<your-domain>" placeholder) when no domain was entered —
+    # a placeholder here used to get persisted to settings.env and silently
+    # re-served as-is on every later "update" run (which never re-prompts
+    # for the domain, by design), looking like a valid webhook URL right up
+    # until a DID provider like Anveo rejected it as an unresolvable host.
+    # Confirmed live.
+    local FORWARD_URL=""
+    [ -n "$RELAY_DOMAIN" ] && FORWARD_URL="https://${RELAY_DOMAIN}/sms/${RELAY_TOKEN}?from=\$[from]\$&to=\$[to]\$&message=\$[message]\$"
 
     # ── Persist settings ──────────────────────────────────────────────────────
     # Single-quoted values: this file gets `source`d again on the next
@@ -929,6 +960,14 @@ ENV
 
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""
+    if [ -z "$FORWARD_URL" ]; then
+        log_warning "Inbound SMS relay is running, but nothing can reach it yet — no domain was entered."
+        log_warning "Point an A record at this box, then re-run 'sudo ./setup.sh sms-inbound' and"
+        log_warning "choose \"2) Full reinstall\" to be asked for the domain again and get a real"
+        log_warning "\"Forward to URL\" to paste into your DID provider."
+        echo ""
+        return 0
+    fi
     log_success "Inbound SMS → Sipnetic configured."
     echo ""
     echo "  1. In your DID provider's portal, open the number's SMS settings and"

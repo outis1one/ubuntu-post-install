@@ -841,11 +841,19 @@ find_free_coturn_range() {
 }
 
 # ── Caddy reverse-proxy wiring (shared by every web service) ─────────────────
-# Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"]
+# Usage: configure_caddy_for_service "Name" "UPSTREAM" "default-subdomain" ["extra"] ["reverse_proxy-extra"]
 # UPSTREAM: container:port for caddy_net routing (e.g. "filebrowser:80"),
 #           or plain port number for localhost fallback (e.g. "8085").
+# The optional 5th arg is inserted as sub-directives *inside* the
+# reverse_proxy block itself (e.g. "        header_up X-Proxy-Secret abc123")
+# — for the rare case a backend needs a header only reverse_proxy's own
+# header_up can set, as opposed to EXTRA_CONFIG's auth-gate directives that
+# run before reverse_proxy entirely. See services/frigate.sh's Authelia
+# integration for the reference caller (pins X-Proxy-Secret so Frigate's
+# proxy-auth trust can't be spoofed by a request that reaches it directly,
+# bypassing Caddy/Authelia).
 configure_caddy_for_service() {
-    local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}"
+    local SERVICE_NAME="$1" SERVICE_UPSTREAM="$2" DEFAULT_SUBDOMAIN="$3" EXTRA_CONFIG="${4:-}" REVERSE_PROXY_EXTRA="${5:-}"
 
     # Out-params (not `local` — callers read these after the call returns) so
     # a caller can tell whether Caddy actually ended up fronting the service
@@ -941,6 +949,15 @@ configure_caddy_for_service() {
         _BLOCK_UPSTREAM="${_THIS_IP}:${_DISPLAY_PORT}"
     fi
 
+    # Bare "reverse_proxy upstream" unless a caller needs sub-directives
+    # (header_up, etc.) inside it — see the REVERSE_PROXY_EXTRA comment above.
+    local _REVERSE_PROXY_LINE="reverse_proxy ${_BLOCK_UPSTREAM}"
+    if [ -n "$REVERSE_PROXY_EXTRA" ]; then
+        _REVERSE_PROXY_LINE="reverse_proxy ${_BLOCK_UPSTREAM} {
+${REVERSE_PROXY_EXTRA}
+    }"
+    fi
+
     local _SITE_BLOCK
     _SITE_BLOCK="$(cat << CADDY_BLOCK
 
@@ -954,7 +971,7 @@ ${SERVICE_DOMAIN} {
     # after it would be dead code that never runs — full bypass regardless
     # of what the auth server's own rules say.
 ${EXTRA_CONFIG}
-    reverse_proxy ${_BLOCK_UPSTREAM}
+    ${_REVERSE_PROXY_LINE}
 
     # Security headers
     header {
