@@ -860,6 +860,27 @@ echo "Reasoning model (DeepSeek-R1 14B — optional)..."
 read -rp "Pull DeepSeek-R1:14b for planning/reasoning? [y/N]: " DR
 [[ "\${DR,,}" == "y" ]] && docker exec ollama ollama pull deepseek-r1:14b
 
+echo ""
+echo "Vision model (optional — image understanding: Mealie's \"import recipe from"
+echo "photo\", attaching images in Open WebUI chat, etc.). None of the models"
+echo "above can read an image; pick one of these if you need that:"
+echo "  1) moondream            ~1.7 GB  Moondream AI — tiny, built for CPU-only/"
+echo "                                   weak or old GPU hardware. Recommended"
+echo "                                   default if you have no GPU or a low-VRAM one."
+echo "  2) llava:7b             ~4.7 GB  General-purpose vision, moderate resources."
+echo "  3) qwen2.5vl:7b         ~6 GB    Stronger accuracy, needs more RAM/VRAM."
+echo "  4) llama3.2-vision:11b  ~7.9 GB  Meta's vision model — heaviest of these four."
+read -rp "Pull a vision model? [1-4, blank to skip]: " VM
+case "\$VM" in
+    1) docker exec ollama ollama pull moondream ;;
+    2) docker exec ollama ollama pull llava:7b ;;
+    3) docker exec ollama ollama pull qwen2.5vl:7b ;;
+    4) docker exec ollama ollama pull llama3.2-vision:11b ;;
+    "") : ;;
+    *) echo "Unrecognized choice '\$VM' — skipping. Pull manually later with:"
+       echo "  docker exec ollama ollama pull <model>" ;;
+esac
+
 echo "" && docker exec ollama ollama list
 PULLSH
 chmod +x "$BASE/pull-models.sh"
