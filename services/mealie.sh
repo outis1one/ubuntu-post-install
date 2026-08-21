@@ -442,6 +442,22 @@ MEALIE_ENV
 
     configure_caddy_for_service "Mealie${INSTANCE_SUFFIX:+ ($INSTANCE_SUFFIX)}" "${CONTAINER}:9000" "recipes${INSTANCE_SUFFIX:+-$INSTANCE_SUFFIX}"
 
+    # The domain typed at that prompt can differ from the recipes.<domain>
+    # default BASE_URL was already set to above (e.g. the user overrides it
+    # with a different subdomain). Reconcile BASE_URL to match whatever
+    # Caddy actually ended up fronting, since BASE_URL is what gets
+    # registered as the OIDC redirect URI just below — a stale BASE_URL
+    # there means Authelia rejects every login with "redirect_uri does not
+    # match any of the OAuth 2.0 Client's pre-registered redirect_uris" even
+    # though Caddy and DNS both point at the right place. Confirmed live:
+    # this is exactly what happened when the Caddy prompt was answered with
+    # a different subdomain than the auto-generated default.
+    if [ "$CADDY_SERVICE_CONFIGURED" = true ] && [ -n "$CADDY_SERVICE_DOMAIN" ] && [ "$MEALIE_BASE_URL" != "https://${CADDY_SERVICE_DOMAIN}" ]; then
+        MEALIE_BASE_URL="https://${CADDY_SERVICE_DOMAIN}"
+        sed -i "s#^BASE_URL=.*#BASE_URL=${MEALIE_BASE_URL}#" .env
+        log_info "BASE_URL updated to match the domain just configured: $MEALIE_BASE_URL"
+    fi
+
     declare -F _mealie_offer_authelia_oidc >/dev/null 2>&1 && _mealie_offer_authelia_oidc "$MEALIE_DIR" "$CONTAINER"
 
     write_readme "$MEALIE_DIR" << MD
