@@ -124,6 +124,17 @@ install_ai-stack() {
         log_info "Skipped. Run later: cd $AS_DIR && bash local-ai-setup.sh"
     fi
 
+    # local-ai-setup.sh runs as whoever invoked this wrapper — root, since
+    # setup.sh itself is run via sudo — so everything it just generated
+    # (docker-compose.yml, .env, requirements.txt, server.py, pull-models.sh,
+    # etc.) comes out root-owned. Hand it back to ACTUAL_USER unconditionally,
+    # not just on the cloud-provider path below. Confirmed live: without this,
+    # re-running local-ai-setup.sh directly later (the update path, plain user,
+    # no sudo — exactly what its own "run later" message above tells you to do)
+    # fails with "Permission denied" on any file the first root-run created,
+    # e.g. requirements.txt.
+    ensure_docker_dir_ownership "$AS_DIR"
+
     # ── Wire cloud providers into the generated compose ───────────────────────
     if [ ${#CLOUD_NAMES[@]} -gt 0 ] && [ -f "$AS_DIR/docker-compose.yml" ]; then
         # Prepend the local RAG connection so RAG keeps working, then the clouds.
