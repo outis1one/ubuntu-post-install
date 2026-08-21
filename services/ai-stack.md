@@ -39,6 +39,26 @@ bash pull-models.sh    # pull Ollama models (run once after first install)
 ```
 Also a systemd unit: `sudo systemctl {start,stop,status} local-ai`
 
+## Vision models (image understanding)
+None of the tier-selected chat/code models above can read an image. `pull-models.sh`
+offers one optional vision model at the end — pick it there, or pull one manually
+any time:
+```bash
+docker exec ollama ollama pull moondream   # or llava:7b / qwen2.5vl:7b / llama3.2-vision:11b
+```
+| Model | Size | Notes |
+|-------|------|-------|
+| `moondream` | ~1.7 GB | By Moondream AI — tiny, built for CPU-only or weak/old-GPU hardware. Best default if you don't have a real GPU. |
+| `llava:7b` | ~4.7 GB | General-purpose vision, moderate resources. |
+| `qwen2.5vl:7b` | ~6 GB | Stronger accuracy, needs more RAM/VRAM. |
+| `llama3.2-vision:11b` | ~7.9 GB | Meta's vision model — heaviest of these four. |
+
+Point any OpenAI-compatible app's vision/image-import feature (e.g. Mealie's
+"import recipe from photo") at this stack's Ollama endpoint with the pulled
+model as `OPENAI_MODEL` — see Open WebUI → Settings → Connections for the
+exact local base URL, or `docker inspect ollama` for the container's address
+on `caddy_net`/the compose network.
+
 ## Cloud LLM providers (Open WebUI)
 Open WebUI uses an OpenAI-compatible connection list. The local RAG server is the
 first entry; any cloud providers added at install follow it. Two semicolon-separated

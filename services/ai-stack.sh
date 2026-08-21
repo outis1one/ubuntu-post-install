@@ -34,6 +34,7 @@ install_ai-stack() {
         echo "[DRY-RUN] Would copy vendored source $SRC_DIR -> $AS_DIR"
         echo "[DRY-RUN] Would optionally collect cloud LLM provider keys (Groq/DeepInfra/OpenAI/OpenRouter)"
         echo "[DRY-RUN] Would run the app installer local-ai-setup.sh (Docker/NVIDIA toolkit, VRAM-aware models, generates compose/.env, starts stack, registers systemd 'local-ai')"
+        echo "[DRY-RUN] Would offer an optional vision-capable model to pull (moondream/llava/qwen2.5vl/llama3.2-vision) via the generated pull-models.sh"
         echo "[DRY-RUN] Would wire cloud providers into Open WebUI (OPENAI_API_BASE_URLS) preserving the local RAG connection"
         echo "[DRY-RUN] Would write gpu-mode.sh and optionally enable the GPU switcher (one small GPU shared by Ollama and InvokeAI/ComfyUI)"
         echo "[DRY-RUN] Would attach Open WebUI to caddy_net and configure Caddy (open-webui:8080, host port 3000)"
