@@ -416,6 +416,42 @@ _remove_caddy_site_block() {
     ' "$caddy_file"
 }
 
+# Read-only counterpart to _remove_caddy_site_block: returns (on stdout) the
+# domain of the local Caddy site block whose body contains
+# "reverse_proxy <upstream>" (same substring-match convention), or nothing
+# if there's no local Caddy, no Caddyfile, or no matching block. Never
+# modifies the Caddyfile — for services/asterisk.sh's stack health check
+# (and any future caller) to answer "is X actually wired into Caddy?"
+# without needing to already know the domain, since several services here
+# (security-dashboard, sms-inbound) never persist the domain they were
+# configured with anywhere — the Caddyfile is the only record of it.
+caddy_domain_for_upstream() {
+    local upstream="$1"
+    local caddyfile="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$caddyfile" ] || return 0
+    awk -v upstream="$upstream" '
+    BEGIN { depth = 0; candidate = ""; domain = ""; found = 0 }
+    {
+        line = $0
+        opens = gsub(/\{/, "{", line)
+        closes = gsub(/\}/, "}", line)
+        if (depth == 0 && opens > 0) {
+            header = $0
+            sub(/[[:space:]]*\{.*$/, "", header)
+            candidate = header
+            depth += opens - closes
+            next
+        }
+        if (depth > 0) {
+            if (index($0, "reverse_proxy " upstream) > 0) { found = 1; domain = candidate }
+            depth += opens - closes
+            next
+        }
+    }
+    END { if (found) print domain }
+    ' "$caddyfile"
+}
+
 # Generic per-service removal: stops/removes its containers, its Caddy site
 # block (if any), any UFW rule tagged with its name, and optionally its
 # ~/docker/<name> directory. Scoped to the common case (a Docker service
