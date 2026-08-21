@@ -73,7 +73,7 @@ install_ai-stack() {
     echo ""
 
     local CLOUD_CHOICES=""
-    prompt_text "Cloud providers to add []:" "" CLOUD_CHOICES
+    prompt_text "Cloud providers to add (blank = skip, stay fully local):" "" CLOUD_CHOICES
 
     # Parallel arrays: display name, OpenAI-compatible base URL, and entered key
     declare -a CLOUD_NAMES=() CLOUD_URLS=() CLOUD_KEYS=()
