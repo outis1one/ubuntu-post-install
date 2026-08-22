@@ -1663,115 +1663,93 @@ EOF
 _asterisk_configure_caddy_public() {
     local DOMAIN_NAME="$1" WEB_ADMIN_PORT_VAL="$2" PUBLIC_IP="$3"
 
-    WEB_ADMIN_PUBLIC_ACCESS_NEEDED=true
+    # Asterisk's own web admin is never exposed publicly by this function —
+    # see services/security-dashboard.sh's _secdash_offer_asterisk_domain
+    # for the actual public-facing use of this domain instead. This only
+    # exists to get DOMAIN_NAME a trusted Caddy-issued TLS cert for SIP TLS,
+    # via a minimal keep-alive page. Cert issuance only needs Caddy to own
+    # the domain's site block and answer the ACME challenge there — it's
+    # unrelated to what the block actually serves.
+    #
+    # An earlier version of this function reverse-proxied Asterisk's own
+    # web admin here, gated (optionally) by Authelia, with WEB_ADMIN_AUTH_DISABLED
+    # flipped to true in .env to hand auth off to it. That coupling was the
+    # root cause of a real live exposure: a box where Authelia protection
+    # was accepted once, but the Authelia import/forward_auth block itself
+    # later went missing from the Caddyfile (e.g. lost on a restore) or a
+    # remote Authelia instance became unreachable/misconfigured, was left
+    # with Asterisk's own login OFF and nothing else gating it — extension/
+    # device data sitting on the public internet with no password at all.
+    # A remote Authelia's forward_auth also proved fragile in practice
+    # (DNS/routing/access-rule mismatches that are hard to diagnose from
+    # this box alone) for something that's only ever meant to keep a
+    # domain's cert alive. A Basic Auth login handled entirely inside Caddy
+    # itself — no external subrequest, no dependency on another box being
+    # correctly configured — is simpler and can't fail this way. Asterisk's
+    # own web admin stays reachable via the CLI only:
+    # docker exec -it <container> easy-asterisk
+    #
+    # Left at the caller's own default (true) here — the web admin's raw
+    # IP:port still needs to be reachable when there's no Caddy in the
+    # picture at all to front this domain instead. Only flipped to false
+    # once we actually confirm Caddy is fronting it (below).
 
     if [[ -z "$DOMAIN_NAME" ]]; then
-        log_info "No FQDN set — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL} (nothing for Caddy to do)."
+        log_info "No FQDN set — nothing for Caddy to do (SIP TLS stays self-signed)."
         return 0
     fi
     if [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -z "${CADDY_REMOTE_HOST:-}" ]]; then
-        log_info "Caddy not installed — web admin stays on http://${PUBLIC_IP:-localhost}:${WEB_ADMIN_PORT_VAL}, SIP TLS stays self-signed."
+        log_info "Caddy not installed — SIP TLS stays self-signed."
         return 0
-    fi
-
-    local EXTRA_BLOCK=""
-    if [ -d "$DOCKER_DIR/authelia" ]; then
-        local _use_auth=""
-        prompt_yn "Protect Asterisk web admin with Authelia SSO? (y/n):" "y" _use_auth
-        if [[ "$_use_auth" =~ ^[Yy]$ ]]; then
-            EXTRA_BLOCK="    import authelia"
-            # Disable built-in auth since Authelia handles it
-            sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
-        fi
-    else
-        # No local Authelia — offer one running elsewhere (e.g. a homelab).
-        # There's no shared "(authelia)" Caddy snippet to import in that
-        # case (authelia.sh only writes one when installing locally), so
-        # this builds the same forward_auth block inline, targeting the
-        # remote instance directly instead of the local "authelia:9091"
-        # container reference.
-        local _use_remote_auth=""
-        prompt_yn "Protect the web admin with a remote Authelia instance (e.g. on a homelab)? (y/n):" "n" _use_remote_auth
-        if [[ "$_use_remote_auth" =~ ^[Yy]$ ]]; then
-            local _remote_authelia=""
-            prompt_text "  Remote Authelia address — a bare host:port over a private network (e.g. a NetBird mesh IP:9091), or a full https:// URL if it's on its own public domain+TLS:" "" _remote_authelia
-            if [[ -n "$_remote_authelia" ]]; then
-                # header_up lines are required here (unlike the local
-                # "authelia:9091" snippet in services/authelia.sh) because
-                # this upstream is reached over a second Caddy hop when
-                # given as a scheme-qualified URL (https://auth.example.com).
-                # Caddy rewrites the outgoing request's Host header to that
-                # upstream host so the remote Caddy can route/SNI-match it —
-                # and without an explicit override, X-Forwarded-Host picks up
-                # that rewritten value instead of the original site's host.
-                # Confirmed live: Authelia was evaluating every request as
-                # if it were for auth.example.com itself (which has
-                # policy: bypass in access_control.rules), so every domain
-                # silently passed through with no 2FA prompt regardless of
-                # its own policy. Pinning these to the original request's
-                # values fixes it regardless of hop count.
-                #
-                # X-Forwarded-Host uses a literal domain, NOT the {host}
-                # placeholder. Confirmed live: {host} still evaluated to
-                # the upstream's own hostname (auth.example.com) rather
-                # than the original site's — Caddy appears to rewrite the
-                # outgoing request's Host to the upstream target before
-                # header_up placeholders are resolved for a scheme-
-                # qualified upstream, so {host} echoes back the already-
-                # rewritten value instead of the original client-facing
-                # host. Since this site block only ever serves one domain
-                # (DOMAIN_NAME), hardcoding it sidesteps the ambiguity
-                # entirely instead of depending on Caddy's internal
-                # header-mutation ordering.
-                EXTRA_BLOCK="    forward_auth ${_remote_authelia} {
-        uri /api/authz/forward-auth
-        copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
-        header_up X-Forwarded-Method {method}
-        header_up X-Forwarded-Proto {scheme}
-        header_up X-Forwarded-Host ${DOMAIN_NAME}
-        header_up X-Forwarded-Uri {uri}
-    }"
-                sed -i "s/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=true/" .env
-                log_info "Using remote Authelia at ${_remote_authelia}."
-                log_info "Verify it's reachable from this box before relying on it — e.g.:"
-                log_info "  curl -I ${_remote_authelia}"
-            else
-                log_info "No address entered — skipping Authelia protection."
-            fi
-        fi
     fi
 
     echo ""
     local WANT_CADDY_PROXY=""
-    prompt_yn "Reverse-proxy the web admin at https://${DOMAIN_NAME}/ via Caddy? (also gets Asterisk a trusted TLS cert for SIP instead of self-signed) (y/n):" "y" WANT_CADDY_PROXY
+    prompt_yn "Get ${DOMAIN_NAME} a trusted TLS cert via Caddy for SIP TLS? (serves a minimal keep-alive page there — not Asterisk's own web admin, which stays reachable only via 'docker exec -it <container> easy-asterisk') (y/n):" "y" WANT_CADDY_PROXY
     [[ "$WANT_CADDY_PROXY" =~ ^[Yy]$ ]] || return 0
+
+    # Caddy is fronting this domain now either way (locally or via a remote
+    # machine) — the keep-alive page doesn't reverse_proxy to anything on
+    # this box in either mode, so the web admin's raw port never needs to
+    # be reachable from the internet for this to work.
+    WEB_ADMIN_PUBLIC_ACCESS_NEEDED=false
 
     local _CADDY_MODE="local"
     [[ ! -d "$DOCKER_DIR/caddy" ]] && [[ -n "${CADDY_REMOTE_HOST:-}" ]] && _CADDY_MODE="remote"
 
-    # Asterisk runs with network_mode: host, so whatever proxies to it
-    # needs a way to reach the host, not "localhost" (which resolves
-    # to the proxying container's own netns). A local Caddy container
-    # reaches the host via host.docker.internal (wired up in
-    # services/caddy.sh's compose file); a remote Caddy machine needs
-    # this box's actual public IP instead.
-    local _PROXY_TARGET="host.docker.internal:${WEB_ADMIN_PORT_VAL}"
-    [[ "$_CADDY_MODE" == "remote" ]] && _PROXY_TARGET="${PUBLIC_IP}:${WEB_ADMIN_PORT_VAL}"
+    # Basic Auth handled entirely by Caddy — same generate/hash pattern as
+    # services/security-dashboard.sh's own independent Basic Auth layer.
+    local BASICAUTH_BLOCK=""
+    local _use_basicauth=""
+    prompt_yn "  Add a Basic Auth login on this keep-alive page? (y/n):" "y" _use_basicauth
+    if [[ "$_use_basicauth" =~ ^[Yy]$ ]]; then
+        local BA_USER="" BA_PASS="" BA_HASH=""
+        prompt_text "  Basic Auth username [admin]:" "admin" BA_USER
+        BA_PASS="$(generate_password 20)"
+        if [[ "$_CADDY_MODE" == "local" ]]; then
+            BA_HASH="$(docker exec caddy caddy hash-password --plaintext "$BA_PASS" 2>/dev/null)"
+        fi
+        if [ -z "$BA_HASH" ]; then
+            log_warning "Could not generate the Basic Auth hash — keep-alive page will be unauthenticated."
+        else
+            BASICAUTH_BLOCK="    basicauth {
+        ${BA_USER} ${BA_HASH}
+    }
+"
+            log_success "Basic Auth username: ${BA_USER}"
+            log_success "Basic Auth password: ${BA_PASS}"
+            log_warning "Save that password now — only the bcrypt hash is written to the Caddyfile, it is not stored anywhere in plaintext."
+        fi
+    fi
 
     local _SITE_BLOCK
     _SITE_BLOCK="$(cat << CADDY_BLOCK
 
-# Asterisk Web Admin
+# Asterisk domain — keep-alive page only, for the SIP TLS cert. Asterisk's
+# own web admin is intentionally not served here — use the CLI instead:
+# docker exec -it <container> easy-asterisk
 ${DOMAIN_NAME} {
-    # Auth (if any) must come before reverse_proxy — forward_auth is the
-    # same directive family as reverse_proxy internally, and Caddy doesn't
-    # reorder repeats of the same directive within a block; it runs them in
-    # the order they're written. With reverse_proxy first, it would handle
-    # and terminate every request immediately, so an auth check written
-    # after it would be dead code that never runs — full bypass regardless
-    # of what the auth server's own rules say.
-${EXTRA_BLOCK}
-    reverse_proxy ${_PROXY_TARGET}
+${BASICAUTH_BLOCK}    respond "OK" 200
 
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -1810,10 +1788,10 @@ CADDY_BLOCK
             # actually works here. Try it anyway, fall back to a
             # restart — confirmed necessary on a real deployment.
             if docker exec caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
-                log_success "Web admin accessible at: https://${DOMAIN_NAME}"
+                log_success "Keep-alive page live at: https://${DOMAIN_NAME}"
             elif docker restart caddy &>/dev/null; then
                 log_success "Caddy restarted to apply changes (reload API is disabled by default)"
-                log_success "Web admin should be accessible at: https://${DOMAIN_NAME}"
+                log_success "Keep-alive page should be live at: https://${DOMAIN_NAME}"
             else
                 log_warning "Reload/restart failed — check: docker logs caddy"
                 log_info "Manual fix: docker restart caddy"
@@ -1826,7 +1804,8 @@ CADDY_BLOCK
         chown "$ACTUAL_USER:$ACTUAL_USER" "$_SNIPPET_DIR/asterisk.caddy" 2>/dev/null || true
         log_success "Snippet saved: $_SNIPPET_DIR/asterisk.caddy"
         log_info "Copy to your Caddy machine: scp $_SNIPPET_DIR/asterisk.caddy caddy-host:~/caddy-snippets/"
-        log_info "Remote Caddy reaches this box over its public IP, so the web admin port stays open below."
+        log_info "This is just a keep-alive page (for the cert) — the remote Caddy machine doesn't need"
+        log_info "to reach anything on this box for it, so no port needs to stay open here for this."
     fi
 }
 
