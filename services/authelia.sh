@@ -287,9 +287,17 @@ install_authelia() {
     echo "  Authelia needs a few details to configure."
     echo ""
     local CADDY_NET="${SITE_CADDY_NET:-caddy_net}"
-    local AUTHELIA_DOMAIN AUTHELIA_ADMIN_USER AUTHELIA_ADMIN_DISPLAY AUTHELIA_ADMIN_EMAIL
+    local AUTHELIA_DOMAIN AUTHELIA_PORTAL_SUBDOMAIN AUTHELIA_PORTAL_DOMAIN AUTHELIA_ADMIN_USER AUTHELIA_ADMIN_DISPLAY AUTHELIA_ADMIN_EMAIL
     local AUTHELIA_SMTP_HOST AUTHELIA_SMTP_PORT AUTHELIA_SMTP_USER AUTHELIA_SMTP_PASS AUTHELIA_TZ
     prompt_text "  Your domain (e.g., example.com):" "${SITE_DOMAIN:-example.com}" AUTHELIA_DOMAIN
+    # Subdomain the login portal itself lives on — "auth" is just the
+    # default, not a fixed convention. Every later function that needs this
+    # domain's portal (add_authelia_domain for a DIFFERENT domain's own
+    # portal, remove_authelia_domain, OIDC client registration, etc.) reads
+    # it back from configuration.yml's session.cookies authelia_url instead
+    # of assuming "auth." — see those functions for why.
+    prompt_text "  Subdomain for the login portal (e.g. 'auth' -> auth.${AUTHELIA_DOMAIN}):" "auth" AUTHELIA_PORTAL_SUBDOMAIN
+    AUTHELIA_PORTAL_DOMAIN="${AUTHELIA_PORTAL_SUBDOMAIN}.${AUTHELIA_DOMAIN}"
     prompt_text "  Admin username:" "admin" AUTHELIA_ADMIN_USER
     prompt_text "  Admin display name:" "Administrator" AUTHELIA_ADMIN_DISPLAY
     prompt_text "  Admin email:" "admin@${AUTHELIA_DOMAIN}" AUTHELIA_ADMIN_EMAIL
@@ -411,7 +419,7 @@ session:
   remember_me: 7d
   cookies:
     - domain: ${AUTHELIA_DOMAIN}
-      authelia_url: https://auth.${AUTHELIA_DOMAIN}
+      authelia_url: https://${AUTHELIA_PORTAL_DOMAIN}
       default_redirection_url: https://${AUTHELIA_DOMAIN}
 
 storage:
@@ -482,19 +490,19 @@ SNIPPET_EOF
               cat "$CADDY_FILE"; } > "$CADDY_FILE.tmp" && mv "$CADDY_FILE.tmp" "$CADDY_FILE"
             echo "  ✓ Authelia snippet added to Caddyfile"
         fi
-        if ! grep -q "auth.${AUTHELIA_DOMAIN}" "$CADDY_FILE"; then
+        if ! grep -q "${AUTHELIA_PORTAL_DOMAIN}" "$CADDY_FILE"; then
             cat >> "$CADDY_FILE" << CADDY_AUTH_BLOCK
 
 # ── Authelia login portal ──────────────────────────────────────────────────────
-auth.${AUTHELIA_DOMAIN} {
+${AUTHELIA_PORTAL_DOMAIN} {
     # header_up pins X-Forwarded-Host to whatever the client actually sent.
     # Without it, Caddy's reverse_proxy recomputes X-Forwarded-Host from its
-    # own incoming request (always auth.${AUTHELIA_DOMAIN} itself) and
+    # own incoming request (always ${AUTHELIA_PORTAL_DOMAIN} itself) and
     # overwrites the value a forward_auth caller (e.g. a remote site's
-    # "forward_auth https://auth.${AUTHELIA_DOMAIN}" block, see
+    # "forward_auth https://${AUTHELIA_PORTAL_DOMAIN}" block, see
     # services/asterisk.sh's droplet-mode Caddy block) set for its own domain. Confirmed
     # live: every forward-auth check evaluated as if it were for
-    # auth.${AUTHELIA_DOMAIN} itself (which has policy: bypass in
+    # ${AUTHELIA_PORTAL_DOMAIN} itself (which has policy: bypass in
     # access_control.rules so its own login portal isn't gated behind
     # itself), so every domain behind it silently passed through with no
     # 2FA prompt regardless of that domain's own policy.
@@ -502,16 +510,16 @@ auth.${AUTHELIA_DOMAIN} {
         header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
     }
     log {
-        output file /var/log/caddy/auth.log
+        output file /var/log/caddy/${AUTHELIA_PORTAL_DOMAIN}.log
     }
 }
 CADDY_AUTH_BLOCK
-            echo "  ✓ Authelia portal block added for auth.${AUTHELIA_DOMAIN}"
+            echo "  ✓ Authelia portal block added for ${AUTHELIA_PORTAL_DOMAIN}"
         fi
         docker ps --format '{{.Names}}' | grep -q "^caddy$" && \
             { docker exec -w /etc/caddy caddy caddy reload 2>/dev/null && echo "  ✓ Caddy reloaded" || echo "  ⚠ Reload manually after checking the Caddyfile"; }
     else
-        echo "  ℹ Caddy not installed yet — add the (authelia) snippet + auth.${AUTHELIA_DOMAIN} block to your Caddyfile later (see README)."
+        echo "  ℹ Caddy not installed yet — add the (authelia) snippet + ${AUTHELIA_PORTAL_DOMAIN} block to your Caddyfile later (see README)."
     fi
 
     # ── README for the service folder ────────────────────────────────────────
@@ -519,7 +527,7 @@ CADDY_AUTH_BLOCK
 # Authelia — SSO + 2FA portal
 
 Single login (with TOTP two-factor) that protects any Caddy subdomain via
-forward-auth. Portal: **https://auth.${AUTHELIA_DOMAIN}**
+forward-auth. Portal: **https://${AUTHELIA_PORTAL_DOMAIN}**
 
 ## Layout
 \`\`\`
@@ -573,10 +581,10 @@ registered app gets its own Client ID/Secret under
 secret is shown once at registration time and only the hash is kept.
 
 Endpoints (needed if an app asks for them instead of a discovery URL):
-- Discovery: \`https://auth.${AUTHELIA_DOMAIN}/.well-known/openid-configuration\`
-- Authorization: \`https://auth.${AUTHELIA_DOMAIN}/api/oidc/authorization\`
-- Token: \`https://auth.${AUTHELIA_DOMAIN}/api/oidc/token\`
-- UserInfo: \`https://auth.${AUTHELIA_DOMAIN}/api/oidc/userinfo\`
+- Discovery: \`https://${AUTHELIA_PORTAL_DOMAIN}/.well-known/openid-configuration\`
+- Authorization: \`https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/authorization\`
+- Token: \`https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/token\`
+- UserInfo: \`https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/userinfo\`
 
 ## Manage
 \`\`\`
@@ -624,7 +632,7 @@ README_MD
     fi
 
     echo ""
-    echo "  Auth portal:  https://auth.${AUTHELIA_DOMAIN}"
+    echo "  Auth portal:  https://${AUTHELIA_PORTAL_DOMAIN}"
     echo "  Admin login:  ${AUTHELIA_ADMIN_USER}  (use Forgot Password to set a real password)"
     echo "  README:       $AUTHELIA_DIR/README.md"
     echo ""
@@ -666,6 +674,10 @@ add_authelia_domain() {
         return 0
     fi
 
+    local NEW_PORTAL_SUBDOMAIN NEW_PORTAL_DOMAIN
+    prompt_text "  Subdomain for this domain's own login portal (e.g. 'auth' -> auth.${NEW_DOMAIN}):" "auth" NEW_PORTAL_SUBDOMAIN
+    NEW_PORTAL_DOMAIN="${NEW_PORTAL_SUBDOMAIN}.${NEW_DOMAIN}"
+
     # ── access_control.rules: insert right after "rules:" ────────────────────
     awk -v domain="$NEW_DOMAIN" '
         { print }
@@ -677,11 +689,11 @@ add_authelia_domain() {
     ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 
     # ── session.cookies: insert right after "cookies:" ────────────────────────
-    awk -v domain="$NEW_DOMAIN" '
+    awk -v domain="$NEW_DOMAIN" -v portal="$NEW_PORTAL_DOMAIN" '
         { print }
         /^  cookies:$/ && !done {
             print "    - domain: " domain
-            print "      authelia_url: https://auth." domain
+            print "      authelia_url: https://" portal
             print "      default_redirection_url: https://" domain
             done=1
         }
@@ -692,29 +704,29 @@ add_authelia_domain() {
 
     # ── Caddy portal block for the new domain ─────────────────────────────────
     if [ -f "$CADDY_FILE" ]; then
-        if ! grep -q "^auth.${NEW_DOMAIN} {" "$CADDY_FILE"; then
+        if ! grep -qx "${NEW_PORTAL_DOMAIN} {" "$CADDY_FILE"; then
             cat >> "$CADDY_FILE" << CADDY_AUTH_BLOCK2
 
 # ── Authelia login portal (${NEW_DOMAIN}) ─────────────────────────────────────
-auth.${NEW_DOMAIN} {
-    # See auth.${AUTHELIA_DOMAIN:-<original domain>}'s block above for why
-    # header_up X-Forwarded-Host is required here, not optional.
+${NEW_PORTAL_DOMAIN} {
+    # See this instance's other portal block(s) above for why header_up
+    # X-Forwarded-Host is required here, not optional.
     reverse_proxy authelia:9091 {
         header_up X-Forwarded-Host {http.request.header.X-Forwarded-Host}
     }
     log {
-        output file /var/log/caddy/auth.${NEW_DOMAIN}.log
+        output file /var/log/caddy/${NEW_PORTAL_DOMAIN}.log
     }
 }
 CADDY_AUTH_BLOCK2
-            echo "  ✓ Authelia portal block added for auth.${NEW_DOMAIN}"
+            echo "  ✓ Authelia portal block added for ${NEW_PORTAL_DOMAIN}"
             docker ps --format '{{.Names}}' | grep -q "^caddy$" && \
                 { docker exec -w /etc/caddy caddy caddy reload 2>/dev/null && echo "  ✓ Caddy reloaded" || echo "  ⚠ Reload manually: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"; }
         else
-            echo "  ✓ auth.${NEW_DOMAIN} portal block already exists in the Caddyfile"
+            echo "  ✓ ${NEW_PORTAL_DOMAIN} portal block already exists in the Caddyfile"
         fi
     else
-        echo "  ℹ Caddy not installed — add an auth.${NEW_DOMAIN} portal block manually later (see README)."
+        echo "  ℹ Caddy not installed — add a ${NEW_PORTAL_DOMAIN} portal block manually later (see README)."
     fi
 
     # ── Restart Authelia to pick up the new config ────────────────────────────
@@ -727,7 +739,7 @@ CADDY_AUTH_BLOCK2
     fi
 
     echo ""
-    echo "  Auth portal for $NEW_DOMAIN: https://auth.${NEW_DOMAIN}"
+    echo "  Auth portal for $NEW_DOMAIN: https://${NEW_PORTAL_DOMAIN}"
     echo "  Protect a service under this domain the same way as any other:"
     echo "    myservice.${NEW_DOMAIN} {"
     echo "        import authelia"
@@ -738,18 +750,21 @@ CADDY_AUTH_BLOCK2
     echo ""
 }
 
-# Removes the auth.<domain> Caddy portal block add_authelia_domain() writes —
-# same bounded-block technique used elsewhere in this repo for Caddy site
-# blocks (find the opening "<domain> {" line, walk forward to the matching
-# unindented "}"), just keyed on "auth.<domain> {" instead of a service
-# domain or a reverse_proxy marker.
+# Removes a login-portal Caddy block add_authelia_domain() writes — same
+# bounded-block technique used elsewhere in this repo for Caddy site blocks
+# (find the opening "<portal-domain> {" line, walk forward to the matching
+# unindented "}"). Takes the portal's own FULL domain, not the apex it
+# belongs to and an assumed "auth." prefix — the portal subdomain is
+# user-chosen at the time it's added (see add_authelia_domain), so it can't
+# be reconstructed from the apex alone. Callers read it back from that
+# domain's own session.cookies authelia_url entry before removing it.
 _authelia_remove_caddy_portal_block() {
-    local domain="$1"
+    local portal_domain="$1"
     local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
     [ -f "$caddy_file" ] || return 0
 
     local domain_line end_line start_line
-    domain_line="$(grep -nx "auth.${domain} {" "$caddy_file" | head -1 | cut -d: -f1)"
+    domain_line="$(grep -nx "${portal_domain} {" "$caddy_file" | head -1 | cut -d: -f1)"
     [ -z "$domain_line" ] && return 0
 
     start_line="$domain_line"
@@ -759,13 +774,13 @@ _authelia_remove_caddy_portal_block() {
 
     end_line="$(tail -n "+$domain_line" "$caddy_file" | grep -nx '}' | head -1 | cut -d: -f1)"
     if [ -z "$end_line" ]; then
-        log_warning "Could not find the end of auth.${domain}'s Caddy block — leaving it as-is."
+        log_warning "Could not find the end of ${portal_domain}'s Caddy block — leaving it as-is."
         return 1
     fi
     end_line=$((domain_line + end_line - 1))
 
     sed -i "${start_line},${end_line}d" "$caddy_file"
-    log_info "Removed the auth.${domain} Caddy portal block."
+    log_info "Removed the ${portal_domain} Caddy portal block."
     docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$" && \
         { docker exec -w /etc/caddy caddy caddy reload 2>/dev/null && log_success "Caddy reloaded" \
             || log_warning "Reload manually: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"; }
@@ -814,9 +829,21 @@ remove_authelia_domain() {
         return 0
     fi
 
+    # Read the portal's own domain back from this apex's session.cookies
+    # entry — it's whatever subdomain was chosen when this domain was added
+    # (see add_authelia_domain), not necessarily "auth.<domain>", so it
+    # can't be assumed. Must happen before the removal below, which deletes
+    # this exact entry.
+    local RM_PORTAL_DOMAIN
+    RM_PORTAL_DOMAIN="$(awk -v domain="$RM_DOMAIN" '
+        $0 == "    - domain: " domain { f=1; next }
+        f && /authelia_url:/ { print $2; exit }
+    ' "$CONFIG_FILE" | sed -E 's#^https?://##')"
+    [ -z "$RM_PORTAL_DOMAIN" ] && RM_PORTAL_DOMAIN="auth.${RM_DOMAIN}"
+
     echo ""
     log_warning "This removes ${RM_DOMAIN}'s access rule, session-cookie scope, and its"
-    log_warning "auth.${RM_DOMAIN} login portal from THIS Authelia instance."
+    log_warning "${RM_PORTAL_DOMAIN} login portal from THIS Authelia instance."
     log_warning "Any service still using 'import authelia' or forward_auth pointed at"
     log_warning "${RM_DOMAIN} will start failing to authenticate — reconfigure or remove"
     log_warning "those first if they're still live."
@@ -843,7 +870,7 @@ remove_authelia_domain() {
     chown 1000:1000 "$CONFIG_FILE" 2>/dev/null || true
     log_success "Removed ${RM_DOMAIN} from $CONFIG_FILE"
 
-    _authelia_remove_caddy_portal_block "$RM_DOMAIN"
+    _authelia_remove_caddy_portal_block "$RM_PORTAL_DOMAIN"
 
     local RESTART_AUTH=""
     prompt_yn "  Restart Authelia to apply? (y/n):" "y" RESTART_AUTH
@@ -1992,6 +2019,17 @@ _authelia_add_oidc_client() {
         return 1
     fi
 
+    # This domain's own portal — whatever subdomain was actually chosen at
+    # install time (see install_authelia's own AUTHELIA_PORTAL_SUBDOMAIN
+    # prompt), not necessarily "auth.<domain>". Read back the same way
+    # AUTHELIA_DOMAIN itself is, from this entry's own authelia_url.
+    local AUTHELIA_PORTAL_DOMAIN
+    AUTHELIA_PORTAL_DOMAIN="$(tr -d '\r' < "$CONFIG_FILE" | awk -v domain="$AUTHELIA_DOMAIN" '
+        $0 == "    - domain: " domain { f=1; next }
+        f && /authelia_url:/ { print $2; exit }
+    ' | sed -E 's#^https?://##')"
+    [ -z "$AUTHELIA_PORTAL_DOMAIN" ] && AUTHELIA_PORTAL_DOMAIN="auth.${AUTHELIA_DOMAIN}"
+
     echo ""
     echo "  Register another app to log in via Authelia (OIDC/SSO)."
     echo ""
@@ -2074,12 +2112,12 @@ _authelia_add_oidc_client() {
     echo ""
     echo "    Client ID:      ${CLIENT_ID}"
     echo "    Client Secret:  ${CLIENT_SECRET_PLAIN}"
-    echo "    Discovery URL:  https://auth.${AUTHELIA_DOMAIN}/.well-known/openid-configuration"
+    echo "    Discovery URL:  https://${AUTHELIA_PORTAL_DOMAIN}/.well-known/openid-configuration"
     echo ""
     echo "  If it asks for individual endpoints instead of a discovery URL:"
-    echo "    Authorization:  https://auth.${AUTHELIA_DOMAIN}/api/oidc/authorization"
-    echo "    Token:          https://auth.${AUTHELIA_DOMAIN}/api/oidc/token"
-    echo "    UserInfo:       https://auth.${AUTHELIA_DOMAIN}/api/oidc/userinfo"
+    echo "    Authorization:  https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/authorization"
+    echo "    Token:          https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/token"
+    echo "    UserInfo:       https://${AUTHELIA_PORTAL_DOMAIN}/api/oidc/userinfo"
     echo "    Scopes:         openid profile email"
     echo ""
     case "$APP_CHOICE" in
@@ -2092,7 +2130,7 @@ _authelia_add_oidc_client() {
         2)
             echo "  Add these to Vaultwarden's .env, then: cd \$VAULTWARDEN_DIR && docker compose up -d"
             echo "    SSO_ENABLED=true"
-            echo "    SSO_AUTHORITY=https://auth.${AUTHELIA_DOMAIN}"
+            echo "    SSO_AUTHORITY=https://${AUTHELIA_PORTAL_DOMAIN}"
             echo "    SSO_CLIENT_ID=${CLIENT_ID}"
             echo "    SSO_CLIENT_SECRET=${CLIENT_SECRET_PLAIN}"
             echo "    SSO_SCOPES=profile email"
@@ -2103,7 +2141,7 @@ _authelia_add_oidc_client() {
             ;;
         3)
             echo "  Immich → Administration → Settings → OAuth Authentication:"
-            echo "    Issuer URL:     https://auth.${AUTHELIA_DOMAIN}"
+            echo "    Issuer URL:     https://${AUTHELIA_PORTAL_DOMAIN}"
             echo "      (Immich appends /.well-known/openid-configuration itself — paste"
             echo "      just the base URL above, not the full Discovery URL from earlier.)"
             echo "    Client ID:      ${CLIENT_ID}"
