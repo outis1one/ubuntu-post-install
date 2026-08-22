@@ -56,9 +56,13 @@ fi
 # ── Container + directory detection ─────────────────────────────────────────
 section "Detecting install"
 
-CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 -E '^easy-asterisk(-do)?$' || true)"
+# "asterisk" is this repo's current container name; "easy-asterisk" is what
+# an install kept from before that rename (never silently renamed under a
+# running deployment); "easy-asterisk-do"/"asterisk-do" cover a DigitalOcean
+# droplet install, old or new naming. Whichever is actually running wins.
+CONTAINER="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 -E '^(easy-)?asterisk(-do)?$' || true)"
 if [ -z "$CONTAINER" ]; then
-    fail "No running easy-asterisk / easy-asterisk-do container found — is asterisk installed and started?"
+    fail "No running asterisk / easy-asterisk / *-do container found — is asterisk installed and started?"
     echo ""
     echo "  $PASS passed, $WARN warnings, $FAIL failed. Stopping — nothing else can be checked without a running container."
     exit 1
@@ -196,8 +200,7 @@ if [ -z "$TURN_SERVER" ]; then
     warn "Add it via: sudo ./setup.sh asterisk (update mode)"
 else
     if grep -q '^  coturn:' "$EA_DIR/docker-compose.yml" 2>/dev/null; then
-        COTURN_CONTAINER="easy-asterisk-coturn"
-        [[ "$CONTAINER" == *-do ]] && COTURN_CONTAINER="easy-asterisk-do-coturn"
+        COTURN_CONTAINER="${CONTAINER}-coturn"
         ok "Using an embedded, per-Asterisk coturn ($COTURN_CONTAINER); tested separately below."
     else
         COTURN_CONTAINER="coturn"

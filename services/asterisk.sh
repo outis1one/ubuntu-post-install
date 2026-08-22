@@ -298,6 +298,21 @@ register_service asterisk homelab "Easy Asterisk PBX (intercom/VoIP; auto-tunes 
 # naming. Every sibling service in this repo (pstn-trunk, security-dashboard,
 # crowdsec) already probes for both directories, so both layouts stay fully
 # supported without further special-casing.
+#
+# Container name itself: new installs use the plain "asterisk" (matching
+# every other service's own container_name == service name convention —
+# "easy-" was this repo's install-time container name before, left over from
+# when the vendor CLI tool's own name (`easy-asterisk`, still installed at
+# /usr/local/bin/easy-asterisk inside the container — unrelated, never
+# renamed) got reused for the container too. A box that already has a
+# running container is read directly from its own docker-compose.yml instead
+# of assumed from the directory, so an existing "easy-asterisk" install
+# keeps working with no silent rename — same reasoning as the droplet-layout
+# preservation above, just one level down (container name, not directory).
+# Migrating an existing box to the new name is a deliberate, one-time action
+# (edit docker-compose.yml's container_name + coturn, `docker compose down`
+# + `up -d`) — once done, every sibling service here re-reads it from that
+# same file and follows automatically, no further changes needed anywhere.
 _asterisk_resolve_layout() {
     if [[ -f "$DOCKER_DIR/asterisk-digital-ocean/docker-compose.yml" ]]; then
         ASTERISK_DIR="$DOCKER_DIR/asterisk-digital-ocean"
@@ -306,9 +321,13 @@ _asterisk_resolve_layout() {
         ASTERISK_PROJECT="asterisk-do"
     else
         ASTERISK_DIR="$DOCKER_DIR/asterisk"
-        ASTERISK_CONTAINER="easy-asterisk"
-        ASTERISK_COTURN="easy-asterisk-coturn"
         ASTERISK_PROJECT="asterisk"
+        ASTERISK_CONTAINER=""
+        if [[ -f "$ASTERISK_DIR/docker-compose.yml" ]]; then
+            ASTERISK_CONTAINER="$(grep -m1 '^[[:space:]]*container_name:' "$ASTERISK_DIR/docker-compose.yml" | awk '{print $2}')"
+        fi
+        [[ -z "$ASTERISK_CONTAINER" ]] && ASTERISK_CONTAINER="asterisk"
+        ASTERISK_COTURN="${ASTERISK_CONTAINER}-coturn"
     fi
 }
 
