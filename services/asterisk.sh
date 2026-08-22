@@ -312,6 +312,20 @@ _asterisk_resolve_layout() {
     fi
 }
 
+# Live public-IP detection, no prompts — the same DO-metadata -> ifconfig.me
+# -> `hostname -I` fallback chain _asterisk_detect_digitalocean uses when
+# actually setting up a droplet, factored out for every OTHER caller that
+# just needs "what's this box's public IP right now" without the
+# interactive droplet-mode question attached (the archive-restore IP-patch
+# below, and _asterisk_run_stack_health_check's IP-mismatch check).
+_asterisk_current_public_ip() {
+    local ip=""
+    ip="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "$ip"
+}
+
 # ── DigitalOcean droplet detection ─────────────────────────────────────────
 # Sets IS_DO (true/false), DROPLET_ID and PUBLIC_IP.
 #
@@ -667,9 +681,7 @@ case "$cmd" in
         PJSIP_CONF="$HERE/config/asterisk/pjsip.conf"
         if [ -f "$PJSIP_CONF" ]; then
             OLD_EXT_IP="$(grep -m1 '^external_signaling_address=' "$PJSIP_CONF" | cut -d= -f2)"
-            NEW_EXT_IP="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
-            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
-            [ -z "$NEW_EXT_IP" ] && NEW_EXT_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+            NEW_EXT_IP="$(_asterisk_current_public_ip)"
 
             if [ -n "$OLD_EXT_IP" ] && [ -n "$NEW_EXT_IP" ] && [ "$OLD_EXT_IP" != "$NEW_EXT_IP" ]; then
                 echo "This archive's SIP config was for a different box's public IP"
@@ -1153,6 +1165,48 @@ _asterisk_patch_voicemail_vendor_files() {
     done
 
     log_success "Vendor generator functions patched for voicemail access codes."
+}
+
+# ── easy-asterisk CLI: non-interactive Caddy cert sync ──────────────────────
+# Adds a --sync-caddy-cert flag to the deployed easy-asterisk.sh/
+# easy-asterisk-v0.10.0.sh copies, mirroring the vendor script's own
+# --rebuild-dialplan/--write-web-admin-script non-interactive entry points
+# (see their own comments a few lines up in the vendor file). Needed so
+# _asterisk_run_stack_health_check() below can trigger
+# setup_caddy_cert_sync() — the same function "Server Settings -> Force
+# re-sync Caddy certs" calls in the interactive menu, which finds Caddy's
+# already-issued cert for DOMAIN_NAME and copies it into
+# /etc/asterisk/certs so the transport-tls PJSIP transport can actually
+# bind — from the host via `docker exec`, instead of only being reachable
+# by a human sitting at the interactive CLI. Patches the deployed copy
+# only (never vendor/ in git), same convention as
+# _asterisk_patch_voicemail_vendor_files and friends.
+_asterisk_patch_cert_sync_cli() {
+    local EA_DIR="$1"
+    local EASY1="$EA_DIR/easy-asterisk.sh"
+    local EASY2
+    EASY2="$(find "$EA_DIR" -maxdepth 1 -name 'easy-asterisk-v*.sh' | head -1)"
+    [[ -z "$EASY2" ]] && EASY2="$EA_DIR/easy-asterisk-v0.10.0.sh"
+    local f
+
+    for f in "$EASY1" "$EASY2"; do
+        [[ -f "$f" ]] || continue
+        grep -q -- '--sync-caddy-cert' "$f" && continue
+        if ! grep -q '^# Non-interactive entry point used by the container entrypoint on every$' "$f"; then
+            log_warning "$(basename "$f"): non-interactive-entrypoint anchor not found — vendor template changed upstream."
+            log_warning "  Add a --sync-caddy-cert flag branch calling setup_caddy_cert_sync \"auto\" manually (see this installer's comment)."
+            continue
+        fi
+        sed -i '/^# Non-interactive entry point used by the container entrypoint on every$/i\
+# Non-interactive entry point so services/asterisk.sh'"'"'s host-side stack\
+# health check can trigger a Caddy cert re-sync without a human at the\
+# interactive CLI menu (Server Settings -> "Force re-sync Caddy certs").\
+if [[ "${1:-}" == "--sync-caddy-cert" ]]; then\
+    setup_caddy_cert_sync "auto"\
+    exit 0\
+fi\
+' "$f"
+    done
 }
 
 # ── asterisk.conf: live_dangerously ─────────────────────────────────────────
@@ -1811,6 +1865,199 @@ _asterisk_remind_non_do_firewall() {
     echo "    UDP      ${COTURN_MIN_PORT_VAL}-${COTURN_MAX_PORT_VAL}     (TURN relay)"
 }
 
+# ── Stack health check (update mode) ────────────────────────────────────────
+# "update" mode deliberately never re-asks the domain/networking/Caddy
+# questions a fresh install does, on the assumption whatever's already
+# configured is meant to stay that way. That assumption silently breaks for
+# any of: a domain that was set but never got wired into Caddy, a Caddy
+# block that exists but Asterisk's own TLS cert was never synced to match
+# it (transport-tls then fails to bind — "Unable to retrieve PJSIP
+# transport 'transport-tls'" in the logs, breaking every call), a baked-in
+# external IP left over from before a box move (droplet revert, IP
+# reassignment), or any of the services that chain off Asterisk (Security
+# Dashboard, sms-inbound, ntfy) having the exact same "domain set, nothing
+# actually serving it" gap of their own — none of which "update" would
+# ever notice or mention on its own. Confirmed live, all of them, across a
+# single droplet revert.
+#
+# Runs every "update", unconditionally — the CHECKING is never opt-in, so a
+# gap is never missed just because nobody thought to ask. Each FIX is
+# opt-in and named explicitly as a change when offered, since it's real
+# config being written (a Caddy block, a synced cert, a rewritten IP) —
+# never silent, unlike the rest of "update" mode's core promise of
+# touching nothing. Nothing is written unless a fix is explicitly accepted.
+_asterisk_run_stack_health_check() {
+    local EA_DIR="$1" CONTAINER="$2"
+    local ISSUES_FOUND=0
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  STACK HEALTH CHECK"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    local _DOMAIN _PORT
+    _DOMAIN="$(grep -E '^DOMAIN_NAME=' "$EA_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+    _PORT="$(grep -E '^WEB_ADMIN_PORT=' "$EA_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+
+    # ── 1. External IP baked into pjsip.conf ────────────────────────────────
+    local _BAKED_IP
+    _BAKED_IP="$(grep -m1 '^external_signaling_address=' "$EA_DIR/config/asterisk/pjsip.conf" 2>/dev/null | cut -d= -f2)"
+    if [[ -n "$_BAKED_IP" ]]; then
+        local _LIVE_IP
+        _LIVE_IP="$(_asterisk_current_public_ip)"
+        if [[ -n "$_LIVE_IP" ]] && [[ "$_BAKED_IP" != "$_LIVE_IP" ]]; then
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            log_warning "✗ Public IP: pjsip.conf has ${_BAKED_IP} baked in — this box is now ${_LIVE_IP}."
+            log_warning "  Every call's media negotiation is broken until this is fixed."
+            local _FIX_IP=""
+            prompt_yn "  Fix it now? This rewrites external_media_address/external_signaling_address to ${_LIVE_IP} in every config file that has the old IP, then restarts Asterisk — drops any call in progress. (y/n):" "y" _FIX_IP
+            if [[ "$_FIX_IP" =~ ^[Yy]$ ]]; then
+                local _ESC_OLD="${_BAKED_IP//./\\.}"
+                grep -rlF "$_BAKED_IP" "$EA_DIR/config" "$EA_DIR/.env" 2>/dev/null | while read -r _f; do
+                    sed -i "s/$_ESC_OLD/$_LIVE_IP/g" "$_f"
+                done
+                (cd "$EA_DIR" && docker compose restart) \
+                    && log_success "  Fixed — pjsip.conf now points at ${_LIVE_IP}, Asterisk restarted." \
+                    || log_warning "  Restart failed — check: docker compose -f $EA_DIR/docker-compose.yml logs"
+            fi
+        else
+            log_success "✓ Public IP matches what's baked into pjsip.conf (${_BAKED_IP})."
+        fi
+    fi
+
+    # ── 2. Asterisk's own web-admin/SIP domain: Caddy block + TLS cert ──────
+    if [[ -z "$_DOMAIN" ]]; then
+        log_info "— No DOMAIN_NAME set (LAN-only / self-signed) — nothing to check here."
+    elif [[ ! -d "$DOCKER_DIR/caddy" ]]; then
+        log_info "— ${_DOMAIN} is set, but no local Caddy is installed here to check."
+    else
+        if grep -q "^${_DOMAIN}" "$DOCKER_DIR/caddy/Caddyfile" 2>/dev/null; then
+            log_success "✓ ${_DOMAIN}: Caddy site block present."
+        else
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            log_warning "✗ ${_DOMAIN}: DOMAIN_NAME is set, but Caddy has no site block for it — nothing is serving it."
+            local _FIX_CADDY=""
+            prompt_yn "  Add a Caddy site block for ${_DOMAIN} now? (y/n):" "y" _FIX_CADDY
+            if [[ "$_FIX_CADDY" =~ ^[Yy]$ ]]; then
+                _asterisk_configure_caddy_public "$_DOMAIN" "${_PORT:-8081}" "$(_asterisk_current_public_ip)"
+            fi
+        fi
+
+        local _CERT_OK=false
+        if docker exec "$CONTAINER" sh -c "openssl x509 -in /etc/asterisk/certs/server.crt -noout -ext subjectAltName 2>/dev/null | grep -q \"DNS:${_DOMAIN}\"" 2>/dev/null; then
+            _CERT_OK=true
+        fi
+        if [[ "$_CERT_OK" == true ]]; then
+            log_success "✓ ${_DOMAIN}: TLS certificate matches (transport-tls can bind)."
+        else
+            ISSUES_FOUND=$((ISSUES_FOUND + 1))
+            log_warning "✗ ${_DOMAIN}: no valid TLS certificate for this domain in the container —"
+            log_warning "  the transport-tls PJSIP transport will fail to bind, breaking every call"
+            log_warning "  (\"Unable to retrieve PJSIP transport 'transport-tls'\" in the logs)."
+            local _FIX_CERT=""
+            prompt_yn "  Sync a certificate from Caddy and restart Asterisk now? (y/n):" "y" _FIX_CERT
+            if [[ "$_FIX_CERT" =~ ^[Yy]$ ]]; then
+                if docker exec "$CONTAINER" /usr/local/bin/easy-asterisk --sync-caddy-cert 2>&1 | tail -5; then
+                    log_success "  Cert sync ran — verify: docker exec $CONTAINER openssl x509 -in /etc/asterisk/certs/server.crt -noout -ext subjectAltName"
+                else
+                    log_warning "  Cert sync failed — Caddy may not have a certificate for ${_DOMAIN} yet"
+                    log_warning "  (check: docker logs caddy), or this container predates the"
+                    log_warning "  --sync-caddy-cert flag — re-run update once more first."
+                fi
+            fi
+        fi
+    fi
+
+    # ── 3. Chained services: Security Dashboard, sms-inbound, ntfy ──────────
+    # Each of these has the exact same "domain set (or fixed), Caddy never
+    # wired" gap Asterisk itself just had — none of them persist enough
+    # state to fix it without re-asking for a domain, so caddy_domain_for_
+    # upstream (lib/common.sh) checks the Caddyfile directly instead, and a
+    # found gap points at that service's own reinstall rather than trying
+    # to script a fix here for config this file doesn't own.
+    #
+    # This box's local Caddyfile is the only thing checkable from here —
+    # any of these three can instead be fronted by a Caddy (and Authelia)
+    # on a completely different box, the same remote-Caddy pattern
+    # sms-inbound.sh and ntfy.sh's own installers already support (see
+    # CADDY_MODE/CADDY_REMOTE_HOST in the site config). "Not found in the
+    # local Caddyfile" only COUNTS as an issue when the site is actually
+    # configured for local Caddy — the same resolution those installers use.
+    # In remote (or no-Caddy) mode it's expected, not broken: reported
+    # informationally, with no fix offered, since guessing wrong here would
+    # add a redundant/conflicting local block for something deliberately
+    # fronted elsewhere.
+    local _SITE_CADDY_MODE="${CADDY_MODE:-none}"
+    [ "$_SITE_CADDY_MODE" = "none" ] && [ -d "$DOCKER_DIR/caddy" ] && _SITE_CADDY_MODE="local"
+    [ "$_SITE_CADDY_MODE" = "none" ] && [ -n "${CADDY_REMOTE_HOST:-}" ] && _SITE_CADDY_MODE="remote"
+
+    if declare -F caddy_domain_for_upstream >/dev/null 2>&1; then
+        if [[ -f /opt/security-dashboard/app.py ]]; then
+            local _SD_DOMAIN
+            _SD_DOMAIN="$(caddy_domain_for_upstream "host.docker.internal:8092")"
+            if [[ -n "$_SD_DOMAIN" ]]; then
+                log_success "✓ Security Dashboard: Caddy serving it at ${_SD_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— Security Dashboard: no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
+            else
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+                log_warning "✗ Security Dashboard is installed, but Caddy has no site block for it."
+                local _FIX_SD=""
+                prompt_yn "  Configure Caddy for the Security Dashboard now? (y/n):" "y" _FIX_SD
+                if [[ "$_FIX_SD" =~ ^[Yy]$ ]] && declare -F _secdash_configure_caddy >/dev/null 2>&1; then
+                    _secdash_configure_caddy 8092
+                elif [[ "$_FIX_SD" =~ ^[Yy]$ ]]; then
+                    log_warning "  services/security-dashboard.sh isn't loaded in this run — re-run it directly: sudo ./setup.sh security-dashboard"
+                fi
+            fi
+        fi
+
+        if [[ -f /opt/sms-inbound/settings.env ]]; then
+            local SMS_RELAY_DOMAIN="" SMS_RELAY_PORT="" SMS_FORWARD_URL=""
+            # shellcheck disable=SC1091
+            source /opt/sms-inbound/settings.env
+            if [[ -z "$SMS_RELAY_DOMAIN" || "$SMS_FORWARD_URL" == *"<your-domain>"* ]]; then
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+                log_warning "✗ sms-inbound is installed, but has no real webhook domain set — SMS delivery can't work."
+                log_warning "  Re-run 'sudo ./setup.sh sms-inbound' and choose \"f) Full reinstall\" to be asked for it (needs DNS pointed here first)."
+            elif [[ -n "$(caddy_domain_for_upstream "host.docker.internal:${SMS_RELAY_PORT}")" ]]; then
+                log_success "✓ sms-inbound: Caddy serving the webhook at ${SMS_RELAY_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— sms-inbound: no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
+            else
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+                log_warning "✗ sms-inbound has a domain set (${SMS_RELAY_DOMAIN}), but Caddy has no site block for it."
+                log_warning "  Re-run 'sudo ./setup.sh sms-inbound' and choose \"f) Full reinstall\" to fix it (re-enters the same domain, re-adds the Caddy block)."
+            fi
+        fi
+
+        local _ntfy_dir
+        for _ntfy_dir in "$DOCKER_DIR"/ntfy "$DOCKER_DIR"/ntfy-*; do
+            [[ -d "$_ntfy_dir" ]] || continue
+            local _ntfy_container
+            _ntfy_container="$(basename "$_ntfy_dir")"
+            local _NTFY_DOMAIN
+            _NTFY_DOMAIN="$(caddy_domain_for_upstream "${_ntfy_container}:80")"
+            if [[ -n "$_NTFY_DOMAIN" ]]; then
+                log_success "✓ ntfy (${_ntfy_container}): Caddy serving it at ${_NTFY_DOMAIN}."
+            elif [[ "$_SITE_CADDY_MODE" != "local" ]]; then
+                log_info "— ntfy (${_ntfy_container}): no site block in this box's local Caddyfile (site is in ${_SITE_CADDY_MODE} Caddy mode — likely fronted by a Caddy/Authelia on a different box; not checked here)."
+            else
+                ISSUES_FOUND=$((ISSUES_FOUND + 1))
+                log_warning "✗ ntfy (${_ntfy_container}) is installed, but Caddy has no site block for it."
+                log_warning "  Re-run 'sudo ./setup.sh ntfy' and choose \"f) Full reinstall\" to fix it — that's the only mode that re-asks the domain."
+            fi
+        done
+    fi
+
+    echo ""
+    if [[ "$ISSUES_FOUND" -eq 0 ]]; then
+        log_success "Stack health check: everything checked is fully wired."
+    else
+        log_warning "Stack health check: $ISSUES_FOUND issue(s) found (see above)."
+    fi
+}
+
 # ── Shared: README ─────────────────────────────────────────────────────────
 # One document with a droplet-only section appended in public-cloud mode, so
 # the two deployment shapes can't document themselves differently by accident.
@@ -2163,6 +2410,10 @@ install_asterisk() {
         echo "[DRY-RUN] Would offer to also set up the Security Dashboard and a PSTN trunk in this"
         echo "[DRY-RUN]   same run (calling services/security-dashboard.sh / services/pstn-trunk.sh"
         echo "[DRY-RUN]   directly — both stay independently invocable via their own service name too)"
+        echo "[DRY-RUN] Update mode would run a stack health check: baked-in public IP vs. this"
+        echo "[DRY-RUN]   box's actual one, Asterisk's own domain (Caddy block + TLS cert), and"
+        echo "[DRY-RUN]   whether the Security Dashboard/sms-inbound/ntfy (if installed) actually"
+        echo "[DRY-RUN]   have Caddy wired up — reports anything unwired and offers to fix it"
         return 0
     fi
 
@@ -2211,6 +2462,7 @@ install_asterisk() {
                 _asterisk_write_voicemail_conf "$EA_DIR/config/asterisk/voicemail.conf"
                 _asterisk_ensure_live_voicemail_include "$EA_DIR" "$CONTAINER"
                 _asterisk_patch_keepalive_vendor_files "$EA_DIR"
+                _asterisk_patch_cert_sync_cli "$EA_DIR"
                 ensure_docker_dir_ownership "$EA_DIR/config/asterisk"
                 chmod 644 "$EA_DIR/config/asterisk/messaging-dialplan.conf" "$EA_DIR/config/asterisk/voicemail-dialplan.conf"
 
@@ -2242,45 +2494,10 @@ install_asterisk() {
                 _EXISTING_DOMAIN="$(grep -E '^DOMAIN_NAME=' .env | cut -d= -f2-)"
                 _EXISTING_PORT="$(grep -E '^WEB_ADMIN_PORT=' .env | cut -d= -f2-)"
 
-                # A domain was set at some point (DOMAIN_NAME in .env) but
-                # Caddy never ended up with a site block for it — declined
-                # at install time, DNS wasn't ready yet, or Caddy itself was
-                # reinstalled/reset since. "update" never re-asks the
-                # domain/networking/firewall questions (see this branch's
-                # own comment above), but leaving a configured-but-unwired
-                # domain broken forever with no way back short of a full
-                # reinstall (which rotates coturn/TURN credentials — see the
-                # "fresh" branch's own warning below) defeats the point of
-                # "update" being the safe, no-side-effects path.
-                # _asterisk_configure_caddy_public() only ever touches the
-                # Caddyfile and .env's WEB_ADMIN_AUTH_DISABLED line — never
-                # coturn, extensions, or anything a full reinstall would put
-                # at risk — so it's safe to offer here even though nothing
-                # else in "update" touches Caddy.
-                local _CADDY_JUST_CONFIGURED=false
-                if [[ -n "$_EXISTING_DOMAIN" ]] && [[ -d "$DOCKER_DIR/caddy" ]] \
-                   && ! grep -q "^${_EXISTING_DOMAIN}" "$DOCKER_DIR/caddy/Caddyfile" 2>/dev/null; then
-                    echo ""
-                    log_warning "DOMAIN_NAME (${_EXISTING_DOMAIN}) is set, but Caddy has no site"
-                    log_warning "block for it — nothing is actually serving that domain."
-                    local _FIX_CADDY=""
-                    prompt_yn "  Configure Caddy for ${_EXISTING_DOMAIN} now? (y/n):" "y" _FIX_CADDY
-                    if [[ "$_FIX_CADDY" =~ ^[Yy]$ ]]; then
-                        local _CURRENT_PUBLIC_IP=""
-                        _CURRENT_PUBLIC_IP="$(curl -fsS --max-time 2 http://169.254.169.254/metadata/v1/interfaces/public/0/ipv4/address 2>/dev/null || true)"
-                        [[ -z "$_CURRENT_PUBLIC_IP" ]] && _CURRENT_PUBLIC_IP="$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)"
-                        [[ -z "$_CURRENT_PUBLIC_IP" ]] && _CURRENT_PUBLIC_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-                        _asterisk_configure_caddy_public "$_EXISTING_DOMAIN" "${_EXISTING_PORT:-8081}" "$_CURRENT_PUBLIC_IP"
-                        _CADDY_JUST_CONFIGURED=true
-                    fi
-                fi
+                log_success "Existing .env and firewall rules were left untouched."
+                _asterisk_run_stack_health_check "$EA_DIR" "$CONTAINER"
 
                 echo ""
-                if [[ "$_CADDY_JUST_CONFIGURED" == true ]]; then
-                    log_success "Existing .env and firewall rules were left untouched; Caddy was just configured above."
-                else
-                    log_success "Existing .env, firewall rules, and Caddy/Authelia config were left untouched."
-                fi
                 if [[ -n "$_EXISTING_DOMAIN" ]]; then
                     echo "  Web admin: https://${_EXISTING_DOMAIN}/"
                 else
