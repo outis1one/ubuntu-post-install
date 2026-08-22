@@ -100,6 +100,7 @@ is_installed() {
         kdeconnect) command -v kdeconnect >/dev/null 2>&1 ;;
         silent-send) [ -d "$ACTUAL_HOME/silent-send/.git" ] ;;
         sync-cc) [ -f "$ACTUAL_HOME/sync-cc/sync_cc.py" ] ;;
+        claude-cli) [ -f "$ACTUAL_HOME/.claude-shared/CLAUDE.md" ] ;;
         sky-cam) [ -d "$ACTUAL_HOME/sky-cam/.git" ] ;;
         sky-cam-frigate) [ -d "$ACTUAL_HOME/sky-cam/.git" ] && [ -f "$ACTUAL_HOME/sky-cam/frigate-retime.sh" ] ;;
         # Either directory counts: boxes set up before the droplet edition was
@@ -130,7 +131,7 @@ is_installed() {
 # is_installed() as 0 or 1.
 install_count() {
     case "$1" in
-        base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config|ssh-key-import)
+        base|glow|crowdsec|security-dashboard|kdeconnect|silent-send|sync-cc|claude-cli|sky-cam|sky-cam-frigate|asterisk|pstn-trunk|sms-inbound|ssh-config|ssh-key-import)
             is_installed "$1" && echo 1 || echo 0 ;;
         wordpress)
             find "$DOCKER_DIR" -mindepth 1 -maxdepth 1 -name 'wordpress-*' -type d 2>/dev/null | wc -l ;;
