@@ -77,10 +77,25 @@ flash-attention-class kernel path.
 | Pascal (2016) | P100 16GB / P40 24GB | 16-24GB HBM2/GDDR5 | No | SD1.5 fine; SDXL runs but slow — no tensor cores at all, weak/emulated FP16 (worse on the P40 than the P100) | Same VRAM math as Ampere/Volta at matched capacity (P40 24GB ≈ 30B Q4), but noticeably slower tokens/sec | 32B coder Q4 fits the P40 24GB capacity-wise; fine for batch/background, not snappy interactive autocomplete |
 | Maxwell (2014) | M40 / M60 24GB | 8-24GB GDDR5 | No | Impractical — SD1.5 only, very slow; no real FP16 tensor path | 7B-13B Q4 runs but slow | 7B-class coder models only — a novelty, not a daily driver |
 
-NVIDIA's CUDA 12.9 release notes flag Maxwell, Pascal, and Volta as the last
-architectures the *next* major toolkit will support — existing CUDA 12.x
-builds keep working, but factor this in before buying used Pascal/Volta
-hardware today.
+**CUDA 13 has already dropped Pascal/Volta** (this happened, it's not a future
+warning anymore) — pin the host driver to an LTS/LTSB branch that still lists
+Volta as supported (check `ubuntu-drivers devices`' recommendation rather than
+blindly taking the newest branch) before relying on one of these cards. Docker
+GPU passthrough only needs the host *driver* to recognize the card — prebuilt
+inference images (Ollama, ComfyUI, etc.) already bundle whatever CUDA runtime
+they need — so this is a driver-branch choice at install time, not something
+`require_docker` pins for you (it installs Docker/Compose only; NVIDIA
+driver + `nvidia-container-toolkit` are still on you to install first).
+
+**Tesla-card power connector — don't assume standard PCIe.** V100/P100/P40/M40
+PCIe cards take an 8-pin **CPU/EPS12V** connector, not the 6+2-pin PCIe
+connector a normal GPU uses — a standard PCIe cable will not plug in. Get the
+dongle/adapter (splits a PCIe 8-pin into EPS12V, or use a real EPS cable) and
+never daisy-chain both 8-pin rails off one PSU cable/splitter — use two
+separate cable runs. These cards are also passively cooled (built for server
+chassis airflow, no onboard fan) — a tower case needs a shroud + dedicated
+fan blowing through the heatsink fins, and there's no display output, which
+is a non-issue on a headless box like this but worth knowing going in.
 
 **MoE models are the exception that gives Pascal/Volta real life for coding.**
 The "coding" column above assumes dense models, where token speed tracks the
