@@ -82,6 +82,21 @@ architectures the *next* major toolkit will support — existing CUDA 12.x
 builds keep working, but factor this in before buying used Pascal/Volta
 hardware today.
 
+**MoE models are the exception that gives Pascal/Volta real life for coding.**
+The "coding" column above assumes dense models, where token speed tracks the
+full parameter count — exactly where Pascal/Volta's missing or first-gen
+tensor cores hurt most. A mixture-of-experts model breaks that link: VRAM is
+still set by *total* params (every expert has to be resident — no memory
+saving from sparsity), but compute per token is set by *active* params only.
+`qwen3-coder:30b-a3b` in `ollama pull` is the concrete case — 30B total, only
+~3.3B active per token (128 experts, 8 routed) — so it needs the same ~19GB
+VRAM (Q4_K_M) as a dense 30B model but computes like a dense ~3B one. That's
+light enough that Pascal/Volta's weak tensor cores barely matter, making it
+the best coding model to put on a P40 24GB or a V100 — a dense 32B coder on
+the same card would be noticeably slower for no quality gain. Mixtral 8x7B
+(46.7B total / ~13B active, ~24-26GB at Q4) is the same trade at a larger
+size — fits Volta 32GB or Ampere, with the same active-vs-total gap.
+
 ## Cloud LLM providers (Open WebUI)
 Open WebUI uses an OpenAI-compatible connection list. The local RAG server is the
 first entry; any cloud providers added at install follow it. Two semicolon-separated
