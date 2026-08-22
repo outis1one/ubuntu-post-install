@@ -10,6 +10,49 @@
   less text (saves tokens), for both local and cloud models.
 - Web search uses **DuckDuckGo** (no SearXNG in this build).
 
+## Hybrid workflow — local coding model + Claude Code
+Split coding work by size, not by tool preference. This stack's local Ollama
+coder model (the GPU generations table below has sizing per card) handles
+fast, in-loop iteration — autocomplete, boilerplate, single-file refactors,
+private/offline drafting, zero token cost. Claude Code (cloud) handles the
+bigger, longer, cross-file work — architectural refactors, anything needing
+full-repo context or stronger judgment — driven against this stack's Gitea
+(or GitHub, via the `gitea-github-sync.sh` mirror in Roles above).
+
+### Where to put instructions for each side
+Claude Code loads `CLAUDE.md` in four tiers, concatenated broadest to most
+specific — later tiers add to earlier ones, they don't replace them:
+
+| Tier | Path | Put here |
+|---|---|---|
+| User | `~/.claude/CLAUDE.md` | Your personal conventions, true on *every* project — e.g. "CLI menus are numbered, `0` is always exit," "verify UI changes with Playwright," your code-style rules |
+| Project | `./CLAUDE.md` or `./.claude/CLAUDE.md` | This codebase's own architecture/conventions, shared with collaborators via git (this file is the reference example) |
+| Local | `./CLAUDE.local.md` (gitignored) | Your personal per-project notes — sandbox URLs, test data |
+| One-off task | The prompt itself, handed over when you say "go" | The specific feature/idea for *this* build — never durable, don't put it in `CLAUDE.md` |
+
+Write cross-project quirks into `~/.claude/CLAUDE.md` once — every project
+inherits them automatically, no per-repo duplication needed. If it grows
+past ~200 lines, split it into `~/.claude/rules/*.md` (still user-level,
+loads before project-level rules).
+
+### Claude Code reading from self-hosted Gitea
+Two levels, depending on what you need:
+- **Plain git — works today, nothing to install.** Claude Code's git
+  operations are shell `git` commands, not a GitHub-specific code path —
+  clone/push/pull against this stack's Gitea over SSH or an HTTPS token
+  exactly like any other remote. This only applies to a locally-run Claude
+  Code CLI against your own machine; a cloud/remote Claude Code session
+  (like the one used to write this doc) is scoped to whichever provider —
+  typically GitHub — it was attached to at session start, and can't reach
+  an arbitrary self-hosted Gitea on your LAN.
+- **PR/issue/CI-level integration (optional).** Reading/commenting on Gitea
+  PRs and issues the way a GitHub MCP server does for GitHub needs an MCP
+  server that speaks Gitea's REST API. Gitea's own project publishes one
+  (`gitea/gitea-mcp`), authenticated via a personal access token — add it
+  with `claude mcp add` pointed at this stack's Gitea instance. Not bundled
+  by default; this stack's Gitea has no built-in Claude integration out of
+  the box.
+
 ## GPU switcher (small local GPU only)
 One small GPU can't run local chat and local image-gen at once. Swap it:
 ```bash
@@ -77,10 +120,55 @@ flash-attention-class kernel path.
 | Pascal (2016) | P100 16GB / P40 24GB | 16-24GB HBM2/GDDR5 | No | SD1.5 fine; SDXL runs but slow — no tensor cores at all, weak/emulated FP16 (worse on the P40 than the P100) | Same VRAM math as Ampere/Volta at matched capacity (P40 24GB ≈ 30B Q4), but noticeably slower tokens/sec | 32B coder Q4 fits the P40 24GB capacity-wise; fine for batch/background, not snappy interactive autocomplete |
 | Maxwell (2014) | M40 / M60 24GB | 8-24GB GDDR5 | No | Impractical — SD1.5 only, very slow; no real FP16 tensor path | 7B-13B Q4 runs but slow | 7B-class coder models only — a novelty, not a daily driver |
 
-NVIDIA's CUDA 12.9 release notes flag Maxwell, Pascal, and Volta as the last
-architectures the *next* major toolkit will support — existing CUDA 12.x
-builds keep working, but factor this in before buying used Pascal/Volta
-hardware today.
+**CUDA 13 has already dropped Pascal/Volta** (this happened, it's not a future
+warning anymore) — but that's the *toolkit*, not the driver, and it doesn't
+block this stack: Docker GPU passthrough only needs the host *driver* to
+recognize the card, since prebuilt inference images (Ollama, ComfyUI, etc.)
+already bundle whatever CUDA runtime they need internally. The driver is the
+part to get right. **NVIDIA has named R580 the last driver branch that adds
+Volta/Pascal support** (P100/P40/V100 explicitly listed), supported into
+~June 2028 — pin to R580 explicitly rather than trusting `ubuntu-drivers
+autoinstall`'s default pick on a fresh/newer Ubuntu install, since a later
+branch may no longer initialize these cards at all. Also confirm you land on
+the **proprietary** driver package, not an `-open` one — NVIDIA's open-source
+kernel modules only support Turing and newer, so Volta/Pascal *require* the
+closed-source module; `ubuntu-drivers devices` should recommend the right one
+for the card it detects, but double-check rather than assume on a distro
+release that defaults newer GPUs to `-open`. None of this is something
+`require_docker` handles — it installs Docker/Compose only; the NVIDIA
+driver and `nvidia-container-toolkit` are still on you to install first,
+and getting the driver branch right is what actually matters here, not the
+Ubuntu version itself.
+
+**"Tesla"-branded card power connector — don't assume standard PCIe.**
+("Tesla" here is NVIDIA's old datacenter-card *brand name*, retired after
+Volta — not the unrelated, much older Tesla *microarchitecture* that
+predates Fermi/Kepler/Maxwell/Pascal/Volta. V100/P100/P40/M40 all shipped
+under the Tesla brand despite being four different architecture
+generations.) These PCIe cards take an 8-pin **CPU/EPS12V** connector, not
+the 6+2-pin PCIe
+connector a normal GPU uses — a standard PCIe cable will not plug in. Get the
+dongle/adapter (splits a PCIe 8-pin into EPS12V, or use a real EPS cable) and
+never daisy-chain both 8-pin rails off one PSU cable/splitter — use two
+separate cable runs. These cards are also passively cooled (built for server
+chassis airflow, no onboard fan) — a tower case needs a shroud + dedicated
+fan blowing through the heatsink fins, and there's no display output, which
+is a non-issue on a headless box like this but worth knowing going in.
+
+**MoE models are the exception that gives Pascal/Volta real life for coding.**
+The "coding" column above assumes dense models, where token speed tracks the
+full parameter count — exactly where Pascal/Volta's missing or first-gen
+tensor cores hurt most. A mixture-of-experts model breaks that link: VRAM is
+still set by *total* params (every expert has to be resident — no memory
+saving from sparsity), but compute per token is set by *active* params only.
+`qwen3-coder:30b-a3b` in `ollama pull` is the concrete case — 30B total, only
+~3.3B active per token (128 experts, 8 routed) — so it needs the same ~19GB
+VRAM (Q4_K_M) as a dense 30B model but computes like a dense ~3B one. That's
+light enough that Pascal/Volta's weak tensor cores barely matter, making it
+the best coding model to put on a P40 24GB or a V100 — a dense 32B coder on
+the same card would be noticeably slower for no quality gain. Mixtral 8x7B
+(46.7B total / ~13B active, ~24-26GB at Q4) is the same trade at a larger
+size — fits Volta 32GB or Ampere, with the same active-vs-total gap.
 
 ## Cloud LLM providers (Open WebUI)
 Open WebUI uses an OpenAI-compatible connection list. The local RAG server is the
