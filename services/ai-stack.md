@@ -59,6 +59,29 @@ model as `OPENAI_MODEL` — see Open WebUI → Settings → Connections for the
 exact local base URL, or `docker inspect ollama` for the container's address
 on `caddy_net`/the compose network.
 
+## NVIDIA server-GPU generations — capability reference
+What a given datacenter GPU generation can actually run through this stack
+(Ollama for chat/code, ComfyUI/InvokeAI for images), since it's VRAM- and
+tensor-core-bound per generation. Only Ampere and newer have native BF16
+tensor cores; llama.cpp/Ollama's CUDA backend supports Pascal (compute
+capability 6.0) and up, so quantized chat/coding model size mostly comes
+down to VRAM capacity — older cards just run slower per token, with no
+flash-attention-class kernel path.
+
+| Generation | Example server cards | VRAM | Flux 2 (32B DiT) | Flux.1 / SDXL | Chat (GGUF, Ollama) | Coding (GGUF, Ollama) |
+|---|---|---|---|---|---|---|
+| Blackwell (2024-25) | B100 / B200 / GB200 | 180-192GB HBM3e | Yes — FP8 fast, native | Yes, fast | 70B+ at high precision, easily | Any coder model, full precision |
+| Hopper (2022) | H100 / H200 | 80-141GB HBM3 | Yes — FP8 native tensor cores; the target generation | Yes, fast | 70B in Q4-Q8 comfortably | Qwen2.5-Coder-32B / DeepSeek-Coder-V2, full precision |
+| Ampere (2020) | A100 40/80GB | 40-80GB HBM2e | Minimum viable — FP8 checkpoint (~32GB) fits the 80GB card; no native FP8 tensor cores, so it's upcast/emulated rather than accelerated | Yes, comfortable (native BF16/TF32) | 70B Q4 (~40GB) fits the 80GB card with room; 30-34B comfortable on the 40GB card | Qwen2.5-Coder-32B / Codestral-22B comfortable |
+| Volta (2017) | V100 16/32GB | 16-32GB HBM2 | No — even the 32GB card has no headroom for the FP8 checkpoint plus activations | FLUX.1-dev FP8 (~18-23GB) fits the 32GB card, tight; SDXL/SD1.5 fine (first-gen FP16 tensor cores) | 32GB card: 30-34B Q4 comfortable, 70B tight/needs multi-GPU. 16GB card: 13-14B comfortable | 32B coder models fit the 32GB card in Q4 |
+| Pascal (2016) | P100 16GB / P40 24GB | 16-24GB HBM2/GDDR5 | No | SD1.5 fine; SDXL runs but slow — no tensor cores at all, weak/emulated FP16 (worse on the P40 than the P100) | Same VRAM math as Ampere/Volta at matched capacity (P40 24GB ≈ 30B Q4), but noticeably slower tokens/sec | 32B coder Q4 fits the P40 24GB capacity-wise; fine for batch/background, not snappy interactive autocomplete |
+| Maxwell (2014) | M40 / M60 24GB | 8-24GB GDDR5 | No | Impractical — SD1.5 only, very slow; no real FP16 tensor path | 7B-13B Q4 runs but slow | 7B-class coder models only — a novelty, not a daily driver |
+
+NVIDIA's CUDA 12.9 release notes flag Maxwell, Pascal, and Volta as the last
+architectures the *next* major toolkit will support — existing CUDA 12.x
+builds keep working, but factor this in before buying used Pascal/Volta
+hardware today.
+
 ## Cloud LLM providers (Open WebUI)
 Open WebUI uses an OpenAI-compatible connection list. The local RAG server is the
 first entry; any cloud providers added at install follow it. Two semicolon-separated
