@@ -105,7 +105,15 @@ install_security-dashboard() {
     if [[ "$ASTERISK_EA_DIR" == *asterisk-digital-ocean ]]; then
         ASTERISK_EA_CONTAINER="easy-asterisk-do"
     elif [ -n "$ASTERISK_EA_DIR" ]; then
-        ASTERISK_EA_CONTAINER="easy-asterisk"
+        # Read the box's own container_name instead of assuming — new
+        # installs use plain "asterisk" now, but an existing "easy-asterisk"
+        # install (this repo's container name before that rename) keeps
+        # working unchanged until someone deliberately migrates it. See
+        # services/asterisk.sh's _asterisk_resolve_layout for the reasoning.
+        if [[ -f "$ASTERISK_EA_DIR/docker-compose.yml" ]]; then
+            ASTERISK_EA_CONTAINER="$(grep -m1 '^[[:space:]]*container_name:' "$ASTERISK_EA_DIR/docker-compose.yml" | awk '{print $2}')"
+        fi
+        [[ -z "$ASTERISK_EA_CONTAINER" ]] && ASTERISK_EA_CONTAINER="asterisk"
     fi
 
     echo ""

@@ -44,11 +44,26 @@ public-FQDN-only flow, hand-built Caddy site block, remote Authelia, Cloud
 Firewall — behind that one answer. Two lessons worth reusing:
 
 - **Don't rename a live install's directory or containers.** New installs
-  land in `~/docker/asterisk` with `easy-asterisk`; a pre-merge droplet keeps
-  `~/docker/asterisk-digital-ocean` and `easy-asterisk-do`, because its
-  Caddyfile block, UFW rules, Cloud Firewall, CrowdSec acquisition and PSTN
-  trunk all name those exact paths. `_asterisk_resolve_layout()` picks
-  whichever exists, and every sibling service probes both.
+  land in `~/docker/asterisk` with a container named `asterisk`; a pre-merge
+  droplet keeps `~/docker/asterisk-digital-ocean` and `easy-asterisk-do`,
+  because its Caddyfile block, UFW rules, Cloud Firewall, CrowdSec
+  acquisition and PSTN trunk all name those exact paths.
+  `_asterisk_resolve_layout()` picks whichever directory exists, and every
+  sibling service probes both. The plain container name was itself renamed
+  once already — from `easy-asterisk` (this repo's original choice, reusing
+  the vendor CLI tool's own name, `/usr/local/bin/easy-asterisk` inside the
+  container — unrelated, never renamed) to plain `asterisk`, matching every
+  other service's own `container_name == service name` convention. The same
+  "don't rename under a running deployment" rule applied: every resolver
+  (`_asterisk_resolve_layout()` and the duplicated copies in
+  `security-dashboard.sh`, `sms-inbound.sh`, `pstn-trunk.sh`,
+  `tools/pstn-test-check.sh`) reads the container name out of the box's own
+  `docker-compose.yml` instead of assuming it, so an existing `easy-asterisk`
+  install keeps working unchanged. Migrating one to the new name is a
+  deliberate, one-time action on that box (edit `docker-compose.yml`'s
+  `container_name:` for both Asterisk and its coturn sidecar, `docker compose
+  down` + `up -d`) — once done, every sibling service re-reads it from that
+  same file and follows automatically.
 - **Check whether a "flavor-specific" behavior was actually flavor-specific.**
   The Asterisk security-logging patch and the `logs/full` logrotate config
   were droplet-only purely because that's where they got written first — the

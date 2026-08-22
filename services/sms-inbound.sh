@@ -53,7 +53,15 @@ _sms_detect_container_name() {
     if [[ "$_ea_dir" == *asterisk-digital-ocean ]]; then
         echo "easy-asterisk-do"
     else
-        echo "easy-asterisk"
+        # Read the box's own container_name instead of assuming — new
+        # installs use plain "asterisk" now, but an existing "easy-asterisk"
+        # install (this repo's container name before that rename) keeps
+        # working unchanged until someone deliberately migrates it. See
+        # services/asterisk.sh's _asterisk_resolve_layout for the reasoning.
+        local _name=""
+        [[ -f "$_ea_dir/docker-compose.yml" ]] && \
+            _name="$(grep -m1 '^[[:space:]]*container_name:' "$_ea_dir/docker-compose.yml" | awk '{print $2}')"
+        echo "${_name:-asterisk}"
     fi
 }
 
