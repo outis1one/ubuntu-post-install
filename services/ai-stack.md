@@ -78,14 +78,24 @@ flash-attention-class kernel path.
 | Maxwell (2014) | M40 / M60 24GB | 8-24GB GDDR5 | No | Impractical — SD1.5 only, very slow; no real FP16 tensor path | 7B-13B Q4 runs but slow | 7B-class coder models only — a novelty, not a daily driver |
 
 **CUDA 13 has already dropped Pascal/Volta** (this happened, it's not a future
-warning anymore) — pin the host driver to an LTS/LTSB branch that still lists
-Volta as supported (check `ubuntu-drivers devices`' recommendation rather than
-blindly taking the newest branch) before relying on one of these cards. Docker
-GPU passthrough only needs the host *driver* to recognize the card — prebuilt
-inference images (Ollama, ComfyUI, etc.) already bundle whatever CUDA runtime
-they need — so this is a driver-branch choice at install time, not something
-`require_docker` pins for you (it installs Docker/Compose only; NVIDIA
-driver + `nvidia-container-toolkit` are still on you to install first).
+warning anymore) — but that's the *toolkit*, not the driver, and it doesn't
+block this stack: Docker GPU passthrough only needs the host *driver* to
+recognize the card, since prebuilt inference images (Ollama, ComfyUI, etc.)
+already bundle whatever CUDA runtime they need internally. The driver is the
+part to get right. **NVIDIA has named R580 the last driver branch that adds
+Volta/Pascal support** (P100/P40/V100 explicitly listed), supported into
+~June 2028 — pin to R580 explicitly rather than trusting `ubuntu-drivers
+autoinstall`'s default pick on a fresh/newer Ubuntu install, since a later
+branch may no longer initialize these cards at all. Also confirm you land on
+the **proprietary** driver package, not an `-open` one — NVIDIA's open-source
+kernel modules only support Turing and newer, so Volta/Pascal *require* the
+closed-source module; `ubuntu-drivers devices` should recommend the right one
+for the card it detects, but double-check rather than assume on a distro
+release that defaults newer GPUs to `-open`. None of this is something
+`require_docker` handles — it installs Docker/Compose only; the NVIDIA
+driver and `nvidia-container-toolkit` are still on you to install first,
+and getting the driver branch right is what actually matters here, not the
+Ubuntu version itself.
 
 **Tesla-card power connector — don't assume standard PCIe.** V100/P100/P40/M40
 PCIe cards take an 8-pin **CPU/EPS12V** connector, not the 6+2-pin PCIe
