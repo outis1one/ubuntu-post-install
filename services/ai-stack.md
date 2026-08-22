@@ -10,6 +10,49 @@
   less text (saves tokens), for both local and cloud models.
 - Web search uses **DuckDuckGo** (no SearXNG in this build).
 
+## Hybrid workflow — local coding model + Claude Code
+Split coding work by size, not by tool preference. This stack's local Ollama
+coder model (the GPU generations table below has sizing per card) handles
+fast, in-loop iteration — autocomplete, boilerplate, single-file refactors,
+private/offline drafting, zero token cost. Claude Code (cloud) handles the
+bigger, longer, cross-file work — architectural refactors, anything needing
+full-repo context or stronger judgment — driven against this stack's Gitea
+(or GitHub, via the `gitea-github-sync.sh` mirror in Roles above).
+
+### Where to put instructions for each side
+Claude Code loads `CLAUDE.md` in four tiers, concatenated broadest to most
+specific — later tiers add to earlier ones, they don't replace them:
+
+| Tier | Path | Put here |
+|---|---|---|
+| User | `~/.claude/CLAUDE.md` | Your personal conventions, true on *every* project — e.g. "CLI menus are numbered, `0` is always exit," "verify UI changes with Playwright," your code-style rules |
+| Project | `./CLAUDE.md` or `./.claude/CLAUDE.md` | This codebase's own architecture/conventions, shared with collaborators via git (this file is the reference example) |
+| Local | `./CLAUDE.local.md` (gitignored) | Your personal per-project notes — sandbox URLs, test data |
+| One-off task | The prompt itself, handed over when you say "go" | The specific feature/idea for *this* build — never durable, don't put it in `CLAUDE.md` |
+
+Write cross-project quirks into `~/.claude/CLAUDE.md` once — every project
+inherits them automatically, no per-repo duplication needed. If it grows
+past ~200 lines, split it into `~/.claude/rules/*.md` (still user-level,
+loads before project-level rules).
+
+### Claude Code reading from self-hosted Gitea
+Two levels, depending on what you need:
+- **Plain git — works today, nothing to install.** Claude Code's git
+  operations are shell `git` commands, not a GitHub-specific code path —
+  clone/push/pull against this stack's Gitea over SSH or an HTTPS token
+  exactly like any other remote. This only applies to a locally-run Claude
+  Code CLI against your own machine; a cloud/remote Claude Code session
+  (like the one used to write this doc) is scoped to whichever provider —
+  typically GitHub — it was attached to at session start, and can't reach
+  an arbitrary self-hosted Gitea on your LAN.
+- **PR/issue/CI-level integration (optional).** Reading/commenting on Gitea
+  PRs and issues the way a GitHub MCP server does for GitHub needs an MCP
+  server that speaks Gitea's REST API. Gitea's own project publishes one
+  (`gitea/gitea-mcp`), authenticated via a personal access token — add it
+  with `claude mcp add` pointed at this stack's Gitea instance. Not bundled
+  by default; this stack's Gitea has no built-in Claude integration out of
+  the box.
+
 ## GPU switcher (small local GPU only)
 One small GPU can't run local chat and local image-gen at once. Swap it:
 ```bash
