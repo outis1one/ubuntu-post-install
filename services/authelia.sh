@@ -225,44 +225,50 @@ install_authelia() {
         echo ""
         echo "    1) Add another protected domain to this instance (non-destructive —"
         echo "       one Authelia+Redis, multiple independent apex domains/logins)"
-        echo "    2) Add a new user (creates a users.yml entry + password hash)"
-        echo "    3) Manage an existing user (email, password reset, 2FA reset/exempt,"
+        echo "    2) Remove a protected domain added this way (undoes option 1 for one"
+        echo "       domain — other services still pointed at it will stop authenticating)"
+        echo "    3) Add a new user (creates a users.yml entry + password hash)"
+        echo "    4) Manage an existing user (email, password reset, 2FA reset/exempt,"
         echo "       promote/demote admin, per-service access, delete)"
-        echo "    4) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
+        echo "    5) Register an app to log in VIA Authelia (OIDC/SSO — e.g. ActualBudget,"
         echo "       Vaultwarden, or any other app with its own \"Enable OpenID\" setting)"
-        echo "    5) Reconfigure from scratch (regenerates secrets/users — breaks"
+        echo "    6) Reconfigure from scratch (regenerates secrets/users — breaks"
         echo "       existing sessions for every domain already on this instance)"
-        echo "    6) Show who has universal vs. service-scoped access"
-        echo "    7) Change \"Remember me\" session duration (stay logged in longer)"
-        echo "    8) Leave as-is"
+        echo "    7) Show who has universal vs. service-scoped access"
+        echo "    8) Change \"Remember me\" session duration (stay logged in longer)"
+        echo "    9) Leave as-is"
         echo ""
         local EXISTING_CHOICE=""
-        prompt_text "  Choice [1/2/3/4/5/6/7/8]:" "8" EXISTING_CHOICE
+        prompt_text "  Choice [1/2/3/4/5/6/7/8/9]:" "9" EXISTING_CHOICE
         case "$EXISTING_CHOICE" in
             1)
                 add_authelia_domain
                 return 0
                 ;;
             2)
-                add_authelia_user
+                remove_authelia_domain
                 return 0
                 ;;
             3)
-                edit_authelia_user
+                add_authelia_user
                 return 0
                 ;;
             4)
-                _authelia_add_oidc_client
+                edit_authelia_user
                 return 0
                 ;;
             5)
-                : # fall through to the full reinstall flow below
+                _authelia_add_oidc_client
+                return 0
                 ;;
             6)
+                : # fall through to the full reinstall flow below
+                ;;
+            7)
                 _authelia_report_access_scope
                 return 0
                 ;;
-            7)
+            8)
                 _authelia_set_remember_me
                 return 0
                 ;;
@@ -730,6 +736,122 @@ CADDY_AUTH_BLOCK2
     echo "  Same users/passwords work across every domain on this instance —"
     echo "  it's one shared user database, just separate sessions per domain."
     echo ""
+}
+
+# Removes the auth.<domain> Caddy portal block add_authelia_domain() writes —
+# same bounded-block technique used elsewhere in this repo for Caddy site
+# blocks (find the opening "<domain> {" line, walk forward to the matching
+# unindented "}"), just keyed on "auth.<domain> {" instead of a service
+# domain or a reverse_proxy marker.
+_authelia_remove_caddy_portal_block() {
+    local domain="$1"
+    local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$caddy_file" ] || return 0
+
+    local domain_line end_line start_line
+    domain_line="$(grep -nx "auth.${domain} {" "$caddy_file" | head -1 | cut -d: -f1)"
+    [ -z "$domain_line" ] && return 0
+
+    start_line="$domain_line"
+    if [ "$domain_line" -gt 1 ] && sed -n "$((domain_line - 1))p" "$caddy_file" | grep -qE '^# '; then
+        start_line=$((domain_line - 1))
+    fi
+
+    end_line="$(tail -n "+$domain_line" "$caddy_file" | grep -nx '}' | head -1 | cut -d: -f1)"
+    if [ -z "$end_line" ]; then
+        log_warning "Could not find the end of auth.${domain}'s Caddy block — leaving it as-is."
+        return 1
+    fi
+    end_line=$((domain_line + end_line - 1))
+
+    sed -i "${start_line},${end_line}d" "$caddy_file"
+    log_info "Removed the auth.${domain} Caddy portal block."
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$" && \
+        { docker exec -w /etc/caddy caddy caddy reload 2>/dev/null && log_success "Caddy reloaded" \
+            || log_warning "Reload manually: docker exec caddy caddy reload --config /etc/caddy/Caddyfile"; }
+}
+
+# Reverse of add_authelia_domain() — removes one apex domain's
+# access_control.rules entry, session.cookies entry, and its auth.<domain>
+# Caddy portal block from this instance. Undoes a domain added by mistake
+# (wrong value entered, or a domain that turned out to already be covered by
+# an existing apex's wildcard rule — see the menu's own warning text). Does
+# NOT touch any other domain already on this instance, and does NOT find or
+# fix whatever individual services still point "import authelia"/forward_auth
+# at this instance for the removed domain — those start failing to
+# authenticate (no session-cookie scope left to complete a login against)
+# the moment this runs, so this is for cleaning up a domain that's not
+# actually in use this way, not a way to quietly de-protect a live service.
+remove_authelia_domain() {
+    local AUTHELIA_DIR="$DOCKER_DIR/authelia"
+    local CONFIG_FILE="$AUTHELIA_DIR/config/configuration.yml"
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warning "No configuration.yml found at $CONFIG_FILE — install Authelia first."
+        return 1
+    fi
+
+    echo ""
+    echo "  Domains currently on this Authelia instance:"
+    grep -oE '^    - domain: "\*\.[^"]+"' "$CONFIG_FILE" | sed -E 's/^    - domain: "\*\.(.+)"$/    - \1/'
+    echo ""
+    echo "  Note: this removes a whole apex domain entry added via 'Add another"
+    echo "  protected domain' — if you meant to protect a SUBDOMAIN of an apex"
+    echo "  already listed above, you don't need this at all: it's already covered"
+    echo "  by that apex's wildcard rule and session-cookie scope. Just point that"
+    echo "  subdomain's Caddy block at this instance's existing auth.<apex> portal"
+    echo "  instead of adding it here as its own entry."
+    echo ""
+    local RM_DOMAIN=""
+    prompt_text "  Domain to remove (as shown above, e.g. example.com):" "" RM_DOMAIN
+    if [ -z "$RM_DOMAIN" ]; then
+        log_warning "No domain entered — nothing to do."
+        return 0
+    fi
+
+    if ! grep -qF "\"*.${RM_DOMAIN}\"" "$CONFIG_FILE" 2>/dev/null; then
+        log_warning "$RM_DOMAIN isn't configured on this instance — nothing to do."
+        return 0
+    fi
+
+    echo ""
+    log_warning "This removes ${RM_DOMAIN}'s access rule, session-cookie scope, and its"
+    log_warning "auth.${RM_DOMAIN} login portal from THIS Authelia instance."
+    log_warning "Any service still using 'import authelia' or forward_auth pointed at"
+    log_warning "${RM_DOMAIN} will start failing to authenticate — reconfigure or remove"
+    log_warning "those first if they're still live."
+    local CONFIRM_RM=""
+    prompt_yn "  Continue? (y/n):" "n" CONFIRM_RM
+    [[ "$CONFIRM_RM" =~ ^[Yy]$ ]] || { log_info "Cancelled — nothing changed."; return 0; }
+
+    # ── access_control.rules: remove the "- domain: "*.X"" + "policy: ..." pair ──
+    awk -v domain="$RM_DOMAIN" '
+        BEGIN { skip=0 }
+        skip == 1 { skip=0; next }
+        $0 == "    - domain: \"*." domain "\"" { skip=1; next }
+        { print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    # ── session.cookies: remove the "- domain: X" + 2 following lines ─────────
+    awk -v domain="$RM_DOMAIN" '
+        BEGIN { skip=0 }
+        skip > 0 { skip--; next }
+        $0 == "    - domain: " domain { skip=2; next }
+        { print }
+    ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+
+    chown 1000:1000 "$CONFIG_FILE" 2>/dev/null || true
+    log_success "Removed ${RM_DOMAIN} from $CONFIG_FILE"
+
+    _authelia_remove_caddy_portal_block "$RM_DOMAIN"
+
+    local RESTART_AUTH=""
+    prompt_yn "  Restart Authelia to apply? (y/n):" "y" RESTART_AUTH
+    if [ "$RESTART_AUTH" = "y" ] || [ "$RESTART_AUTH" = "Y" ]; then
+        (cd "$AUTHELIA_DIR" && docker compose restart authelia 2>/dev/null) \
+            && log_success "Authelia restarted" \
+            || log_warning "Restart failed — check: docker compose logs authelia"
+    fi
 }
 
 # Picks "count" random characters from "charset" using an unbiased-enough
