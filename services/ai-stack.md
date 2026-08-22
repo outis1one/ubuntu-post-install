@@ -47,11 +47,24 @@ Two levels, depending on what you need:
   an arbitrary self-hosted Gitea on your LAN.
 - **PR/issue/CI-level integration (optional).** Reading/commenting on Gitea
   PRs and issues the way a GitHub MCP server does for GitHub needs an MCP
-  server that speaks Gitea's REST API. Gitea's own project publishes one
-  (`gitea/gitea-mcp`), authenticated via a personal access token — add it
-  with `claude mcp add` pointed at this stack's Gitea instance. Not bundled
-  by default; this stack's Gitea has no built-in Claude integration out of
-  the box.
+  server that speaks Gitea's REST API. Gitea's own project publishes one —
+  `gitea/gitea-mcp` (gitea.com/gitea/gitea-mcp) — as a binary release, a
+  Docker image (`docker.gitea.com/gitea-mcp-server`), or `go run
+  gitea.com/gitea/gitea-mcp@latest`; it supports both stdio and HTTP
+  transport. Generate a token first — this stack's Gitea → profile →
+  Settings → Applications → Generate New Token (repo/api scopes) — then:
+  ```bash
+  # stdio — simplest, one Claude Code CLI on this box
+  claude mcp add gitea --env GITEA_HOST=http://localhost:3001 \
+      --env GITEA_ACCESS_TOKEN=<token> -- gitea-mcp -t stdio
+
+  # or HTTP — one server, shared by multiple Claude Code clients
+  gitea-mcp -t http --port 8090 &        # run once, e.g. alongside the stack
+  claude mcp add gitea http://localhost:8090/mcp \
+      --header "Authorization: Bearer <token>"
+  ```
+  Not bundled by default — this stack's Gitea has no built-in Claude
+  integration out of the box; this is you adding it.
 
 ## GPU switcher (small local GPU only)
 One small GPU can't run local chat and local image-gen at once. Swap it:
