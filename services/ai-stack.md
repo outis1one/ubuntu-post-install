@@ -97,8 +97,13 @@ driver and `nvidia-container-toolkit` are still on you to install first,
 and getting the driver branch right is what actually matters here, not the
 Ubuntu version itself.
 
-**Tesla-card power connector — don't assume standard PCIe.** V100/P100/P40/M40
-PCIe cards take an 8-pin **CPU/EPS12V** connector, not the 6+2-pin PCIe
+**"Tesla"-branded card power connector — don't assume standard PCIe.**
+("Tesla" here is NVIDIA's old datacenter-card *brand name*, retired after
+Volta — not the unrelated, much older Tesla *microarchitecture* that
+predates Fermi/Kepler/Maxwell/Pascal/Volta. V100/P100/P40/M40 all shipped
+under the Tesla brand despite being four different architecture
+generations.) These PCIe cards take an 8-pin **CPU/EPS12V** connector, not
+the 6+2-pin PCIe
 connector a normal GPU uses — a standard PCIe cable will not plug in. Get the
 dongle/adapter (splits a PCIe 8-pin into EPS12V, or use a real EPS cable) and
 never daisy-chain both 8-pin rails off one PSU cable/splitter — use two
