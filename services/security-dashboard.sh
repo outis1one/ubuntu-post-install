@@ -179,7 +179,7 @@ install_security-dashboard() {
                 prompt_yn "Reconfigure this dashboard's Caddy protection (Authelia domain, or add/rotate an independent Basic Auth layer)? (y/n):" "n" _reconf
                 if [[ "$_reconf" =~ ^[Yy]$ ]]; then
                     _secdash_remove_caddy_block "$DASHBOARD_PORT"
-                    _secdash_configure_caddy "$DASHBOARD_PORT"
+                    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_EA_DIR" "$ASTERISK_EA_CONTAINER"
                 fi
 
                 echo ""
@@ -261,7 +261,7 @@ install_security-dashboard() {
     # below already does this (line ~173); a fresh install needs the same
     # removal, not just the same write. No-ops if nothing is deployed yet.
     _secdash_remove_caddy_block "$DASHBOARD_PORT"
-    _secdash_configure_caddy "$DASHBOARD_PORT"
+    _secdash_configure_caddy "$DASHBOARD_PORT" "$ASTERISK_EA_DIR" "$ASTERISK_EA_CONTAINER"
     _secdash_configure_admin_scoping "$APP_DIR" "$SVC_USER" "$DASHBOARD_PORT"
 
     write_readme "$APP_DIR" << README_MD
@@ -686,7 +686,7 @@ SUDOERS
 # retroactively) using the exact same code path as a fresh install, instead
 # of hand-patching a live Caddyfile block in place.
 _secdash_configure_caddy() {
-    local DASHBOARD_PORT="$1"
+    local DASHBOARD_PORT="$1" ASTERISK_EA_DIR="${2:-}" ASTERISK_EA_CONTAINER="${3:-}"
 
     echo ""
     if ! command -v docker &>/dev/null || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^caddy$"; then
@@ -694,12 +694,17 @@ _secdash_configure_caddy() {
         return 0
     fi
 
-    local _default_domain=""
-    if [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
-        _default_domain="security.${SITE_DOMAIN}"
-    fi
     local SD_DOMAIN=""
-    prompt_text "  Domain for the dashboard (e.g. security.yourdomain.com), you'll need to point DNS at this droplet yourself [${_default_domain:-required}]:" "$_default_domain" SD_DOMAIN
+    _secdash_offer_asterisk_domain "$ASTERISK_EA_DIR" "$DASHBOARD_PORT" "$ASTERISK_EA_CONTAINER"
+    SD_DOMAIN="$ASTERISK_TAKEOVER_DOMAIN"
+
+    if [ -z "$SD_DOMAIN" ]; then
+        local _default_domain=""
+        if [ -n "${SITE_DOMAIN:-}" ] && [ "$SITE_DOMAIN" != "example.com" ]; then
+            _default_domain="security.${SITE_DOMAIN}"
+        fi
+        prompt_text "  Domain for the dashboard (e.g. security.yourdomain.com), you'll need to point DNS at this droplet yourself [${_default_domain:-required}]:" "$_default_domain" SD_DOMAIN
+    fi
 
     if [ -z "$SD_DOMAIN" ]; then
         log_warning "No domain entered — dashboard stays on http://localhost:$DASHBOARD_PORT only (not reachable from outside this box)."
@@ -1002,6 +1007,100 @@ _secdash_remove_caddy_block() {
 
     sed -i "${domain_line},${end_line}d" "$caddy_file"
     log_info "Removed the existing dashboard Caddy block (regenerating it fresh)."
+}
+
+# Same technique as _secdash_remove_caddy_block above, but keyed on the
+# block's own opening "<domain> {" line instead of a reverse_proxy marker —
+# used by _secdash_offer_asterisk_domain to remove ASTERISK'S OLD block for
+# a domain it's handing over, not this dashboard's own.
+_secdash_remove_caddy_block_by_domain() {
+    local domain="$1"
+    local caddy_file="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$caddy_file" ] || return 0
+
+    local domain_line end_line start_line
+    domain_line="$(grep -nx "${domain} {" "$caddy_file" | head -1 | cut -d: -f1)"
+    [ -z "$domain_line" ] && return 0  # nothing there — fine
+
+    # Pull in a "# <comment>" line directly above it too, if present (every
+    # site block this repo writes has one, e.g. "# Asterisk Web Admin").
+    start_line="$domain_line"
+    if [ "$domain_line" -gt 1 ] && sed -n "$((domain_line - 1))p" "$caddy_file" | grep -qE '^# '; then
+        start_line=$((domain_line - 1))
+    fi
+
+    end_line="$(tail -n "+$domain_line" "$caddy_file" | grep -nx '}' | head -1 | cut -d: -f1)"
+    if [ -z "$end_line" ]; then
+        log_warning "Could not find the end of ${domain}'s existing Caddy block — leaving it as-is."
+        return 1
+    fi
+    end_line=$((domain_line + end_line - 1))
+
+    sed -i "${start_line},${end_line}d" "$caddy_file"
+    log_info "Removed the existing Caddy block for ${domain} (regenerating it fresh)."
+}
+
+# ── Optional: take over Asterisk's own public domain instead of a separate
+# one ─────────────────────────────────────────────────────────────────────
+# Asterisk's web admin is only Caddy-fronted at its own domain so Caddy can
+# get it a trusted TLS cert for SIP (see _asterisk_configure_caddy_public in
+# services/asterisk.sh) — cert issuance only needs Caddy to own that
+# domain's site block and answer the ACME challenge there; it's unrelated to
+# what reverse_proxy target the block actually forwards to (Asterisk's own
+# cert-sync reads the issued cert straight off Caddy's disk storage, not by
+# hitting the site). So nothing stops this dashboard from taking that domain
+# over entirely instead of asking for its own — one less DNS entry/cert to
+# manage, and it closes a real gap along the way: _asterisk_configure_caddy_public
+# never rewrites an existing site block on a repeat run, it just leaves an
+# already-present domain line alone. That means a box where
+# WEB_ADMIN_AUTH_DISABLED got set true (built-in login turned off, from an
+# earlier "protect with Authelia" answer) but the Authelia import itself
+# never landed or got lost (e.g. on a restore that didn't carry the Caddyfile
+# edit) is stuck silently unauthenticated with no reconfigure path ever
+# revisiting it — confirmed live (2026-08-22): a real box was found exposing
+# its extensions/device list with no login at all.
+#
+# Sets ASTERISK_TAKEOVER_DOMAIN (non-local out-param, same convention as
+# lib/common.sh's configure_caddy_for_service CADDY_SERVICE_* out-params) to
+# the domain taken over, or leaves it empty if there's nothing to offer or
+# the offer was declined — the caller falls back to its normal own-domain
+# prompt in that case.
+_secdash_offer_asterisk_domain() {
+    local ea_dir="$1" dashboard_port="$2" ea_container="$3"
+    ASTERISK_TAKEOVER_DOMAIN=""
+
+    [ -n "$ea_dir" ] && [ -f "$ea_dir/.env" ] || return 0
+    local _domain
+    _domain="$(grep -E '^DOMAIN_NAME=' "$ea_dir/.env" | cut -d= -f2-)"
+    [ -n "$_domain" ] || return 0
+
+    local _caddy_file="$DOCKER_DIR/caddy/Caddyfile"
+    [ -f "$_caddy_file" ] && grep -qx "${_domain} {" "$_caddy_file" || return 0
+
+    echo ""
+    log_info "Asterisk already has a public domain: ${_domain} (currently serving its own web"
+    log_info "admin there, kept only so Caddy can get it a trusted TLS cert for SIP)."
+    local _takeover=""
+    prompt_yn "  Serve this dashboard there instead, and stop exposing Asterisk's own web admin publicly? (y/n):" "n" _takeover
+    [[ "$_takeover" =~ ^[Yy]$ ]] || return 0
+
+    _secdash_remove_caddy_block_by_domain "$_domain"
+    _secdash_remove_caddy_block "$dashboard_port"
+
+    if grep -q '^WEB_ADMIN_AUTH_DISABLED=' "$ea_dir/.env"; then
+        sed -i 's/^WEB_ADMIN_AUTH_DISABLED=.*/WEB_ADMIN_AUTH_DISABLED=false/' "$ea_dir/.env"
+        # Not restarting Asterisk here — this is a defense-in-depth measure
+        # on a port that's no longer published at all now that the Caddy
+        # block above it is gone, not the live exposure fix (that's already
+        # done by removing the block). Not worth interrupting an active
+        # call for; takes effect on Asterisk's next restart either way.
+        log_info "Re-enabled Asterisk's own web admin login in .env (defense-in-depth; takes effect on"
+        log_info "Asterisk's next restart — not forcing one now in case a call is active)."
+    fi
+    log_warning "Asterisk's native web admin is no longer reachable over HTTPS — use the terminal instead:"
+    log_warning "  docker exec -it ${ea_container:-asterisk} easy-asterisk"
+
+    ASTERISK_TAKEOVER_DOMAIN="$_domain"
 }
 
 # Full teardown for "Full reinstall" — stops the service and removes
